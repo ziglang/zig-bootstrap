@@ -1,0 +1,61 @@
+#!/bin/sh
+
+set -e
+
+JOBS="$1"
+TARGET="$2"
+
+ROOTDIR="$(pwd)"
+
+# First build the libraries for Zig to link against, as well as native `llvm-tblgen`.
+mkdir -p "$ROOTDIR/out/build-llvm-host"
+cd "$ROOTDIR/out/build-llvm-host"
+cmake ../../llvm \
+  -DLLVM_ENABLE_PROJECTS="lld;clang" \
+  -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD="AVR" \
+  -DLLVM_ENABLE_LIBXML2=OFF \
+  -DCMAKE_INSTALL_PREFIX=../host \
+  -DCMAKE_PREFIX_PATH=../host \
+  -DLLVM_BUILD_TOOLS=OFF \
+  -DCLANG_BUILD_TOOLS=OFF \
+  -DCMAKE_BUILD_TYPE=Release
+make "$JOBS" install
+
+# Now we build Zig, still with system C/C++ compiler, linking against LLVM,
+# Clang, LLD we just built from source.
+mkdir -p "$ROOTDIR/out/build-zig-host"
+cd "$ROOTDIR/out/build-zig-host"
+cmake ../../zig -DCMAKE_INSTALL_PREFIX=../host -DCMAKE_PREFIX_PATH=../host -DCMAKE_BUILD_TYPE=Release
+make "$JOBS" install
+
+# Now we have Zig as a cross compiler
+export CC="$ROOTDIR/out/host/bin/zig cc -target $TARGET"
+export CXX="$ROOTDIR/out/host/bin/zig c++ -target $TARGET"
+
+# Rebuild LLVM with Zig.
+mkdir -p "$ROOTDIR/out/build-llvm-$TARGET"
+cd "$ROOTDIR/out/build-llvm-$TARGET"
+cmake ../../llvm \
+  -DLLVM_ENABLE_PROJECTS="lld;clang" \
+  -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD="AVR" \
+  -DLLVM_ENABLE_LIBXML2=OFF \
+  -DCMAKE_INSTALL_PREFIX="../$TARGET" \
+  -DCMAKE_PREFIX_PATH="../$TARGET" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CROSSCOMPILING=True \
+  -DLLVM_TABLEGEN="$ROOTDIR/out/host/bin/llvm-tblgen" \
+  -DCLANG_TABLEGEN="$ROOTDIR/out/build-llvm-host/bin/clang-tblgen" \
+  -DLLVM_BUILD_TOOLS=OFF \
+  -DCLANG_BUILD_TOOLS=OFF \
+  -DLLVM_DEFAULT_TARGET_TRIPLE="$TARGET"
+make "$JOBS" install
+
+# Finally, we can cross compile Zig itself, with Zig.
+mkdir -p "$ROOTDIR/out/build-zig-$TARGET"
+cd "$ROOTDIR/out/build-zig-$TARGET"
+cmake ../../zig \
+  -DCMAKE_INSTALL_PREFIX="../zig-$TARGET" \
+  -DCMAKE_PREFIX_PATH="../$TARGET" \
+  -DCMAKE_CROSSCOMPILING=True \
+  -DCMAKE_BUILD_TYPE=Release
+make "$JOBS" install

@@ -5,64 +5,89 @@ end with a fully operational Zig compiler for any target.
 
 ## Status
 
-None of this works yet, it's still an experiment.
+Not quite working yet - almost
+
+## Version Information
+
+This repository copies sources from upstream.
+
+ * LLVM 10
+ * Clang 10
+ * Zig 0.5.0+463b90b97 plus the branch that adds `zig c++` support.
 
 ## Host System Dependencies
 
  * C++ compiler capable of building LLVM, Clang, and LLD from source.
  * cmake 3.4.3 or later
+ * POSIX shell and related utilities: `mkdir`, `cd`
 
 ## Build Instructions
 
 ```
-make TARGET="$triple"
+build -j1 triple
 ```
+
+Replace `-j1` with your jobs parameter to make, and `triple` with one of the
+Supported Triples below.
+
+If it succeeds, the output will be in `out/zig-triple/`.
 
 ### Supported Triples
 
- * aarch64_be-linux-gnu
- * aarch64_be-linux-musl
- * aarch64_be-windows-gnu
- * aarch64-linux-gnu
- * aarch64-linux-musl
- * aarch64-windows-gnu
- * armeb-linux-gnueabi
- * armeb-linux-gnueabihf
- * armeb-linux-musleabi
- * armeb-linux-musleabihf
- * armeb-windows-gnu
- * arm-linux-gnueabi
- * arm-linux-gnueabihf
- * arm-linux-musleabi
- * arm-linux-musleabihf
- * arm-windows-gnu
- * i386-linux-gnu
- * i386-linux-musl
- * i386-windows-gnu
- * mips64el-linux-gnuabi64
- * mips64el-linux-gnuabin32
- * mips64el-linux-musl
- * mips64-linux-gnuabi64
- * mips64-linux-gnuabin32
- * mips64-linux-musl
- * mipsel-linux-gnu
- * mipsel-linux-musl
- * mips-linux-gnu
- * mips-linux-musl
- * powerpc64le-linux-gnu
- * powerpc64le-linux-musl
- * powerpc64-linux-gnu
- * powerpc64-linux-musl
- * powerpc-linux-gnu
- * powerpc-linux-musl
- * riscv64-linux-gnu
- * riscv64-linux-musl
- * s390x-linux-gnu
- * s390x-linux-musl
- * sparc-linux-gnu
- * sparcv9-linux-gnu
- * wasm32-freestanding-musl
- * x86_64-linux-gnu
- * x86_64-linux-gnux32
- * x86_64-linux-musl
- * x86_64-windows-gnu
+If you try a "not tested" one and find a problem please file an issue,
+and a pull request linking to the issue in the table.
+
+If you try a "not tested" one and find that it works, please file a pull request
+changing the status to "OK".
+
+If you try an "OK" one and it does not work, please check if there is an existing
+issue, and if not, file an issue.
+
+| triple                     | support status |
+|----------------------------|----------------|
+| `aarch64_be-linux-gnu`     | not tested     |
+| `aarch64_be-linux-musl`    | not tested     |
+| `aarch64_be-windows-gnu`   | not tested     |
+| `aarch64-linux-gnu`        | not tested     |
+| `arch64-linux-musl`        | not tested     |
+| `aarch64-windows-gnu`      | not tested     |
+| `armeb-linux-gnueabi`      | not tested     |
+| `armeb-linux-gnueabihf`    | not tested     |
+| `armeb-linux-musleabi`     | not tested     |
+| `armeb-linux-musleabihf`   | not tested     |
+| `armeb-windows-gnu`        | not tested     |
+| `arm-linux-gnueabi`        | not tested     |
+| `arm-linux-gnueabihf`      | not tested     |
+| `arm-linux-musleabi`       | not tested     |
+| `arm-linux-musleabihf`     | not tested     |
+| `arm-windows-gnu`          | not tested     |
+| `i386-linux-gnu`           | not tested     |
+| `i386-linux-musl`          | not tested     |
+| `i386-windows-gnu`         | not tested     |
+| `mips64el-linux-gnuabi64`  | not tested     |
+| `mips64el-linux-gnuabin32` | not tested     |
+| `mips64el-linux-musl`      | not tested     |
+| `mips64-linux-gnuabi64`    | not tested     |
+| `mips64-linux-gnuabin32`   | not tested     |
+| `mips64-linux-musl`        | not tested     |
+| `mipsel-linux-gnu`         | not tested     |
+| `mipsel-linux-musl`        | not tested     |
+| `mips-linux-gnu`           | not tested     |
+| `mips-linux-musl`          | not tested     |
+| `powerpc64le-linux-gnu`    | not tested     |
+| `powerpc64le-linux-musl`   | not tested     |
+| `powerpc64-linux-gnu`      | not tested     |
+| `powerpc64-linux-musl`     | not tested     |
+| `powerpc-linux-gnu`        | not tested     |
+| `powerpc-linux-musl`       | not tested     |
+| `riscv64-linux-gnu`        | not tested     |
+| `riscv64-linux-musl`       | not tested     |
+| `s390x-linux-gnu`          | not tested     |
+| `s390x-linux-musl`         | not tested     |
+| `sparc-linux-gnu`          | not tested     |
+| `sparcv9-linux-gnu`        | not tested     |
+| `wasm32-freestanding-musl` | not tested     |
+| `x86_64-linux-gnu`         | not tested     |
+| `x86_64-linux-gnux32`      | not tested     |
+| `x86_64-linux-musl`        | not tested     |
+| `x86_64-windows-gnu`       | not tested     |
