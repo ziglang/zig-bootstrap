@@ -32,8 +32,9 @@ cmake ../../zig -DCMAKE_INSTALL_PREFIX=../host -DCMAKE_PREFIX_PATH=../host -DCMA
 make "$JOBS" install
 
 # Now we have Zig as a cross compiler
-export CC="$ROOTDIR/out/host/bin/zig cc -target $TARGET"
-export CXX="$ROOTDIR/out/host/bin/zig c++ -target $TARGET"
+ZIG="$ROOTDIR/out/host/bin/zig"
+export CC="$ZIG cc -target $TARGET"
+export CXX="$ZIG c++ -target $TARGET"
 
 # Rebuild LLVM with Zig.
 mkdir -p "$ROOTDIR/out/build-llvm-$TARGET"
@@ -66,5 +67,6 @@ cmake "$ROOTDIR/zig" \
   -DCMAKE_PREFIX_PATH="$ROOTDIR/out/$TARGET" \
   -DCMAKE_CROSSCOMPILING=True \
   -DCMAKE_BUILD_TYPE=Release \
-  -DZIG_CROSSCOMPILING=ON
+  -DZIG_TARGET_TRIPLE="$TARGET" \
+  -DZIG_EXECUTABLE="$ZIG"
 make "$JOBS" install
