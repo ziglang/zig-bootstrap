@@ -11,6 +11,7 @@ if("${ZIG_TARGET_TRIPLE}" STREQUAL "native")
   find_program(LLVM_CONFIG_EXE
       NAMES llvm-config-10 llvm-config-10.0 llvm-config100 llvm-config
       PATHS
+          "${CMAKE_INSTALL_PREFIX}/bin"
           "/mingw64/bin"
           "/c/msys64/mingw64/bin"
           "c:/msys64/mingw64/bin"
