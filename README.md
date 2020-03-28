@@ -67,7 +67,7 @@ issue, and if not, file an issue.
 | `mips64-linux-gnuabin32`   | not tested     |
 | `mips64-linux-musl`        | not tested     |
 | `mipsel-linux-gnu`         | not tested     |
-| `mipsel-linux-musl`        | not tested     |
+| `mipsel-linux-musl`        | [#3](https://github.com/ziglang/bootstrap/issues/3) |
 | `mips-linux-gnu`           | not tested     |
 | `mips-linux-musl`          | not tested     |
 | `powerpc64le-linux-gnu`    | not tested     |
