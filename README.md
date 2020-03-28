@@ -62,22 +62,22 @@ issue, and if not, file an issue.
 | `i386-windows-gnu`         | not tested     |
 | `mips64el-linux-gnuabi64`  | not tested     |
 | `mips64el-linux-gnuabin32` | not tested     |
-| `mips64el-linux-musl`      | not tested     |
+| `mips64el-linux-musl`      | [#3](https://github.com/ziglang/bootstrap/issues/3) |
 | `mips64-linux-gnuabi64`    | not tested     |
 | `mips64-linux-gnuabin32`   | not tested     |
 | `mips64-linux-musl`        | not tested     |
 | `mipsel-linux-gnu`         | not tested     |
-| `mipsel-linux-musl`        | [#3](https://github.com/ziglang/bootstrap/issues/3) |
+| `mipsel-linux-musl`        | not tested     |
 | `mips-linux-gnu`           | not tested     |
 | `mips-linux-musl`          | not tested     |
 | `powerpc64le-linux-gnu`    | not tested     |
-| `powerpc64le-linux-musl`   | not tested     |
+| `powerpc64le-linux-musl`   | [#4](https://github.com/ziglang/bootstrap/issues/5) |
 | `powerpc64-linux-gnu`      | not tested     |
 | `powerpc64-linux-musl`     | not tested     |
 | `powerpc-linux-gnu`        | not tested     |
 | `powerpc-linux-musl`       | not tested     |
 | `riscv64-linux-gnu`        | not tested     |
-| `riscv64-linux-musl`       | not tested     |
+| `riscv64-linux-musl`       | [#4](https://github.com/ziglang/bootstrap/issues/4) |
 | `s390x-linux-gnu`          | not tested     |
 | `s390x-linux-musl`         | not tested     |
 | `sparc-linux-gnu`          | not tested     |
