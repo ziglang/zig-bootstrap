@@ -5,7 +5,9 @@ end with a fully operational Zig compiler for any target.
 
 ## Status
 
-Not quite working yet - almost
+I've been testing with aarch64-linux-musl. It gets all the way to
+successfully building zig0, and the next step is to improve build.zig
+to support cross compiling instead of assuming native.
 
 ## Version Information
 
@@ -17,9 +19,9 @@ This repository copies sources from upstream.
 
 ## Host System Dependencies
 
- * C++ compiler capable of building LLVM, Clang, and LLD from source.
+ * C++ compiler capable of building LLVM, Clang, and LLD from source
  * cmake 3.4.3 or later
- * POSIX shell and related utilities: `mkdir`, `cd`
+ * POSIX shell
 
 ## Build Instructions
 
@@ -49,7 +51,7 @@ issue, and if not, file an issue.
 | `aarch64_be-linux-musl`    | not tested     |
 | `aarch64_be-windows-gnu`   | not tested     |
 | `aarch64-linux-gnu`        | not tested     |
-| `arch64-linux-musl`        | not tested     |
+| `aarch64-linux-musl`       | working on it  |
 | `aarch64-windows-gnu`      | not tested     |
 | `armeb-linux-gnueabi`      | not tested     |
 | `armeb-linux-gnueabihf`    | not tested     |
