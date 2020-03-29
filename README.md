@@ -71,7 +71,7 @@ issue, and if not, file an issue.
 | `mips-linux-gnu`           | not tested     |
 | `mips-linux-musl`          | not tested     |
 | `powerpc64le-linux-gnu`    | not tested     |
-| `powerpc64le-linux-musl`   | [#4](https://github.com/ziglang/bootstrap/issues/5) |
+| `powerpc64le-linux-musl`   | [#5](https://github.com/ziglang/bootstrap/issues/5) |
 | `powerpc64-linux-gnu`      | not tested     |
 | `powerpc64-linux-musl`     | not tested     |
 | `powerpc-linux-gnu`        | not tested     |
