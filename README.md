@@ -85,5 +85,5 @@ issue, and if not, file an issue.
 | `wasm32-freestanding-musl` | not tested     |
 | `x86_64-linux-gnu`         | not tested     |
 | `x86_64-linux-gnux32`      | not tested     |
-| `x86_64-linux-musl`        | not tested     |
+| `x86_64-linux-musl`        | OK             |
 | `x86_64-windows-gnu`       | not tested     |
