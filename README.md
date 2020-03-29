@@ -55,7 +55,7 @@ issue, and if not, file an issue.
 | `arm-linux-gnueabi`        | not tested     |
 | `arm-linux-gnueabihf`      | not tested     |
 | `arm-linux-musleabi`       | not tested     |
-| `arm-linux-musleabihf`     | not tested     |
+| `arm-linux-musleabihf`     | [#7](https://github.com/ziglang/bootstrap/issues/7) |
 | `arm-windows-gnu`          | not tested     |
 | `i386-linux-gnu`           | not tested     |
 | `i386-linux-musl`          | not tested     |
