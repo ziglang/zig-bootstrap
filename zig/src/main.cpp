@@ -688,7 +688,9 @@ static int main0(int argc, char **argv) {
                             strcmp(it.only_arg, "O4") == 0)
                     {
                         build_mode = BuildModeFastRelease;
-                    } else if (strcmp(it.only_arg, "Og") == 0) {
+                    } else if (strcmp(it.only_arg, "Og") == 0 ||
+                            strcmp(it.only_arg, "O0") == 0)
+                    {
                         build_mode = BuildModeDebug;
                     } else {
                         for (size_t i = 0; i < it.other_args_len; i += 1) {
@@ -733,6 +735,13 @@ static int main0(int argc, char **argv) {
                     break;
                 case Stage2ClangArgNoRtti:
                     cpp_rtti = false;
+                    break;
+                case Stage2ClangArgForLinker:
+                    linker_args.append(buf_create_from_str(it.only_arg));
+                    break;
+                case Stage2ClangArgLinkerInputZ:
+                    linker_args.append(buf_create_from_str("-z"));
+                    linker_args.append(buf_create_from_str(it.only_arg));
                     break;
             }
         }
@@ -790,6 +799,11 @@ static int main0(int argc, char **argv) {
                     return EXIT_FAILURE;
                 }
                 dynamic_linker = buf_ptr(linker_args.at(i));
+            } else if (buf_eql_str(arg, "-E") ||
+                buf_eql_str(arg, "--export-dynamic") ||
+                buf_eql_str(arg, "-export-dynamic"))
+            {
+                rdynamic = true;
             } else {
                 fprintf(stderr, "warning: unsupported linker arg: %s\n", buf_ptr(arg));
             }
