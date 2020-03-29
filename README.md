@@ -86,4 +86,4 @@ issue, and if not, file an issue.
 | `x86_64-linux-gnu`         | not tested     |
 | `x86_64-linux-gnux32`      | not tested     |
 | `x86_64-linux-musl`        | OK             |
-| `x86_64-windows-gnu`       | not tested     |
+| `x86_64-windows-gnu`       | [#1](https://github.com/ziglang/bootstrap/pull/1) [#8](https://github.com/ziglang/bootstrap/issues/8) |
