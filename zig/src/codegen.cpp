@@ -10856,8 +10856,6 @@ CodeGen *create_child_codegen(CodeGen *parent_gen, Buf *root_src_path, OutType o
         parent_gen->build_mode, parent_gen->zig_lib_dir, libc, get_global_cache_dir(), false, child_progress_node);
     child_gen->root_out_name = buf_create_from_str(name);
     child_gen->disable_gen_h = true;
-    child_gen->cpp_rtti = parent_gen->cpp_rtti;
-    child_gen->cpp_exceptions = parent_gen->cpp_exceptions;
     child_gen->want_stack_check = WantStackCheckDisabled;
     child_gen->want_sanitize_c = WantCSanitizeDisabled;
     child_gen->verbose_tokenize = parent_gen->verbose_tokenize;
