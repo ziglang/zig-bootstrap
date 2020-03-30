@@ -53,6 +53,7 @@ cmake "$ROOTDIR/llvm" \
   -DLLVM_TABLEGEN="$ROOTDIR/out/host/bin/llvm-tblgen" \
   -DCLANG_TABLEGEN="$ROOTDIR/out/build-llvm-host/bin/clang-tblgen" \
   -DLLVM_BUILD_TOOLS=OFF \
+  -DLLVM_INCLUDE_UTILS=OFF \
   -DLLVM_INCLUDE_TESTS=OFF \
   -DLLVM_INCLUDE_GO_TESTS=OFF \
   -DLLVM_INCLUDE_EXAMPLES=OFF \
