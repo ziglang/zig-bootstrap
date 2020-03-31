@@ -8784,8 +8784,6 @@ static Error define_builtin_compile_vars(CodeGen *g) {
     cache_bool(&cache_hash, g->is_test_build);
     cache_bool(&cache_hash, g->is_single_threaded);
     cache_bool(&cache_hash, g->test_is_evented);
-    cache_bool(&cache_hash, g->cpp_rtti);
-    cache_bool(&cache_hash, g->cpp_exceptions);
     cache_int(&cache_hash, g->code_model);
     cache_int(&cache_hash, g->zig_target->is_native_os);
     cache_int(&cache_hash, g->zig_target->is_native_cpu);
@@ -9259,14 +9257,6 @@ void add_cc_args(CodeGen *g, ZigList<const char *> &args, const char *out_dep_pa
         case CSourceKindAsm:
             break;
     }
-    if (source_kind == CSourceKindCpp) {
-        if (!g->cpp_rtti) {
-            args.append("-fno-rtti");
-        }
-        if (!g->cpp_exceptions) {
-            args.append("-fno-exceptions");
-        }
-    }
     for (size_t i = 0; i < g->zig_target->llvm_cpu_features_asm_len; i += 1) {
         args.append(g->zig_target->llvm_cpu_features_asm_ptr[i]);
     }
@@ -9714,8 +9704,6 @@ Error create_c_object_cache(CodeGen *g, CacheHash **out_cache_hash, bool verbose
     cache_bool(cache_hash, g->have_sanitize_c);
     cache_bool(cache_hash, want_valgrind_support(g));
     cache_bool(cache_hash, g->function_sections);
-    cache_bool(cache_hash, g->cpp_rtti);
-    cache_bool(cache_hash, g->cpp_exceptions);
     cache_int(cache_hash, g->code_model);
 
     for (size_t arg_i = 0; arg_i < g->clang_argv_len; arg_i += 1) {
@@ -10550,8 +10538,6 @@ static Error check_cache(CodeGen *g, Buf *manifest_dir, Buf *digest) {
     cache_bool(ch, g->emit_bin);
     cache_bool(ch, g->emit_llvm_ir);
     cache_bool(ch, g->emit_asm);
-    cache_bool(ch, g->cpp_rtti);
-    cache_bool(ch, g->cpp_exceptions);
     cache_usize(ch, g->version_major);
     cache_usize(ch, g->version_minor);
     cache_usize(ch, g->version_patch);

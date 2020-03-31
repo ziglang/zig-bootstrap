@@ -1078,7 +1078,7 @@ pub fn execvpe_expandArg0(
     mem.set(?[*:0]u8, argv_buf, null);
     defer {
         for (argv_buf) |arg| {
-            const arg_buf = if (arg) |ptr| mem.spanZ(ptr) else break;
+            const arg_buf = mem.spanZ(arg) orelse break;
             allocator.free(arg_buf);
         }
         allocator.free(argv_buf);
@@ -2065,7 +2065,7 @@ pub fn isatty(handle: fd_t) bool {
     }
     if (builtin.os.tag == .linux) {
         var wsz: linux.winsize = undefined;
-        return linux.syscall3(linux.SYS_ioctl, @bitCast(usize, @as(isize, handle)), linux.TIOCGWINSZ, @ptrToInt(&wsz)) == 0;
+        return linux.syscall3(.ioctl, @bitCast(usize, @as(isize, handle)), linux.TIOCGWINSZ, @ptrToInt(&wsz)) == 0;
     }
     unreachable;
 }
