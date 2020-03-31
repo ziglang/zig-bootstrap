@@ -73,7 +73,7 @@ is more portable across Linux distributions.
 | `mips64-linux-gnuabin32`   | not tested     |
 | `mips64-linux-musl`        | not tested     |
 | `mipsel-linux-gnu`         | not tested     |
-| `mipsel-linux-musl`        | not tested     |
+| `mipsel-linux-musl`        | [#12](https://github.com/ziglang/bootstrap/issues/12) |
 | `mips-linux-gnu`           | not tested     |
 | `mips-linux-musl`          | not tested     |
 | `powerpc64le-linux-gnu`    | not tested     |
