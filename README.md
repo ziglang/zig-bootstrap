@@ -41,6 +41,10 @@ changing the status to "OK".
 If you try an "OK" one and it does not work, please check if there is an existing
 issue, and if not, file an issue.
 
+Note: Generally, for Linux targets, we prefer the musl libc builds over the
+glibc builds here, because musl builds end up producing a static binary, which
+is more portable across Linux distributions.
+
 | triple                     | support status |
 |----------------------------|----------------|
 | `aarch64_be-linux-gnu`     | not tested     |
@@ -60,7 +64,7 @@ issue, and if not, file an issue.
 | `arm-linux-musleabihf`     | OK             |
 | `arm-windows-gnu`          | not tested     |
 | `i386-linux-gnu`           | not tested     |
-| `i386-linux-musl`          | not tested     |
+| `i386-linux-musl`          | [#11](https://github.com/ziglang/bootstrap/issues/11) |
 | `i386-windows-gnu`         | not tested     |
 | `mips64el-linux-gnuabi64`  | not tested     |
 | `mips64el-linux-gnuabin32` | not tested     |
