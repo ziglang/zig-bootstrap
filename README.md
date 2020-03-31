@@ -16,6 +16,7 @@ This repository copies sources from upstream.
 
  * C++ compiler capable of building LLVM, Clang, and LLD from source
  * cmake 3.4.3 or later
+ * make
  * POSIX shell
 
 ## Build Instructions
