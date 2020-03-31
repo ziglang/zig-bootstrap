@@ -30,7 +30,7 @@ make "$JOBS" install
 # Clang, LLD we just built from source.
 mkdir -p "$ROOTDIR/out/build-zig-host"
 cd "$ROOTDIR/out/build-zig-host"
-cmake ../../zig -DCMAKE_INSTALL_PREFIX=../host -DCMAKE_PREFIX_PATH=../host -DCMAKE_BUILD_TYPE=Release
+cmake "$ROOTDIR/zig" -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/host" -DCMAKE_PREFIX_PATH="$ROOTDIR/out/host" -DCMAKE_BUILD_TYPE=Release
 make "$JOBS" install
 
 # Now we have Zig as a cross compiler
