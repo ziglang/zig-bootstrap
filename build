@@ -4,6 +4,7 @@ set -e
 
 JOBS="$1"
 TARGET="$2"
+ZIG_CC_FLAGS="$3"
 
 ROOTDIR="$(pwd)"
 
@@ -35,8 +36,8 @@ make "$JOBS" install
 
 # Now we have Zig as a cross compiler
 ZIG="$ROOTDIR/out/host/bin/zig"
-export CC="$ZIG cc -target $TARGET"
-export CXX="$ZIG c++ -target $TARGET"
+export CC="$ZIG cc -target $TARGET $ZIG_CC_FLAGS"
+export CXX="$ZIG c++ -target $TARGET $ZIG_CC_FLAGS"
 
 # Rebuild LLVM with Zig.
 mkdir -p "$ROOTDIR/out/build-llvm-$TARGET"

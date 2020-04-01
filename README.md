@@ -22,13 +22,15 @@ This repository copies sources from upstream.
 ## Build Instructions
 
 ```
-build -j1 triple
+build -j1 triple [options]
 ```
 
 Replace `-j1` with your jobs parameter to make, and `triple` with one of the
 Supported Triples below.
 
 If it succeeds, the output will be in `out/zig-triple/`.
+
+`[options]` could be, for example: `-mcpu=generic+v6kz`.
 
 ### Supported Triples
 
