@@ -194,6 +194,26 @@ const known_options = [_]KnownOpt{
         .name = "mtune",
         .ident = "mcpu",
     },
+    .{
+        .name = "MD",
+        .ident = "dep_file",
+    },
+    .{
+        .name = "MV",
+        .ident = "dep_file",
+    },
+    .{
+        .name = "MF",
+        .ident = "dep_file",
+    },
+    .{
+        .name = "F",
+        .ident = "framework_dir",
+    },
+    .{
+        .name = "framework",
+        .ident = "framework",
+    },
 };
 
 const blacklisted_options = [_][]const u8{};

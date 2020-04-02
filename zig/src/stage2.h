@@ -349,6 +349,9 @@ enum Stage2ClangArg {
     Stage2ClangArgLinkerInputZ,
     Stage2ClangArgLibDir,
     Stage2ClangArgMCpu,
+    Stage2ClangArgDepFile,
+    Stage2ClangArgFrameworkDir,
+    Stage2ClangArgFramework,
 };
 
 // ABI warning

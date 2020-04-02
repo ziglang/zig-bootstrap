@@ -2015,6 +2015,12 @@ enum WantCSanitize {
     WantCSanitizeEnabled,
 };
 
+enum OptionalBool {
+    OptionalBoolNull,
+    OptionalBoolFalse,
+    OptionalBoolTrue,
+};
+
 struct CFile {
     ZigList<const char *> args;
     const char *source_path;
@@ -2230,6 +2236,7 @@ struct CodeGen {
     bool reported_bad_link_libc_error;
     bool is_dynamic; // shared library rather than static library. dynamic musl rather than static musl.
     bool need_frame_size_prefix_data;
+    bool disable_c_depfile;
 
     //////////////////////////// Participates in Input Parameter Cache Hash
     /////// Note: there is a separate cache hash for builtin.zig, when adding fields,
@@ -2258,6 +2265,9 @@ struct CodeGen {
     const ZigTarget *zig_target;
     TargetSubsystem subsystem; // careful using this directly; see detect_subsystem
     ValgrindSupport valgrind_support;
+    CodeModel code_model;
+    OptionalBool linker_gc_sections;
+    OptionalBool linker_allow_shlib_undefined;
     bool strip_debug_symbols;
     bool is_test_build;
     bool is_single_threaded;
@@ -2278,7 +2288,8 @@ struct CodeGen {
     bool emit_asm;
     bool emit_llvm_ir;
     bool test_is_evented;
-    CodeModel code_model;
+    bool linker_z_nodelete;
+    bool linker_z_defs;
 
     Buf *root_out_name;
     Buf *test_filter;
@@ -2287,6 +2298,7 @@ struct CodeGen {
     Buf *zig_std_dir;
     Buf *version_script_path;
     Buf *override_soname;
+    Buf *linker_optimization;
 
     const char **llvm_argv;
     size_t llvm_argv_len;
