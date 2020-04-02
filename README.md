@@ -9,7 +9,7 @@ This repository copies sources from upstream.
 
  * LLVM 10
  * Clang 10
- * Zig 0.5.0+b5526d0b3
+ * Zig 0.5.0+e7f555ca5
    - When 0.6.0 is released, this repository will gain a git tag with that version.
 
 ## Host System Dependencies
@@ -66,7 +66,7 @@ is more portable across Linux distributions.
 | `arm-linux-musleabihf`     | OK             |
 | `arm-windows-gnu`          | not tested     |
 | `i386-linux-gnu`           | not tested     |
-| `i386-linux-musl`          | [#11](https://github.com/ziglang/bootstrap/issues/11) |
+| `i386-linux-musl`          | OK             |
 | `i386-windows-gnu`         | not tested     |
 | `mips64el-linux-gnuabi64`  | not tested     |
 | `mips64el-linux-gnuabin32` | not tested     |
