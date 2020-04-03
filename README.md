@@ -9,7 +9,7 @@ This repository copies sources from upstream.
 
  * LLVM 10
  * Clang 10
- * Zig 0.5.0+e7f555ca5
+ * Zig 0.5.0+7beea4717
    - When 0.6.0 is released, this repository will gain a git tag with that version.
 
 ## Host System Dependencies
@@ -62,7 +62,7 @@ is more portable across Linux distributions.
 | `armeb-windows-gnu`        | not tested     |
 | `arm-linux-gnueabi`        | not tested     |
 | `arm-linux-gnueabihf`      | not tested     |
-| `arm-linux-musleabi`       | not tested     |
+| `arm-linux-musleabi`       | OK             |
 | `arm-linux-musleabihf`     | OK             |
 | `arm-windows-gnu`          | not tested     |
 | `i386-linux-gnu`           | not tested     |
@@ -95,3 +95,9 @@ is more portable across Linux distributions.
 | `x86_64-linux-gnux32`      | not tested     |
 | `x86_64-linux-musl`        | OK             |
 | `x86_64-windows-gnu`       | [#1](https://github.com/ziglang/bootstrap/pull/1) [#8](https://github.com/ziglang/bootstrap/issues/8) |
+
+#### Other Notable Targets Known to Work
+
+ * `arm-linux-musleabi` with `-mcpu=generic+v6kz`. This produces a build of Zig
+   that runs on the RPi 1 and RPi Zero.
+   - If you want to produce a build for this CPU exactly, use `-mcpu=arm1176jzf_s`.
