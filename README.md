@@ -32,6 +32,10 @@ If it succeeds, the output will be in `out/zig-triple/`.
 
 `[options]` could be, for example: `-mcpu=generic+v6kz`.
 
+Note that the `triple` parameter is not optional. For the native target, you
+still have to pass the triple explicitly. To make it native, additionally
+pass `-mcpu=native` for `[options]`.
+
 ### Supported Triples
 
 If you try a "not tested" one and find a problem please file an issue,
