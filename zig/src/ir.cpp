@@ -10993,48 +10993,77 @@ static void float_negate(ZigValue *out_val, ZigValue *op) {
 }
 
 void float_write_ieee597(ZigValue *op, uint8_t *buf, bool is_big_endian) {
-    if (op->type->id == ZigTypeIdFloat) {
-        switch (op->type->data.floating.bit_count) {
-            case 16:
-                memcpy(buf, &op->data.x_f16, 2); // TODO wrong when compiler is big endian
-                return;
-            case 32:
-                memcpy(buf, &op->data.x_f32, 4); // TODO wrong when compiler is big endian
-                return;
-            case 64:
-                memcpy(buf, &op->data.x_f64, 8); // TODO wrong when compiler is big endian
-                return;
-            case 128:
-                memcpy(buf, &op->data.x_f128, 16); // TODO wrong when compiler is big endian
-                return;
-            default:
-                zig_unreachable();
-        }
-    } else {
+    if (op->type->id != ZigTypeIdFloat)
         zig_unreachable();
+
+    const unsigned n = op->type->data.floating.bit_count / 8;
+    assert(n <= 16);
+
+    switch (op->type->data.floating.bit_count) {
+        case 16:
+            memcpy(buf, &op->data.x_f16, 2);
+            break;
+        case 32:
+            memcpy(buf, &op->data.x_f32, 4);
+            break;
+        case 64:
+            memcpy(buf, &op->data.x_f64, 8);
+            break;
+        case 128:
+            memcpy(buf, &op->data.x_f128, 16);
+            break;
+        default:
+            zig_unreachable();
+    }
+
+    if (is_big_endian) {
+        // Byteswap in place if needed
+        for (size_t i = 0; i < n / 2; i++) {
+            uint8_t u = buf[i];
+            buf[i] = buf[n - 1 - i];
+            buf[n - 1 - i] = u;
+        }
     }
 }
 
 void float_read_ieee597(ZigValue *val, uint8_t *buf, bool is_big_endian) {
-    if (val->type->id == ZigTypeIdFloat) {
-        switch (val->type->data.floating.bit_count) {
-            case 16:
-                memcpy(&val->data.x_f16, buf, 2); // TODO wrong when compiler is big endian
-                return;
-            case 32:
-                memcpy(&val->data.x_f32, buf, 4); // TODO wrong when compiler is big endian
-                return;
-            case 64:
-                memcpy(&val->data.x_f64, buf, 8); // TODO wrong when compiler is big endian
-                return;
-            case 128:
-                memcpy(&val->data.x_f128, buf, 16); // TODO wrong when compiler is big endian
-                return;
-            default:
-                zig_unreachable();
-        }
-    } else {
+    if (val->type->id != ZigTypeIdFloat)
         zig_unreachable();
+
+    const unsigned n = val->type->data.floating.bit_count / 8;
+    assert(n <= 16);
+
+    uint8_t tmp[16];
+    uint8_t *ptr = buf;
+
+    if (is_big_endian) {
+        memcpy(tmp, buf, n);
+
+        // Byteswap if needed
+        for (size_t i = 0; i < n / 2; i++) {
+            uint8_t u = tmp[i];
+            tmp[i] = tmp[n - 1 - i];
+            tmp[n - 1 - i] = u;
+        }
+
+        ptr = tmp;
+    }
+
+    switch (val->type->data.floating.bit_count) {
+        case 16:
+            memcpy(&val->data.x_f16, ptr, 2);
+            return;
+        case 32:
+            memcpy(&val->data.x_f32, ptr, 4);
+            return;
+        case 64:
+            memcpy(&val->data.x_f64, ptr, 8);
+            return;
+        case 128:
+            memcpy(&val->data.x_f128, ptr, 16);
+            return;
+        default:
+            zig_unreachable();
     }
 }
 
@@ -26583,7 +26612,6 @@ done_with_return_type:
                 if (parent_ptr == nullptr)
                     return ira->codegen->invalid_inst_gen;
 
-
                 if (parent_ptr->special == ConstValSpecialUndef) {
                     array_val = nullptr;
                     abs_offset = 0;
@@ -26745,6 +26773,113 @@ done_with_return_type:
             ir_add_error(ira, &instruction->base.base, buf_sprintf("non-zero length slice of undefined pointer"));
             return ira->codegen->invalid_inst_gen;
         }
+
+        // check sentinel when target is comptime-known
+        {
+            if (!sentinel_val)
+                goto exit_check_sentinel;
+
+            switch (ptr_ptr->value->data.x_ptr.mut) {
+                case ConstPtrMutComptimeConst:
+                case ConstPtrMutComptimeVar:
+                    break;
+                case ConstPtrMutRuntimeVar:
+                case ConstPtrMutInfer:
+                    goto exit_check_sentinel;
+            }
+
+            // prepare check parameters
+            ZigValue *target = const_ptr_pointee(ira, ira->codegen, ptr_ptr->value, instruction->base.base.source_node);
+            if (target == nullptr)
+                return ira->codegen->invalid_inst_gen;
+
+            uint64_t target_len = 0;
+            ZigValue *target_sentinel = nullptr;
+            ZigValue *target_elements = nullptr;
+
+            for (;;) {
+                if (target->type->id == ZigTypeIdArray) {
+                    // handle `[N]T`
+                    target_len = target->type->data.array.len;
+                    target_sentinel = target->type->data.array.sentinel;
+                    target_elements = target->data.x_array.data.s_none.elements;
+                    break;
+                } else if (target->type->id == ZigTypeIdPointer && target->type->data.pointer.child_type->id == ZigTypeIdArray) {
+                    // handle `*[N]T`
+                    target = const_ptr_pointee(ira, ira->codegen, target, instruction->base.base.source_node);
+                    if (target == nullptr)
+                        return ira->codegen->invalid_inst_gen;
+                    assert(target->type->id == ZigTypeIdArray);
+                    continue;
+                } else if (target->type->id == ZigTypeIdPointer) {
+                    // handle `[*]T`
+                    // handle `[*c]T`
+                    switch (target->data.x_ptr.special) {
+                        case ConstPtrSpecialInvalid:
+                        case ConstPtrSpecialDiscard:
+                            zig_unreachable();
+                        case ConstPtrSpecialRef:
+                            target = target->data.x_ptr.data.ref.pointee;
+                            assert(target->type->id == ZigTypeIdArray);
+                            continue;
+                        case ConstPtrSpecialBaseArray:
+                        case ConstPtrSpecialSubArray:
+                            target = target->data.x_ptr.data.base_array.array_val;
+                            assert(target->type->id == ZigTypeIdArray);
+                            continue;
+                        case ConstPtrSpecialBaseStruct:
+                            zig_panic("TODO slice const inner struct");
+                        case ConstPtrSpecialBaseErrorUnionCode:
+                            zig_panic("TODO slice const inner error union code");
+                        case ConstPtrSpecialBaseErrorUnionPayload:
+                            zig_panic("TODO slice const inner error union payload");
+                        case ConstPtrSpecialBaseOptionalPayload:
+                            zig_panic("TODO slice const inner optional payload");
+                        case ConstPtrSpecialHardCodedAddr:
+                            // skip check
+                            goto exit_check_sentinel;
+                        case ConstPtrSpecialFunction:
+                            zig_panic("TODO slice of ptr cast from function");
+                        case ConstPtrSpecialNull:
+                            zig_panic("TODO slice of null ptr");
+                    }
+                    break;
+                } else if (is_slice(target->type)) {
+                    // handle `[]T`
+                    target = target->data.x_struct.fields[slice_ptr_index];
+                    assert(target->type->id == ZigTypeIdPointer);
+                    continue;
+                }
+
+                zig_unreachable();
+            }
+
+            // perform check
+            if (target_sentinel == nullptr) {
+                if (end_scalar >= target_len) {
+                    ir_add_error(ira, &instruction->base.base, buf_sprintf("slice-sentinel is out of bounds"));
+                    return ira->codegen->invalid_inst_gen;
+                }
+                if (!const_values_equal(ira->codegen, sentinel_val, &target_elements[end_scalar])) {
+                    ir_add_error(ira, &instruction->base.base, buf_sprintf("slice-sentinel does not match memory at target index"));
+                    return ira->codegen->invalid_inst_gen;
+                }
+            } else {
+                assert(end_scalar <= target_len);
+                if (end_scalar == target_len) {
+                    if (!const_values_equal(ira->codegen, sentinel_val, target_sentinel)) {
+                        ir_add_error(ira, &instruction->base.base, buf_sprintf("slice-sentinel does not match target-sentinel"));
+                        return ira->codegen->invalid_inst_gen;
+                    }
+                } else {
+                    if (!const_values_equal(ira->codegen, sentinel_val, &target_elements[end_scalar])) {
+                        ir_add_error(ira, &instruction->base.base, buf_sprintf("slice-sentinel does not match memory at target index"));
+                        return ira->codegen->invalid_inst_gen;
+                    }
+                }
+            }
+        }
+        exit_check_sentinel:
 
         IrInstGen *result = ir_const(ira, &instruction->base.base, return_type);
 
@@ -28311,6 +28446,7 @@ static Error buf_read_value_bytes(IrAnalyze *ira, CodeGen *codegen, AstNode *sou
                         }
                         BigInt big_int;
                         bigint_read_twos_complement(&big_int, buf + offset, big_int_byte_count * 8, is_big_endian, false);
+                        uint64_t bit_offset = 0;
                         while (src_i < src_field_count) {
                             TypeStructField *field = val->type->data.structure.fields[src_i];
                             src_assert(field->gen_index != SIZE_MAX, source_node);
@@ -28323,7 +28459,11 @@ static Error buf_read_value_bytes(IrAnalyze *ira, CodeGen *codegen, AstNode *sou
 
                             BigInt child_val;
                             if (is_big_endian) {
-                                zig_panic("TODO buf_read_value_bytes packed struct big endian");
+                                BigInt packed_bits_size_bi;
+                                bigint_init_unsigned(&packed_bits_size_bi, big_int_byte_count * 8 - packed_bits_size - bit_offset);
+                                BigInt tmp;
+                                bigint_shr(&tmp, &big_int, &packed_bits_size_bi);
+                                bigint_truncate(&child_val, &tmp, packed_bits_size, false);
                             } else {
                                 BigInt packed_bits_size_bi;
                                 bigint_init_unsigned(&packed_bits_size_bi, packed_bits_size);
@@ -28333,11 +28473,12 @@ static Error buf_read_value_bytes(IrAnalyze *ira, CodeGen *codegen, AstNode *sou
                                 big_int = tmp;
                             }
 
-                            bigint_write_twos_complement(&child_val, child_buf, big_int_byte_count * 8, is_big_endian);
+                            bigint_write_twos_complement(&child_val, child_buf, packed_bits_size, is_big_endian);
                             if ((err = buf_read_value_bytes(ira, codegen, source_node, child_buf, field_val))) {
                                 return err;
                             }
 
+                            bit_offset += packed_bits_size;
                             src_i += 1;
                         }
                         offset += big_int_byte_count;

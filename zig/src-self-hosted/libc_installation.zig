@@ -32,6 +32,7 @@ pub const LibCInstallation = struct {
         LibCKernel32LibNotFound,
         UnsupportedArchitecture,
         WindowsSdkNotFound,
+        ZigIsTheCCompiler,
     };
 
     pub fn parse(
@@ -60,7 +61,7 @@ pub const LibCInstallation = struct {
         var it = std.mem.tokenize(contents, "\n");
         while (it.next()) |line| {
             if (line.len == 0 or line[0] == '#') continue;
-            var line_it = std.mem.separate(line, "=");
+            var line_it = std.mem.split(line, "=");
             const name = line_it.next() orelse {
                 try stderr.print("missing equal sign after field name\n", .{});
                 return error.ParseError;
@@ -229,10 +230,19 @@ pub const LibCInstallation = struct {
             "-xc",
             dev_null,
         };
+        var env_map = try std.process.getEnvMap(allocator);
+        defer env_map.deinit();
+
+        // Detect infinite loops.
+        const inf_loop_env_key = "ZIG_IS_DETECTING_LIBC_PATHS";
+        if (env_map.get(inf_loop_env_key) != null) return error.ZigIsTheCCompiler;
+        try env_map.set(inf_loop_env_key, "1");
+
         const exec_res = std.ChildProcess.exec(.{
             .allocator = allocator,
             .argv = &argv,
             .max_output_bytes = 1024 * 1024,
+            .env_map = &env_map,
             // Some C compilers, such as Clang, are known to rely on argv[0] to find the path
             // to their own executable, without even bothering to resolve PATH. This results in the message:
             // error: unable to execute command: Executable "" doesn't exist!
@@ -268,7 +278,7 @@ pub const LibCInstallation = struct {
                 try search_paths.append(line);
             }
         }
-        if (search_paths.len == 0) {
+        if (search_paths.items.len == 0) {
             return error.CCompilerCannotFindHeaders;
         }
 
@@ -276,9 +286,9 @@ pub const LibCInstallation = struct {
         const sys_include_dir_example_file = if (is_windows) "sys\\types.h" else "sys/errno.h";
 
         var path_i: usize = 0;
-        while (path_i < search_paths.len) : (path_i += 1) {
+        while (path_i < search_paths.items.len) : (path_i += 1) {
             // search in reverse order
-            const search_path_untrimmed = search_paths.at(search_paths.len - path_i - 1);
+            const search_path_untrimmed = search_paths.at(search_paths.items.len - path_i - 1);
             const search_path = std.mem.trimLeft(u8, search_path_untrimmed, " ");
             var search_dir = fs.cwd().openDir(search_path, .{}) catch |err| switch (err) {
                 error.FileNotFound,
@@ -518,10 +528,19 @@ fn ccPrintFileName(args: CCPrintFileNameOptions) ![:0]u8 {
     defer allocator.free(arg1);
     const argv = [_][]const u8{ cc_exe, arg1 };
 
+    var env_map = try std.process.getEnvMap(allocator);
+    defer env_map.deinit();
+
+    // Detect infinite loops.
+    const inf_loop_env_key = "ZIG_IS_DETECTING_LIBC_PATHS";
+    if (env_map.get(inf_loop_env_key) != null) return error.ZigIsTheCCompiler;
+    try env_map.set(inf_loop_env_key, "1");
+
     const exec_res = std.ChildProcess.exec(.{
         .allocator = allocator,
         .argv = &argv,
         .max_output_bytes = 1024 * 1024,
+        .env_map = &env_map,
         // Some C compilers, such as Clang, are known to rely on argv[0] to find the path
         // to their own executable, without even bothering to resolve PATH. This results in the message:
         // error: unable to execute command: Executable "" doesn't exist!

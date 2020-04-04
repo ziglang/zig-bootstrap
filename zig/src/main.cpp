@@ -260,18 +260,6 @@ static int main0(int argc, char **argv) {
     char *arg0 = argv[0];
     Error err;
 
-    if (argc == 2 && strcmp(argv[1], "BUILD_INFO") == 0) {
-        printf("%s\n%s\n%s\n%s\n%s\n%s\n%s\n",
-                ZIG_CMAKE_BINARY_DIR,
-                ZIG_CXX_COMPILER,
-                ZIG_LLVM_CONFIG_EXE,
-                ZIG_LLD_INCLUDE_PATH,
-                ZIG_LLD_LIBRARIES,
-                ZIG_CLANG_LIBRARIES,
-                ZIG_DIA_GUIDS_LIB);
-        return 0;
-    }
-
     if (argc >= 2 && (strcmp(argv[1], "clang") == 0 ||
             strcmp(argv[1], "-cc1") == 0 || strcmp(argv[1], "-cc1as") == 0))
     {
@@ -459,6 +447,7 @@ static int main0(int argc, char **argv) {
     bool ensure_libc_on_non_freestanding = false;
     bool ensure_libcpp_on_non_freestanding = false;
     bool disable_c_depfile = false;
+    bool want_native_include_dirs = false;
     Buf *linker_optimization = nullptr;
     OptionalBool linker_gc_sections = OptionalBoolNull;
     OptionalBool linker_allow_shlib_undefined = OptionalBoolNull;
@@ -593,6 +582,7 @@ static int main0(int argc, char **argv) {
         strip = true;
         ensure_libc_on_non_freestanding = true;
         ensure_libcpp_on_non_freestanding = (strcmp(argv[1], "c++") == 0);
+        want_native_include_dirs = true;
 
         bool c_arg = false;
         Stage2ClangArgIterator it;
@@ -758,6 +748,9 @@ static int main0(int argc, char **argv) {
                     break;
                 case Stage2ClangArgFramework:
                     frameworks.append(it.only_arg);
+                    break;
+                case Stage2ClangArgNoStdLibInc:
+                    want_native_include_dirs = false;
                     break;
             }
         }
@@ -1430,7 +1423,7 @@ static int main0(int argc, char **argv) {
                 }
             }
 
-            if (target.is_native_os && any_system_lib_dependencies) {
+            if (target.is_native_os && (any_system_lib_dependencies || want_native_include_dirs)) {
                 Error err;
                 Stage2NativePaths paths;
                 if ((err = stage2_detect_native_paths(&paths))) {
