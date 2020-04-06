@@ -9,7 +9,7 @@ This repository copies sources from upstream.
 
  * LLVM 10
  * Clang 10
- * Zig 0.5.0+e4eb817f7
+ * Zig 0.5.0+e4eb817f7, with PR #4966 applied as a patch
    - When 0.6.0 is released, this repository will gain a git tag with that version.
 
 ## Host System Dependencies
