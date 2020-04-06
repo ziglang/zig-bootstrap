@@ -56,6 +56,7 @@ cmake "$ROOTDIR/llvm" \
   -DCMAKE_CROSSCOMPILING=True \
   -DCMAKE_SYSTEM_NAME="$TARGET_OS_CMAKE" \
   -DCMAKE_AR="$ROOTDIR/out/host/bin/llvm-ar" \
+  -DCMAKE_RANLIB="$ROOTDIR/out/host/bin/llvm-ranlib" \
   -DLLVM_TABLEGEN="$ROOTDIR/out/host/bin/llvm-tblgen" \
   -DCLANG_TABLEGEN="$ROOTDIR/out/build-llvm-host/bin/clang-tblgen" \
   -DLLVM_BUILD_TOOLS=OFF \
@@ -81,6 +82,7 @@ cmake "$ROOTDIR/zig" \
   -DCMAKE_CROSSCOMPILING=True \
   -DCMAKE_SYSTEM_NAME="$TARGET_OS_CMAKE" \
   -DCMAKE_AR="$ROOTDIR/out/host/bin/llvm-ar" \
+  -DCMAKE_RANLIB="$ROOTDIR/out/host/bin/llvm-ranlib" \
   -DCMAKE_BUILD_TYPE=Release \
   -DZIG_TARGET_TRIPLE="$TARGET" \
   -DZIG_EXECUTABLE="$ZIG"
