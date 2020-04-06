@@ -71,7 +71,7 @@ is more portable across Linux distributions.
 | `arm-windows-gnu`          | not tested     |
 | `i386-linux-gnu`           | not tested     |
 | `i386-linux-musl`          | OK             |
-| `i386-windows-gnu`         | not tested     |
+| `i386-windows-gnu`         | [#18](https://github.com/ziglang/bootstrap/issues/18) |
 | `mips64el-linux-gnuabi64`  | not tested     |
 | `mips64el-linux-gnuabin32` | not tested     |
 | `mips64el-linux-musl`      | [#3](https://github.com/ziglang/bootstrap/issues/3) |
@@ -98,7 +98,7 @@ is more portable across Linux distributions.
 | `x86_64-linux-gnu`         | OK             |
 | `x86_64-linux-gnux32`      | not tested     |
 | `x86_64-linux-musl`        | OK             |
-| `x86_64-windows-gnu`       | [#1](https://github.com/ziglang/bootstrap/pull/1) [#8](https://github.com/ziglang/bootstrap/issues/8) |
+| `x86_64-windows-gnu`       | OK             |
 
 #### Other Notable Targets Known to Work
 
