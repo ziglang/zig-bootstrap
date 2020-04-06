@@ -74,6 +74,12 @@ cmake "$ROOTDIR/llvm" \
   -DLLVM_BUILD_STATIC=ON \
   -DLIBCLANG_BUILD_STATIC=ON \
   -DLLVM_DEFAULT_TARGET_TRIPLE="$TARGET"
+make "$JOBS" install-llvm-headers install-clang-headers
+cd lib
+make "$JOBS" install
+cd ../tools/clang/lib
+make "$JOBS" install
+cd ../../lld
 make "$JOBS" install
 
 # Finally, we can cross compile Zig itself, with Zig.
