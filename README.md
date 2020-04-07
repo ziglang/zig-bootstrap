@@ -71,7 +71,7 @@ is more portable across Linux distributions.
 | `arm-windows-gnu`          | not tested     |
 | `i386-linux-gnu`           | not tested     |
 | `i386-linux-musl`          | OK             |
-| `i386-windows-gnu`         | [#18](https://github.com/ziglang/bootstrap/issues/18) |
+| `i386-windows-gnu`         | OK             |
 | `mips64el-linux-gnuabi64`  | not tested     |
 | `mips64el-linux-gnuabin32` | not tested     |
 | `mips64el-linux-musl`      | [#3](https://github.com/ziglang/bootstrap/issues/3) |
