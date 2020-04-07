@@ -94,6 +94,7 @@ is more portable across Linux distributions.
 | `s390x-linux-musl`         | not tested     |
 | `sparc-linux-gnu`          | not tested     |
 | `sparcv9-linux-gnu`        | not tested     |
+| `sparcv9-linux-gnu`        | [ziglang/zig#4931](https://github.com/ziglang/zig/issues/4931) |
 | `wasm32-freestanding-musl` | not tested     |
 | `x86_64-linux-gnu`         | OK             |
 | `x86_64-linux-gnux32`      | not tested     |
