@@ -9,7 +9,7 @@ This repository copies sources from upstream.
 
  * LLVM 10
  * Clang 10
- * Zig 0.5.0+1ee59c5c3
+ * Zig 0.5.0+d5087ccb
    - When 0.6.0 is released, this repository will gain a git tag with that version.
 
 ## Host System Dependencies
@@ -22,19 +22,19 @@ This repository copies sources from upstream.
 ## Build Instructions
 
 ```
-build -j1 triple [options]
+build -j1 native baseline
 ```
 
-Replace `-j1` with your jobs parameter to make, and `triple` with one of the
-Supported Triples below.
+All parameters are required:
 
-If it succeeds, the output will be in `out/zig-triple/`.
+ * `-j1`: Replace with your jobs parameter to make.
+ * `native`: Replace with one of the Supported Triples below, or use `native`
+   for the native triple.
+ * `baseline`: Replace with a `-mcpu` parameter of Zig. `baseline` means
+   it will target a generic CPU for the target. `native` means it will target
+   the native CPU. See the Zig documentation for more details.
 
-`[options]` could be, for example: `-mcpu=generic+v6kz`.
-
-Note that the `triple` parameter is not optional. For the native target, you
-still have to pass the triple explicitly. To make it native, additionally
-pass `-mcpu=native` for `[options]`.
+If it succeeds, the output will be in `out/zig-triple-mcpu/`.
 
 ### Supported Triples
 
@@ -97,12 +97,12 @@ is more portable across Linux distributions.
 | `sparcv9-linux-gnu`        | [ziglang/zig#4931](https://github.com/ziglang/zig/issues/4931) |
 | `wasm32-freestanding-musl` | not tested     |
 | `x86_64-linux-gnu`         | OK             |
-| `x86_64-linux-gnux32`      | [#20](https://github.com/ziglang/bootstrap/issues/20)     |
+| `x86_64-linux-gnux32`      | [#20](https://github.com/ziglang/bootstrap/issues/20) |
 | `x86_64-linux-musl`        | OK             |
 | `x86_64-windows-gnu`       | OK             |
 
 #### Other Notable Targets Known to Work
 
- * `arm-linux-musleabi` with `-mcpu=generic+v6kz`. This produces a build of Zig
-   that runs on the RPi 1 and RPi Zero.
-   - If you want to produce a build for this CPU exactly, use `-mcpu=arm1176jzf_s`.
+ * `arm-linux-musleabi` with mcpu value of `generic+v6kz`. This produces a
+   build of Zig that runs on the RPi 1 and RPi Zero.
+   - If you want to produce a build for this CPU exactly, use `arm1176jzf_s`.

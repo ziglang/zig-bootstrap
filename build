@@ -4,7 +4,7 @@ set -e
 
 JOBS="$1"
 TARGET="$2" # Example: riscv64-linux-gnu
-ZIG_CC_FLAGS="$3"
+MCPU="$3" # Examples: `baseline`, `native`, `generic+v7a`, or `arm1176jzf_s`
 
 ROOTDIR="$(pwd)"
 
@@ -41,8 +41,8 @@ make "$JOBS" install
 
 # Now we have Zig as a cross compiler
 ZIG="$ROOTDIR/out/host/bin/zig"
-export CC="$ZIG cc -target $TARGET $ZIG_CC_FLAGS"
-export CXX="$ZIG c++ -target $TARGET $ZIG_CC_FLAGS"
+export CC="$ZIG cc -target $TARGET -mcpu=$MCPU"
+export CXX="$ZIG c++ -target $TARGET -mcpu=$MCPU"
 
 # Rebuild LLVM with Zig.
 mkdir -p "$ROOTDIR/out/build-llvm-$TARGET"
@@ -87,7 +87,7 @@ make "$JOBS" install-llvm-headers install-clang-headers install-LLVMSupport inst
 mkdir -p "$ROOTDIR/out/build-zig-$TARGET"
 cd "$ROOTDIR/out/build-zig-$TARGET"
 cmake "$ROOTDIR/zig" \
-  -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/zig-$TARGET" \
+  -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/zig-$TARGET-$MCPU" \
   -DCMAKE_PREFIX_PATH="$ROOTDIR/out/$TARGET" \
   -DCMAKE_CROSSCOMPILING=True \
   -DCMAKE_SYSTEM_NAME="$TARGET_OS_CMAKE" \
@@ -95,5 +95,6 @@ cmake "$ROOTDIR/zig" \
   -DCMAKE_RANLIB="$ROOTDIR/out/host/bin/llvm-ranlib" \
   -DCMAKE_BUILD_TYPE=Release \
   -DZIG_TARGET_TRIPLE="$TARGET" \
+  -DZIG_TARGET_MCPU="$MCPU" \
   -DZIG_EXECUTABLE="$ZIG"
 make "$JOBS" install
