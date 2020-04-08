@@ -3290,13 +3290,9 @@ static IrInstSrc *ir_build_import(IrBuilderSrc *irb, Scope *scope, AstNode *sour
     return &instruction->base;
 }
 
-static IrInstSrc *ir_build_ref_src(IrBuilderSrc *irb, Scope *scope, AstNode *source_node, IrInstSrc *value,
-        bool is_const, bool is_volatile)
-{
+static IrInstSrc *ir_build_ref_src(IrBuilderSrc *irb, Scope *scope, AstNode *source_node, IrInstSrc *value) {
     IrInstSrcRef *instruction = ir_build_instruction<IrInstSrcRef>(irb, scope, source_node);
     instruction->value = value;
-    instruction->is_const = is_const;
-    instruction->is_volatile = is_volatile;
 
     ir_ref_instruction(value, irb->current_basic_block);
 
@@ -5938,7 +5934,7 @@ static IrInstSrc *ir_gen_symbol(IrBuilderSrc *irb, Scope *scope, AstNode *node, 
     } else {
         IrInstSrc *value = ir_build_const_type(irb, scope, node, primitive_type);
         if (lval == LValPtr) {
-            return ir_build_ref_src(irb, scope, node, value, false, false);
+            return ir_build_ref_src(irb, scope, node, value);
         } else {
             return ir_expr_wrap(irb, scope, value, result_loc);
         }
@@ -7486,7 +7482,7 @@ static IrInstSrc *ir_lval_wrap(IrBuilderSrc *irb, Scope *scope, IrInstSrc *value
     if (lval == LValPtr) {
         // We needed a pointer to a value, but we got a value. So we create
         // an instruction which just makes a pointer of it.
-        return ir_build_ref_src(irb, scope, value->base.source_node, value, false, false);
+        return ir_build_ref_src(irb, scope, value->base.source_node, value);
     } else if (result_loc != nullptr) {
         return ir_expr_wrap(irb, scope, value, result_loc);
     } else {
@@ -21153,7 +21149,11 @@ static IrInstGen *ir_analyze_instruction_elem_ptr(IrAnalyze *ira, IrInstSrcElemP
 
     bool safety_check_on = elem_ptr_instruction->safety_check_on;
     if (instr_is_comptime(casted_elem_index)) {
-        uint64_t index = bigint_as_u64(&casted_elem_index->value->data.x_bigint);
+        ZigValue *index_val = ir_resolve_const(ira, casted_elem_index, UndefBad);
+        if (index_val == nullptr)
+            return ira->codegen->invalid_inst_gen;
+        uint64_t index = bigint_as_u64(&index_val->data.x_bigint);
+
         if (array_type->id == ZigTypeIdArray) {
             uint64_t array_len = array_type->data.array.len +
                 (array_type->data.array.sentinel != nullptr);
@@ -23348,7 +23348,16 @@ static IrInstGen *ir_analyze_instruction_ref(IrAnalyze *ira, IrInstSrcRef *ref_i
     IrInstGen *value = ref_instruction->value->child;
     if (type_is_invalid(value->value->type))
         return ira->codegen->invalid_inst_gen;
-    return ir_get_ref(ira, &ref_instruction->base.base, value, ref_instruction->is_const, ref_instruction->is_volatile);
+    
+    bool is_const = false;
+    bool is_volatile = false;
+
+    ZigValue *child_value = value->value;
+    if (child_value->special == ConstValSpecialStatic) {
+        is_const = true;
+    }
+
+    return ir_get_ref(ira, &ref_instruction->base.base, value, is_const, is_volatile);
 }
 
 static IrInstGen *ir_analyze_union_init(IrAnalyze *ira, IrInst* source_instruction,
