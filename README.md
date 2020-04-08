@@ -97,7 +97,7 @@ is more portable across Linux distributions.
 | `sparcv9-linux-gnu`        | [ziglang/zig#4931](https://github.com/ziglang/zig/issues/4931) |
 | `wasm32-freestanding-musl` | not tested     |
 | `x86_64-linux-gnu`         | OK             |
-| `x86_64-linux-gnux32`      | not tested     |
+| `x86_64-linux-gnux32`      | [#20](https://github.com/ziglang/bootstrap/issues/20)     |
 | `x86_64-linux-musl`        | OK             |
 | `x86_64-windows-gnu`       | OK             |
 
