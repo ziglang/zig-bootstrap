@@ -10,7 +10,7 @@ ROOTDIR="$(pwd)"
 
 TARGET_OS_AND_ABI=${TARGET#*-} # Example: linux-gnu
 TARGET_OS_LOWER=${TARGET_OS_AND_ABI%-*} # Example: linux
-TARGET_OS_CMAKE=${TARGET_OS_LOWER^} # Example: Linux
+TARGET_OS_CMAKE=$(echo "$TARGET_OS_LOWER" | cut -c1 | tr a-z A-Z)$(echo "$TARGET_OS_LOWER" | cut -c2-) # Example: Linux
 
 # First build the libraries for Zig to link against, as well as native `llvm-tblgen`.
 mkdir -p "$ROOTDIR/out/build-llvm-host"
