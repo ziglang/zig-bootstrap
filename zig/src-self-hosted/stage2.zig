@@ -116,6 +116,8 @@ const Error = extern enum {
     UnknownClangOption,
     NestedResponseFile,
     ZigIsTheCCompiler,
+    FileBusy,
+    Locked,
 };
 
 const FILE = std.c.FILE;
@@ -847,6 +849,7 @@ export fn stage2_libc_parse(stage1_libc: *Stage2LibCInstallation, libc_file_z: [
         error.NoDevice => return .NoDevice,
         error.NotDir => return .NotDir,
         error.DeviceBusy => return .DeviceBusy,
+        error.FileLocksNotSupported => unreachable,
     };
     stage1_libc.initFromStage2(libc);
     return .None;
@@ -892,6 +895,22 @@ export fn stage2_libc_render(stage1_libc: *Stage2LibCInstallation, output_file: 
         error.InputOutput => return .FileSystem,
     };
     return .None;
+}
+
+fn enumToString(value: var, type_name: []const u8) ![]const u8 {
+    switch (@typeInfo(@TypeOf(value))) {
+        .Enum => |e| {
+            if (e.is_exhaustive) {
+                return std.fmt.allocPrint(std.heap.c_allocator, ".{}", .{@tagName(value)});
+            } else {
+                return std.fmt.allocPrint(std.heap.c_allocator,
+                    "@intToEnum({}, {})",
+                    .{type_name, @enumToInt(value)}
+                );
+            }
+        },
+        else => unreachable 
+    }
 }
 
 // ABI warning
@@ -1111,13 +1130,13 @@ const Stage2Target = extern struct {
 
             .windows => try os_builtin_str_buffer.outStream().print(
                 \\ .windows = .{{
-                \\        .min = .{},
-                \\        .max = .{},
+                \\        .min = {},
+                \\        .max = {},
                 \\    }}}},
                 \\
             , .{
-                @tagName(target.os.version_range.windows.min),
-                @tagName(target.os.version_range.windows.max),
+                try enumToString(target.os.version_range.windows.min, "Target.Os.WindowsVersion"),
+                try enumToString(target.os.version_range.windows.max, "Target.Os.WindowsVersion")
             }),
         }
         try os_builtin_str_buffer.appendSlice("};\n");

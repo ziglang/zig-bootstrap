@@ -594,8 +594,19 @@ pub const Dir = struct {
             const path_w = try os.windows.cStrToPrefixedFileW(sub_path);
             return self.openFileW(&path_w, flags);
         }
+
+        // Use the O_ locking flags if the os supports them
+        // (Or if it's darwin, as darwin's `open` doesn't support the O_SYNC flag)
+        const has_flock_open_flags = @hasDecl(os, "O_EXLOCK") and !builtin.os.tag.isDarwin();
+        const nonblocking_lock_flag = if (has_flock_open_flags and flags.lock_nonblocking) (os.O_NONBLOCK | os.O_SYNC) else @as(u32, 0);
+        const lock_flag: u32 = if (has_flock_open_flags) switch (flags.lock) {
+            .None => @as(u32, 0),
+            .Shared => os.O_SHLOCK | nonblocking_lock_flag,
+            .Exclusive => os.O_EXLOCK | nonblocking_lock_flag,
+        } else 0;
+
         const O_LARGEFILE = if (@hasDecl(os, "O_LARGEFILE")) os.O_LARGEFILE else 0;
-        const os_flags = O_LARGEFILE | os.O_CLOEXEC | if (flags.write and flags.read)
+        const os_flags = lock_flag | O_LARGEFILE | os.O_CLOEXEC | if (flags.write and flags.read)
             @as(u32, os.O_RDWR)
         else if (flags.write)
             @as(u32, os.O_WRONLY)
@@ -605,6 +616,17 @@ pub const Dir = struct {
             try std.event.Loop.instance.?.openatZ(self.fd, sub_path, os_flags, 0)
         else
             try os.openatZ(self.fd, sub_path, os_flags, 0);
+
+        if (!has_flock_open_flags and flags.lock != .None) {
+            // TODO: integrate async I/O
+            const lock_nonblocking = if (flags.lock_nonblocking) os.LOCK_NB else @as(i32, 0);
+            try os.flock(fd, switch (flags.lock) {
+                .None => unreachable,
+                .Shared => os.LOCK_SH | lock_nonblocking,
+                .Exclusive => os.LOCK_EX | lock_nonblocking,
+            });
+        }
+
         return File{
             .handle = fd,
             .io_mode = .blocking,
@@ -622,8 +644,15 @@ pub const Dir = struct {
         const access_mask = w.SYNCHRONIZE |
             (if (flags.read) @as(u32, w.GENERIC_READ) else 0) |
             (if (flags.write) @as(u32, w.GENERIC_WRITE) else 0);
+
+        const share_access = switch (flags.lock) {
+            .None => @as(?w.ULONG, null),
+            .Shared => w.FILE_SHARE_READ | w.FILE_SHARE_DELETE,
+            .Exclusive => w.FILE_SHARE_DELETE,
+        };
+
         return @as(File, .{
-            .handle = try os.windows.OpenFileW(self.fd, sub_path_w, null, access_mask, w.FILE_OPEN),
+            .handle = try os.windows.OpenFileW(self.fd, sub_path_w, null, access_mask, share_access, flags.lock_nonblocking, w.FILE_OPEN),
             .io_mode = .blocking,
         });
     }
@@ -648,8 +677,19 @@ pub const Dir = struct {
             const path_w = try os.windows.cStrToPrefixedFileW(sub_path_c);
             return self.createFileW(&path_w, flags);
         }
+
+        // Use the O_ locking flags if the os supports them
+        // (Or if it's darwin, as darwin's `open` doesn't support the O_SYNC flag)
+        const has_flock_open_flags = @hasDecl(os, "O_EXLOCK") and !builtin.os.tag.isDarwin();
+        const nonblocking_lock_flag = if (has_flock_open_flags and flags.lock_nonblocking) (os.O_NONBLOCK | os.O_SYNC) else @as(u32, 0);
+        const lock_flag: u32 = if (has_flock_open_flags) switch (flags.lock) {
+            .None => @as(u32, 0),
+            .Shared => os.O_SHLOCK,
+            .Exclusive => os.O_EXLOCK,
+        } else 0;
+
         const O_LARGEFILE = if (@hasDecl(os, "O_LARGEFILE")) os.O_LARGEFILE else 0;
-        const os_flags = O_LARGEFILE | os.O_CREAT | os.O_CLOEXEC |
+        const os_flags = lock_flag | O_LARGEFILE | os.O_CREAT | os.O_CLOEXEC |
             (if (flags.truncate) @as(u32, os.O_TRUNC) else 0) |
             (if (flags.read) @as(u32, os.O_RDWR) else os.O_WRONLY) |
             (if (flags.exclusive) @as(u32, os.O_EXCL) else 0);
@@ -657,6 +697,17 @@ pub const Dir = struct {
             try std.event.Loop.instance.?.openatZ(self.fd, sub_path_c, os_flags, flags.mode)
         else
             try os.openatZ(self.fd, sub_path_c, os_flags, flags.mode);
+
+        if (!has_flock_open_flags and flags.lock != .None) {
+            // TODO: integrate async I/O
+            const lock_nonblocking = if (flags.lock_nonblocking) os.LOCK_NB else @as(i32, 0);
+            try os.flock(fd, switch (flags.lock) {
+                .None => unreachable,
+                .Shared => os.LOCK_SH | lock_nonblocking,
+                .Exclusive => os.LOCK_EX | lock_nonblocking,
+            });
+        }
+
         return File{ .handle = fd, .io_mode = .blocking };
     }
 
@@ -672,8 +723,15 @@ pub const Dir = struct {
             @as(u32, w.FILE_OVERWRITE_IF)
         else
             @as(u32, w.FILE_OPEN_IF);
+
+        const share_access = switch (flags.lock) {
+            .None => @as(?w.ULONG, null),
+            .Shared => w.FILE_SHARE_READ | w.FILE_SHARE_DELETE,
+            .Exclusive => w.FILE_SHARE_DELETE,
+        };
+
         return @as(File, .{
-            .handle = try os.windows.OpenFileW(self.fd, sub_path_w, null, access_mask, creation),
+            .handle = try os.windows.OpenFileW(self.fd, sub_path_w, null, access_mask, share_access, flags.lock_nonblocking, creation),
             .io_mode = .blocking,
         });
     }
@@ -802,6 +860,7 @@ pub const Dir = struct {
             error.IsDir => unreachable, // we're providing O_DIRECTORY
             error.NoSpaceLeft => unreachable, // not providing O_CREAT
             error.PathAlreadyExists => unreachable, // not providing O_CREAT
+            error.FileLocksNotSupported => unreachable, // locking folders is not supported
             else => |e| return e,
         };
         return Dir{ .fd = fd };
@@ -1508,7 +1567,7 @@ pub fn walkPath(allocator: *Allocator, dir_path: []const u8) !Walker {
     return walker;
 }
 
-pub const OpenSelfExeError = os.OpenError || os.windows.CreateFileError || SelfExePathError;
+pub const OpenSelfExeError = os.OpenError || os.windows.CreateFileError || SelfExePathError || os.FlockError;
 
 pub fn openSelfExe() OpenSelfExeError!File {
     if (builtin.os.tag == .linux) {
@@ -1523,13 +1582,6 @@ pub fn openSelfExe() OpenSelfExeError!File {
     const self_exe_path = try selfExePath(&buf);
     buf[self_exe_path.len] = 0;
     return openFileAbsoluteZ(buf[0..self_exe_path.len :0].ptr, .{});
-}
-
-test "openSelfExe" {
-    switch (builtin.os.tag) {
-        .linux, .macosx, .ios, .windows, .freebsd, .dragonfly => (try openSelfExe()).close(),
-        else => return error.SkipZigTest, // Unsupported OS.
-    }
 }
 
 pub const SelfExePathError = os.ReadLinkError || os.SysCtlError;
@@ -1619,6 +1671,7 @@ test "" {
     _ = copyFileAbsolute;
     _ = updateFileAbsolute;
     _ = Dir.copyFile;
+    _ = @import("fs/test.zig");
     _ = @import("fs/path.zig");
     _ = @import("fs/file.zig");
     _ = @import("fs/get_app_data_dir.zig");

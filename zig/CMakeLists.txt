@@ -46,6 +46,7 @@ message("Configuring zig version ${ZIG_VERSION}")
 set(ZIG_STATIC off CACHE BOOL "Attempt to build a static zig executable (not compatible with glibc)")
 set(ZIG_STATIC_LLVM off CACHE BOOL "Prefer linking against static LLVM libraries")
 set(ZIG_ENABLE_MEM_PROFILE off CACHE BOOL "Activate memory usage instrumentation")
+set(ZIG_PREFER_CLANG_CPP_DYLIB off CACHE BOOL "Try to link against -lclang-cpp")
 
 if(ZIG_STATIC)
     set(ZIG_STATIC_LLVM "on")
@@ -453,6 +454,9 @@ if("${ZIG_TARGET_TRIPLE}" STREQUAL "native")
       WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   )
   set(ZIG_EXECUTABLE "${zig_BINARY_DIR}/zig")
+  if (WIN32)
+    set(ZIG_EXECUTABLE "${ZIG_EXECUTABLE}.exe")
+  endif()
 else()
   add_custom_target(zig_build_libstage2 ALL
       COMMAND "${ZIG_EXECUTABLE}" ${BUILD_LIBSTAGE2_ARGS}

@@ -136,14 +136,14 @@ pub fn build(b: *Builder) !void {
 }
 
 fn dependOnLib(b: *Builder, lib_exe_obj: var, dep: LibraryDep) void {
-    for (dep.libdirs.toSliceConst()) |lib_dir| {
+    for (dep.libdirs.items) |lib_dir| {
         lib_exe_obj.addLibPath(lib_dir);
     }
     const lib_dir = fs.path.join(
         b.allocator,
         &[_][]const u8{ dep.prefix, "lib" },
     ) catch unreachable;
-    for (dep.system_libs.toSliceConst()) |lib| {
+    for (dep.system_libs.items) |lib| {
         const static_bare_name = if (mem.eql(u8, lib, "curses"))
             @as([]const u8, "libncurses.a")
         else
@@ -159,10 +159,10 @@ fn dependOnLib(b: *Builder, lib_exe_obj: var, dep: LibraryDep) void {
             lib_exe_obj.linkSystemLibrary(lib);
         }
     }
-    for (dep.libs.toSliceConst()) |lib| {
+    for (dep.libs.items) |lib| {
         lib_exe_obj.addObjectFile(lib);
     }
-    for (dep.includes.toSliceConst()) |include_path| {
+    for (dep.includes.items) |include_path| {
         lib_exe_obj.addIncludeDir(include_path);
     }
 }
@@ -225,10 +225,11 @@ fn findLLVM(b: *Builder, llvm_config_exe: []const u8) !LibraryDep {
                 if (fs.path.isAbsolute(lib_arg)) {
                     try result.libs.append(lib_arg);
                 } else {
+                    var lib_arg_copy = lib_arg;
                     if (mem.endsWith(u8, lib_arg, ".lib")) {
-                        lib_arg = lib_arg[0 .. lib_arg.len - 4];
+                        lib_arg_copy = lib_arg[0 .. lib_arg.len - 4];
                     }
-                    try result.system_libs.append(lib_arg);
+                    try result.system_libs.append(lib_arg_copy);
                 }
             }
         }

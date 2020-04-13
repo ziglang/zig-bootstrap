@@ -1643,9 +1643,7 @@ x{} x.* x.?
 ! * / % ** *% ||
 + - ++ +% -%
 << >>
-&
-^
-|
+& ^ |
 == != < > <= >=
 and
 or
@@ -7696,7 +7694,8 @@ test "call foo" {
       <p>
       Invokes the panic handler function. By default the panic handler function
       calls the public {#syntax#}panic{#endsyntax#} function exposed in the root source file, or
-          if there is not one specified, invokes the one provided in {#syntax#}std/special/panic.zig{#endsyntax#}.
+      if there is not one specified, the {#syntax#}std.builtin.default_panic{#endsyntax#}
+      function from {#syntax#}std/builtin.zig{#endsyntax#}.
       </p>
       <p>Generally it is better to use {#syntax#}@import("std").debug.panic{#endsyntax#}.
           However, {#syntax#}@panic{#endsyntax#} can be useful for 2 scenarios:
@@ -8169,7 +8168,7 @@ test "vector @splat" {
       {#header_open|@tagName#}
       <pre>{#syntax#}@tagName(value: var) []const u8{#endsyntax#}</pre>
       <p>
-      Converts an enum value or union value to a slice of bytes representing the name.
+      Converts an enum value or union value to a slice of bytes representing the name.</p><p>If the enum is non-exhaustive and the tag value does not map to a name, it invokes safety-checked {#link|Undefined Behavior#}.
       </p>
       {#header_close#}
 
