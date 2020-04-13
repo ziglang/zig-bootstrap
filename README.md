@@ -5,12 +5,11 @@ end with a fully operational Zig compiler for any target.
 
 ## Version Information
 
-This repository copies sources from upstream.
+This repository copies sources from upstream, with no patches.
 
  * LLVM 10
  * Clang 10
- * Zig 0.5.0+b702964ae2
-   - When 0.6.0 is released, this repository will gain a git tag with that version.
+ * Zig 0.6.0
 
 ## Host System Dependencies
 
