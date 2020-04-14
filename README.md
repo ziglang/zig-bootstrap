@@ -81,7 +81,7 @@ is more portable across Linux distributions.
 | `mipsel-linux-musl`        | [#12](https://github.com/ziglang/bootstrap/issues/12) |
 | `mips-linux-gnu`           | not tested     |
 | `mips-linux-musl`          | not tested     |
-| `powerpc64le-linux-gnu`    | not tested     |
+| `powerpc64le-linux-gnu`    | [#24](https://github.com/ziglang/zig-bootstrap/issues/24) |
 | `powerpc64le-linux-musl`   | [#5](https://github.com/ziglang/bootstrap/issues/5) |
 | `powerpc64-linux-gnu`      | not tested     |
 | `powerpc64-linux-musl`     | not tested     |
