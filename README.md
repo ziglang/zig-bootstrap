@@ -21,14 +21,15 @@ This repository copies sources from upstream, with no patches.
 ## Build Instructions
 
 ```
-build -j1 native baseline
+build -j1 <arch>-<os>-<abi> baseline
 ```
 
 All parameters are required:
 
  * `-j1`: Replace with your jobs parameter to make.
- * `native`: Replace with one of the Supported Triples below, or use `native`
-   for the native triple.
+ * `<arch>-<os>-<abi>`: Replace with one of the Supported Triples below, or use
+   `native` for the `<arch>` value (e.g. `native-linux-gnu`) to use the native
+    architecture.
  * `baseline`: Replace with a `-mcpu` parameter of Zig. `baseline` means
    it will target a generic CPU for the target. `native` means it will target
    the native CPU. See the Zig documentation for more details.
