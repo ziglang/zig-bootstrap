@@ -3,6 +3,37 @@ const tests = @import("tests.zig");
 const nl = std.cstr.line_sep;
 
 pub fn addCases(cases: *tests.RunTranslatedCContext) void {
+    cases.add("variable shadowing type type",
+        \\#include <stdlib.h>
+        \\int main() {
+        \\    int type = 1;
+        \\    if (type != 1) abort();
+        \\}
+    , "");
+
+    cases.add("assignment as expression",
+        \\#include <stdlib.h>
+        \\int main() {
+        \\    int a, b, c, d = 5;
+        \\    int e = a = b = c = d;
+        \\    if (e != 5) abort();
+        \\}
+    , "");
+
+    cases.add("static variable in block scope",
+        \\#include <stdlib.h>
+        \\int foo() {
+        \\    static int bar;
+        \\    bar += 1;
+        \\    return bar;
+        \\}
+        \\int main() {
+        \\    foo();
+        \\    foo();
+        \\    if (foo() != 3) abort();
+        \\}
+    , "");
+
     cases.add("array initializer",
         \\#include <stdlib.h>
         \\int main(int argc, char **argv) {
@@ -15,7 +46,6 @@ pub fn addCases(cases: *tests.RunTranslatedCContext) void {
         \\    }
         \\    if (s0 != 1) abort();
         \\    if (s1 != 10) abort();
-        \\    return 0;
         \\}
     , "");
 
@@ -193,6 +223,152 @@ pub fn addCases(cases: *tests.RunTranslatedCContext) void {
         \\  a[i] = 0;
         \\  if (a[i] != 0) abort();
         \\  return 0;
+        \\}
+    , "");
+
+    cases.add("case boolean expression converted to int",
+        \\#include <stdlib.h>
+        \\int main(int argc, char **argv) {
+        \\  int value = 1 + 2 * 3 + 4 * 5 + 6 << 7 | 8 == 9;
+        \\  if (value != 4224) abort();
+        \\  return 0;
+        \\}
+    , "");
+
+    cases.add("case boolean expression on left converted to int",
+        \\#include <stdlib.h>
+        \\int main(int argc, char **argv) {
+        \\  int value = 8 == 9 | 1 + 2 * 3 + 4 * 5 + 6 << 7;
+        \\  if (value != 4224) abort();
+        \\  return 0;
+        \\}
+    , "");
+
+    cases.add("case boolean and operator+ converts bool to int",
+        \\#include <stdlib.h>
+        \\int main(int argc, char **argv) {
+        \\  int value = (8 == 9) + 3;
+        \\  int value2 = 3 + (8 == 9);
+        \\  if (value != value2) abort();
+        \\  return 0;
+        \\}
+    , "");
+
+    cases.add("case boolean and operator<",
+        \\#include <stdlib.h>
+        \\int main(int argc, char **argv) {
+        \\  int value = (8 == 9) < 3;
+        \\  if (value == 0) abort();
+        \\  return 0;
+        \\}
+    , "");
+
+    cases.add("case boolean and operator*",
+        \\#include <stdlib.h>
+        \\int main(int argc, char **argv) {
+        \\  int value = (8 == 9) * 3;
+        \\  int value2 = 3 * (9 == 9);
+        \\  if (value != 0) abort();
+        \\  if (value2 == 0) abort();
+        \\  return 0;
+        \\}
+    , "");
+
+    cases.add("scoped typedef",
+        \\int main(int argc, char **argv) {
+        \\  typedef int Foo;
+        \\  typedef Foo Bar;
+        \\  typedef void (*func)(int);
+        \\  typedef int uint32_t;
+        \\  uint32_t a;
+        \\  Foo i;
+        \\  Bar j;
+        \\  return 0;
+        \\}
+    , "");
+
+    cases.add("scoped for loops with shadowing",
+        \\#include <stdlib.h>
+        \\int main() {
+        \\    int count = 0;
+        \\    for (int x = 0; x < 2; x++)
+        \\        for (int x = 0; x < 2; x++)
+        \\            count++;
+        \\
+        \\    if (count != 4) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("array value type casts properly",
+        \\#include <stdlib.h>
+        \\unsigned int choose[53][10];
+        \\static int hash_binary(int k)
+        \\{
+        \\    choose[0][k] = 3;
+        \\    int sum = 0;
+        \\    sum += choose[0][k];
+        \\    return sum;
+        \\}
+        \\
+        \\int main() {
+        \\    int s = hash_binary(4);
+        \\    if (s != 3) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("array value type casts properly use +=",
+        \\#include <stdlib.h>
+        \\static int hash_binary(int k)
+        \\{
+        \\    unsigned int choose[1][1] = {{3}};
+        \\    int sum = -1;
+        \\    int prev = 0;
+        \\    prev = sum += choose[0][0];
+        \\    if (sum != 2) abort();
+        \\    return sum + prev;
+        \\}
+        \\
+        \\int main() {
+        \\    int x = hash_binary(4);
+        \\    if (x != 4) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("ensure array casts outisde +=",
+        \\#include <stdlib.h>
+        \\static int hash_binary(int k)
+        \\{
+        \\    unsigned int choose[3] = {1, 2, 3};
+        \\    int sum = -2;
+        \\    int prev = sum + choose[k];
+        \\    if (prev != 0) abort();
+        \\    return sum + prev;
+        \\}
+        \\
+        \\int main() {
+        \\    int x = hash_binary(1);
+        \\    if (x != -2) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("array cast int to uint",
+        \\#include <stdlib.h>
+        \\static unsigned int hash_binary(int k)
+        \\{
+        \\    int choose[3] = {-1, -2, 3};
+        \\    unsigned int sum = 2;
+        \\    sum += choose[k];
+        \\    return sum;
+        \\}
+        \\
+        \\int main() {
+        \\    unsigned int x = hash_binary(1);
+        \\    if (x != 0) abort();
+        \\    return 0;
         \\}
     , "");
 }

@@ -234,12 +234,12 @@ pub fn addCases(cases: *tests.CompareOutputContext) void {
         \\}
     );
 
-    cases.addRuntimeSafety("noasync function call, callee suspends",
+    cases.addRuntimeSafety("nosuspend function call, callee suspends",
         \\pub fn panic(message: []const u8, stack_trace: ?*@import("builtin").StackTrace) noreturn {
         \\    @import("std").os.exit(126);
         \\}
         \\pub fn main() void {
-        \\    _ = noasync add(101, 100);
+        \\    _ = nosuspend add(101, 100);
         \\}
         \\fn add(a: i32, b: i32) i32 {
         \\    if (a > 100) {
@@ -280,9 +280,9 @@ pub fn addCases(cases: *tests.CompareOutputContext) void {
         \\pub fn main() void {
         \\    var bytes: [1]u8 align(16) = undefined;
         \\    var ptr = other;
-        \\    var frame = @asyncCall(&bytes, {}, ptr);
+        \\    var frame = @asyncCall(&bytes, {}, ptr, .{});
         \\}
-        \\async fn other() void {
+        \\fn other() callconv(.Async) void {
         \\    suspend;
         \\}
     );
@@ -472,11 +472,11 @@ pub fn addCases(cases: *tests.CompareOutputContext) void {
         \\    @import("std").os.exit(126);
         \\}
         \\pub fn main() void {
-        \\    var a: @Vector(4, i32) = [_]i32{ 1, 2, 2147483643, 4 };
-        \\    var b: @Vector(4, i32) = [_]i32{ 5, 6, 7, 8 };
+        \\    var a: @import("std").meta.Vector(4, i32) = [_]i32{ 1, 2, 2147483643, 4 };
+        \\    var b: @import("std").meta.Vector(4, i32) = [_]i32{ 5, 6, 7, 8 };
         \\    const x = add(a, b);
         \\}
-        \\fn add(a: @Vector(4, i32), b: @Vector(4, i32)) @Vector(4, i32) {
+        \\fn add(a: @import("std").meta.Vector(4, i32), b: @import("std").meta.Vector(4, i32)) @import("std").meta.Vector(4, i32) {
         \\    return a + b;
         \\}
     );
@@ -486,11 +486,11 @@ pub fn addCases(cases: *tests.CompareOutputContext) void {
         \\    @import("std").os.exit(126);
         \\}
         \\pub fn main() void {
-        \\    var a: @Vector(4, u32) = [_]u32{ 1, 2, 8, 4 };
-        \\    var b: @Vector(4, u32) = [_]u32{ 5, 6, 7, 8 };
+        \\    var a: @import("std").meta.Vector(4, u32) = [_]u32{ 1, 2, 8, 4 };
+        \\    var b: @import("std").meta.Vector(4, u32) = [_]u32{ 5, 6, 7, 8 };
         \\    const x = sub(b, a);
         \\}
-        \\fn sub(a: @Vector(4, u32), b: @Vector(4, u32)) @Vector(4, u32) {
+        \\fn sub(a: @import("std").meta.Vector(4, u32), b: @import("std").meta.Vector(4, u32)) @import("std").meta.Vector(4, u32) {
         \\    return a - b;
         \\}
     );
@@ -500,11 +500,11 @@ pub fn addCases(cases: *tests.CompareOutputContext) void {
         \\    @import("std").os.exit(126);
         \\}
         \\pub fn main() void {
-        \\    var a: @Vector(4, u8) = [_]u8{ 1, 2, 200, 4 };
-        \\    var b: @Vector(4, u8) = [_]u8{ 5, 6, 2, 8 };
+        \\    var a: @import("std").meta.Vector(4, u8) = [_]u8{ 1, 2, 200, 4 };
+        \\    var b: @import("std").meta.Vector(4, u8) = [_]u8{ 5, 6, 2, 8 };
         \\    const x = mul(b, a);
         \\}
-        \\fn mul(a: @Vector(4, u8), b: @Vector(4, u8)) @Vector(4, u8) {
+        \\fn mul(a: @import("std").meta.Vector(4, u8), b: @import("std").meta.Vector(4, u8)) @import("std").meta.Vector(4, u8) {
         \\    return a * b;
         \\}
     );
@@ -514,10 +514,10 @@ pub fn addCases(cases: *tests.CompareOutputContext) void {
         \\    @import("std").os.exit(126);
         \\}
         \\pub fn main() void {
-        \\    var a: @Vector(4, i16) = [_]i16{ 1, -32768, 200, 4 };
+        \\    var a: @import("std").meta.Vector(4, i16) = [_]i16{ 1, -32768, 200, 4 };
         \\    const x = neg(a);
         \\}
-        \\fn neg(a: @Vector(4, i16)) @Vector(4, i16) {
+        \\fn neg(a: @import("std").meta.Vector(4, i16)) @import("std").meta.Vector(4, i16) {
         \\    return -a;
         \\}
     );
@@ -579,12 +579,12 @@ pub fn addCases(cases: *tests.CompareOutputContext) void {
         \\    @import("std").os.exit(126);
         \\}
         \\pub fn main() !void {
-        \\    var a: @Vector(4, i16) = [_]i16{ 1, 2, -32768, 4 };
-        \\    var b: @Vector(4, i16) = [_]i16{ 1, 2, -1, 4 };
+        \\    var a: @import("std").meta.Vector(4, i16) = [_]i16{ 1, 2, -32768, 4 };
+        \\    var b: @import("std").meta.Vector(4, i16) = [_]i16{ 1, 2, -1, 4 };
         \\    const x = div(a, b);
         \\    if (x[2] == 32767) return error.Whatever;
         \\}
-        \\fn div(a: @Vector(4, i16), b: @Vector(4, i16)) @Vector(4, i16) {
+        \\fn div(a: @import("std").meta.Vector(4, i16), b: @import("std").meta.Vector(4, i16)) @import("std").meta.Vector(4, i16) {
         \\    return @divTrunc(a, b);
         \\}
     );
@@ -658,11 +658,11 @@ pub fn addCases(cases: *tests.CompareOutputContext) void {
         \\    @import("std").os.exit(126);
         \\}
         \\pub fn main() void {
-        \\    var a: @Vector(4, i32) = [4]i32{111, 222, 333, 444};
-        \\    var b: @Vector(4, i32) = [4]i32{111, 0, 333, 444};
+        \\    var a: @import("std").meta.Vector(4, i32) = [4]i32{111, 222, 333, 444};
+        \\    var b: @import("std").meta.Vector(4, i32) = [4]i32{111, 0, 333, 444};
         \\    const x = div0(a, b);
         \\}
-        \\fn div0(a: @Vector(4, i32), b: @Vector(4, i32)) @Vector(4, i32) {
+        \\fn div0(a: @import("std").meta.Vector(4, i32), b: @import("std").meta.Vector(4, i32)) @import("std").meta.Vector(4, i32) {
         \\    return @divTrunc(a, b);
         \\}
     );
@@ -685,11 +685,11 @@ pub fn addCases(cases: *tests.CompareOutputContext) void {
         \\    @import("std").os.exit(126);
         \\}
         \\pub fn main() !void {
-        \\    var a: @Vector(4, i32) = [4]i32{111, 222, 333, 444};
-        \\    var b: @Vector(4, i32) = [4]i32{111, 222, 333, 441};
+        \\    var a: @import("std").meta.Vector(4, i32) = [4]i32{111, 222, 333, 444};
+        \\    var b: @import("std").meta.Vector(4, i32) = [4]i32{111, 222, 333, 441};
         \\    const x = divExact(a, b);
         \\}
-        \\fn divExact(a: @Vector(4, i32), b: @Vector(4, i32)) @Vector(4, i32) {
+        \\fn divExact(a: @import("std").meta.Vector(4, i32), b: @import("std").meta.Vector(4, i32)) @import("std").meta.Vector(4, i32) {
         \\    return @divExact(a, b);
         \\}
     );
@@ -754,6 +754,16 @@ pub fn addCases(cases: *tests.CompareOutputContext) void {
         \\pub fn main() void {
         \\    var value: c_short = -1;
         \\    var casted = @intCast(u32, value);
+        \\}
+    );
+
+    cases.addRuntimeSafety("unsigned integer not fitting in cast to signed integer - same bit count",
+        \\pub fn panic(message: []const u8, stack_trace: ?*@import("builtin").StackTrace) noreturn {
+        \\    @import("std").os.exit(126);
+        \\}
+        \\pub fn main() void {
+        \\    var value: u8 = 245;
+        \\    var casted = @intCast(i8, value);
         \\}
     );
 
@@ -874,16 +884,16 @@ pub fn addCases(cases: *tests.CompareOutputContext) void {
         \\    return &failing_frame;
         \\}
         \\
-        \\async fn failing() anyerror!void {
+        \\fn failing() anyerror!void {
         \\    suspend;
         \\    return second();
         \\}
         \\
-        \\async fn second() anyerror!void {
+        \\fn second() callconv(.Async) anyerror!void {
         \\    return error.Fail;
         \\}
         \\
-        \\async fn printTrace(p: anyframe->anyerror!void) void {
+        \\fn printTrace(p: anyframe->anyerror!void) void {
         \\    (await p) catch unreachable;
         \\}
     );

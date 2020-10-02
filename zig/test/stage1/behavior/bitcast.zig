@@ -1,6 +1,7 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
 const maxInt = std.math.maxInt;
 
 test "@bitCast i32 -> u32" {
@@ -170,7 +171,7 @@ test "nested bitcast" {
 
 test "bitcast passed as tuple element" {
     const S = struct {
-        fn foo(args: var) void {
+        fn foo(args: anytype) void {
             comptime expect(@TypeOf(args[0]) == f32);
             expect(args[0] == 12.34);
         }
@@ -180,10 +181,16 @@ test "bitcast passed as tuple element" {
 
 test "triple level result location with bitcast sandwich passed as tuple element" {
     const S = struct {
-        fn foo(args: var) void {
+        fn foo(args: anytype) void {
             comptime expect(@TypeOf(args[0]) == f64);
             expect(args[0] > 12.33 and args[0] < 12.35);
         }
     };
     S.foo(.{@as(f64, @bitCast(f32, @as(u32, 0x414570A4)))});
+}
+
+test "bitcast generates a temporary value" {
+    var y = @as(u16, 0x55AA);
+    const x = @bitCast(u16, @bitCast([2]u8, y));
+    expectEqual(y, x);
 }

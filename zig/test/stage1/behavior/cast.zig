@@ -16,6 +16,9 @@ test "integer literal to pointer cast" {
 }
 
 test "pointer reinterpret const float to int" {
+    // https://github.com/ziglang/zig/issues/3345
+    if (std.Target.current.cpu.arch == .mips) return error.SkipZigTest;
+
     const float: f64 = 5.99999999999994648725e-01;
     const float_ptr = &float;
     const int_ptr = @ptrCast(*const i32, float_ptr);
@@ -379,6 +382,19 @@ test "@intCast i32 to u7" {
     var y: i32 = 120;
     var z = x >> @intCast(u7, y);
     expect(z == 0xff);
+}
+
+test "@floatCast cast down" {
+    {
+        var double: f64 = 0.001534;
+        var single = @floatCast(f32, double);
+        expect(single == 0.001534);
+    }
+    {
+        const double: f64 = 0.001534;
+        const single = @floatCast(f32, double);
+        expect(single == 0.001534);
+    }
 }
 
 test "implicit cast undefined to optional" {
@@ -759,7 +775,7 @@ test "variable initialization uses result locations properly with regards to the
 
 test "cast between [*c]T and ?[*:0]T on fn parameter" {
     const S = struct {
-        const Handler = ?extern fn ([*c]const u8) void;
+        const Handler = ?fn ([*c]const u8) callconv(.C) void;
         fn addCallback(handler: Handler) void {}
 
         fn myCallback(cstr: ?[*:0]const u8) callconv(.C) void {}
@@ -804,4 +820,37 @@ test "peer type resolve array pointers, one of them const" {
     const array2: [5]u8 = undefined;
     comptime expect(@TypeOf(&array1, &array2) == []const u8);
     comptime expect(@TypeOf(&array2, &array1) == []const u8);
+}
+
+test "peer type resolve array pointer and unknown pointer" {
+    const const_array: [4]u8 = undefined;
+    var array: [4]u8 = undefined;
+    var const_ptr: [*]const u8 = undefined;
+    var ptr: [*]u8 = undefined;
+
+    comptime expect(@TypeOf(&array, ptr) == [*]u8);
+    comptime expect(@TypeOf(ptr, &array) == [*]u8);
+
+    comptime expect(@TypeOf(&const_array, ptr) == [*]const u8);
+    comptime expect(@TypeOf(ptr, &const_array) == [*]const u8);
+
+    comptime expect(@TypeOf(&array, const_ptr) == [*]const u8);
+    comptime expect(@TypeOf(const_ptr, &array) == [*]const u8);
+
+    comptime expect(@TypeOf(&const_array, const_ptr) == [*]const u8);
+    comptime expect(@TypeOf(const_ptr, &const_array) == [*]const u8);
+}
+
+test "comptime float casts" {
+    const a = @intToFloat(comptime_float, 1);
+    expect(a == 1);
+    expect(@TypeOf(a) == comptime_float);
+    const b = @floatToInt(comptime_int, 2);
+    expect(b == 2);
+    expect(@TypeOf(b) == comptime_int);
+}
+
+test "cast from ?[*]T to ??[*]T" {
+    const a: ??[*]u8 = @as(?[*]u8, null);
+    expect(a != null and a.? == null);
 }

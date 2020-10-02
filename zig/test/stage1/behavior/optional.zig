@@ -1,4 +1,7 @@
-const expect = @import("std").testing.expect;
+const std = @import("std");
+const testing = std.testing;
+const expect = testing.expect;
+const expectEqual = testing.expectEqual;
 
 pub const EmptyStruct = struct {};
 
@@ -44,6 +47,40 @@ test "address of unwrap optional" {
     S.global = S.Foo{ .a = 1234 };
     const foo = S.getFoo() catch unreachable;
     expect(foo.a == 1234);
+}
+
+test "equality compare optional with non-optional" {
+    test_cmp_optional_non_optional();
+    comptime test_cmp_optional_non_optional();
+}
+
+fn test_cmp_optional_non_optional() void {
+    var ten: i32 = 10;
+    var opt_ten: ?i32 = 10;
+    var five: i32 = 5;
+    var int_n: ?i32 = null;
+
+    expect(int_n != ten);
+    expect(opt_ten == ten);
+    expect(opt_ten != five);
+
+    // test evaluation is always lexical
+    // ensure that the optional isn't always computed before the non-optional
+    var mutable_state: i32 = 0;
+    _ = blk1: {
+        mutable_state += 1;
+        break :blk1 @as(?f64, 10.0);
+    } != blk2: {
+        expect(mutable_state == 1);
+        break :blk2 @as(f64, 5.0);
+    };
+    _ = blk1: {
+        mutable_state += 1;
+        break :blk1 @as(f64, 10.0);
+    } != blk2: {
+        expect(mutable_state == 2);
+        break :blk2 @as(?f64, 5.0);
+    };
 }
 
 test "passing an optional integer as a parameter" {
@@ -197,4 +234,36 @@ test "0-bit child type coerced to optional" {
     };
     S.doTheTest();
     comptime S.doTheTest();
+}
+
+test "array of optional unaligned types" {
+    const Enum = enum { one, two, three };
+
+    const SomeUnion = union(enum) {
+        Num: Enum,
+        Other: u32,
+    };
+
+    const values = [_]?SomeUnion{
+        SomeUnion{ .Num = .one },
+        SomeUnion{ .Num = .two },
+        SomeUnion{ .Num = .three },
+        SomeUnion{ .Num = .one },
+        SomeUnion{ .Num = .two },
+        SomeUnion{ .Num = .three },
+    };
+
+    // The index must be a runtime value
+    var i: usize = 0;
+    expectEqual(Enum.one, values[i].?.Num);
+    i += 1;
+    expectEqual(Enum.two, values[i].?.Num);
+    i += 1;
+    expectEqual(Enum.three, values[i].?.Num);
+    i += 1;
+    expectEqual(Enum.one, values[i].?.Num);
+    i += 1;
+    expectEqual(Enum.two, values[i].?.Num);
+    i += 1;
+    expectEqual(Enum.three, values[i].?.Num);
 }

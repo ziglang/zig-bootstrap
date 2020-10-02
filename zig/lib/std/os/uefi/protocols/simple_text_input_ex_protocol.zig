@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const uefi = @import("std").os.uefi;
 const Event = uefi.Event;
 const Guid = uefi.Guid;
@@ -5,12 +10,12 @@ const Status = uefi.Status;
 
 /// Character input devices, e.g. Keyboard
 pub const SimpleTextInputExProtocol = extern struct {
-    _reset: extern fn (*const SimpleTextInputExProtocol, bool) Status,
-    _read_key_stroke_ex: extern fn (*const SimpleTextInputExProtocol, *KeyData) Status,
+    _reset: fn (*const SimpleTextInputExProtocol, bool) callconv(.C) Status,
+    _read_key_stroke_ex: fn (*const SimpleTextInputExProtocol, *KeyData) callconv(.C) Status,
     wait_for_key_ex: Event,
-    _set_state: extern fn (*const SimpleTextInputExProtocol, *const u8) Status,
-    _register_key_notify: extern fn (*const SimpleTextInputExProtocol, *const KeyData, extern fn (*const KeyData) usize, **c_void) Status,
-    _unregister_key_notify: extern fn (*const SimpleTextInputExProtocol, *const c_void) Status,
+    _set_state: fn (*const SimpleTextInputExProtocol, *const u8) callconv(.C) Status,
+    _register_key_notify: fn (*const SimpleTextInputExProtocol, *const KeyData, fn (*const KeyData) callconv(.C) usize, **c_void) callconv(.C) Status,
+    _unregister_key_notify: fn (*const SimpleTextInputExProtocol, *const c_void) callconv(.C) Status,
 
     /// Resets the input device hardware.
     pub fn reset(self: *const SimpleTextInputExProtocol, verify: bool) Status {
@@ -28,7 +33,7 @@ pub const SimpleTextInputExProtocol = extern struct {
     }
 
     /// Register a notification function for a particular keystroke for the input device.
-    pub fn registerKeyNotify(self: *const SimpleTextInputExProtocol, key_data: *const KeyData, notify: extern fn (*const KeyData) usize, handle: **c_void) Status {
+    pub fn registerKeyNotify(self: *const SimpleTextInputExProtocol, key_data: *const KeyData, notify: fn (*const KeyData) callconv(.C) usize, handle: **c_void) Status {
         return self._register_key_notify(self, key_data, notify, handle);
     }
 

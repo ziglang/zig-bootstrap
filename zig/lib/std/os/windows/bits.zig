@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 // Platform-dependent types and values that are used along with OS-specific APIs.
 
 const builtin = @import("builtin");
@@ -27,14 +32,16 @@ pub const UCHAR = u8;
 pub const FLOAT = f32;
 pub const HANDLE = *c_void;
 pub const HCRYPTPROV = ULONG_PTR;
-pub const HBRUSH = *@OpaqueType();
-pub const HCURSOR = *@OpaqueType();
-pub const HICON = *@OpaqueType();
-pub const HINSTANCE = *@OpaqueType();
-pub const HMENU = *@OpaqueType();
-pub const HMODULE = *@OpaqueType();
-pub const HWND = *@OpaqueType();
-pub const FARPROC = *@OpaqueType();
+pub const HBRUSH = *@Type(.Opaque);
+pub const HCURSOR = *@Type(.Opaque);
+pub const HICON = *@Type(.Opaque);
+pub const HINSTANCE = *@Type(.Opaque);
+pub const HMENU = *@Type(.Opaque);
+pub const HMODULE = *@Type(.Opaque);
+pub const HWND = *@Type(.Opaque);
+pub const HDC = *@Type(.Opaque);
+pub const HGLRC = *@Type(.Opaque);
+pub const FARPROC = *@Type(.Opaque);
 pub const INT = c_int;
 pub const LPBYTE = *BYTE;
 pub const LPCH = *CHAR;
@@ -74,7 +81,7 @@ pub const WPARAM = usize;
 pub const LPARAM = ?*c_void;
 pub const LRESULT = ?*c_void;
 
-pub const va_list = *@OpaqueType();
+pub const va_list = *@Type(.Opaque);
 
 pub const TRUE = 1;
 pub const FALSE = 0;
@@ -486,7 +493,7 @@ pub const FILE_OPEN_BY_FILE_ID = 0x00002000;
 pub const FILE_OPEN_FOR_BACKUP_INTENT = 0x00004000;
 pub const FILE_NO_COMPRESSION = 0x00008000;
 pub const FILE_RESERVE_OPFILTER = 0x00100000;
-pub const FILE_TRANSACTED_MODE = 0x00200000;
+pub const FILE_OPEN_REPARSE_POINT = 0x00200000;
 pub const FILE_OPEN_OFFLINE_FILE = 0x00400000;
 pub const FILE_OPEN_FOR_FREE_SPACE_QUERY = 0x00800000;
 
@@ -591,6 +598,7 @@ pub const FILE_CURRENT = 1;
 pub const FILE_END = 2;
 
 pub const HEAP_CREATE_ENABLE_EXECUTE = 0x00040000;
+pub const HEAP_REALLOC_IN_PLACE_ONLY = 0x00000010;
 pub const HEAP_GENERATE_EXCEPTIONS = 0x00000004;
 pub const HEAP_NO_SERIALIZE = 0x00000001;
 
@@ -625,7 +633,7 @@ pub const MEM_RESERVE_PLACEHOLDERS = 0x2;
 pub const MEM_DECOMMIT = 0x4000;
 pub const MEM_RELEASE = 0x8000;
 
-pub const PTHREAD_START_ROUTINE = extern fn (LPVOID) DWORD;
+pub const PTHREAD_START_ROUTINE = fn (LPVOID) callconv(.C) DWORD;
 pub const LPTHREAD_START_ROUTINE = PTHREAD_START_ROUTINE;
 
 pub const WIN32_FIND_DATAW = extern struct {
@@ -782,7 +790,7 @@ pub const IMAGE_TLS_DIRECTORY = extern struct {
 pub const IMAGE_TLS_DIRECTORY64 = IMAGE_TLS_DIRECTORY;
 pub const IMAGE_TLS_DIRECTORY32 = IMAGE_TLS_DIRECTORY;
 
-pub const PIMAGE_TLS_CALLBACK = ?extern fn (PVOID, DWORD, PVOID) void;
+pub const PIMAGE_TLS_CALLBACK = ?fn (PVOID, DWORD, PVOID) callconv(.C) void;
 
 pub const PROV_RSA_FULL = 1;
 
@@ -808,7 +816,7 @@ pub const FILE_ACTION_MODIFIED = 0x00000003;
 pub const FILE_ACTION_RENAMED_OLD_NAME = 0x00000004;
 pub const FILE_ACTION_RENAMED_NEW_NAME = 0x00000005;
 
-pub const LPOVERLAPPED_COMPLETION_ROUTINE = ?extern fn (DWORD, DWORD, *OVERLAPPED) void;
+pub const LPOVERLAPPED_COMPLETION_ROUTINE = ?fn (DWORD, DWORD, *OVERLAPPED) callconv(.C) void;
 
 pub const FILE_NOTIFY_CHANGE_CREATION = 64;
 pub const FILE_NOTIFY_CHANGE_SIZE = 8;
@@ -861,7 +869,7 @@ pub const RTL_CRITICAL_SECTION = extern struct {
 pub const CRITICAL_SECTION = RTL_CRITICAL_SECTION;
 pub const INIT_ONCE = RTL_RUN_ONCE;
 pub const INIT_ONCE_STATIC_INIT = RTL_RUN_ONCE_INIT;
-pub const INIT_ONCE_FN = extern fn (InitOnce: *INIT_ONCE, Parameter: ?*c_void, Context: ?*c_void) BOOL;
+pub const INIT_ONCE_FN = fn (InitOnce: *INIT_ONCE, Parameter: ?*c_void, Context: ?*c_void) callconv(.C) BOOL;
 
 pub const RTL_RUN_ONCE = extern struct {
     Ptr: ?*c_void,
@@ -1167,10 +1175,10 @@ pub const UNICODE_STRING = extern struct {
     Buffer: [*]WCHAR,
 };
 
-const ACTIVATION_CONTEXT_DATA = @OpaqueType();
-const ASSEMBLY_STORAGE_MAP = @OpaqueType();
-const FLS_CALLBACK_INFO = @OpaqueType();
-const RTL_BITMAP = @OpaqueType();
+const ACTIVATION_CONTEXT_DATA = @Type(.Opaque);
+const ASSEMBLY_STORAGE_MAP = @Type(.Opaque);
+const FLS_CALLBACK_INFO = @Type(.Opaque);
+const RTL_BITMAP = @Type(.Opaque);
 pub const PRTL_BITMAP = *RTL_BITMAP;
 const KAFFINITY = usize;
 
@@ -1416,7 +1424,7 @@ pub const RTL_DRIVE_LETTER_CURDIR = extern struct {
     DosPath: UNICODE_STRING,
 };
 
-pub const PPS_POST_PROCESS_INIT_ROUTINE = ?extern fn () void;
+pub const PPS_POST_PROCESS_INIT_ROUTINE = ?fn () callconv(.C) void;
 
 pub const FILE_BOTH_DIR_INFORMATION = extern struct {
     NextEntryOffset: ULONG,
@@ -1436,7 +1444,7 @@ pub const FILE_BOTH_DIR_INFORMATION = extern struct {
 };
 pub const FILE_BOTH_DIRECTORY_INFORMATION = FILE_BOTH_DIR_INFORMATION;
 
-pub const IO_APC_ROUTINE = extern fn (PVOID, *IO_STATUS_BLOCK, ULONG) void;
+pub const IO_APC_ROUTINE = fn (PVOID, *IO_STATUS_BLOCK, ULONG) callconv(.C) void;
 
 pub const CURDIR = extern struct {
     DosPath: UNICODE_STRING,
@@ -1539,3 +1547,52 @@ pub const POSVERSIONINFOW = *OSVERSIONINFOW;
 pub const LPOSVERSIONINFOW = *OSVERSIONINFOW;
 pub const RTL_OSVERSIONINFOW = OSVERSIONINFOW;
 pub const PRTL_OSVERSIONINFOW = *RTL_OSVERSIONINFOW;
+
+pub const REPARSE_DATA_BUFFER = extern struct {
+    ReparseTag: ULONG,
+    ReparseDataLength: USHORT,
+    Reserved: USHORT,
+    DataBuffer: [1]UCHAR,
+};
+pub const SYMBOLIC_LINK_REPARSE_BUFFER = extern struct {
+    SubstituteNameOffset: USHORT,
+    SubstituteNameLength: USHORT,
+    PrintNameOffset: USHORT,
+    PrintNameLength: USHORT,
+    Flags: ULONG,
+    PathBuffer: [1]WCHAR,
+};
+pub const MOUNT_POINT_REPARSE_BUFFER = extern struct {
+    SubstituteNameOffset: USHORT,
+    SubstituteNameLength: USHORT,
+    PrintNameOffset: USHORT,
+    PrintNameLength: USHORT,
+    PathBuffer: [1]WCHAR,
+};
+pub const MAXIMUM_REPARSE_DATA_BUFFER_SIZE: ULONG = 16 * 1024;
+pub const FSCTL_SET_REPARSE_POINT: DWORD = 0x900a4;
+pub const FSCTL_GET_REPARSE_POINT: DWORD = 0x900a8;
+pub const IO_REPARSE_TAG_SYMLINK: ULONG = 0xa000000c;
+pub const IO_REPARSE_TAG_MOUNT_POINT: ULONG = 0xa0000003;
+pub const SYMLINK_FLAG_RELATIVE: ULONG = 0x1;
+
+pub const SYMBOLIC_LINK_FLAG_DIRECTORY: DWORD = 0x1;
+pub const SYMBOLIC_LINK_FLAG_ALLOW_UNPRIVILEGED_CREATE: DWORD = 0x2;
+
+pub const MOUNTMGR_MOUNT_POINT = extern struct {
+    SymbolicLinkNameOffset: ULONG,
+    SymbolicLinkNameLength: USHORT,
+    Reserved1: USHORT,
+    UniqueIdOffset: ULONG,
+    UniqueIdLength: USHORT,
+    Reserved2: USHORT,
+    DeviceNameOffset: ULONG,
+    DeviceNameLength: USHORT,
+    Reserved3: USHORT,
+};
+pub const MOUNTMGR_MOUNT_POINTS = extern struct {
+    Size: ULONG,
+    NumberOfMountPoints: ULONG,
+    MountPoints: [1]MOUNTMGR_MOUNT_POINT,
+};
+pub const IOCTL_MOUNTMGR_QUERY_POINTS: ULONG = 0x6d0008;

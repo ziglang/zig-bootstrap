@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 // Ported from musl, which is licensed under the MIT license:
 // https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
 //
@@ -17,7 +22,7 @@ const maxInt = std.math.maxInt;
 ///  - sinh(+-0)   = +-0
 ///  - sinh(+-inf) = +-inf
 ///  - sinh(nan)   = nan
-pub fn sinh(x: var) @TypeOf(x) {
+pub fn sinh(x: anytype) @TypeOf(x) {
     const T = @TypeOf(x);
     return switch (T) {
         f32 => sinh32(x),
@@ -62,7 +67,7 @@ fn sinh32(x: f32) f32 {
 
 fn sinh64(x: f64) f64 {
     const u = @bitCast(u64, x);
-    const w = @intCast(u32, u >> 32);
+    const w = @intCast(u32, u >> 32) & (maxInt(u32) >> 1);
     const ax = @bitCast(f64, u & (maxInt(u64) >> 1));
 
     if (x == 0.0 or math.isNan(x)) {
@@ -104,6 +109,10 @@ test "math.sinh32" {
     expect(math.approxEq(f32, sinh32(0.2), 0.201336, epsilon));
     expect(math.approxEq(f32, sinh32(0.8923), 1.015512, epsilon));
     expect(math.approxEq(f32, sinh32(1.5), 2.129279, epsilon));
+    expect(math.approxEq(f32, sinh32(-0.0), -0.0, epsilon));
+    expect(math.approxEq(f32, sinh32(-0.2), -0.201336, epsilon));
+    expect(math.approxEq(f32, sinh32(-0.8923), -1.015512, epsilon));
+    expect(math.approxEq(f32, sinh32(-1.5), -2.129279, epsilon));
 }
 
 test "math.sinh64" {
@@ -113,6 +122,10 @@ test "math.sinh64" {
     expect(math.approxEq(f64, sinh64(0.2), 0.201336, epsilon));
     expect(math.approxEq(f64, sinh64(0.8923), 1.015512, epsilon));
     expect(math.approxEq(f64, sinh64(1.5), 2.129279, epsilon));
+    expect(math.approxEq(f64, sinh64(-0.0), -0.0, epsilon));
+    expect(math.approxEq(f64, sinh64(-0.2), -0.201336, epsilon));
+    expect(math.approxEq(f64, sinh64(-0.8923), -1.015512, epsilon));
+    expect(math.approxEq(f64, sinh64(-1.5), -2.129279, epsilon));
 }
 
 test "math.sinh32.special" {

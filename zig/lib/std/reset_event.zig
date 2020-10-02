@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("std.zig");
 const builtin = @import("builtin");
 const testing = std.testing;
@@ -52,7 +57,7 @@ pub const ResetEvent = struct {
 
     /// Wait for the event to be set by blocking the current thread.
     /// A timeout in nanoseconds can be provided as a hint for how
-    /// long the thread should block on the unset event before throwind error.TimedOut.
+    /// long the thread should block on the unset event before throwing error.TimedOut.
     pub fn timedWait(self: *ResetEvent, timeout_ns: u64) !void {
         return self.os_event.wait(timeout_ns);
     }
@@ -152,15 +157,15 @@ const PosixEvent = struct {
             if (comptime std.Target.current.isDarwin()) {
                 var tv: os.darwin.timeval = undefined;
                 assert(os.darwin.gettimeofday(&tv, null) == 0);
-                timeout_abs += @intCast(u64, tv.tv_sec) * time.second;
-                timeout_abs += @intCast(u64, tv.tv_usec) * time.microsecond;
+                timeout_abs += @intCast(u64, tv.tv_sec) * time.ns_per_s;
+                timeout_abs += @intCast(u64, tv.tv_usec) * time.us_per_s;
             } else {
                 os.clock_gettime(os.CLOCK_REALTIME, &ts) catch unreachable;
-                timeout_abs += @intCast(u64, ts.tv_sec) * time.second;
+                timeout_abs += @intCast(u64, ts.tv_sec) * time.ns_per_s;
                 timeout_abs += @intCast(u64, ts.tv_nsec);
             }
-            ts.tv_sec = @intCast(@TypeOf(ts.tv_sec), @divFloor(timeout_abs, time.second));
-            ts.tv_nsec = @intCast(@TypeOf(ts.tv_nsec), @mod(timeout_abs, time.second));
+            ts.tv_sec = @intCast(@TypeOf(ts.tv_sec), @divFloor(timeout_abs, time.ns_per_s));
+            ts.tv_nsec = @intCast(@TypeOf(ts.tv_nsec), @mod(timeout_abs, time.ns_per_s));
         }
 
         while (!self.is_set) {

@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const uefi = @import("std").os.uefi;
 const Guid = uefi.Guid;
 const Event = uefi.Event;
@@ -7,14 +12,14 @@ const SimpleNetworkMode = uefi.protocols.SimpleNetworkMode;
 const MacAddress = uefi.protocols.MacAddress;
 
 pub const ManagedNetworkProtocol = extern struct {
-    _get_mode_data: extern fn (*const ManagedNetworkProtocol, ?*ManagedNetworkConfigData, ?*SimpleNetworkMode) Status,
-    _configure: extern fn (*const ManagedNetworkProtocol, ?*const ManagedNetworkConfigData) Status,
-    _mcast_ip_to_mac: extern fn (*const ManagedNetworkProtocol, bool, *const c_void, *MacAddress) Status,
-    _groups: extern fn (*const ManagedNetworkProtocol, bool, ?*const MacAddress) Status,
-    _transmit: extern fn (*const ManagedNetworkProtocol, *const ManagedNetworkCompletionToken) Status,
-    _receive: extern fn (*const ManagedNetworkProtocol, *const ManagedNetworkCompletionToken) Status,
-    _cancel: extern fn (*const ManagedNetworkProtocol, ?*const ManagedNetworkCompletionToken) Status,
-    _poll: extern fn (*const ManagedNetworkProtocol) usize,
+    _get_mode_data: fn (*const ManagedNetworkProtocol, ?*ManagedNetworkConfigData, ?*SimpleNetworkMode) callconv(.C) Status,
+    _configure: fn (*const ManagedNetworkProtocol, ?*const ManagedNetworkConfigData) callconv(.C) Status,
+    _mcast_ip_to_mac: fn (*const ManagedNetworkProtocol, bool, *const c_void, *MacAddress) callconv(.C) Status,
+    _groups: fn (*const ManagedNetworkProtocol, bool, ?*const MacAddress) callconv(.C) Status,
+    _transmit: fn (*const ManagedNetworkProtocol, *const ManagedNetworkCompletionToken) callconv(.C) Status,
+    _receive: fn (*const ManagedNetworkProtocol, *const ManagedNetworkCompletionToken) callconv(.C) Status,
+    _cancel: fn (*const ManagedNetworkProtocol, ?*const ManagedNetworkCompletionToken) callconv(.C) Status,
+    _poll: fn (*const ManagedNetworkProtocol) callconv(.C) usize,
 
     /// Returns the operational parameters for the current MNP child driver.
     /// May also support returning the underlying SNP driver mode data.

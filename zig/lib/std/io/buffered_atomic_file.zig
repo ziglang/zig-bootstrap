@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("../std.zig");
 const mem = std.mem;
 const fs = std.fs;
@@ -15,8 +20,12 @@ pub const BufferedAtomicFile = struct {
 
     /// TODO when https://github.com/ziglang/zig/issues/2761 is solved
     /// this API will not need an allocator
-    /// TODO integrate this with Dir API
-    pub fn create(allocator: *mem.Allocator, dest_path: []const u8) !*BufferedAtomicFile {
+    pub fn create(
+        allocator: *mem.Allocator,
+        dir: fs.Dir,
+        dest_path: []const u8,
+        atomic_file_options: fs.Dir.AtomicFileOptions,
+    ) !*BufferedAtomicFile {
         var self = try allocator.create(BufferedAtomicFile);
         self.* = BufferedAtomicFile{
             .atomic_file = undefined,
@@ -26,11 +35,11 @@ pub const BufferedAtomicFile = struct {
         };
         errdefer allocator.destroy(self);
 
-        self.atomic_file = try fs.cwd().atomicFile(dest_path, .{});
+        self.atomic_file = try dir.atomicFile(dest_path, atomic_file_options);
         errdefer self.atomic_file.deinit();
 
         self.file_stream = self.atomic_file.file.outStream();
-        self.buffered_stream = .{ .unbuffered_out_stream = self.file_stream };
+        self.buffered_stream = .{ .unbuffered_writer = self.file_stream };
         return self;
     }
 

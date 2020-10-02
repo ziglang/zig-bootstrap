@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const uefi = @import("std").os.uefi;
 const Guid = uefi.Guid;
 const Handle = uefi.Handle;
@@ -5,7 +10,7 @@ const Status = uefi.Status;
 
 /// Override EDID information
 pub const EdidOverrideProtocol = extern struct {
-    _get_edid: extern fn (*const EdidOverrideProtocol, Handle, *u32, *usize, *?[*]u8) Status,
+    _get_edid: fn (*const EdidOverrideProtocol, Handle, *u32, *usize, *?[*]u8) callconv(.C) Status,
 
     /// Returns policy information and potentially a replacement EDID for the specified video output device.
     /// attributes must be align(4)

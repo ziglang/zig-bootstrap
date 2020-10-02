@@ -1,10 +1,19 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("../../std.zig");
 const assert = std.debug.assert;
 const maxInt = std.math.maxInt;
 
+// See: https://opensource.apple.com/source/xnu/xnu-6153.141.1/bsd/sys/_types.h.auto.html
+// TODO: audit mode_t/pid_t, should likely be u16/i32
 pub const fd_t = c_int;
 pub const pid_t = c_int;
 pub const mode_t = c_uint;
+pub const uid_t = u32;
+pub const gid_t = u32;
 
 pub const in_port_t = u16;
 pub const sa_family_t = u8;
@@ -74,8 +83,8 @@ pub const Stat = extern struct {
     mode: u16,
     nlink: u16,
     ino: ino_t,
-    uid: u32,
-    gid: u32,
+    uid: uid_t,
+    gid: gid_t,
     rdev: i32,
     atimesec: isize,
     atimensec: isize,
@@ -125,7 +134,7 @@ pub const empty_sigset = sigset_t(0);
 
 /// Renamed from `sigaction` to `Sigaction` to avoid conflict with function name.
 pub const Sigaction = extern struct {
-    handler: extern fn (c_int) void,
+    handler: fn (c_int) callconv(.C) void,
     sa_mask: sigset_t,
     sa_flags: c_int,
 };
@@ -764,12 +773,43 @@ pub const SOCK_RDM = 4;
 pub const SOCK_SEQPACKET = 5;
 pub const SOCK_MAXADDRLEN = 255;
 
+/// Not actually supported by Darwin, but Zig supplies a shim.
+/// This numerical value is not ABI-stable. It need only not conflict
+/// with any other "SOCK_" bits.
+pub const SOCK_CLOEXEC = 1 << 15;
+/// Not actually supported by Darwin, but Zig supplies a shim.
+/// This numerical value is not ABI-stable. It need only not conflict
+/// with any other "SOCK_" bits.
+pub const SOCK_NONBLOCK = 1 << 16;
+
 pub const IPPROTO_ICMP = 1;
 pub const IPPROTO_ICMPV6 = 58;
 pub const IPPROTO_TCP = 6;
 pub const IPPROTO_UDP = 17;
 pub const IPPROTO_IP = 0;
 pub const IPPROTO_IPV6 = 41;
+
+pub const SOL_SOCKET = 0xffff;
+
+pub const SO_DEBUG = 0x0001;
+pub const SO_ACCEPTCONN = 0x0002;
+pub const SO_REUSEADDR = 0x0004;
+pub const SO_KEEPALIVE = 0x0008;
+pub const SO_DONTROUTE = 0x0010;
+pub const SO_BROADCAST = 0x0020;
+pub const SO_USELOOPBACK = 0x0040;
+pub const SO_LINGER = 0x1080;
+pub const SO_OOBINLINE = 0x0100;
+pub const SO_REUSEPORT = 0x0200;
+pub const SO_ACCEPTFILTER = 0x1000;
+pub const SO_SNDBUF = 0x1001;
+pub const SO_RCVBUF = 0x1002;
+pub const SO_SNDLOWAT = 0x1003;
+pub const SO_RCVLOWAT = 0x1004;
+pub const SO_SNDTIMEO = 0x1005;
+pub const SO_RCVTIMEO = 0x1006;
+pub const SO_ERROR = 0x1007;
+pub const SO_TYPE = 0x1008;
 
 fn wstatus(x: u32) u32 {
     return x & 0o177;
@@ -1232,10 +1272,10 @@ pub const RTLD_NOLOAD = 0x10;
 pub const RTLD_NODELETE = 0x80;
 pub const RTLD_FIRST = 0x100;
 
-pub const RTLD_NEXT = @intToPtr(*c_void, ~maxInt(usize));
-pub const RTLD_DEFAULT = @intToPtr(*c_void, ~maxInt(usize) - 1);
-pub const RTLD_SELF = @intToPtr(*c_void, ~maxInt(usize) - 2);
-pub const RTLD_MAIN_ONLY = @intToPtr(*c_void, ~maxInt(usize) - 4);
+pub const RTLD_NEXT = @intToPtr(*c_void, @bitCast(usize, @as(isize, -1)));
+pub const RTLD_DEFAULT = @intToPtr(*c_void, @bitCast(usize, @as(isize, -2)));
+pub const RTLD_SELF = @intToPtr(*c_void, @bitCast(usize, @as(isize, -3)));
+pub const RTLD_MAIN_ONLY = @intToPtr(*c_void, @bitCast(usize, @as(isize, -5)));
 
 /// duplicate file descriptor
 pub const F_DUPFD = 0;
@@ -1399,3 +1439,38 @@ pub const LOCK_SH = 1;
 pub const LOCK_EX = 2;
 pub const LOCK_UN = 8;
 pub const LOCK_NB = 4;
+
+pub const nfds_t = usize;
+pub const pollfd = extern struct {
+    fd: fd_t,
+    events: i16,
+    revents: i16,
+};
+
+pub const POLLIN = 0x001;
+pub const POLLPRI = 0x002;
+pub const POLLOUT = 0x004;
+pub const POLLRDNORM = 0x040;
+pub const POLLWRNORM = POLLOUT;
+pub const POLLRDBAND = 0x080;
+pub const POLLWRBAND = 0x100;
+
+pub const POLLEXTEND = 0x0200;
+pub const POLLATTRIB = 0x0400;
+pub const POLLNLINK = 0x0800;
+pub const POLLWRITE = 0x1000;
+
+pub const POLLERR = 0x008;
+pub const POLLHUP = 0x010;
+pub const POLLNVAL = 0x020;
+
+pub const POLLSTANDARD = POLLIN | POLLPRI | POLLOUT | POLLRDNORM | POLLRDBAND | POLLWRBAND | POLLERR | POLLHUP | POLLNVAL;
+
+pub const CLOCK_REALTIME = 0;
+pub const CLOCK_MONOTONIC = 6;
+pub const CLOCK_MONOTONIC_RAW = 4;
+pub const CLOCK_MONOTONIC_RAW_APPROX = 5;
+pub const CLOCK_UPTIME_RAW = 8;
+pub const CLOCK_UPTIME_RAW_APPROX = 9;
+pub const CLOCK_PROCESS_CPUTIME_ID = 12;
+pub const CLOCK_THREAD_CPUTIME_ID = 16;

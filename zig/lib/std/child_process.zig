@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("std.zig");
 const cstr = std.cstr;
 const unicode = std.unicode;
@@ -39,13 +44,17 @@ pub const ChildProcess = struct {
     stderr_behavior: StdIo,
 
     /// Set to change the user id when spawning the child process.
-    uid: if (builtin.os.tag == .windows) void else ?u32,
+    uid: if (builtin.os.tag == .windows or builtin.os.tag == .wasi) void else ?os.uid_t,
 
     /// Set to change the group id when spawning the child process.
-    gid: if (builtin.os.tag == .windows) void else ?u32,
+    gid: if (builtin.os.tag == .windows or builtin.os.tag == .wasi) void else ?os.gid_t,
 
     /// Set to change the current working directory when spawning the child process.
     cwd: ?[]const u8,
+    /// Set to change the current working directory when spawning the child process.
+    /// This is not yet implemented for Windows. See https://github.com/ziglang/zig/issues/5190
+    /// Once that is done, `cwd` will be deprecated in favor of this field.
+    cwd_dir: ?fs.Dir = null,
 
     err_pipe: if (builtin.os.tag == .windows) void else [2]os.fd_t,
 
@@ -183,6 +192,7 @@ pub const ChildProcess = struct {
         allocator: *mem.Allocator,
         argv: []const []const u8,
         cwd: ?[]const u8 = null,
+        cwd_dir: ?fs.Dir = null,
         env_map: ?*const BufMap = null,
         max_output_bytes: usize = 50 * 1024,
         expand_arg0: Arg0Expand = .no_expand,
@@ -194,6 +204,7 @@ pub const ChildProcess = struct {
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe;
         child.cwd = args.cwd;
+        child.cwd_dir = args.cwd_dir;
         child.env_map = args.env_map;
         child.expand_arg0 = args.expand_arg0;
 
@@ -202,7 +213,7 @@ pub const ChildProcess = struct {
         const stdout_in = child.stdout.?.inStream();
         const stderr_in = child.stderr.?.inStream();
 
-        // TODO need to poll to read these streams to prevent a deadlock (or rely on evented I/O).
+        // TODO https://github.com/ziglang/zig/issues/6343
         const stdout = try stdout_in.readAllAlloc(args.allocator, args.max_output_bytes);
         errdefer args.allocator.free(stdout);
         const stderr = try stderr_in.readAllAlloc(args.allocator, args.max_output_bytes);
@@ -264,9 +275,7 @@ pub const ChildProcess = struct {
     }
 
     fn handleWaitResult(self: *ChildProcess, status: u32) void {
-        // TODO https://github.com/ziglang/zig/issues/3190
-        var term = self.cleanupAfterWait(status);
-        self.term = term;
+        self.term = self.cleanupAfterWait(status);
     }
 
     fn cleanupStreams(self: *ChildProcess) void {
@@ -358,6 +367,7 @@ pub const ChildProcess = struct {
                 error.FileTooBig => unreachable,
                 error.DeviceBusy => unreachable,
                 error.FileLocksNotSupported => unreachable,
+                error.BadPathName => unreachable, // Windows-only
                 else => |e| return e,
             }
         else
@@ -384,12 +394,12 @@ pub const ChildProcess = struct {
         // and execve from the child process to the parent process.
         const err_pipe = blk: {
             if (builtin.os.tag == .linux) {
-                const fd = try os.eventfd(0, 0);
+                const fd = try os.eventfd(0, os.EFD_CLOEXEC);
                 // There's no distinction between the readable and the writeable
                 // end with eventfd
                 break :blk [2]os.fd_t{ fd, fd };
             } else {
-                break :blk try os.pipe();
+                break :blk try os.pipe2(os.O_CLOEXEC);
             }
         };
         errdefer destroyPipe(err_pipe);
@@ -414,7 +424,9 @@ pub const ChildProcess = struct {
                 os.close(stderr_pipe[1]);
             }
 
-            if (self.cwd) |cwd| {
+            if (self.cwd_dir) |cwd| {
+                os.fchdir(cwd.fd) catch |err| forkChildErrReport(err_pipe[1], err);
+            } else if (self.cwd) |cwd| {
                 os.chdir(cwd) catch |err| forkChildErrReport(err_pipe[1], err);
             }
 
@@ -433,26 +445,17 @@ pub const ChildProcess = struct {
         // we are the parent
         const pid = @intCast(i32, pid_result);
         if (self.stdin_behavior == StdIo.Pipe) {
-            self.stdin = File{
-                .handle = stdin_pipe[1],
-                .io_mode = std.io.mode,
-            };
+            self.stdin = File{ .handle = stdin_pipe[1] };
         } else {
             self.stdin = null;
         }
         if (self.stdout_behavior == StdIo.Pipe) {
-            self.stdout = File{
-                .handle = stdout_pipe[0],
-                .io_mode = std.io.mode,
-            };
+            self.stdout = File{ .handle = stdout_pipe[0] };
         } else {
             self.stdout = null;
         }
         if (self.stderr_behavior == StdIo.Pipe) {
-            self.stderr = File{
-                .handle = stderr_pipe[0],
-                .io_mode = std.io.mode,
-            };
+            self.stderr = File{ .handle = stderr_pipe[0] };
         } else {
             self.stderr = null;
         }
@@ -481,25 +484,20 @@ pub const ChildProcess = struct {
 
         const any_ignore = (self.stdin_behavior == StdIo.Ignore or self.stdout_behavior == StdIo.Ignore or self.stderr_behavior == StdIo.Ignore);
 
-        // TODO use CreateFileW here since we are using a string literal for the path
         const nul_handle = if (any_ignore)
-            windows.CreateFile(
-                "NUL",
-                windows.GENERIC_READ,
-                windows.FILE_SHARE_READ,
-                null,
-                windows.OPEN_EXISTING,
-                windows.FILE_ATTRIBUTE_NORMAL,
-                null,
-            ) catch |err| switch (err) {
-                error.SharingViolation => unreachable, // not possible for "NUL"
+            // "\Device\Null" or "\??\NUL"
+            windows.OpenFile(&[_]u16{ '\\', 'D', 'e', 'v', 'i', 'c', 'e', '\\', 'N', 'u', 'l', 'l' }, .{
+                .access_mask = windows.GENERIC_READ | windows.SYNCHRONIZE,
+                .share_access = windows.FILE_SHARE_READ,
+                .creation = windows.OPEN_EXISTING,
+                .io_mode = .blocking,
+            }) catch |err| switch (err) {
                 error.PathAlreadyExists => unreachable, // not possible for "NUL"
                 error.PipeBusy => unreachable, // not possible for "NUL"
-                error.InvalidUtf8 => unreachable, // not possible for "NUL"
-                error.BadPathName => unreachable, // not possible for "NUL"
                 error.FileNotFound => unreachable, // not possible for "NUL"
                 error.AccessDenied => unreachable, // not possible for "NUL"
                 error.NameTooLong => unreachable, // not possible for "NUL"
+                error.WouldBlock => unreachable, // not possible for "NUL"
                 else => |e| return e,
             }
         else
@@ -676,26 +674,17 @@ pub const ChildProcess = struct {
         };
 
         if (g_hChildStd_IN_Wr) |h| {
-            self.stdin = File{
-                .handle = h,
-                .io_mode = io.mode,
-            };
+            self.stdin = File{ .handle = h };
         } else {
             self.stdin = null;
         }
         if (g_hChildStd_OUT_Rd) |h| {
-            self.stdout = File{
-                .handle = h,
-                .io_mode = io.mode,
-            };
+            self.stdout = File{ .handle = h };
         } else {
             self.stdout = null;
         }
         if (g_hChildStd_ERR_Rd) |h| {
-            self.stderr = File{
-                .handle = h,
-                .io_mode = io.mode,
-            };
+            self.stderr = File{ .handle = h };
         } else {
             self.stderr = null;
         }
@@ -827,16 +816,23 @@ fn destroyPipe(pipe: [2]os.fd_t) void {
 // Then the child exits.
 fn forkChildErrReport(fd: i32, err: ChildProcess.SpawnError) noreturn {
     writeIntFd(fd, @as(ErrInt, @errorToInt(err))) catch {};
+    // If we're linking libc, some naughty applications may have registered atexit handlers
+    // which we really do not want to run in the fork child. I caught LLVM doing this and
+    // it caused a deadlock instead of doing an exit syscall. In the words of Avril Lavigne,
+    // "Why'd you have to go and make things so complicated?"
+    if (std.Target.current.os.tag == .linux) {
+        std.os.linux.exit(1); // By-pass libc regardless of whether it is linked.
+    }
     os.exit(1);
 }
 
-const ErrInt = std.meta.IntType(false, @sizeOf(anyerror) * 8);
+const ErrInt = std.meta.Int(false, @sizeOf(anyerror) * 8);
 
 fn writeIntFd(fd: i32, value: ErrInt) !void {
     const file = File{
         .handle = fd,
-        .io_mode = .blocking,
-        .async_block_allowed = File.async_block_allowed_yes,
+        .capable_io_mode = .blocking,
+        .intended_io_mode = .blocking,
     };
     file.outStream().writeIntNative(u64, @intCast(u64, value)) catch return error.SystemResources;
 }
@@ -844,8 +840,8 @@ fn writeIntFd(fd: i32, value: ErrInt) !void {
 fn readIntFd(fd: i32) !ErrInt {
     const file = File{
         .handle = fd,
-        .io_mode = .blocking,
-        .async_block_allowed = File.async_block_allowed_yes,
+        .capable_io_mode = .blocking,
+        .intended_io_mode = .blocking,
     };
     return @intCast(ErrInt, file.inStream().readIntNative(u64) catch return error.SystemResources);
 }

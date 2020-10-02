@@ -35,6 +35,7 @@
     var domSectSearchResults = document.getElementById("sectSearchResults");
     var domListSearchResults = document.getElementById("listSearchResults");
     var domSectSearchNoResults = document.getElementById("sectSearchNoResults");
+    var domSectSearchAllResultsLink = document.getElementById("sectSearchAllResultsLink");
     var domSectInfo = document.getElementById("sectInfo");
     var domTdTarget = document.getElementById("tdTarget");
     var domTdZigVer = document.getElementById("tdZigVer");
@@ -42,11 +43,22 @@
     var domHelpModal = document.getElementById("helpDialog");
 
     var searchTimer = null;
+    var searchTrimResults = true;
     var escapeHtmlReplacements = { "&": "&amp;", '"': "&quot;", "<": "&lt;", ">": "&gt;" };
 
     var typeKinds = indexTypeKinds();
     var typeTypeId = findTypeTypeId();
     var pointerSizeEnum = { One: 0, Many: 1, Slice: 2, C: 3 };
+    var tokenKinds = {
+        Keyword: 'tok-kw',
+        String: 'tok-str',
+        Builtin: 'tok-builtin',
+        Comment: 'tok-comment',
+        Function: 'tok-fn',
+        Null: 'tok-null',
+        Number: 'tok-number',
+        Type: 'tok-type',
+    };
 
     // for each package, is an array with packages to get to this one
     var canonPkgPaths = computeCanonicalPackagePaths();
@@ -82,6 +94,8 @@
     var nodesToCallsMap = indexNodesToCalls();
 
     domSearch.addEventListener('keydown', onSearchKeyDown, false);
+    domSectSearchAllResultsLink.addEventListener('click', onClickSearchShowAllResults, false);
+
     window.addEventListener('hashchange', onHashChange, false);
     window.addEventListener('keydown', onWindowKeyDown, false);
     onHashChange();
@@ -113,6 +127,7 @@
         domSectFields.classList.add("hidden");
         domSectSearchResults.classList.add("hidden");
         domSectSearchNoResults.classList.add("hidden");
+        domSectSearchAllResultsLink.classList.add("hidden");
         domSectInfo.classList.add("hidden");
         domHdrName.classList.add("hidden");
         domSectNav.classList.add("hidden");
@@ -256,13 +271,15 @@
                 if (fnObj.combined === undefined) fnObj.combined = allCompTimeFnCallsResult(calls);
                 if (fnObj.combined != null) renderContainer(fnObj.combined);
 
-                resizeDomList(domListFnExamples, calls.length, '<li></li>');
+                var domListFnExamplesFragment = createDomListFragment(calls.length, '<li></li>');
 
                 for (var callI = 0; callI < calls.length; callI += 1) {
-                    var liDom = domListFnExamples.children[callI];
+                    var liDom = domListFnExamplesFragment.children[callI];
                     liDom.innerHTML = getCallHtml(fnDecl, calls[callI]);
                 }
 
+                domListFnExamples.innerHTML = "";
+                domListFnExamples.appendChild(domListFnExamplesFragment);
                 domFnExamples.classList.remove("hidden");
             } else if (instantiations != null) {
                 // TODO
@@ -303,7 +320,7 @@
             return;
         }
 
-        resizeDomList(domListParams, docCount, '<div></div>');
+        var domListParamsFragment = createDomListFragment(docCount, '<div></div>');
         var domIndex = 0;
 
         for (var i = 0; i < fields.length; i += 1) {
@@ -312,7 +329,7 @@
             if (fieldNode.docs == null) {
                 continue;
             }
-            var divDom = domListParams.children[domIndex];
+            var divDom = domListParamsFragment.children[domIndex];
             domIndex += 1;
             var argTypeIndex = typeObj.args[i];
 
@@ -333,12 +350,15 @@
             }
             divDom.innerHTML = html;
         }
+
+        domListParams.innerHTML = "";
+        domListParams.appendChild(domListParamsFragment);
         domSectParams.classList.remove("hidden");
     }
 
     function renderNav() {
         var len = curNav.pkgNames.length + curNav.declNames.length;
-        resizeDomList(domListNav, len, '<li><a href="#"></a></li>');
+        var domListNavFragment = createDomListFragment(len, '<li><a href="#"></a></li>');
         var list = [];
         var hrefPkgNames = [];
         var hrefDeclNames = [];
@@ -358,7 +378,7 @@
         }
 
         for (var i = 0; i < list.length; i += 1) {
-            var liDom = domListNav.children[i];
+            var liDom = domListNavFragment.children[i];
             var aDom = liDom.children[0];
             aDom.textContent = list[i].name;
             aDom.setAttribute('href', list[i].link);
@@ -369,6 +389,8 @@
             }
         }
 
+        domListNav.innerHTML = "";
+        domListNav.appendChild(domListNavFragment);
         domSectNav.classList.remove("hidden");
     }
 
@@ -401,9 +423,9 @@
         });
 
         if (list.length !== 0) {
-            resizeDomList(domListPkgs, list.length, '<li><a href="#"></a></li>');
+            var domListPkgsFragment = createDomListFragment(list.length, '<li><a href="#"></a></li>');
             for (var i = 0; i < list.length; i += 1) {
-                var liDom = domListPkgs.children[i];
+                var liDom = domListPkgsFragment.children[i];
                 var aDom = liDom.children[0];
                 aDom.textContent = list[i].name;
                 aDom.setAttribute('href', navLinkPkg(list[i].pkg));
@@ -414,6 +436,8 @@
                 }
             }
 
+            domListPkgs.innerHTML = "";
+            domListPkgs.appendChild(domListPkgsFragment);
             domSectPkgs.classList.remove("hidden");
         }
     }
@@ -454,29 +478,10 @@
         return navLink(curNav.pkgNames, declNamesCopy);
     }
 
-    function resizeDomListDl(dlDom, desiredLen) {
-        // add the missing dom entries
-        var i, ev;
-        for (i = dlDom.childElementCount / 2; i < desiredLen; i += 1) {
-            dlDom.insertAdjacentHTML('beforeend', '<dt></dt><dd></dd>');
-        }
-        // remove extra dom entries
-        while (desiredLen < dlDom.childElementCount / 2) {
-            dlDom.removeChild(dlDom.lastChild);
-            dlDom.removeChild(dlDom.lastChild);
-        }
-    }
-
-    function resizeDomList(listDom, desiredLen, templateHtml) {
-        // add the missing dom entries
-        var i, ev;
-        for (i = listDom.childElementCount; i < desiredLen; i += 1) {
-            listDom.insertAdjacentHTML('beforeend', templateHtml);
-        }
-        // remove extra dom entries
-        while (desiredLen < listDom.childElementCount) {
-            listDom.removeChild(listDom.lastChild);
-        }
+    function createDomListFragment(desiredLen, templateHtml) {
+        var domTemplate = document.createElement("template");
+        domTemplate.innerHTML = templateHtml.repeat(desiredLen);
+        return domTemplate.content;
     }
 
     function typeIndexName(typeIndex, wantHtml, wantLink, fnDecl, linkFnNameDecl) {
@@ -537,13 +542,17 @@
                 var fnObj = zigAnalysis.fns[value];
                 return typeIndexName(fnObj.type, wantHtml, wantLink);
             case typeKinds.Int:
-                if (wantHtml) {
-                    return '<span class="tok-number">' + value + '</span>';
+                return token(value, tokenKinds.Number, wantHtml);
+            case typeKinds.Optional:
+                if(value === 'null'){
+                    return token(value, tokenKinds.Null, wantHtml);
                 } else {
-                    return value + "";
+                    console.trace("TODO non-null optional value printing");
+                    return "TODO";
                 }
             default:
                 console.trace("TODO implement getValueText for this type:", zigAnalysis.typeKinds[typeObj.kind]);
+                return "TODO";
         }
     }
 
@@ -551,11 +560,7 @@
         switch (typeObj.kind) {
             case typeKinds.Array:
                 var name = "[";
-                if (wantHtml) {
-                    name += '<span class="tok-number">' + typeObj.len + '</span>';
-                } else {
-                    name += typeObj.len;
-                }
+                name += token(typeObj.len, tokenKinds.Number, wantHtml);
                 name += "]";
                 name += typeIndexName(typeObj.elem, wantHtml, wantSubLink, null);
                 return name;
@@ -579,111 +584,48 @@
                         break;
                 }
                 if (typeObj['const']) {
-                    if (wantHtml) {
-                        name += '<span class="tok-kw">const</span> ';
-                    } else {
-                        name += "const ";
-                    }
+                    name += token('const', tokenKinds.Keyword, wantHtml) + ' ';
                 }
                 if (typeObj['volatile']) {
-                    if (wantHtml) {
-                        name += '<span class="tok-kw">volatile</span> ';
-                    } else {
-                        name += "volatile ";
-                    }
+                    name += token('volatile', tokenKinds.Keyword, wantHtml) + ' ';
                 }
                 if (typeObj.align != null) {
-                    if (wantHtml) {
-                        name += '<span class="tok-kw">align</span>(';
-                    } else {
-                        name += "align(";
-                    }
-                    if (wantHtml) {
-                        name += '<span class="tok-number">' + typeObj.align + '</span>';
-                    } else {
-                        name += typeObj.align;
-                    }
+                    name += token('align', tokenKinds.Keyword, wantHtml) + '(';
+                    name += token(typeObj.align, tokenKinds.Number, wantHtml);
+
                     if (typeObj.hostIntBytes != null) {
                         name += ":";
-                        if (wantHtml) {
-                            name += '<span class="tok-number">' + typeObj.bitOffsetInHost + '</span>';
-                        } else {
-                            name += typeObj.bitOffsetInHost;
-                        }
+                        name += token(typeObj.bitOffsetInHost, tokenKinds.Number, wantHtml);
                         name += ":";
-                        if (wantHtml) {
-                            name += '<span class="tok-number">' + typeObj.hostIntBytes + '</span>';
-                        } else {
-                            name += typeObj.hostIntBytes;
-                        }
+                        name += token(typeObj.hostIntBytes, tokenKinds.Number, wantHtml);
                     }
                     name += ") ";
                 }
                 name += typeIndexName(typeObj.elem, wantHtml, wantSubLink, null);
                 return name;
             case typeKinds.Float:
-                if (wantHtml) {
-                    return '<span class="tok-type">f' + typeObj.bits + '</span>';
-                } else {
-                    return "f" + typeObj.bits;
-                }
+                return token('f' + typeObj.bits, tokenKinds.Type, wantHtml);
             case typeKinds.Int:
                 var signed = (typeObj.i != null) ? 'i' : 'u';
                 var bits = typeObj[signed];
-                if (wantHtml) {
-                    return '<span class="tok-type">' + signed + bits + '</span>';
-                } else {
-                    return signed + bits;
-                }
+                return token(signed + bits, tokenKinds.Type, wantHtml);
             case typeKinds.ComptimeInt:
-                if (wantHtml) {
-                    return '<span class="tok-type">comptime_int</span>';
-                } else {
-                    return "comptime_int";
-                }
+                return token('comptime_int', tokenKinds.Type, wantHtml);
             case typeKinds.ComptimeFloat:
-                if (wantHtml) {
-                    return '<span class="tok-type">comptime_float</span>';
-                } else {
-                    return "comptime_float";
-                }
+                return token('comptime_float', tokenKinds.Type, wantHtml);
             case typeKinds.Type:
-                if (wantHtml) {
-                    return '<span class="tok-type">type</span>';
-                } else {
-                    return "type";
-                }
+                return token('type', tokenKinds.Type, wantHtml);
             case typeKinds.Bool:
-                if (wantHtml) {
-                    return '<span class="tok-type">bool</span>';
-                } else {
-                    return "bool";
-                }
+                return token('bool', tokenKinds.Type, wantHtml);
             case typeKinds.Void:
-                if (wantHtml) {
-                    return '<span class="tok-type">void</span>';
-                } else {
-                    return "void";
-                }
+                return token('void', tokenKinds.Type, wantHtml);
             case typeKinds.EnumLiteral:
-                if (wantHtml) {
-                    return '<span class="tok-type">(enum literal)</span>';
-                } else {
-                    return "(enum literal)";
-                }
+                return token('(enum literal)', tokenKinds.Type, wantHtml);
             case typeKinds.NoReturn:
-                if (wantHtml) {
-                    return '<span class="tok-type">noreturn</span>';
-                } else {
-                    return "noreturn";
-                }
+                return token('noreturn', tokenKinds.Type, wantHtml);
             case typeKinds.ErrorSet:
                 if (typeObj.errors == null) {
-                    if (wantHtml) {
-                        return '<span class="tok-type">anyerror</span>';
-                    } else {
-                        return "anyerror";
-                    }
+                    return token('anyerror', tokenKinds.Type, wantHtml);
                 } else {
                     if (wantHtml) {
                         return escapeHtml(typeObj.name);
@@ -744,19 +686,11 @@
                             }
 
                             if (paramNode.noalias) {
-                                if (wantHtml) {
-                                    payloadHtml += '<span class="tok-kw">noalias</span> ';
-                                } else {
-                                    payloadHtml += 'noalias ';
-                                }
+                                payloadHtml += token('noalias', tokenKinds.Keyword, wantHtml) + ' ';
                             }
 
                             if (paramNode.comptime) {
-                                if (wantHtml) {
-                                    payloadHtml += '<span class="tok-kw">comptime</span> ';
-                                } else {
-                                    payloadHtml += 'comptime ';
-                                }
+                                payloadHtml += token('comptime', tokenKinds.Keyword, wantHtml) + ' ';
                             }
 
                             var paramName = paramNode.name;
@@ -772,10 +706,8 @@
                             payloadHtml += '...';
                         } else if (argTypeIndex != null) {
                             payloadHtml += typeIndexName(argTypeIndex, wantHtml, wantSubLink);
-                        } else if (wantHtml) {
-                            payloadHtml += '<span class="tok-kw">var</span>';
                         } else {
-                            payloadHtml += 'var';
+                            payloadHtml += token('var', tokenKinds.Keyword, wantHtml);
                         }
                     }
                 }
@@ -783,10 +715,8 @@
                 payloadHtml += ') ';
                 if (typeObj.ret != null) {
                     payloadHtml += typeIndexName(typeObj.ret, wantHtml, wantSubLink, fnDecl);
-                } else if (wantHtml) {
-                    payloadHtml += '<span class="tok-kw">var</span>';
                 } else {
-                    payloadHtml += 'var';
+                    payloadHtml += token('var', tokenKinds.Keyword, wantHtml);
                 }
                 return payloadHtml;
             default:
@@ -831,10 +761,10 @@
                 return operatorCompare(a.err.name.toLowerCase(), b.err.name.toLowerCase());
             });
 
-            resizeDomListDl(domListFnErrors, errorList.length);
+            var domListFnErrorsFragment = createDomListFragment(errorList.length, "<dt></dt><dd></dd>");
             for (var i = 0; i < errorList.length; i += 1) {
-                var nameTdDom = domListFnErrors.children[i * 2 + 0];
-                var descTdDom = domListFnErrors.children[i * 2 + 1];
+                var nameTdDom = domListFnErrorsFragment.children[i * 2 + 0];
+                var descTdDom = domListFnErrorsFragment.children[i * 2 + 1];
                 nameTdDom.textContent = errorList[i].err.name;
                 var docs = errorList[i].docs;
                 if (docs != null) {
@@ -843,6 +773,8 @@
                     descTdDom.textContent = "";
                 }
             }
+            domListFnErrors.innerHTML = "";
+            domListFnErrors.appendChild(domListFnErrorsFragment);
             domTableFnErrors.classList.remove("hidden");
         }
         domSectFnErrors.classList.remove("hidden");
@@ -1022,45 +954,51 @@
         }
 
         if (typesList.length !== 0) {
-            resizeDomList(domListTypes, typesList.length, '<li><a href="#"></a></li>');
+            var domListTypesFragment = createDomListFragment(typesList.length, '<li><a href="#"></a></li>');
             for (var i = 0; i < typesList.length; i += 1) {
-                var liDom = domListTypes.children[i];
+                var liDom = domListTypesFragment.children[i];
                 var aDom = liDom.children[0];
                 var decl = typesList[i];
                 aDom.textContent = decl.name;
                 aDom.setAttribute('href', navLinkDecl(decl.name));
             }
+            domListTypes.innerHTML = "";
+            domListTypes.appendChild(domListTypesFragment);
             domSectTypes.classList.remove("hidden");
         }
         if (namespacesList.length !== 0) {
-            resizeDomList(domListNamespaces, namespacesList.length, '<li><a href="#"></a></li>');
+            var domListNamespacesFragment = createDomListFragment(namespacesList.length, '<li><a href="#"></a></li>');
             for (var i = 0; i < namespacesList.length; i += 1) {
-                var liDom = domListNamespaces.children[i];
+                var liDom = domListNamespacesFragment.children[i];
                 var aDom = liDom.children[0];
                 var decl = namespacesList[i];
                 aDom.textContent = decl.name;
                 aDom.setAttribute('href', navLinkDecl(decl.name));
             }
+            domListNamespaces.innerHTML = "";
+            domListNamespaces.appendChild(domListNamespacesFragment);
             domSectNamespaces.classList.remove("hidden");
         }
 
         if (errSetsList.length !== 0) {
-            resizeDomList(domListErrSets, errSetsList.length, '<li><a href="#"></a></li>');
+            var domListErrSetsFragment = createDomListFragment(errSetsList.length, '<li><a href="#"></a></li>');
             for (var i = 0; i < errSetsList.length; i += 1) {
-                var liDom = domListErrSets.children[i];
+                var liDom = domListErrSetsFragment.children[i];
                 var aDom = liDom.children[0];
                 var decl = errSetsList[i];
                 aDom.textContent = decl.name;
                 aDom.setAttribute('href', navLinkDecl(decl.name));
             }
+            domListErrSets.innerHTML = "";
+            domListErrSets.appendChild(domListErrSetsFragment);
             domSectErrSets.classList.remove("hidden");
         }
 
         if (fnsList.length !== 0) {
-            resizeDomList(domListFns, fnsList.length, '<tr><td></td><td></td></tr>');
+            var domListFnsFragment = createDomListFragment(fnsList.length, '<tr><td></td><td></td></tr>');
             for (var i = 0; i < fnsList.length; i += 1) {
                 var decl = fnsList[i];
-                var trDom = domListFns.children[i];
+                var trDom = domListFnsFragment.children[i];
 
                 var tdFnCode = trDom.children[0];
                 var tdDesc = trDom.children[1];
@@ -1074,17 +1012,19 @@
                     tdDesc.textContent = "";
                 }
             }
+            domListFns.innerHTML = "";
+            domListFns.appendChild(domListFnsFragment);
             domSectFns.classList.remove("hidden");
         }
 
         if (container.fields != null && container.fields.length !== 0) {
-            resizeDomList(domListFields, container.fields.length, '<div></div>');
+            var domListFieldsFragment = createDomListFragment(container.fields.length, '<div></div>');
 
             var containerNode = zigAnalysis.astNodes[container.src];
             for (var i = 0; i < container.fields.length; i += 1) {
                 var field = container.fields[i];
                 var fieldNode = zigAnalysis.astNodes[containerNode.fields[i]];
-                var divDom = domListFields.children[i];
+                var divDom = domListFieldsFragment.children[i];
 
                 var html = '<div class="mobile-scroll-container"><pre class="scroll-item">' + escapeHtml(fieldNode.name);
 
@@ -1107,15 +1047,17 @@
                 }
                 divDom.innerHTML = html;
             }
+            domListFields.innerHTML = "";
+            domListFields.appendChild(domListFieldsFragment);
             domSectFields.classList.remove("hidden");
         }
 
         if (varsList.length !== 0) {
-            resizeDomList(domListGlobalVars, varsList.length,
+            var domListGlobalVarsFragment = createDomListFragment(varsList.length,
                 '<tr><td><a href="#"></a></td><td></td><td></td></tr>');
             for (var i = 0; i < varsList.length; i += 1) {
                 var decl = varsList[i];
-                var trDom = domListGlobalVars.children[i];
+                var trDom = domListGlobalVarsFragment.children[i];
 
                 var tdName = trDom.children[0];
                 var tdNameA = tdName.children[0];
@@ -1134,15 +1076,17 @@
                     tdDesc.textContent = "";
                 }
             }
+            domListGlobalVars.innerHTML = "";
+            domListGlobalVars.appendChild(domListGlobalVarsFragment);
             domSectGlobalVars.classList.remove("hidden");
         }
 
         if (valsList.length !== 0) {
-            resizeDomList(domListValues, valsList.length,
+            var domListValuesFragment = createDomListFragment(valsList.length,
                 '<tr><td><a href="#"></a></td><td></td><td></td></tr>');
             for (var i = 0; i < valsList.length; i += 1) {
                 var decl = valsList[i];
-                var trDom = domListValues.children[i];
+                var trDom = domListValuesFragment.children[i];
 
                 var tdName = trDom.children[0];
                 var tdNameA = tdName.children[0];
@@ -1161,6 +1105,8 @@
                     tdDesc.textContent = "";
                 }
             }
+            domListValues.innerHTML = "";
+            domListValues.appendChild(domListValuesFragment);
             domSectValues.classList.remove("hidden");
         }
     }
@@ -1498,6 +1444,22 @@
                 }
             ];
 
+            // Links, images and inner links don't use the same marker to wrap their content.
+            const linksFormat = [
+                {
+                    prefix: "[",
+                    regex: /\[([^\]]*)\]\(([^\)]*)\)/,
+                    urlIndex: 2, // Index in the match that contains the link URL
+                    textIndex: 1 // Index in the match that contains the link text
+                },
+                {
+                    prefix: "h",
+                    regex: /http[s]?:\/\/[^\s]+/,
+                    urlIndex: 0,
+                    textIndex: 0
+                }
+            ];
+
             const stack = [];
 
             var innerHTML = "";
@@ -1548,6 +1510,29 @@
                     currentRun += innerText[i];
                     in_code = true;
                 } else {
+                    var foundMatches = false;
+
+                    for (var j = 0; j < linksFormat.length; j++) {
+                        const linkFmt = linksFormat[j];
+
+                        if (linkFmt.prefix == innerText[i]) {
+                            var remaining = innerText.substring(i);
+                            var matches = remaining.match(linkFmt.regex);
+
+                            if (matches) {
+                                flushRun();
+                                innerHTML += ' <a href="' + matches[linkFmt.urlIndex] + '">' + matches[linkFmt.textIndex] + '</a> ';
+                                i += matches[0].length; // Skip the fragment we just consumed
+                                foundMatches = true;
+                                break;
+                            }
+                        }
+                    }
+
+                    if (foundMatches) {
+                        continue;
+                    }
+
                     var any = false;
                     for (var idx = (stack.length > 0 ? -1 : 0); idx < formats.length; idx++) {
                         const fmt = idx >= 0 ? formats[idx] : stack[stack.length - 1];
@@ -1768,7 +1753,7 @@
         if (ev.ctrlKey) name = "Ctrl+" + name;
         return name;
     }
-    
+
     function onWindowKeyDown(ev) {
         switch (getKeyString(ev)) {
             case "Esc":
@@ -1800,6 +1785,13 @@
         domHelpModal.focus();
     }
 
+    function onClickSearchShowAllResults(ev) {
+        ev.preventDefault();
+        ev.stopPropagation();
+        searchTrimResults = false;
+        onHashChange();
+    }
+
     function clearAsyncSearch() {
         if (searchTimer != null) {
             clearTimeout(searchTimer);
@@ -1809,7 +1801,8 @@
 
     function startAsyncSearch() {
         clearAsyncSearch();
-        searchTimer = setTimeout(startSearch, 100);
+        searchTrimResults = true;
+        searchTimer = setTimeout(startSearch, 10);
     }
     function startSearch() {
         clearAsyncSearch();
@@ -1881,25 +1874,38 @@
         }
 
         if (matchedItems.length !== 0) {
-            resizeDomList(domListSearchResults, matchedItems.length, '<li><a href="#"></a></li>');
-
             matchedItems.sort(function(a, b) {
                 var cmp = operatorCompare(b.points, a.points);
                 if (cmp != 0) return cmp;
                 return operatorCompare(a.decl.name, b.decl.name);
             });
 
+            var searchTrimmed = false
+            var searchTrimResultsMaxItems = 200
+            if (searchTrimResults && matchedItems.length > searchTrimResultsMaxItems) {
+                matchedItems = matchedItems.slice(0, searchTrimResultsMaxItems)
+                searchTrimmed = true
+            }
+
+            var domListSearchResultsFragment = createDomListFragment(matchedItems.length, '<li><a href="#"></a></li>');
             for (var i = 0; i < matchedItems.length; i += 1) {
-                var liDom = domListSearchResults.children[i];
+                var liDom = domListSearchResultsFragment.children[i];
                 var aDom = liDom.children[0];
                 var match = matchedItems[i];
                 var lastPkgName = match.path.pkgNames[match.path.pkgNames.length - 1];
                 aDom.textContent = lastPkgName + "." + match.path.declNames.join('.');
                 aDom.setAttribute('href', navLink(match.path.pkgNames, match.path.declNames));
             }
-            renderSearchCursor();
 
+            domListSearchResults.innerHTML = "";
+            domListSearchResults.appendChild(domListSearchResultsFragment);
             domSectSearchResults.classList.remove("hidden");
+
+            if (searchTrimmed) {
+                domSectSearchAllResultsLink.classList.remove("hidden");
+            }
+
+            renderSearchCursor();
         } else {
             domSectSearchNoResults.classList.remove("hidden");
         }
@@ -1959,6 +1965,14 @@
     function firstObjectKey(obj) {
         for (var key in obj) {
             return key;
+        }
+    }
+
+    function token(value, tokenClass, wantHtml){
+        if(wantHtml){
+            return '<span class="' + tokenClass + '">' + value + '</span>';
+        } else {
+            return value + '';
         }
     }
 })();

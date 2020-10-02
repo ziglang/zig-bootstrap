@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("../std.zig");
 const testing = std.testing;
 
@@ -21,7 +26,7 @@ pub fn Batch(
         /// usual recommended option for this parameter.
         auto_async,
 
-        /// Always uses the `noasync` keyword when using `await` on the jobs,
+        /// Always uses the `nosuspend` keyword when using `await` on the jobs,
         /// making `add` and `wait` non-async functions. Asserts that the jobs do not suspend.
         never_async,
 
@@ -75,7 +80,7 @@ pub fn Batch(
             const job = &self.jobs[self.next_job_index];
             self.next_job_index = (self.next_job_index + 1) % max_jobs;
             if (job.frame) |existing| {
-                job.result = if (async_ok) await existing else noasync await existing;
+                job.result = if (async_ok) await existing else nosuspend await existing;
                 if (CollectedResult != void) {
                     job.result catch |err| {
                         self.collected_result = err;
@@ -94,7 +99,7 @@ pub fn Batch(
         /// a time, however, it need not be the same thread.
         pub fn wait(self: *Self) CollectedResult {
             for (self.jobs) |*job| if (job.frame) |f| {
-                job.result = if (async_ok) await f else noasync await f;
+                job.result = if (async_ok) await f else nosuspend await f;
                 if (CollectedResult != void) {
                     job.result catch |err| {
                         self.collected_result = err;
@@ -122,7 +127,7 @@ test "std.event.Batch" {
 }
 
 fn sleepALittle(count: *usize) void {
-    std.time.sleep(1 * std.time.millisecond);
+    std.time.sleep(1 * std.time.ns_per_ms);
     _ = @atomicRmw(usize, count, .Add, 1, .SeqCst);
 }
 

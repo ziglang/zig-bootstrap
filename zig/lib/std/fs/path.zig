@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const builtin = @import("builtin");
 const std = @import("../std.zig");
 const debug = std.debug;
@@ -175,6 +180,10 @@ pub fn isAbsoluteWindows(path: []const u8) bool {
 
 pub fn isAbsoluteWindowsW(path_w: [*:0]const u16) bool {
     return isAbsoluteWindowsImpl(u16, mem.spanZ(path_w));
+}
+
+pub fn isAbsoluteWindowsWTF16(path: []const u16) bool {
+    return isAbsoluteWindowsImpl(u16, path);
 }
 
 pub const isAbsoluteWindowsC = @compileError("deprecated: renamed to isAbsoluteWindowsZ");
@@ -649,6 +658,8 @@ pub fn resolvePosix(allocator: *Allocator, paths: []const []const u8) ![]u8 {
 }
 
 test "resolve" {
+    if (builtin.os.tag == .wasi) return error.SkipZigTest;
+
     const cwd = try process.getCwdAlloc(testing.allocator);
     defer testing.allocator.free(cwd);
     if (builtin.os.tag == .windows) {
@@ -663,10 +674,11 @@ test "resolve" {
 }
 
 test "resolveWindows" {
-    if (@import("builtin").arch == .aarch64) {
+    if (builtin.arch == .aarch64) {
         // TODO https://github.com/ziglang/zig/issues/3288
         return error.SkipZigTest;
     }
+    if (builtin.os.tag == .wasi) return error.SkipZigTest;
     if (builtin.os.tag == .windows) {
         const cwd = try process.getCwdAlloc(testing.allocator);
         defer testing.allocator.free(cwd);
@@ -711,6 +723,8 @@ test "resolveWindows" {
 }
 
 test "resolvePosix" {
+    if (builtin.os.tag == .wasi) return error.SkipZigTest;
+
     try testResolvePosix(&[_][]const u8{ "/a/b", "c" }, "/a/b/c");
     try testResolvePosix(&[_][]const u8{ "/a/b", "c", "//d", "e///" }, "/d/e");
     try testResolvePosix(&[_][]const u8{ "/a/b/c", "..", "../" }, "/a");
@@ -1025,7 +1039,7 @@ pub fn relativeWindows(allocator: *Allocator, from: []const u8, to: []const u8) 
     var from_it = mem.tokenize(resolved_from, "/\\");
     var to_it = mem.tokenize(resolved_to, "/\\");
     while (true) {
-        const from_component = from_it.next() orelse return mem.dupe(allocator, u8, to_it.rest());
+        const from_component = from_it.next() orelse return allocator.dupe(u8, to_it.rest());
         const to_rest = to_it.rest();
         if (to_it.next()) |to_component| {
             // TODO ASCII is wrong, we actually need full unicode support to compare paths.
@@ -1076,7 +1090,7 @@ pub fn relativePosix(allocator: *Allocator, from: []const u8, to: []const u8) ![
     var from_it = mem.tokenize(resolved_from, "/");
     var to_it = mem.tokenize(resolved_to, "/");
     while (true) {
-        const from_component = from_it.next() orelse return mem.dupe(allocator, u8, to_it.rest());
+        const from_component = from_it.next() orelse return allocator.dupe(u8, to_it.rest());
         const to_rest = to_it.rest();
         if (to_it.next()) |to_component| {
             if (mem.eql(u8, from_component, to_component))
@@ -1101,7 +1115,7 @@ pub fn relativePosix(allocator: *Allocator, from: []const u8, to: []const u8) ![
         }
         if (to_rest.len == 0) {
             // shave off the trailing slash
-            return result[0 .. result_index - 1];
+            return allocator.shrink(result, result_index - 1);
         }
 
         mem.copy(u8, result[result_index..], to_rest);
@@ -1112,10 +1126,12 @@ pub fn relativePosix(allocator: *Allocator, from: []const u8, to: []const u8) ![
 }
 
 test "relative" {
-    if (@import("builtin").arch == .aarch64) {
+    if (builtin.arch == .aarch64) {
         // TODO https://github.com/ziglang/zig/issues/3288
         return error.SkipZigTest;
     }
+    if (builtin.os.tag == .wasi) return error.SkipZigTest;
+
     try testRelativeWindows("c:/blah\\blah", "d:/games", "D:\\games");
     try testRelativeWindows("c:/aaaa/bbbb", "c:/aaaa", "..");
     try testRelativeWindows("c:/aaaa/bbbb", "c:/cccc", "..\\..\\cccc");

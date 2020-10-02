@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const uefi = @import("std").os.uefi;
 const Guid = uefi.Guid;
 const Handle = uefi.Handle;
@@ -19,7 +24,7 @@ pub const LoadedImageProtocol = extern struct {
     image_size: u64,
     image_code_type: MemoryType,
     image_data_type: MemoryType,
-    _unload: extern fn (*const LoadedImageProtocol, Handle) Status,
+    _unload: fn (*const LoadedImageProtocol, Handle) callconv(.C) Status,
 
     /// Unloads an image from memory.
     pub fn unload(self: *const LoadedImageProtocol, handle: Handle) Status {

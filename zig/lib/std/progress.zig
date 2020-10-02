@@ -1,4 +1,10 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("std");
+const windows = std.os.windows;
 const testing = std.testing;
 const assert = std.debug.assert;
 
@@ -11,6 +17,9 @@ pub const Progress = struct {
     /// `null` if the current node (and its children) should
     /// not print on update()
     terminal: ?std.fs.File = undefined,
+
+    /// Whether the terminal supports ANSI escape codes.
+    supports_ansi_escape_codes: bool = false,
 
     root: Node = undefined,
 
@@ -27,10 +36,10 @@ pub const Progress = struct {
     output_buffer: [100]u8 = undefined,
 
     /// How many nanoseconds between writing updates to the terminal.
-    refresh_rate_ns: u64 = 50 * std.time.millisecond,
+    refresh_rate_ns: u64 = 50 * std.time.ns_per_ms,
 
     /// How many nanoseconds to keep the output hidden
-    initial_delay_ns: u64 = 500 * std.time.millisecond,
+    initial_delay_ns: u64 = 500 * std.time.ns_per_ms,
 
     done: bool = true,
 
@@ -99,7 +108,13 @@ pub const Progress = struct {
     /// API to return Progress rather than accept it as a parameter.
     pub fn start(self: *Progress, name: []const u8, estimated_total_items: ?usize) !*Node {
         const stderr = std.io.getStdErr();
-        self.terminal = if (stderr.supportsAnsiEscapeCodes()) stderr else null;
+        self.terminal = null;
+        if (stderr.supportsAnsiEscapeCodes()) {
+            self.terminal = stderr;
+            self.supports_ansi_escape_codes = true;
+        } else if (std.builtin.os.tag == .windows and stderr.isTty()) {
+            self.terminal = stderr;
+        }
         self.root = Node{
             .context = self,
             .parent = null,
@@ -129,12 +144,52 @@ pub const Progress = struct {
         const prev_columns_written = self.columns_written;
         var end: usize = 0;
         if (self.columns_written > 0) {
-            // restore cursor position
-            end += (std.fmt.bufPrint(self.output_buffer[end..], "\x1b[{}D", .{self.columns_written}) catch unreachable).len;
-            self.columns_written = 0;
+            // restore the cursor position by moving the cursor
+            // `columns_written` cells to the left, then clear the rest of the
+            // line
+            if (self.supports_ansi_escape_codes) {
+                end += (std.fmt.bufPrint(self.output_buffer[end..], "\x1b[{}D", .{self.columns_written}) catch unreachable).len;
+                end += (std.fmt.bufPrint(self.output_buffer[end..], "\x1b[0K", .{}) catch unreachable).len;
+            } else if (std.builtin.os.tag == .windows) winapi: {
+                var info: windows.CONSOLE_SCREEN_BUFFER_INFO = undefined;
+                if (windows.kernel32.GetConsoleScreenBufferInfo(file.handle, &info) != windows.TRUE)
+                    unreachable;
 
-            // clear rest of line
-            end += (std.fmt.bufPrint(self.output_buffer[end..], "\x1b[0K", .{}) catch unreachable).len;
+                var cursor_pos = windows.COORD{
+                    .X = info.dwCursorPosition.X - @intCast(windows.SHORT, self.columns_written),
+                    .Y = info.dwCursorPosition.Y,
+                };
+
+                if (cursor_pos.X < 0)
+                    cursor_pos.X = 0;
+
+                const fill_chars = @intCast(windows.DWORD, info.dwSize.X - cursor_pos.X);
+
+                var written: windows.DWORD = undefined;
+                if (windows.kernel32.FillConsoleOutputAttribute(
+                    file.handle,
+                    info.wAttributes,
+                    fill_chars,
+                    cursor_pos,
+                    &written,
+                ) != windows.TRUE) {
+                    // Stop trying to write to this file.
+                    self.terminal = null;
+                    break :winapi;
+                }
+                if (windows.kernel32.FillConsoleOutputCharacterA(
+                    file.handle,
+                    ' ',
+                    fill_chars,
+                    cursor_pos,
+                    &written,
+                ) != windows.TRUE) unreachable;
+
+                if (windows.kernel32.SetConsoleCursorPosition(file.handle, cursor_pos) != windows.TRUE)
+                    unreachable;
+            } else unreachable;
+
+            self.columns_written = 0;
         }
 
         if (!self.done) {
@@ -142,7 +197,7 @@ pub const Progress = struct {
             var maybe_node: ?*Node = &self.root;
             while (maybe_node) |node| {
                 if (need_ellipse) {
-                    self.bufWrite(&end, "...", .{});
+                    self.bufWrite(&end, "... ", .{});
                 }
                 need_ellipse = false;
                 if (node.name.len != 0 or node.estimated_total_items != null) {
@@ -163,7 +218,7 @@ pub const Progress = struct {
                 maybe_node = node.recently_updated_child;
             }
             if (need_ellipse) {
-                self.bufWrite(&end, "...", .{});
+                self.bufWrite(&end, "... ", .{});
             }
         }
 
@@ -174,7 +229,7 @@ pub const Progress = struct {
         self.prev_refresh_timestamp = self.timer.read();
     }
 
-    pub fn log(self: *Progress, comptime format: []const u8, args: var) void {
+    pub fn log(self: *Progress, comptime format: []const u8, args: anytype) void {
         const file = self.terminal orelse return;
         self.refresh();
         file.outStream().print(format, args) catch {
@@ -184,7 +239,7 @@ pub const Progress = struct {
         self.columns_written = 0;
     }
 
-    fn bufWrite(self: *Progress, end: *usize, comptime format: []const u8, args: var) void {
+    fn bufWrite(self: *Progress, end: *usize, comptime format: []const u8, args: anytype) void {
         if (std.fmt.bufPrint(self.output_buffer[end.*..], format, args)) |written| {
             const amt = written.len;
             end.* += amt;
@@ -195,10 +250,10 @@ pub const Progress = struct {
                 end.* = self.output_buffer.len;
             },
         }
-        const bytes_needed_for_esc_codes_at_end = 11;
+        const bytes_needed_for_esc_codes_at_end = if (std.builtin.os.tag == .windows) 0 else 11;
         const max_end = self.output_buffer.len - bytes_needed_for_esc_codes_at_end;
         if (end.* > max_end) {
-            const suffix = "...";
+            const suffix = "... ";
             self.columns_written = self.columns_written - (end.* - max_end) + suffix.len;
             std.mem.copy(u8, self.output_buffer[max_end..], suffix);
             end.* = max_end + suffix.len;
@@ -232,24 +287,24 @@ test "basic functionality" {
         next_sub_task = (next_sub_task + 1) % sub_task_names.len;
 
         node.completeOne();
-        std.time.sleep(5 * std.time.millisecond);
+        std.time.sleep(5 * std.time.ns_per_ms);
         node.completeOne();
         node.completeOne();
-        std.time.sleep(5 * std.time.millisecond);
+        std.time.sleep(5 * std.time.ns_per_ms);
         node.completeOne();
         node.completeOne();
-        std.time.sleep(5 * std.time.millisecond);
+        std.time.sleep(5 * std.time.ns_per_ms);
 
         node.end();
 
-        std.time.sleep(5 * std.time.millisecond);
+        std.time.sleep(5 * std.time.ns_per_ms);
     }
     {
         var node = root_node.start("this is a really long name designed to activate the truncation code. let's find out if it works", null);
         node.activate();
-        std.time.sleep(10 * std.time.millisecond);
+        std.time.sleep(10 * std.time.ns_per_ms);
         progress.refresh();
-        std.time.sleep(10 * std.time.millisecond);
+        std.time.sleep(10 * std.time.ns_per_ms);
         node.end();
     }
 }

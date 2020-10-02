@@ -634,6 +634,128 @@ fn testSqrt(comptime T: type, x: T) void {
     expect(@sqrt(x * x) == x);
 }
 
+test "@fabs" {
+    testFabs(f128, 12.0);
+    comptime testFabs(f128, 12.0);
+    testFabs(f64, 12.0);
+    comptime testFabs(f64, 12.0);
+    testFabs(f32, 12.0);
+    comptime testFabs(f32, 12.0);
+    testFabs(f16, 12.0);
+    comptime testFabs(f16, 12.0);
+
+    const x = 14.0;
+    const y = -x;
+    const z = @fabs(y);
+    comptime expectEqual(x, z);
+}
+
+fn testFabs(comptime T: type, x: T) void {
+    const y = -x;
+    const z = @fabs(y);
+    expectEqual(x, z);
+}
+
+test "@floor" {
+    // FIXME: Generates a floorl function call
+    // testFloor(f128, 12.0);
+    comptime testFloor(f128, 12.0);
+    testFloor(f64, 12.0);
+    comptime testFloor(f64, 12.0);
+    testFloor(f32, 12.0);
+    comptime testFloor(f32, 12.0);
+    testFloor(f16, 12.0);
+    comptime testFloor(f16, 12.0);
+
+    const x = 14.0;
+    const y = x + 0.7;
+    const z = @floor(y);
+    comptime expectEqual(x, z);
+}
+
+fn testFloor(comptime T: type, x: T) void {
+    const y = x + 0.6;
+    const z = @floor(y);
+    expectEqual(x, z);
+}
+
+test "@ceil" {
+    // FIXME: Generates a ceill function call
+    //testCeil(f128, 12.0);
+    comptime testCeil(f128, 12.0);
+    testCeil(f64, 12.0);
+    comptime testCeil(f64, 12.0);
+    testCeil(f32, 12.0);
+    comptime testCeil(f32, 12.0);
+    testCeil(f16, 12.0);
+    comptime testCeil(f16, 12.0);
+
+    const x = 14.0;
+    const y = x - 0.7;
+    const z = @ceil(y);
+    comptime expectEqual(x, z);
+}
+
+fn testCeil(comptime T: type, x: T) void {
+    const y = x - 0.8;
+    const z = @ceil(y);
+    expectEqual(x, z);
+}
+
+test "@trunc" {
+    // FIXME: Generates a truncl function call
+    //testTrunc(f128, 12.0);
+    comptime testTrunc(f128, 12.0);
+    testTrunc(f64, 12.0);
+    comptime testTrunc(f64, 12.0);
+    testTrunc(f32, 12.0);
+    comptime testTrunc(f32, 12.0);
+    testTrunc(f16, 12.0);
+    comptime testTrunc(f16, 12.0);
+
+    const x = 14.0;
+    const y = x + 0.7;
+    const z = @trunc(y);
+    comptime expectEqual(x, z);
+}
+
+fn testTrunc(comptime T: type, x: T) void {
+    {
+        const y = x + 0.8;
+        const z = @trunc(y);
+        expectEqual(x, z);
+    }
+
+    {
+        const y = -x - 0.8;
+        const z = @trunc(y);
+        expectEqual(-x, z);
+    }
+}
+
+test "@round" {
+    // FIXME: Generates a roundl function call
+    //testRound(f128, 12.0);
+    comptime testRound(f128, 12.0);
+    testRound(f64, 12.0);
+    comptime testRound(f64, 12.0);
+    testRound(f32, 12.0);
+    comptime testRound(f32, 12.0);
+    testRound(f16, 12.0);
+    comptime testRound(f16, 12.0);
+
+    const x = 14.0;
+    const y = x + 0.4;
+    const z = @round(y);
+    comptime expectEqual(x, z);
+}
+
+fn testRound(comptime T: type, x: T) void {
+    const y = x - 0.5;
+    const z = @round(y);
+    expectEqual(x, z);
+}
+
 test "comptime_int param and return" {
     const a = comptimeAdd(35361831660712422535336160538497375248, 101752735581729509668353361206450473702);
     expect(a == 137114567242441932203689521744947848950);
@@ -649,8 +771,8 @@ fn comptimeAdd(comptime a: comptime_int, comptime b: comptime_int) comptime_int 
 test "vector integer addition" {
     const S = struct {
         fn doTheTest() void {
-            var a: @Vector(4, i32) = [_]i32{ 1, 2, 3, 4 };
-            var b: @Vector(4, i32) = [_]i32{ 5, 6, 7, 8 };
+            var a: std.meta.Vector(4, i32) = [_]i32{ 1, 2, 3, 4 };
+            var b: std.meta.Vector(4, i32) = [_]i32{ 5, 6, 7, 8 };
             var result = a + b;
             var result_array: [4]i32 = result;
             const expected = [_]i32{ 6, 8, 10, 12 };
@@ -693,8 +815,8 @@ test "128-bit multiplication" {
 test "vector comparison" {
     const S = struct {
         fn doTheTest() void {
-            var a: @Vector(6, i32) = [_]i32{ 1, 3, -1, 5, 7, 9 };
-            var b: @Vector(6, i32) = [_]i32{ -1, 3, 0, 6, 10, -10 };
+            var a: std.meta.Vector(6, i32) = [_]i32{ 1, 3, -1, 5, 7, 9 };
+            var b: std.meta.Vector(6, i32) = [_]i32{ -1, 3, 0, 6, 10, -10 };
             expect(mem.eql(bool, &@as([6]bool, a < b), &[_]bool{ false, false, true, true, true, false }));
             expect(mem.eql(bool, &@as([6]bool, a <= b), &[_]bool{ false, true, true, true, true, false }));
             expect(mem.eql(bool, &@as([6]bool, a == b), &[_]bool{ false, true, false, false, false, false }));

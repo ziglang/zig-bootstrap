@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("std");
 const builtin = @import("builtin");
 const debug = std.debug;
@@ -34,13 +39,13 @@ pub fn PackedIntIo(comptime Int: type, comptime endian: builtin.Endian) type {
 
     //we bitcast the desired Int type to an unsigned version of itself
     // to avoid issues with shifting signed ints.
-    const UnInt = std.meta.IntType(false, int_bits);
+    const UnInt = std.meta.Int(false, int_bits);
 
     //The maximum container int type
-    const MinIo = std.meta.IntType(false, min_io_bits);
+    const MinIo = std.meta.Int(false, min_io_bits);
 
     //The minimum container int type
-    const MaxIo = std.meta.IntType(false, max_io_bits);
+    const MaxIo = std.meta.Int(false, max_io_bits);
 
     return struct {
         pub fn get(bytes: []const u8, index: usize, bit_offset: u7) Int {
@@ -314,15 +319,18 @@ pub fn PackedIntSliceEndian(comptime Int: type, comptime endian: builtin.Endian)
 }
 
 test "PackedIntArray" {
+    // TODO @setEvalBranchQuota generates panics in wasm32. Investigate.
+    if (builtin.arch == .wasm32) return error.SkipZigTest;
+
     @setEvalBranchQuota(10000);
     const max_bits = 256;
     const int_count = 19;
 
     comptime var bits = 0;
-    inline while (bits <= 256) : (bits += 1) {
+    inline while (bits <= max_bits) : (bits += 1) {
         //alternate unsigned and signed
         const even = bits % 2 == 0;
-        const I = std.meta.IntType(even, bits);
+        const I = std.meta.Int(even, bits);
 
         const PackedArray = PackedIntArray(I, int_count);
         const expected_bytes = ((bits * int_count) + 7) / 8;
@@ -357,6 +365,9 @@ test "PackedIntArray init" {
 }
 
 test "PackedIntSlice" {
+    // TODO @setEvalBranchQuota generates panics in wasm32. Investigate.
+    if (builtin.arch == .wasm32) return error.SkipZigTest;
+
     @setEvalBranchQuota(10000);
     const max_bits = 256;
     const int_count = 19;
@@ -366,10 +377,10 @@ test "PackedIntSlice" {
     var buffer: [total_bytes]u8 = undefined;
 
     comptime var bits = 0;
-    inline while (bits <= 256) : (bits += 1) {
+    inline while (bits <= max_bits) : (bits += 1) {
         //alternate unsigned and signed
         const even = bits % 2 == 0;
-        const I = std.meta.IntType(even, bits);
+        const I = std.meta.Int(even, bits);
         const P = PackedIntSlice(I);
 
         var data = P.init(&buffer, int_count);
@@ -399,7 +410,7 @@ test "PackedIntSlice of PackedInt(Array/Slice)" {
 
     comptime var bits = 0;
     inline while (bits <= max_bits) : (bits += 1) {
-        const Int = std.meta.IntType(false, bits);
+        const Int = std.meta.Int(false, bits);
 
         const PackedArray = PackedIntArray(Int, int_count);
         var packed_array = @as(PackedArray, undefined);

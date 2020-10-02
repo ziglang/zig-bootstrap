@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 usingnamespace @import("../linux.zig");
 
 /// Routing/device hook
@@ -122,6 +127,9 @@ pub const NLM_F_CAPPED = 0x100;
 pub const NLM_F_ACK_TLVS = 0x200;
 
 pub const NetlinkMessageType = extern enum(u16) {
+    /// < 0x10: reserved control messages
+    pub const MIN_TYPE = 0x10;
+
     /// Nothing.
     NOOP = 0x1,
 
@@ -133,9 +141,6 @@ pub const NetlinkMessageType = extern enum(u16) {
 
     /// Data lost
     OVERRUN = 0x4,
-
-    /// < 0x10: reserved control messages
-    pub const MIN_TYPE = 0x10;
 
     // rtlink types
 

@@ -1,21 +1,28 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("std.zig");
+const print = std.debug.print;
 
-pub const LeakCountAllocator = @import("testing/leak_count_allocator.zig").LeakCountAllocator;
 pub const FailingAllocator = @import("testing/failing_allocator.zig").FailingAllocator;
 
 /// This should only be used in temporary test programs.
 pub const allocator = &allocator_instance.allocator;
-pub var allocator_instance = LeakCountAllocator.init(&base_allocator_instance.allocator);
+pub var allocator_instance = std.heap.GeneralPurposeAllocator(.{}){};
 
 pub const failing_allocator = &failing_allocator_instance.allocator;
 pub var failing_allocator_instance = FailingAllocator.init(&base_allocator_instance.allocator, 0);
 
-pub var base_allocator_instance = std.heap.ThreadSafeFixedBufferAllocator.init(allocator_mem[0..]);
-var allocator_mem: [1024 * 1024]u8 = undefined;
+pub var base_allocator_instance = std.heap.FixedBufferAllocator.init("");
+
+/// TODO https://github.com/ziglang/zig/issues/5738
+pub var log_level = std.log.Level.warn;
 
 /// This function is intended to be used only in tests. It prints diagnostics to stderr
 /// and then aborts when actual_error_union is not expected_error.
-pub fn expectError(expected_error: anyerror, actual_error_union: var) void {
+pub fn expectError(expected_error: anyerror, actual_error_union: anytype) void {
     if (actual_error_union) |actual_payload| {
         std.debug.panic("expected error.{}, found {}", .{ @errorName(expected_error), actual_payload });
     } else |actual_error| {
@@ -31,8 +38,8 @@ pub fn expectError(expected_error: anyerror, actual_error_union: var) void {
 /// This function is intended to be used only in tests. When the two values are not
 /// equal, prints diagnostics to stderr to show exactly how they are not equal,
 /// then aborts.
-/// The types must match exactly.
-pub fn expectEqual(expected: var, actual: @TypeOf(expected)) void {
+/// `actual` is casted to the type of `expected`.
+pub fn expectEqual(expected: anytype, actual: @TypeOf(expected)) void {
     switch (@typeInfo(@TypeOf(actual))) {
         .NoReturn,
         .BoundFn,
@@ -167,6 +174,59 @@ test "expectEqual.union(enum)" {
     expectEqual(a10, a10);
 }
 
+/// This function is intended to be used only in tests. When the actual value is not
+/// within the margin of the expected value,
+/// prints diagnostics to stderr to show exactly how they are not equal, then aborts.
+/// The types must be floating point
+pub fn expectWithinMargin(expected: anytype, actual: @TypeOf(expected), margin: @TypeOf(expected)) void {
+    std.debug.assert(margin >= 0.0);
+
+    switch (@typeInfo(@TypeOf(actual))) {
+        .Float,
+        .ComptimeFloat,
+        => {
+            if (@fabs(expected - actual) > margin) {
+                std.debug.panic("actual {}, not within margin {} of expected {}", .{ actual, margin, expected });
+            }
+        },
+        else => @compileError("Unable to compare non floating point values"),
+    }
+}
+
+test "expectWithinMargin.f32" {
+    const x: f32 = 12.0;
+    const y: f32 = 12.06;
+
+    expectWithinMargin(x, y, 0.1);
+}
+
+/// This function is intended to be used only in tests. When the actual value is not
+/// within the epsilon of the expected value,
+/// prints diagnostics to stderr to show exactly how they are not equal, then aborts.
+/// The types must be floating point
+pub fn expectWithinEpsilon(expected: anytype, actual: @TypeOf(expected), epsilon: @TypeOf(expected)) void {
+    std.debug.assert(epsilon >= 0.0 and epsilon <= 1.0);
+
+    const margin = epsilon * expected;
+    switch (@typeInfo(@TypeOf(actual))) {
+        .Float,
+        .ComptimeFloat,
+        => {
+            if (@fabs(expected - actual) > margin) {
+                std.debug.panic("actual {}, not within epsilon {}, of expected {}", .{ actual, epsilon, expected });
+            }
+        },
+        else => @compileError("Unable to compare non floating point values"),
+    }
+}
+
+test "expectWithinEpsilon.f32" {
+    const x: f32 = 12.0;
+    const y: f32 = 13.2;
+
+    expectWithinEpsilon(x, y, 0.1);
+}
+
 /// This function is intended to be used only in tests. When the two slices are not
 /// equal, prints diagnostics to stderr to show exactly how they are not equal,
 /// then aborts.
@@ -192,6 +252,60 @@ pub fn expect(ok: bool) void {
     if (!ok) @panic("test failure");
 }
 
+pub const TmpDir = struct {
+    dir: std.fs.Dir,
+    parent_dir: std.fs.Dir,
+    sub_path: [sub_path_len]u8,
+
+    const random_bytes_count = 12;
+    const sub_path_len = std.base64.Base64Encoder.calcSize(random_bytes_count);
+
+    pub fn cleanup(self: *TmpDir) void {
+        self.dir.close();
+        self.parent_dir.deleteTree(&self.sub_path) catch {};
+        self.parent_dir.close();
+        self.* = undefined;
+    }
+};
+
+fn getCwdOrWasiPreopen() std.fs.Dir {
+    if (@import("builtin").os.tag == .wasi) {
+        var preopens = std.fs.wasi.PreopenList.init(allocator);
+        defer preopens.deinit();
+        preopens.populate() catch
+            @panic("unable to make tmp dir for testing: unable to populate preopens");
+        const preopen = preopens.find(std.fs.wasi.PreopenType{ .Dir = "." }) orelse
+            @panic("unable to make tmp dir for testing: didn't find '.' in the preopens");
+
+        return std.fs.Dir{ .fd = preopen.fd };
+    } else {
+        return std.fs.cwd();
+    }
+}
+
+pub fn tmpDir(opts: std.fs.Dir.OpenDirOptions) TmpDir {
+    var random_bytes: [TmpDir.random_bytes_count]u8 = undefined;
+    std.crypto.randomBytes(&random_bytes) catch
+        @panic("unable to make tmp dir for testing: unable to get random bytes");
+    var sub_path: [TmpDir.sub_path_len]u8 = undefined;
+    std.fs.base64_encoder.encode(&sub_path, &random_bytes);
+
+    var cwd = getCwdOrWasiPreopen();
+    var cache_dir = cwd.makeOpenPath("zig-cache", .{}) catch
+        @panic("unable to make tmp dir for testing: unable to make and open zig-cache dir");
+    defer cache_dir.close();
+    var parent_dir = cache_dir.makeOpenPath("tmp", .{}) catch
+        @panic("unable to make tmp dir for testing: unable to make and open zig-cache/tmp dir");
+    var dir = parent_dir.makeOpenPath(&sub_path, opts) catch
+        @panic("unable to make tmp dir for testing: unable to make and open the tmp dir");
+
+    return .{
+        .dir = dir,
+        .parent_dir = parent_dir,
+        .sub_path = sub_path,
+    };
+}
+
 test "expectEqual nested array" {
     const a = [2][2]f32{
         [_]f32{ 1.0, 0.0 },
@@ -211,4 +325,67 @@ test "expectEqual vector" {
     var b = @splat(4, @as(u32, 4));
 
     expectEqual(a, b);
+}
+
+pub fn expectEqualStrings(expected: []const u8, actual: []const u8) void {
+    if (std.mem.indexOfDiff(u8, actual, expected)) |diff_index| {
+        print("\n====== expected this output: =========\n", .{});
+        printWithVisibleNewlines(expected);
+        print("\n======== instead found this: =========\n", .{});
+        printWithVisibleNewlines(actual);
+        print("\n======================================\n", .{});
+
+        var diff_line_number: usize = 1;
+        for (expected[0..diff_index]) |value| {
+            if (value == '\n') diff_line_number += 1;
+        }
+        print("First difference occurs on line {}:\n", .{diff_line_number});
+
+        print("expected:\n", .{});
+        printIndicatorLine(expected, diff_index);
+
+        print("found:\n", .{});
+        printIndicatorLine(actual, diff_index);
+
+        @panic("test failure");
+    }
+}
+
+fn printIndicatorLine(source: []const u8, indicator_index: usize) void {
+    const line_begin_index = if (std.mem.lastIndexOfScalar(u8, source[0..indicator_index], '\n')) |line_begin|
+        line_begin + 1
+    else
+        0;
+    const line_end_index = if (std.mem.indexOfScalar(u8, source[indicator_index..], '\n')) |line_end|
+        (indicator_index + line_end)
+    else
+        source.len;
+
+    printLine(source[line_begin_index..line_end_index]);
+    {
+        var i: usize = line_begin_index;
+        while (i < indicator_index) : (i += 1)
+            print(" ", .{});
+    }
+    print("^\n", .{});
+}
+
+fn printWithVisibleNewlines(source: []const u8) void {
+    var i: usize = 0;
+    while (std.mem.indexOf(u8, source[i..], "\n")) |nl| : (i += nl + 1) {
+        printLine(source[i .. i + nl]);
+    }
+    print("{}␃\n", .{source[i..]}); // End of Text symbol (ETX)
+}
+
+fn printLine(line: []const u8) void {
+    if (line.len != 0) switch (line[line.len - 1]) {
+        ' ', '\t' => print("{}⏎\n", .{line}), // Carriage return symbol,
+        else => {},
+    };
+    print("{}\n", .{line});
+}
+
+test "" {
+    expectEqualStrings("foo", "foo");
 }

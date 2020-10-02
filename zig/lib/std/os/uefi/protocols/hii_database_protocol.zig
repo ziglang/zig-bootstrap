@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const uefi = @import("std").os.uefi;
 const Guid = uefi.Guid;
 const Status = uefi.Status;
@@ -6,10 +11,10 @@ const hii = uefi.protocols.hii;
 /// Database manager for HII-related data structures.
 pub const HIIDatabaseProtocol = extern struct {
     _new_package_list: Status, // TODO
-    _remove_package_list: extern fn (*const HIIDatabaseProtocol, hii.HIIHandle) Status,
-    _update_package_list: extern fn (*const HIIDatabaseProtocol, hii.HIIHandle, *const hii.HIIPackageList) Status,
-    _list_package_lists: extern fn (*const HIIDatabaseProtocol, u8, ?*const Guid, *usize, [*]hii.HIIHandle) Status,
-    _export_package_lists: extern fn (*const HIIDatabaseProtocol, ?hii.HIIHandle, *usize, *hii.HIIPackageList) Status,
+    _remove_package_list: fn (*const HIIDatabaseProtocol, hii.HIIHandle) callconv(.C) Status,
+    _update_package_list: fn (*const HIIDatabaseProtocol, hii.HIIHandle, *const hii.HIIPackageList) callconv(.C) Status,
+    _list_package_lists: fn (*const HIIDatabaseProtocol, u8, ?*const Guid, *usize, [*]hii.HIIHandle) callconv(.C) Status,
+    _export_package_lists: fn (*const HIIDatabaseProtocol, ?hii.HIIHandle, *usize, *hii.HIIPackageList) callconv(.C) Status,
     _register_package_notify: Status, // TODO
     _unregister_package_notify: Status, // TODO
     _find_keyboard_layouts: Status, // TODO
