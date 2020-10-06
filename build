@@ -40,8 +40,8 @@ make "$JOBS" install
 
 # Now we have Zig as a cross compiler
 ZIG="$ROOTDIR/out/host/bin/zig"
-export CC="$ZIG cc -target $TARGET -mcpu=$MCPU"
-export CXX="$ZIG c++ -target $TARGET -mcpu=$MCPU"
+export CC="$ZIG cc -fno-sanitize=all -target $TARGET -mcpu=$MCPU"
+export CXX="$ZIG c++ -fno-sanitize=all -target $TARGET -mcpu=$MCPU"
 
 # Rebuild LLVM with Zig.
 mkdir -p "$ROOTDIR/out/build-llvm-$TARGET"
