@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const uefi = @import("std").os.uefi;
 const Guid = uefi.Guid;
 const Event = uefi.Event;
@@ -7,15 +12,15 @@ const ManagedNetworkConfigData = uefi.protocols.ManagedNetworkConfigData;
 const SimpleNetworkMode = uefi.protocols.SimpleNetworkMode;
 
 pub const Ip6Protocol = extern struct {
-    _get_mode_data: extern fn (*const Ip6Protocol, ?*Ip6ModeData, ?*ManagedNetworkConfigData, ?*SimpleNetworkMode) Status,
-    _configure: extern fn (*const Ip6Protocol, ?*const Ip6ConfigData) Status,
-    _groups: extern fn (*const Ip6Protocol, bool, ?*const Ip6Address) Status,
-    _routes: extern fn (*const Ip6Protocol, bool, ?*const Ip6Address, u8, ?*const Ip6Address) Status,
-    _neighbors: extern fn (*const Ip6Protocol, bool, *const Ip6Address, ?*const MacAddress, u32, bool) Status,
-    _transmit: extern fn (*const Ip6Protocol, *Ip6CompletionToken) Status,
-    _receive: extern fn (*const Ip6Protocol, *Ip6CompletionToken) Status,
-    _cancel: extern fn (*const Ip6Protocol, ?*Ip6CompletionToken) Status,
-    _poll: extern fn (*const Ip6Protocol) Status,
+    _get_mode_data: fn (*const Ip6Protocol, ?*Ip6ModeData, ?*ManagedNetworkConfigData, ?*SimpleNetworkMode) callconv(.C) Status,
+    _configure: fn (*const Ip6Protocol, ?*const Ip6ConfigData) callconv(.C) Status,
+    _groups: fn (*const Ip6Protocol, bool, ?*const Ip6Address) callconv(.C) Status,
+    _routes: fn (*const Ip6Protocol, bool, ?*const Ip6Address, u8, ?*const Ip6Address) callconv(.C) Status,
+    _neighbors: fn (*const Ip6Protocol, bool, *const Ip6Address, ?*const MacAddress, u32, bool) callconv(.C) Status,
+    _transmit: fn (*const Ip6Protocol, *Ip6CompletionToken) callconv(.C) Status,
+    _receive: fn (*const Ip6Protocol, *Ip6CompletionToken) callconv(.C) Status,
+    _cancel: fn (*const Ip6Protocol, ?*Ip6CompletionToken) callconv(.C) Status,
+    _poll: fn (*const Ip6Protocol) callconv(.C) Status,
 
     /// Gets the current operational settings for this instance of the EFI IPv6 Protocol driver.
     pub fn getModeData(self: *const Ip6Protocol, ip6_mode_data: ?*Ip6ModeData, mnp_config_data: ?*ManagedNetworkConfigData, snp_mode_data: ?*SimpleNetworkMode) Status {

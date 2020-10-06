@@ -1,11 +1,16 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const uefi = @import("std").os.uefi;
 const Guid = uefi.Guid;
 const Status = uefi.Status;
 
 /// Random Number Generator protocol
 pub const RNGProtocol = extern struct {
-    _get_info: extern fn (*const RNGProtocol, *usize, [*]align(8) Guid) Status,
-    _get_rng: extern fn (*const RNGProtocol, ?*align(8) const Guid, usize, [*]u8) Status,
+    _get_info: fn (*const RNGProtocol, *usize, [*]align(8) Guid) callconv(.C) Status,
+    _get_rng: fn (*const RNGProtocol, ?*align(8) const Guid, usize, [*]u8) callconv(.C) Status,
 
     /// Returns information about the random number generation implementation.
     pub fn getInfo(self: *const RNGProtocol, list_size: *usize, list: [*]align(8) Guid) Status {

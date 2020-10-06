@@ -2,6 +2,472 @@ const tests = @import("tests.zig");
 const std = @import("std");
 
 pub fn addCases(cases: *tests.CompileErrorContext) void {
+    cases.add("slice sentinel mismatch",
+        \\export fn entry() void {
+        \\    const x = @import("std").meta.Vector(3, f32){ 25, 75, 5, 0 };
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:62: error: index 3 outside vector of size 3",
+    });
+
+    cases.add("slice sentinel mismatch",
+        \\export fn entry() void {
+        \\    const y: [:1]const u8 = &[_:2]u8{ 1, 2 };
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:37: error: expected type '[:1]const u8', found '*const [2:2]u8'",
+    });
+
+    cases.add("@Type for union with opaque field",
+        \\const TypeInfo = @import("builtin").TypeInfo;
+        \\const Untagged = @Type(.{
+        \\    .Union = .{
+        \\        .layout = .Auto,
+        \\        .tag_type = null,
+        \\        .fields = &[_]TypeInfo.UnionField{
+        \\            .{ .name = "foo", .field_type = @Type(.Opaque) },
+        \\        },
+        \\        .decls = &[_]TypeInfo.Declaration{},
+        \\    },
+        \\});
+        \\export fn entry() void {
+        \\    _ = Untagged{};
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:25: error: opaque types have unknown size and therefore cannot be directly embedded in unions",
+        "tmp.zig:13:17: note: referenced here",
+    });
+
+    cases.add("@Type for union with zero fields",
+        \\const TypeInfo = @import("builtin").TypeInfo;
+        \\const Untagged = @Type(.{
+        \\    .Union = .{
+        \\        .layout = .Auto,
+        \\        .tag_type = null,
+        \\        .fields = &[_]TypeInfo.UnionField{},
+        \\        .decls = &[_]TypeInfo.Declaration{},
+        \\    },
+        \\});
+        \\export fn entry() void {
+        \\    _ = Untagged{};
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:25: error: unions must have 1 or more fields",
+        "tmp.zig:11:17: note: referenced here",
+    });
+
+    cases.add("@Type for exhaustive enum with zero fields",
+        \\const TypeInfo = @import("builtin").TypeInfo;
+        \\const Tag = @Type(.{
+        \\    .Enum = .{
+        \\        .layout = .Auto,
+        \\        .tag_type = u1,
+        \\        .fields = &[_]TypeInfo.EnumField{},
+        \\        .decls = &[_]TypeInfo.Declaration{},
+        \\        .is_exhaustive = true,
+        \\    },
+        \\});
+        \\export fn entry() void {
+        \\    _ = @intToEnum(Tag, 0);
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:20: error: enums must have 1 or more fields",
+        "tmp.zig:12:9: note: referenced here",
+    });
+
+    cases.add("@Type for tagged union with extra union field",
+        \\const TypeInfo = @import("builtin").TypeInfo;
+        \\const Tag = @Type(.{
+        \\    .Enum = .{
+        \\        .layout = .Auto,
+        \\        .tag_type = u1,
+        \\        .fields = &[_]TypeInfo.EnumField{
+        \\            .{ .name = "signed", .value = 0 },
+        \\            .{ .name = "unsigned", .value = 1 },
+        \\        },
+        \\        .decls = &[_]TypeInfo.Declaration{},
+        \\        .is_exhaustive = true,
+        \\    },
+        \\});
+        \\const Tagged = @Type(.{
+        \\    .Union = .{
+        \\        .layout = .Auto,
+        \\        .tag_type = Tag,
+        \\        .fields = &[_]TypeInfo.UnionField{
+        \\            .{ .name = "signed", .field_type = i32 },
+        \\            .{ .name = "unsigned", .field_type = u32 },
+        \\            .{ .name = "arst", .field_type = f32 },
+        \\        },
+        \\        .decls = &[_]TypeInfo.Declaration{},
+        \\    },
+        \\});
+        \\export fn entry() void {
+        \\    var tagged = Tagged{ .signed = -1 };
+        \\    tagged = .{ .unsigned = 1 };
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:14:23: error: enum field not found: 'arst'",
+        "tmp.zig:2:20: note: enum declared here",
+        "tmp.zig:27:24: note: referenced here",
+    });
+
+    cases.add("@Type for tagged union with extra enum field",
+        \\const TypeInfo = @import("builtin").TypeInfo;
+        \\const Tag = @Type(.{
+        \\    .Enum = .{
+        \\        .layout = .Auto,
+        \\        .tag_type = u2,
+        \\        .fields = &[_]TypeInfo.EnumField{
+        \\            .{ .name = "signed", .value = 0 },
+        \\            .{ .name = "unsigned", .value = 1 },
+        \\            .{ .name = "arst", .field_type = 2 },
+        \\        },
+        \\        .decls = &[_]TypeInfo.Declaration{},
+        \\        .is_exhaustive = true,
+        \\    },
+        \\});
+        \\const Tagged = @Type(.{
+        \\    .Union = .{
+        \\        .layout = .Auto,
+        \\        .tag_type = Tag,
+        \\        .fields = &[_]TypeInfo.UnionField{
+        \\            .{ .name = "signed", .field_type = i32 },
+        \\            .{ .name = "unsigned", .field_type = u32 },
+        \\        },
+        \\        .decls = &[_]TypeInfo.Declaration{},
+        \\    },
+        \\});
+        \\export fn entry() void {
+        \\    var tagged = Tagged{ .signed = -1 };
+        \\    tagged = .{ .unsigned = 1 };
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:9:32: error: no member named 'field_type' in struct 'std.builtin.EnumField'",
+        "tmp.zig:18:21: note: referenced here",
+        "tmp.zig:27:18: note: referenced here",
+    });
+
+    cases.add("@Type with undefined",
+        \\comptime {
+        \\    _ = @Type(.{ .Array = .{ .len = 0, .child = u8, .sentinel = undefined } });
+        \\}
+        \\comptime {
+        \\    _ = @Type(.{
+        \\        .Struct = .{
+        \\            .fields = undefined,
+        \\            .decls = undefined,
+        \\            .is_tuple = false,
+        \\            .layout = .Auto,
+        \\        },
+        \\    });
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:16: error: use of undefined value here causes undefined behavior",
+        "tmp.zig:5:16: error: use of undefined value here causes undefined behavior",
+    });
+
+    cases.add("struct with declarations unavailable for @Type",
+        \\export fn entry() void {
+        \\    _ = @Type(@typeInfo(struct { const foo = 1; }));
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:15: error: TypeInfo.Struct.decls must be empty for @Type",
+    });
+
+    cases.add("enum with declarations unavailable for @Type",
+        \\export fn entry() void {
+        \\    _ = @Type(@typeInfo(enum { foo, const bar = 1; }));
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:15: error: TypeInfo.Enum.decls must be empty for @Type",
+    });
+
+    cases.addTest("reject extern variables with initializers",
+        \\extern var foo: int = 2;
+    , &[_][]const u8{
+        "tmp.zig:1:1: error: extern variables have no initializers",
+    });
+
+    cases.addTest("duplicate/unused labels",
+        \\comptime {
+        \\    blk: { blk: while (false) {} }
+        \\    blk: while (false) { blk: for (@as([0]void, undefined)) |_| {} }
+        \\    blk: for (@as([0]void, undefined)) |_| { blk: {} }
+        \\}
+        \\comptime {
+        \\    blk: {}
+        \\    blk: while(false) {}
+        \\    blk: for(@as([0]void, undefined)) |_| {}
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:17: error: redeclaration of label 'blk'",
+        "tmp.zig:2:10: note: previous declaration is here",
+        "tmp.zig:3:31: error: redeclaration of label 'blk'",
+        "tmp.zig:3:10: note: previous declaration is here",
+        "tmp.zig:4:51: error: redeclaration of label 'blk'",
+        "tmp.zig:4:10: note: previous declaration is here",
+        "tmp.zig:7:10: error: unused block label",
+        "tmp.zig:8:10: error: unused while label",
+        "tmp.zig:9:10: error: unused for label",
+    });
+
+    cases.addTest("@alignCast of zero sized types",
+        \\export fn foo() void {
+        \\    const a: *void = undefined;
+        \\    _ = @alignCast(2, a);
+        \\}
+        \\export fn bar() void {
+        \\    const a: ?*void = undefined;
+        \\    _ = @alignCast(2, a);
+        \\}
+        \\export fn baz() void {
+        \\    const a: []void = undefined;
+        \\    _ = @alignCast(2, a);
+        \\}
+        \\export fn qux() void {
+        \\    const a = struct {
+        \\        fn a(comptime b: u32) void {}
+        \\    }.a;
+        \\    _ = @alignCast(2, a);
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:3:23: error: cannot adjust alignment of zero sized type '*void'",
+        "tmp.zig:7:23: error: cannot adjust alignment of zero sized type '?*void'",
+        "tmp.zig:11:23: error: cannot adjust alignment of zero sized type '[]void'",
+        "tmp.zig:17:23: error: cannot adjust alignment of zero sized type 'fn(u32) anytype'",
+    });
+
+    cases.addTest("invalid non-exhaustive enum to union",
+        \\const E = enum(u8) {
+        \\    a,
+        \\    b,
+        \\    _,
+        \\};
+        \\const U = union(E) {
+        \\    a,
+        \\    b,
+        \\};
+        \\export fn foo() void {
+        \\    var e = @intToEnum(E, 15);
+        \\    var u: U = e;
+        \\}
+        \\export fn bar() void {
+        \\    const e = @intToEnum(E, 15);
+        \\    var u: U = e;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:12:16: error: runtime cast to union 'U' from non-exhustive enum",
+        "tmp.zig:16:16: error: no tag by value 15",
+    });
+
+    cases.addTest("switching with exhaustive enum has '_' prong ",
+        \\const E = enum{
+        \\    a,
+        \\    b,
+        \\};
+        \\pub export fn entry() void {
+        \\    var e: E = .b;
+        \\    switch (e) {
+        \\        .a => {},
+        \\        .b => {},
+        \\        _ => {},
+        \\    }
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:7:5: error: switch on exhaustive enum has `_` prong",
+    });
+
+    cases.addTest("invalid pointer with @Type",
+        \\export fn entry() void {
+        \\    _ = @Type(.{ .Pointer = .{
+        \\        .size = .One,
+        \\        .is_const = false,
+        \\        .is_volatile = false,
+        \\        .alignment = 1,
+        \\        .child = u8,
+        \\        .is_allowzero = false,
+        \\        .sentinel = 0,
+        \\    }});
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:16: error: sentinels are only allowed on slices and unknown-length pointers",
+    });
+
+    cases.addTest("helpful return type error message",
+        \\export fn foo() u32 {
+        \\    return error.Ohno;
+        \\}
+        \\fn bar() !u32 {
+        \\    return error.Ohno;
+        \\}
+        \\export fn baz() void {
+        \\    try bar();
+        \\}
+        \\export fn qux() u32 {
+        \\    return bar();
+        \\}
+        \\export fn quux() u32 {
+        \\    var buf: u32 = 0;
+        \\    buf = bar();
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:17: error: expected type 'u32', found 'error{Ohno}'",
+        "tmp.zig:1:17: note: function cannot return an error",
+        "tmp.zig:8:5: error: expected type 'void', found '@typeInfo(@typeInfo(@TypeOf(bar)).Fn.return_type.?).ErrorUnion.error_set'",
+        "tmp.zig:7:17: note: function cannot return an error",
+        "tmp.zig:11:15: error: expected type 'u32', found '@typeInfo(@typeInfo(@TypeOf(bar)).Fn.return_type.?).ErrorUnion.error_set!u32'",
+        "tmp.zig:10:17: note: function cannot return an error",
+        "tmp.zig:15:14: error: expected type 'u32', found '@typeInfo(@typeInfo(@TypeOf(bar)).Fn.return_type.?).ErrorUnion.error_set!u32'",
+        "tmp.zig:14:5: note: cannot store an error in type 'u32'",
+    });
+
+    cases.addTest("int/float conversion to comptime_int/float",
+        \\export fn foo() void {
+        \\    var a: f32 = 2;
+        \\    _ = @floatToInt(comptime_int, a);
+        \\}
+        \\export fn bar() void {
+        \\    var a: u32 = 2;
+        \\    _ = @intToFloat(comptime_float, a);
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:3:35: error: unable to evaluate constant expression",
+        "tmp.zig:3:9: note: referenced here",
+        "tmp.zig:7:37: error: unable to evaluate constant expression",
+        "tmp.zig:7:9: note: referenced here",
+    });
+
+    cases.add("extern variable has no type",
+        \\extern var foo;
+        \\pub export fn entry() void {
+        \\    foo;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:1:1: error: unable to infer variable type",
+    });
+
+    cases.add("@src outside function",
+        \\comptime {
+        \\    @src();
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:5: error: @src outside function",
+    });
+
+    cases.add("call assigned to constant",
+        \\const Foo = struct {
+        \\    x: i32,
+        \\};
+        \\fn foo() Foo {
+        \\    return .{ .x = 42 };
+        \\}
+        \\fn bar(val: anytype) Foo {
+        \\    return .{ .x = val };
+        \\}
+        \\export fn entry() void {
+        \\    const baz: Foo = undefined;
+        \\    baz = foo();
+        \\}
+        \\export fn entry1() void {
+        \\    const baz: Foo = undefined;
+        \\    baz = bar(42);
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:12:14: error: cannot assign to constant",
+        "tmp.zig:16:14: error: cannot assign to constant",
+    });
+
+    cases.add("invalid pointer syntax",
+        \\export fn foo() void {
+        \\    var guid: *:0 const u8 = undefined;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:15: error: sentinels are only allowed on unknown-length pointers",
+    });
+
+    cases.add("declaration between fields",
+        \\const S = struct {
+        \\    const foo = 2;
+        \\    const bar = 2;
+        \\    const baz = 2;
+        \\    a: usize,
+        \\    const foo1 = 2;
+        \\    const bar1 = 2;
+        \\    const baz1 = 2;
+        \\    b: usize,
+        \\};
+        \\comptime {
+        \\    _ = S;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:6:5: error: declarations are not allowed between container fields",
+    });
+
+    cases.add("non-extern function with var args",
+        \\fn foo(args: ...) void {}
+        \\export fn entry() void {
+        \\    foo();
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:1:1: error: non-extern function is variadic",
+    });
+
+    cases.addTest("invalid int casts",
+        \\export fn foo() void {
+        \\    var a: u32 = 2;
+        \\    _ = @intCast(comptime_int, a);
+        \\}
+        \\export fn bar() void {
+        \\    var a: u32 = 2;
+        \\    _ = @intToFloat(u32, a);
+        \\}
+        \\export fn baz() void {
+        \\    var a: u32 = 2;
+        \\    _ = @floatToInt(u32, a);
+        \\}
+        \\export fn qux() void {
+        \\    var a: f32 = 2;
+        \\    _ = @intCast(u32, a);
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:3:32: error: unable to evaluate constant expression",
+        "tmp.zig:3:9: note: referenced here",
+        "tmp.zig:7:21: error: expected float type, found 'u32'",
+        "tmp.zig:7:9: note: referenced here",
+        "tmp.zig:11:26: error: expected float type, found 'u32'",
+        "tmp.zig:11:9: note: referenced here",
+        "tmp.zig:15:23: error: expected integer type, found 'f32'",
+        "tmp.zig:15:9: note: referenced here",
+    });
+
+    cases.addTest("invalid float casts",
+        \\export fn foo() void {
+        \\    var a: f32 = 2;
+        \\    _ = @floatCast(comptime_float, a);
+        \\}
+        \\export fn bar() void {
+        \\    var a: f32 = 2;
+        \\    _ = @floatToInt(f32, a);
+        \\}
+        \\export fn baz() void {
+        \\    var a: f32 = 2;
+        \\    _ = @intToFloat(f32, a);
+        \\}
+        \\export fn qux() void {
+        \\    var a: u32 = 2;
+        \\    _ = @floatCast(f32, a);
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:3:36: error: unable to evaluate constant expression",
+        "tmp.zig:3:9: note: referenced here",
+        "tmp.zig:7:21: error: expected integer type, found 'f32'",
+        "tmp.zig:7:9: note: referenced here",
+        "tmp.zig:11:26: error: expected int type, found 'f32'",
+        "tmp.zig:11:9: note: referenced here",
+        "tmp.zig:15:25: error: expected float type, found 'u32'",
+        "tmp.zig:15:9: note: referenced here",
+    });
+
     cases.addTest("invalid assignments",
         \\export fn entry1() void {
         \\    var a: []const u8 = "foo";
@@ -152,9 +618,9 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         "tmp.zig:17:17: error: RHS of shift is too large for LHS type",
     });
 
-    cases.addTest("combination of noasync and async",
+    cases.addTest("combination of nosuspend and async",
         \\export fn entry() void {
-        \\    noasync {
+        \\    nosuspend {
         \\        const bar = async foo();
         \\        suspend;
         \\        resume bar;
@@ -162,9 +628,9 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\}
         \\fn foo() void {}
     , &[_][]const u8{
-        "tmp.zig:3:21: error: async call in noasync scope",
-        "tmp.zig:4:9: error: suspend in noasync scope",
-        "tmp.zig:5:9: error: resume in noasync scope",
+        "tmp.zig:3:21: error: async call in nosuspend scope",
+        "tmp.zig:4:9: error: suspend in nosuspend scope",
+        "tmp.zig:5:9: error: resume in nosuspend scope",
     });
 
     cases.add("atomicrmw with bool op not .Xchg",
@@ -318,8 +784,8 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    _ = C;
         \\}
     , &[_][]const u8{
-        "tmp.zig:4:5: error: non-exhaustive enum must specify size",
-        "error: value assigned to '_' field of non-exhaustive enum",
+        "tmp.zig:4:5: error: value assigned to '_' field of non-exhaustive enum",
+        "error: non-exhaustive enum must specify size",
         "error: non-exhaustive enum specifies every value",
         "error: '_' field of non-exhaustive enum must be last",
     });
@@ -329,6 +795,10 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    a,
         \\    b,
         \\    _,
+        \\};
+        \\const U = union(E) {
+        \\    a: i32,
+        \\    b: u32,
         \\};
         \\pub export fn entry() void {
         \\    var e: E = .b;
@@ -340,10 +810,113 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\        .a => {},
         \\        .b => {},
         \\    }
+        \\    var u = U{.a = 2};
+        \\    switch (u) { // error: `_` prong not allowed when switching on tagged union
+        \\        .a => {},
+        \\        .b => {},
+        \\        _ => {},
+        \\    }
         \\}
     , &[_][]const u8{
-        "tmp.zig:8:5: error: enumeration value 'E.b' not handled in switch",
-        "tmp.zig:12:5: error: switch on non-exhaustive enum must include `else` or `_` prong",
+        "tmp.zig:12:5: error: enumeration value 'E.b' not handled in switch",
+        "tmp.zig:16:5: error: switch on non-exhaustive enum must include `else` or `_` prong",
+        "tmp.zig:21:5: error: `_` prong not allowed when switching on tagged union",
+    });
+
+    cases.add("switch expression - unreachable else prong (bool)",
+        \\fn foo(x: bool) void {
+        \\    switch (x) {
+        \\        true => {},
+        \\        false => {},
+        \\        else => {},
+        \\    }
+        \\}
+        \\export fn entry() usize { return @sizeOf(@TypeOf(foo)); }
+    , &[_][]const u8{
+        "tmp.zig:5:9: error: unreachable else prong, all cases already handled",
+    });
+
+    cases.add("switch expression - unreachable else prong (u1)",
+        \\fn foo(x: u1) void {
+        \\    switch (x) {
+        \\        0 => {},
+        \\        1 => {},
+        \\        else => {},
+        \\    }
+        \\}
+        \\export fn entry() usize { return @sizeOf(@TypeOf(foo)); }
+    , &[_][]const u8{
+        "tmp.zig:5:9: error: unreachable else prong, all cases already handled",
+    });
+
+    cases.add("switch expression - unreachable else prong (u2)",
+        \\fn foo(x: u2) void {
+        \\    switch (x) {
+        \\        0 => {},
+        \\        1 => {},
+        \\        2 => {},
+        \\        3 => {},
+        \\        else => {},
+        \\    }
+        \\}
+        \\export fn entry() usize { return @sizeOf(@TypeOf(foo)); }
+    , &[_][]const u8{
+        "tmp.zig:7:9: error: unreachable else prong, all cases already handled",
+    });
+
+    cases.add("switch expression - unreachable else prong (range u8)",
+        \\fn foo(x: u8) void {
+        \\    switch (x) {
+        \\        0 => {},
+        \\        1 => {},
+        \\        2 => {},
+        \\        3 => {},
+        \\        4...255 => {},
+        \\        else => {},
+        \\    }
+        \\}
+        \\export fn entry() usize { return @sizeOf(@TypeOf(foo)); }
+    , &[_][]const u8{
+        "tmp.zig:8:9: error: unreachable else prong, all cases already handled",
+    });
+
+    cases.add("switch expression - unreachable else prong (range i8)",
+        \\fn foo(x: i8) void {
+        \\    switch (x) {
+        \\        -128...0 => {},
+        \\        1 => {},
+        \\        2 => {},
+        \\        3 => {},
+        \\        4...127 => {},
+        \\        else => {},
+        \\    }
+        \\}
+        \\export fn entry() usize { return @sizeOf(@TypeOf(foo)); }
+    , &[_][]const u8{
+        "tmp.zig:8:9: error: unreachable else prong, all cases already handled",
+    });
+
+    cases.add("switch expression - unreachable else prong (enum)",
+        \\const TestEnum = enum{ T1, T2 };
+        \\
+        \\fn err(x: u8) TestEnum {
+        \\    switch (x) {
+        \\        0 => return TestEnum.T1,
+        \\        else => return TestEnum.T2,
+        \\    }
+        \\}
+        \\
+        \\fn foo(x: u8) void {
+        \\    switch (err(x)) {
+        \\        TestEnum.T1 => {},
+        \\        TestEnum.T2 => {},
+        \\        else => {},
+        \\    }
+        \\}
+        \\
+        \\export fn entry() usize { return @sizeOf(@TypeOf(foo)); }
+    , &[_][]const u8{
+        "tmp.zig:14:9: error: unreachable else prong, all cases already handled",
     });
 
     cases.addTest("@export with empty name string",
@@ -375,7 +948,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    for (arr) |bits| _ = @popCount(bits);
         \\}
     , &[_][]const u8{
-        "tmp.zig:3:26: error: expected 2 arguments, found 1",
+        "tmp.zig:3:26: error: expected 2 argument(s), found 1",
     });
 
     cases.addTest("@call rejects non comptime-known fn - always_inline",
@@ -463,7 +1036,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    _ = @cmpxchgWeak(f32, &x, 1, 2, .SeqCst, .SeqCst);
         \\}
     , &[_][]const u8{
-        "tmp.zig:3:22: error: expected integer, enum or pointer type, found 'f32'",
+        "tmp.zig:3:22: error: expected bool, integer, enum or pointer type, found 'f32'",
     });
 
     cases.add("atomicrmw with float op not .Xchg, .Add or .Sub",
@@ -647,15 +1220,6 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         "tmp.zig:2:28: error: invalid character: ';'",
     });
 
-    cases.add("var args without c calling conv",
-        \\fn foo(args: ...) void {}
-        \\comptime {
-        \\    _ = foo;
-        \\}
-    , &[_][]const u8{
-        "tmp.zig:1:8: error: var args only allowed in functions with C calling convention",
-    });
-
     cases.add("comptime struct field, no init value",
         \\const Foo = struct {
         \\    comptime b: i32,
@@ -697,7 +1261,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     });
 
     cases.add("exported async function",
-        \\export async fn foo() void {}
+        \\export fn foo() callconv(.Async) void {}
     , &[_][]const u8{
         "tmp.zig:1:1: error: exported function cannot be async",
     });
@@ -797,10 +1361,10 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    };
         \\}
     , &[_][]const u8{
-        "tmp.zig:11:25: error: expected type 'u32', found '@TypeOf(get_uval).ReturnType.ErrorSet!u32'",
+        "tmp.zig:11:25: error: expected type 'u32', found '@typeInfo(@typeInfo(@TypeOf(get_uval)).Fn.return_type.?).ErrorUnion.error_set!u32'",
     });
 
-    cases.add("asigning to struct or union fields that are not optionals with a function that returns an optional",
+    cases.add("assigning to struct or union fields that are not optionals with a function that returns an optional",
         \\fn maybe(is: bool) ?u8 {
         \\    if (is) return @as(u8, 10) else return null;
         \\}
@@ -902,13 +1466,13 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
 
     cases.add("store vector pointer with unknown runtime index",
         \\export fn entry() void {
-        \\    var v: @Vector(4, i32) = [_]i32{ 1, 5, 3, undefined };
+        \\    var v: @import("std").meta.Vector(4, i32) = [_]i32{ 1, 5, 3, undefined };
         \\
         \\    var i: u32 = 0;
         \\    storev(&v[i], 42);
         \\}
         \\
-        \\fn storev(ptr: var, val: i32) void {
+        \\fn storev(ptr: anytype, val: i32) void {
         \\    ptr.* = val;
         \\}
     , &[_][]const u8{
@@ -917,13 +1481,13 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
 
     cases.add("load vector pointer with unknown runtime index",
         \\export fn entry() void {
-        \\    var v: @Vector(4, i32) = [_]i32{ 1, 5, 3, undefined };
+        \\    var v: @import("std").meta.Vector(4, i32) = [_]i32{ 1, 5, 3, undefined };
         \\
         \\    var i: u32 = 0;
         \\    var x = loadv(&v[i]);
         \\}
         \\
-        \\fn loadv(ptr: var) i32 {
+        \\fn loadv(ptr: anytype) i32 {
         \\    return ptr.*;
         \\}
     , &[_][]const u8{
@@ -1022,13 +1586,17 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     , &[_][]const u8{
         "tmp.zig:3:36: error: expected type 'std.builtin.TypeInfo', found 'std.builtin.Int'",
     });
-
-    cases.add("Struct unavailable for @Type",
-        \\export fn entry() void {
-        \\    _ = @Type(@typeInfo(struct { }));
+    cases.add("wrong type for argument tuple to @asyncCall",
+        \\export fn entry1() void {
+        \\    var frame: @Frame(foo) = undefined;
+        \\    @asyncCall(&frame, {}, foo, {});
+        \\}
+        \\
+        \\fn foo() i32 {
+        \\    return 0;
         \\}
     , &[_][]const u8{
-        "tmp.zig:2:15: error: @Type not availble for 'TypeInfo.Struct'",
+        "tmp.zig:3:33: error: expected tuple or struct, found 'void'",
     });
 
     cases.add("wrong type for result ptr to @asyncCall",
@@ -1037,7 +1605,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\}
         \\fn amain() i32 {
         \\    var frame: @Frame(foo) = undefined;
-        \\    return await @asyncCall(&frame, false, foo);
+        \\    return await @asyncCall(&frame, false, foo, .{});
         \\}
         \\fn foo() i32 {
         \\    return 1234;
@@ -1176,11 +1744,11 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
 
     cases.add("bad alignment in @asyncCall",
         \\export fn entry() void {
-        \\    var ptr: async fn () void = func;
+        \\    var ptr: fn () callconv(.Async) void = func;
         \\    var bytes: [64]u8 = undefined;
-        \\    _ = @asyncCall(&bytes, {}, ptr);
+        \\    _ = @asyncCall(&bytes, {}, ptr, .{});
         \\}
-        \\async fn func() void {}
+        \\fn func() callconv(.Async) void {}
     , &[_][]const u8{
         "tmp.zig:4:21: error: expected type '[]align(16) u8', found '*[64]u8'",
     });
@@ -1326,7 +1894,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\export fn entry() void {
         \\    _ = async amain();
         \\}
-        \\async fn amain() void {
+        \\fn amain() callconv(.Async) void {
         \\    other();
         \\}
         \\fn other() void {
@@ -1342,7 +1910,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\export fn entry() void {
         \\    _ = async amain();
         \\}
-        \\async fn amain() void {
+        \\fn amain() callconv(.Async) void {
         \\    var x: [@sizeOf(@Frame(amain))]u8 = undefined;
         \\}
     , &[_][]const u8{
@@ -1354,7 +1922,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\export fn entry() void {
         \\    var ptr = afunc;
         \\    var bytes: [100]u8 align(16) = undefined;
-        \\    _ = @asyncCall(&bytes, {}, ptr);
+        \\    _ = @asyncCall(&bytes, {}, ptr, .{});
         \\}
         \\fn afunc() void { }
     , &[_][]const u8{
@@ -1369,7 +1937,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    var ptr = afunc;
         \\    _ = ptr();
         \\}
-        \\async fn afunc() void {}
+        \\fn afunc() callconv(.Async) void {}
     , &[_][]const u8{
         "tmp.zig:6:12: error: function is not comptime-known; @asyncCall required",
     });
@@ -1380,7 +1948,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    _ = async ptr();
         \\}
         \\
-        \\async fn afunc() void { }
+        \\fn afunc() callconv(.Async) void { }
     , &[_][]const u8{
         "tmp.zig:3:15: error: function is not comptime-known; @asyncCall required",
     });
@@ -1498,7 +2066,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    const info = @TypeOf(slice).unknown;
         \\}
     , &[_][]const u8{
-        "tmp.zig:3:32: error: type '[]i32' does not support field access",
+        "tmp.zig:3:32: error: type 'type' does not support field access",
     });
 
     cases.add("peer cast then implicit cast const pointer to mutable C pointer",
@@ -1693,7 +2261,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    while (true) {}
         \\}
     , &[_][]const u8{
-        "error: expected type 'fn([]const u8, ?*std.builtin.StackTrace) noreturn', found 'fn([]const u8,var) var'",
+        "error: expected type 'fn([]const u8, ?*std.builtin.StackTrace) noreturn', found 'fn([]const u8,anytype) anytype'",
         "note: only one of the functions is generic",
     });
 
@@ -1787,7 +2355,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
             \\    exit(0);
             \\}
         , &[_][]const u8{
-            "tmp.zig:3:5: error: dependency on library c must be explicitly specified in the build command",
+            "tmp.zig:3:5: error: dependency on libc must be explicitly specified in the build command",
         });
 
         cases.addTest("libc headers note",
@@ -1803,8 +2371,8 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
 
     cases.addTest("comptime vector overflow shows the index",
         \\comptime {
-        \\    var a: @Vector(4, u8) = [_]u8{ 1, 2, 255, 4 };
-        \\    var b: @Vector(4, u8) = [_]u8{ 5, 6, 1, 8 };
+        \\    var a: @import("std").meta.Vector(4, u8) = [_]u8{ 1, 2, 255, 4 };
+        \\    var b: @import("std").meta.Vector(4, u8) = [_]u8{ 5, 6, 1, 8 };
         \\    var x = a + b;
         \\}
     , &[_][]const u8{
@@ -1893,11 +2461,11 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     });
 
     cases.add("export generic function",
-        \\export fn foo(num: var) i32 {
+        \\export fn foo(num: anytype) i32 {
         \\    return 0;
         \\}
     , &[_][]const u8{
-        "tmp.zig:1:15: error: parameter of type 'var' not allowed in function with calling convention 'C'",
+        "tmp.zig:1:15: error: parameter of type 'anytype' not allowed in function with calling convention 'C'",
     });
 
     cases.add("C pointer to c_void",
@@ -1910,7 +2478,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     });
 
     cases.add("directly embedding opaque type in struct and union",
-        \\const O = @OpaqueType();
+        \\const O = @Type(.Opaque);
         \\const Foo = struct {
         \\    o: O,
         \\};
@@ -1925,7 +2493,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    var bar: Bar = undefined;
         \\}
         \\export fn c() void {
-        \\    var baz: *@OpaqueType() = undefined;
+        \\    var baz: *@Type(.Opaque) = undefined;
         \\    const qux = .{baz.*};
         \\}
     , &[_][]const u8{
@@ -2603,7 +3171,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         "tmp.zig:7:17: error: switch on type 'type' provides no expression parameter",
     });
 
-    cases.add("function protoype with no body",
+    cases.add("function prototype with no body",
         \\fn foo() void;
         \\export fn entry() void {
         \\    foo();
@@ -2697,7 +3265,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     });
 
     cases.add("missing parameter name of generic function",
-        \\fn dump(var) void {}
+        \\fn dump(anytype) void {}
         \\export fn entry() void {
         \\    var a: u8 = 9;
         \\    dump(a);
@@ -2720,13 +3288,13 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     });
 
     cases.add("generic fn as parameter without comptime keyword",
-        \\fn f(_: fn (var) void) void {}
-        \\fn g(_: var) void {}
+        \\fn f(_: fn (anytype) void) void {}
+        \\fn g(_: anytype) void {}
         \\export fn entry() void {
         \\    f(g);
         \\}
     , &[_][]const u8{
-        "tmp.zig:1:9: error: parameter of type 'fn(var) var' must be declared comptime",
+        "tmp.zig:1:9: error: parameter of type 'fn(anytype) anytype' must be declared comptime",
     });
 
     cases.add("optional pointer to void in extern struct",
@@ -2889,7 +3457,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     });
 
     cases.add("unknown length pointer to opaque",
-        \\export const T = [*]@OpaqueType();
+        \\export const T = [*]@Type(.Opaque);
     , &[_][]const u8{
         "tmp.zig:1:21: error: unknown-length pointer to opaque",
     });
@@ -2969,7 +3537,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\export fn entry() void {
         \\    _ = async foo();
         \\}
-        \\async fn foo() void {
+        \\fn foo() void {
         \\    suspend {
         \\        suspend {
         \\        }
@@ -3017,7 +3585,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\export fn entry() void {
         \\    _ = async amain();
         \\}
-        \\async fn amain() void {
+        \\fn amain() callconv(.Async) void {
         \\    return error.ShouldBeCompileError;
         \\}
     , &[_][]const u8{
@@ -3026,7 +3594,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
 
     cases.add("var makes structs required to be comptime known",
         \\export fn entry() void {
-        \\   const S = struct{v: var};
+        \\   const S = struct{v: anytype};
         \\   var s = S{.v=@as(i32, 10)};
         \\}
     , &[_][]const u8{
@@ -3111,7 +3679,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    }
         \\}
     , &[_][]const u8{
-        "tmp.zig:5:14: error: duplicate switch value: '@TypeOf(foo).ReturnType.ErrorSet.Foo'",
+        "tmp.zig:5:14: error: duplicate switch value: '@typeInfo(@typeInfo(@TypeOf(foo)).Fn.return_type.?).ErrorUnion.error_set.Foo'",
         "tmp.zig:3:14: note: other value is here",
     });
 
@@ -3243,7 +3811,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    try foo();
         \\}
     , &[_][]const u8{
-        "tmp.zig:5:5: error: cannot resolve inferred error set '@TypeOf(foo).ReturnType.ErrorSet': function 'foo' not fully analyzed yet",
+        "tmp.zig:5:5: error: cannot resolve inferred error set '@typeInfo(@typeInfo(@TypeOf(foo)).Fn.return_type.?).ErrorUnion.error_set': function 'foo' not fully analyzed yet",
     });
 
     cases.add("implicit cast of error set not a subset",
@@ -3487,7 +4055,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     });
 
     cases.add("attempt to use 0 bit type in extern fn",
-        \\extern fn foo(ptr: extern fn(*void) void) void;
+        \\extern fn foo(ptr: fn(*void) callconv(.C) void) void;
         \\
         \\export fn entry() void {
         \\    foo(bar);
@@ -3498,7 +4066,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    bar(&{});
         \\}
     , &[_][]const u8{
-        "tmp.zig:1:30: error: parameter of type '*void' has 0 bits; not allowed in function with calling convention 'C'",
+        "tmp.zig:1:23: error: parameter of type '*void' has 0 bits; not allowed in function with calling convention 'C'",
         "tmp.zig:7:11: error: parameter of type '*void' has 0 bits; not allowed in function with calling convention 'C'",
     });
 
@@ -3769,7 +4337,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\}
         \\fn b(a: i32, b: i32, c: i32) void { }
     , &[_][]const u8{
-        "tmp.zig:2:6: error: expected 3 arguments, found 1",
+        "tmp.zig:2:6: error: expected 3 argument(s), found 1",
     });
 
     cases.add("invalid type",
@@ -4249,6 +4817,40 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         "tmp.zig:5:14: note: previous value is here",
     });
 
+    cases.add("switch expression - duplicate type",
+        \\fn foo(comptime T: type, x: T) u8 {
+        \\    return switch (T) {
+        \\        u32 => 0,
+        \\        u64 => 1,
+        \\        u32 => 2,
+        \\        else => 3,
+        \\    };
+        \\}
+        \\export fn entry() usize { return @sizeOf(@TypeOf(foo(u32, 0))); }
+    , &[_][]const u8{
+        "tmp.zig:5:9: error: duplicate switch value",
+        "tmp.zig:3:9: note: previous value is here",
+    });
+
+    cases.add("switch expression - duplicate type (struct alias)",
+        \\const Test = struct {
+        \\    bar: i32,
+        \\};
+        \\const Test2 = Test;
+        \\fn foo(comptime T: type, x: T) u8 {
+        \\    return switch (T) {
+        \\        Test => 0,
+        \\        u64 => 1,
+        \\        Test2 => 2,
+        \\        else => 3,
+        \\    };
+        \\}
+        \\export fn entry() usize { return @sizeOf(@TypeOf(foo(u32, 0))); }
+    , &[_][]const u8{
+        "tmp.zig:9:9: error: duplicate switch value",
+        "tmp.zig:7:9: note: previous value is here",
+    });
+
     cases.add("switch expression - switch on pointer type with no else",
         \\fn foo(x: *u8) void {
         \\    switch (x) {
@@ -4348,7 +4950,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\
         \\export fn entry() usize { return @sizeOf(@TypeOf(f)); }
     , &[_][]const u8{
-        "tmp.zig:20:34: error: expected 1 arguments, found 0",
+        "tmp.zig:20:34: error: expected 1 argument(s), found 0",
     });
 
     cases.add("missing function name",
@@ -4478,7 +5080,17 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    const pointer = &array[0];
         \\}
     , &[_][]const u8{
-        "tmp.zig:3:27: error: index 0 outside array of size 0",
+        "tmp.zig:3:27: error: accessing a zero length array is not allowed",
+    });
+
+    cases.add("indexing an array of size zero with runtime index",
+        \\const array = [_]u8{};
+        \\export fn foo() void {
+        \\    var index: usize = 0;
+        \\    const pointer = &array[index];
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:4:27: error: accessing a zero length array is not allowed",
     });
 
     cases.add("compile time division by zero",
@@ -5120,7 +5732,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\}
         \\export fn entry() usize { return @sizeOf(@TypeOf(f)); }
     , &[_][]const u8{
-        "tmp.zig:6:15: error: expected 2 arguments, found 3",
+        "tmp.zig:6:15: error: expected 2 argument(s), found 3",
     });
 
     cases.add("assign through constant pointer",
@@ -5255,6 +5867,50 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
 
         tc.addSourceFile("foo.zig",
             \\fn privateFunction() void { }
+        );
+
+        break :x tc;
+    });
+
+    cases.addCase(x: {
+        const tc = cases.create("multiple files with private member instance function (canonical invocation) error",
+            \\const Foo = @import("foo.zig",).Foo;
+            \\
+            \\export fn callPrivFunction() void {
+            \\    var foo = Foo{};
+            \\    Foo.privateFunction(foo);
+            \\}
+        , &[_][]const u8{
+            "tmp.zig:5:8: error: 'privateFunction' is private",
+            "foo.zig:2:5: note: declared here",
+        });
+
+        tc.addSourceFile("foo.zig",
+            \\pub const Foo = struct {
+            \\    fn privateFunction(self: *Foo) void { }
+            \\};
+        );
+
+        break :x tc;
+    });
+
+    cases.addCase(x: {
+        const tc = cases.create("multiple files with private member instance function error",
+            \\const Foo = @import("foo.zig",).Foo;
+            \\
+            \\export fn callPrivFunction() void {
+            \\    var foo = Foo{};
+            \\    foo.privateFunction();
+            \\}
+        , &[_][]const u8{
+            "tmp.zig:5:8: error: 'privateFunction' is private",
+            "foo.zig:2:5: note: declared here",
+        });
+
+        tc.addSourceFile("foo.zig",
+            \\pub const Foo = struct {
+            \\    fn privateFunction(self: *Foo) void { }
+            \\};
         );
 
         break :x tc;
@@ -5729,32 +6385,33 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         "tmp.zig:2:15: error: expected error union type, found '?i32'",
     });
 
-    cases.add("inline fn calls itself indirectly",
-        \\export fn foo() void {
-        \\    bar();
-        \\}
-        \\inline fn bar() void {
-        \\    baz();
-        \\    quux();
-        \\}
-        \\inline fn baz() void {
-        \\    bar();
-        \\    quux();
-        \\}
-        \\extern fn quux() void;
-    , &[_][]const u8{
-        "tmp.zig:4:1: error: unable to inline function",
-    });
+    // TODO test this in stage2, but we won't even try in stage1
+    //cases.add("inline fn calls itself indirectly",
+    //    \\export fn foo() void {
+    //    \\    bar();
+    //    \\}
+    //    \\inline fn bar() void {
+    //    \\    baz();
+    //    \\    quux();
+    //    \\}
+    //    \\inline fn baz() void {
+    //    \\    bar();
+    //    \\    quux();
+    //    \\}
+    //    \\extern fn quux() void;
+    //, &[_][]const u8{
+    //    "tmp.zig:4:1: error: unable to inline function",
+    //});
 
-    cases.add("save reference to inline function",
-        \\export fn foo() void {
-        \\    quux(@ptrToInt(bar));
-        \\}
-        \\inline fn bar() void { }
-        \\extern fn quux(usize) void;
-    , &[_][]const u8{
-        "tmp.zig:4:1: error: unable to inline function",
-    });
+    //cases.add("save reference to inline function",
+    //    \\export fn foo() void {
+    //    \\    quux(@ptrToInt(bar));
+    //    \\}
+    //    \\inline fn bar() void { }
+    //    \\extern fn quux(usize) void;
+    //, &[_][]const u8{
+    //    "tmp.zig:4:1: error: unable to inline function",
+    //});
 
     cases.add("signed integer division",
         \\export fn foo(a: i32, b: i32) i32 {
@@ -5845,10 +6502,10 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     });
 
     cases.add("calling a generic function only known at runtime",
-        \\var foos = [_]fn(var) void { foo1, foo2 };
+        \\var foos = [_]fn(anytype) void { foo1, foo2 };
         \\
-        \\fn foo1(arg: var) void {}
-        \\fn foo2(arg: var) void {}
+        \\fn foo1(arg: anytype) void {}
+        \\fn foo2(arg: anytype) void {}
         \\
         \\pub fn main() !void {
         \\    foos[0](true);
@@ -5925,7 +6582,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    return 0x11 << x;
         \\}
     , &[_][]const u8{
-        "tmp.zig:2:17: error: LHS of shift must be an integer type, or RHS must be compile-time known",
+        "tmp.zig:2:17: error: LHS of shift must be a fixed-width integer type, or RHS must be compile-time known",
     });
 
     cases.add("shifting RHS is log2 of LHS int bit width",
@@ -6035,8 +6692,8 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         "tmp.zig:2:31: error: index 2 outside array of size 2",
     });
 
-    cases.add("wrong pointer coerced to pointer to @OpaqueType()",
-        \\const Derp = @OpaqueType();
+    cases.add("wrong pointer coerced to pointer to @Type(.Opaque)",
+        \\const Derp = @Type(.Opaque);
         \\extern fn bar(d: *Derp) void;
         \\export fn foo() void {
         \\    var x = @as(u8, 1);
@@ -6074,7 +6731,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\export fn entry9() void {
         \\   var z: noreturn = return;
         \\}
-        \\const Opaque = @OpaqueType();
+        \\const Opaque = @Type(.Opaque);
         \\const Foo = struct {
         \\    fn bar(self: *const Foo) void {}
         \\};
@@ -6228,7 +6885,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     });
 
     cases.add("field access of opaque type",
-        \\const MyType = @OpaqueType();
+        \\const MyType = @Type(.Opaque);
         \\
         \\export fn entry() bool {
         \\    var x: i32 = 1;
@@ -6240,12 +6897,6 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\}
     , &[_][]const u8{
         "tmp.zig:9:13: error: type '*MyType' does not support field access",
-    });
-
-    cases.add("carriage return special case", "fn test() bool {\r\n" ++
-        "   true\r\n" ++
-        "}\r\n", &[_][]const u8{
-        "tmp.zig:1:17: error: invalid carriage return, only '\\n' line endings are supported",
     });
 
     cases.add("invalid legacy unicode escape",
@@ -6692,15 +7343,6 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         "tmp.zig:7:24: error: accessing union field 'Bar' while field 'Baz' is set",
     });
 
-    cases.add("getting return type of generic function",
-        \\fn generic(a: var) void {}
-        \\comptime {
-        \\    _ = @TypeOf(generic).ReturnType;
-        \\}
-    , &[_][]const u8{
-        "tmp.zig:3:25: error: ReturnType has not been resolved because 'fn(var) var' is generic",
-    });
-
     cases.add("unsupported modifier at start of asm output constraint",
         \\export fn foo() void {
         \\    var bar: u32 = 3;
@@ -6754,8 +7396,8 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
 
     cases.addTest("@shuffle with selected index past first vector length",
         \\export fn entry() void {
-        \\    const v: @Vector(4, u32) = [4]u32{ 10, 11, 12, 13 };
-        \\    const x: @Vector(4, u32) = [4]u32{ 14, 15, 16, 17 };
+        \\    const v: @import("std").meta.Vector(4, u32) = [4]u32{ 10, 11, 12, 13 };
+        \\    const x: @import("std").meta.Vector(4, u32) = [4]u32{ 14, 15, 16, 17 };
         \\    var z = @shuffle(u32, v, x, [8]i32{ 0, 1, 2, 3, 7, 6, 5, 4 });
         \\}
     , &[_][]const u8{
@@ -6766,11 +7408,13 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
 
     cases.addTest("nested vectors",
         \\export fn entry() void {
-        \\    const V = @Vector(4, @Vector(4, u8));
-        \\    var v: V = undefined;
+        \\    const V1 = @import("std").meta.Vector(4, u8);
+        \\    const V2 = @Type(@import("builtin").TypeInfo{ .Vector = .{ .len = 4, .child = V1 } });
+        \\    var v: V2 = undefined;
         \\}
     , &[_][]const u8{
-        "tmp.zig:2:26: error: vector element type must be integer, float, bool, or pointer; '@Vector(4, u8)' is invalid",
+        "tmp.zig:3:49: error: vector element type must be integer, float, bool, or pointer; '@Vector(4, u8)' is invalid",
+        "tmp.zig:3:16: note: referenced here",
     });
 
     cases.addTest("bad @splat type",
@@ -6844,7 +7488,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     });
 
     cases.add("function returning opaque type",
-        \\const FooType = @OpaqueType();
+        \\const FooType = @Type(.Opaque);
         \\export fn bar() !FooType {
         \\    return error.InvalidValue;
         \\}
@@ -6862,7 +7506,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     });
 
     cases.add("generic function returning opaque type",
-        \\const FooType = @OpaqueType();
+        \\const FooType = @Type(.Opaque);
         \\fn generic(comptime T: type) !T {
         \\    return undefined;
         \\}
@@ -6883,6 +7527,32 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         "tmp.zig:2:1: note: function declared here",
         "tmp.zig:12:16: error: call to generic function with Undefined return type '(undefined)' not allowed",
         "tmp.zig:2:1: note: function declared here",
+    });
+
+    cases.add("function parameter is opaque",
+        \\const FooType = @Type(.Opaque);
+        \\export fn entry1() void {
+        \\    const someFuncPtr: fn (FooType) void = undefined;
+        \\}
+        \\
+        \\export fn entry2() void {
+        \\    const someFuncPtr: fn (@TypeOf(null)) void = undefined;
+        \\}
+        \\
+        \\fn foo(p: FooType) void {}
+        \\export fn entry3() void {
+        \\    _ = foo;
+        \\}
+        \\
+        \\fn bar(p: @TypeOf(null)) void {}
+        \\export fn entry4() void {
+        \\    _ = bar;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:3:28: error: parameter of opaque type 'FooType' not allowed",
+        "tmp.zig:7:28: error: parameter of type '(null)' not allowed",
+        "tmp.zig:10:11: error: parameter of opaque type 'FooType' not allowed",
+        "tmp.zig:15:11: error: parameter of type '(null)' not allowed",
     });
 
     cases.add( // fixed bug #2032
@@ -7235,5 +7905,123 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     , &[_][]const u8{
         ":3:18: error: expected type '[*:0]const u8', found '*[64]u8'",
         ":3:18: note: destination pointer requires a terminating '0' sentinel",
+    });
+
+    cases.add("issue #5221: invalid struct init type referenced by @typeInfo and passed into function",
+        \\fn ignore(comptime param: anytype) void {}
+        \\
+        \\export fn foo() void {
+        \\    const MyStruct = struct {
+        \\        wrong_type: []u8 = "foo",
+        \\    };
+        \\
+        \\    comptime ignore(@typeInfo(MyStruct).Struct.fields[0]);
+        \\}
+    , &[_][]const u8{
+        ":5:28: error: expected type '[]u8', found '*const [3:0]u8'",
+    });
+
+    cases.add("integer underflow error",
+        \\export fn entry() void {
+        \\    _ = @intToPtr(*c_void, ~@as(usize, @import("std").math.maxInt(usize)) - 1);
+        \\}
+    , &[_][]const u8{
+        ":2:75: error: operation caused overflow",
+    });
+
+    cases.addCase(x: {
+        var tc = cases.create("align(N) expr function pointers is a compile error",
+            \\export fn foo() align(1) void {
+            \\    return;
+            \\}
+        , &[_][]const u8{
+            "tmp.zig:1:23: error: align(N) expr is not allowed on function prototypes in wasm32/wasm64",
+        });
+        tc.target = std.zig.CrossTarget{
+            .cpu_arch = .wasm32,
+            .os_tag = .freestanding,
+            .abi = .none,
+        };
+        break :x tc;
+    });
+
+    cases.add("compare optional to non-optional with invalid types",
+        \\export fn inconsistentChildType() void {
+        \\    var x: ?i32 = undefined;
+        \\    const y: comptime_int = 10;
+        \\    _ = (x == y);
+        \\}
+        \\
+        \\export fn optionalToOptional() void {
+        \\    var x: ?i32 = undefined;
+        \\    var y: ?i32 = undefined;
+        \\    _ = (x == y);
+        \\}
+        \\
+        \\export fn optionalVector() void {
+        \\    var x: ?@Vector(10, i32) = undefined;
+        \\    var y: @Vector(10, i32) = undefined;
+        \\    _ = (x == y);
+        \\}
+        \\
+        \\export fn invalidChildType() void {
+        \\    var x: ?[3]i32 = undefined;
+        \\    var y: [3]i32 = undefined;
+        \\    _ = (x == y);
+        \\}
+    , &[_][]const u8{
+        ":4:12: error: cannot compare types '?i32' and 'comptime_int'",
+        ":4:12: note: optional child type 'i32' must be the same as non-optional type 'comptime_int'",
+        ":10:12: error: cannot compare types '?i32' and '?i32'",
+        ":10:12: note: optional to optional comparison is only supported for optional pointer types",
+        ":16:12: error: TODO add comparison of optional vector",
+        ":22:12: error: cannot compare types '?[3]i32' and '[3]i32'",
+        ":22:12: note: operator not supported for type '[3]i32'",
+    });
+
+    cases.add("slice cannot have its bytes reinterpreted",
+        \\export fn foo() void {
+        \\    const bytes = [1]u8{ 0xfa } ** 16;
+        \\    var value = @ptrCast(*const []const u8, &bytes).*;
+        \\}
+    , &[_][]const u8{
+        ":3:52: error: slice '[]const u8' cannot have its bytes reinterpreted",
+    });
+
+    cases.add("wasmMemorySize is a compile error in non-Wasm targets",
+        \\export fn foo() void {
+        \\    _ = @wasmMemorySize(0);
+        \\    return;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:9: error: @wasmMemorySize is a wasm32 feature only",
+    });
+
+    cases.add("wasmMemoryGrow is a compile error in non-Wasm targets",
+        \\export fn foo() void {
+        \\    _ = @wasmMemoryGrow(0, 1);
+        \\    return;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:9: error: @wasmMemoryGrow is a wasm32 feature only",
+    });
+
+    cases.add("Issue #5586: Make unary minus for unsigned types a compile error",
+        \\export fn f(x: u32) u32 {
+        \\    const y = -%x;
+        \\    return -y;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:3:12: error: negation of type 'u32'",
+    });
+
+    cases.add("Issue #5618: coercion of ?*c_void to *c_void must fail.",
+        \\export fn foo() void {
+        \\    var u: ?*c_void = null;
+        \\    var v: *c_void = undefined;
+        \\    v = u;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:4:9: error: expected type '*c_void', found '?*c_void'",
     });
 }

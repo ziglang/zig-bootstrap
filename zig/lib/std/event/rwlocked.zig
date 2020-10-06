@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("../std.zig");
 const RwLock = std.event.RwLock;
 
@@ -40,14 +45,14 @@ pub fn RwLocked(comptime T: type) type {
             self.lock.deinit();
         }
 
-        pub async fn acquireRead(self: *Self) HeldReadLock {
+        pub fn acquireRead(self: *Self) callconv(.Async) HeldReadLock {
             return HeldReadLock{
                 .held = self.lock.acquireRead(),
                 .value = &self.locked_data,
             };
         }
 
-        pub async fn acquireWrite(self: *Self) HeldWriteLock {
+        pub fn acquireWrite(self: *Self) callconv(.Async) HeldWriteLock {
             return HeldWriteLock{
                 .held = self.lock.acquireWrite(),
                 .value = &self.locked_data,

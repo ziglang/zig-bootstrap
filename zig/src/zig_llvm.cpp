@@ -39,6 +39,7 @@
 #include <llvm/Object/COFFModuleDefinition.h>
 #include <llvm/PassRegistry.h>
 #include <llvm/Support/CommandLine.h>
+#include <llvm/Support/Host.h>
 #include <llvm/Support/FileSystem.h>
 #include <llvm/Support/TargetParser.h>
 #include <llvm/Support/Timer.h>
@@ -308,7 +309,9 @@ ZIG_EXTERN_C LLVMTypeRef ZigLLVMTokenTypeInContext(LLVMContextRef context_ref) {
 LLVMValueRef ZigLLVMBuildCall(LLVMBuilderRef B, LLVMValueRef Fn, LLVMValueRef *Args,
         unsigned NumArgs, ZigLLVM_CallingConv CC, ZigLLVM_CallAttr attr, const char *Name)
 {
-    CallInst *call_inst = CallInst::Create(unwrap(Fn), makeArrayRef(unwrap(Args), NumArgs), Name);
+    Value *V = unwrap(Fn);
+    FunctionType *FnT = cast<FunctionType>(cast<PointerType>(V->getType())->getElementType());
+    CallInst *call_inst = CallInst::Create(FnT, V, makeArrayRef(unwrap(Args), NumArgs), Name);
     call_inst->setCallingConv(static_cast<CallingConv::ID>(CC));
     switch (attr) {
         case ZigLLVM_CallAttrAuto:
@@ -927,7 +930,7 @@ class MyOStream: public raw_ostream {
 };
 
 bool ZigLLVMWriteImportLibrary(const char *def_path, const ZigLLVM_ArchType arch,
-                               const char *output_lib_path, const bool kill_at)
+                               const char *output_lib_path, bool kill_at)
 {
     COFF::MachineTypes machine = COFF::IMAGE_FILE_MACHINE_UNKNOWN;
 

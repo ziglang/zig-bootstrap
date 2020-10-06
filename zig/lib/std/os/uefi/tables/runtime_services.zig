@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const uefi = @import("std").os.uefi;
 const Guid = uefi.Guid;
 const TableHeader = uefi.tables.TableHeader;
@@ -17,7 +22,7 @@ pub const RuntimeServices = extern struct {
     hdr: TableHeader,
 
     /// Returns the current time and date information, and the time-keeping capabilities of the hardware platform.
-    getTime: extern fn (*uefi.Time, ?*TimeCapabilities) Status,
+    getTime: fn (*uefi.Time, ?*TimeCapabilities) callconv(.C) Status,
 
     setTime: Status, // TODO
     getWakeupTime: Status, // TODO
@@ -26,18 +31,18 @@ pub const RuntimeServices = extern struct {
     convertPointer: Status, // TODO
 
     /// Returns the value of a variable.
-    getVariable: extern fn ([*:0]const u16, *align(8) const Guid, ?*u32, *usize, ?*c_void) Status,
+    getVariable: fn ([*:0]const u16, *align(8) const Guid, ?*u32, *usize, ?*c_void) callconv(.C) Status,
 
     /// Enumerates the current variable names.
-    getNextVariableName: extern fn (*usize, [*:0]u16, *align(8) Guid) Status,
+    getNextVariableName: fn (*usize, [*:0]u16, *align(8) Guid) callconv(.C) Status,
 
     /// Sets the value of a variable.
-    setVariable: extern fn ([*:0]const u16, *align(8) const Guid, u32, usize, *c_void) Status,
+    setVariable: fn ([*:0]const u16, *align(8) const Guid, u32, usize, *c_void) callconv(.C) Status,
 
     getNextHighMonotonicCount: Status, // TODO
 
     /// Resets the entire platform.
-    resetSystem: extern fn (ResetType, Status, usize, ?*const c_void) noreturn,
+    resetSystem: fn (ResetType, Status, usize, ?*const c_void) callconv(.C) noreturn,
 
     updateCapsule: Status, // TODO
     queryCapsuleCapabilities: Status, // TODO

@@ -171,3 +171,248 @@ test "@Type picks up the sentinel value from TypeInfo" {
         [:4]allowzero align(4) volatile u8,  [:4]allowzero align(4) const volatile u8,
     });
 }
+
+test "Type.Optional" {
+    testTypes(&[_]type{
+        ?u8,
+        ?*u8,
+        ?[]u8,
+        ?[*]u8,
+        ?[*c]u8,
+    });
+}
+
+test "Type.ErrorUnion" {
+    testTypes(&[_]type{
+        error{}!void,
+        error{Error}!void,
+    });
+}
+
+test "Type.Opaque" {
+    testing.expect(@Type(.Opaque) != @Type(.Opaque));
+    testing.expect(@typeInfo(@Type(.Opaque)) == .Opaque);
+}
+
+test "Type.Vector" {
+    testTypes(&[_]type{
+        @Vector(0, u8),
+        @Vector(4, u8),
+        @Vector(8, *u8),
+        std.meta.Vector(0, u8),
+        std.meta.Vector(4, u8),
+        std.meta.Vector(8, *u8),
+    });
+}
+
+test "Type.AnyFrame" {
+    testTypes(&[_]type{
+        anyframe,
+        anyframe->u8,
+        anyframe->anyframe->u8,
+    });
+}
+
+test "Type.EnumLiteral" {
+    testTypes(&[_]type{
+        @TypeOf(.Dummy),
+    });
+}
+
+fn add(a: i32, b: i32) i32 {
+    return a + b;
+}
+
+test "Type.Frame" {
+    testTypes(&[_]type{
+        @Frame(add),
+    });
+}
+
+test "Type.ErrorSet" {
+    // error sets don't compare equal so just check if they compile
+    _ = @Type(@typeInfo(error{}));
+    _ = @Type(@typeInfo(error{A}));
+    _ = @Type(@typeInfo(error{ A, B, C }));
+}
+
+test "Type.Struct" {
+    const A = @Type(@typeInfo(struct { x: u8, y: u32 }));
+    const infoA = @typeInfo(A).Struct;
+    testing.expectEqual(TypeInfo.ContainerLayout.Auto, infoA.layout);
+    testing.expectEqualSlices(u8, "x", infoA.fields[0].name);
+    testing.expectEqual(u8, infoA.fields[0].field_type);
+    testing.expectEqual(@as(?u8, null), infoA.fields[0].default_value);
+    testing.expectEqualSlices(u8, "y", infoA.fields[1].name);
+    testing.expectEqual(u32, infoA.fields[1].field_type);
+    testing.expectEqual(@as(?u32, null), infoA.fields[1].default_value);
+    testing.expectEqualSlices(TypeInfo.Declaration, &[_]TypeInfo.Declaration{}, infoA.decls);
+    testing.expectEqual(@as(bool, false), infoA.is_tuple);
+
+    var a = A{ .x = 0, .y = 1 };
+    testing.expectEqual(@as(u8, 0), a.x);
+    testing.expectEqual(@as(u32, 1), a.y);
+    a.y += 1;
+    testing.expectEqual(@as(u32, 2), a.y);
+
+    const B = @Type(@typeInfo(extern struct { x: u8, y: u32 = 5 }));
+    const infoB = @typeInfo(B).Struct;
+    testing.expectEqual(TypeInfo.ContainerLayout.Extern, infoB.layout);
+    testing.expectEqualSlices(u8, "x", infoB.fields[0].name);
+    testing.expectEqual(u8, infoB.fields[0].field_type);
+    testing.expectEqual(@as(?u8, null), infoB.fields[0].default_value);
+    testing.expectEqualSlices(u8, "y", infoB.fields[1].name);
+    testing.expectEqual(u32, infoB.fields[1].field_type);
+    testing.expectEqual(@as(?u32, 5), infoB.fields[1].default_value);
+    testing.expectEqual(@as(usize, 0), infoB.decls.len);
+    testing.expectEqual(@as(bool, false), infoB.is_tuple);
+
+    const C = @Type(@typeInfo(packed struct { x: u8 = 3, y: u32 = 5 }));
+    const infoC = @typeInfo(C).Struct;
+    testing.expectEqual(TypeInfo.ContainerLayout.Packed, infoC.layout);
+    testing.expectEqualSlices(u8, "x", infoC.fields[0].name);
+    testing.expectEqual(u8, infoC.fields[0].field_type);
+    testing.expectEqual(@as(?u8, 3), infoC.fields[0].default_value);
+    testing.expectEqualSlices(u8, "y", infoC.fields[1].name);
+    testing.expectEqual(u32, infoC.fields[1].field_type);
+    testing.expectEqual(@as(?u32, 5), infoC.fields[1].default_value);
+    testing.expectEqual(@as(usize, 0), infoC.decls.len);
+    testing.expectEqual(@as(bool, false), infoC.is_tuple);
+}
+
+test "Type.Enum" {
+    const Foo = @Type(.{
+        .Enum = .{
+            .layout = .Auto,
+            .tag_type = u8,
+            .fields = &[_]TypeInfo.EnumField{
+                .{ .name = "a", .value = 1 },
+                .{ .name = "b", .value = 5 },
+            },
+            .decls = &[_]TypeInfo.Declaration{},
+            .is_exhaustive = true,
+        },
+    });
+    testing.expectEqual(true, @typeInfo(Foo).Enum.is_exhaustive);
+    testing.expectEqual(@as(u8, 1), @enumToInt(Foo.a));
+    testing.expectEqual(@as(u8, 5), @enumToInt(Foo.b));
+    const Bar = @Type(.{
+        .Enum = .{
+            .layout = .Extern,
+            .tag_type = u32,
+            .fields = &[_]TypeInfo.EnumField{
+                .{ .name = "a", .value = 1 },
+                .{ .name = "b", .value = 5 },
+            },
+            .decls = &[_]TypeInfo.Declaration{},
+            .is_exhaustive = false,
+        },
+    });
+    testing.expectEqual(false, @typeInfo(Bar).Enum.is_exhaustive);
+    testing.expectEqual(@as(u32, 1), @enumToInt(Bar.a));
+    testing.expectEqual(@as(u32, 5), @enumToInt(Bar.b));
+    testing.expectEqual(@as(u32, 6), @enumToInt(@intToEnum(Bar, 6)));
+}
+
+test "Type.Union" {
+    const Untagged = @Type(.{
+        .Union = .{
+            .layout = .Auto,
+            .tag_type = null,
+            .fields = &[_]TypeInfo.UnionField{
+                .{ .name = "int", .field_type = i32 },
+                .{ .name = "float", .field_type = f32 },
+            },
+            .decls = &[_]TypeInfo.Declaration{},
+        },
+    });
+    var untagged = Untagged{ .int = 1 };
+    untagged.float = 2.0;
+    untagged.int = 3;
+    testing.expectEqual(@as(i32, 3), untagged.int);
+
+    const PackedUntagged = @Type(.{
+        .Union = .{
+            .layout = .Packed,
+            .tag_type = null,
+            .fields = &[_]TypeInfo.UnionField{
+                .{ .name = "signed", .field_type = i32 },
+                .{ .name = "unsigned", .field_type = u32 },
+            },
+            .decls = &[_]TypeInfo.Declaration{},
+        },
+    });
+    var packed_untagged = PackedUntagged{ .signed = -1 };
+    testing.expectEqual(@as(i32, -1), packed_untagged.signed);
+    testing.expectEqual(~@as(u32, 0), packed_untagged.unsigned);
+
+    const Tag = @Type(.{
+        .Enum = .{
+            .layout = .Auto,
+            .tag_type = u1,
+            .fields = &[_]TypeInfo.EnumField{
+                .{ .name = "signed", .value = 0 },
+                .{ .name = "unsigned", .value = 1 },
+            },
+            .decls = &[_]TypeInfo.Declaration{},
+            .is_exhaustive = true,
+        },
+    });
+    const Tagged = @Type(.{
+        .Union = .{
+            .layout = .Auto,
+            .tag_type = Tag,
+            .fields = &[_]TypeInfo.UnionField{
+                .{ .name = "signed", .field_type = i32 },
+                .{ .name = "unsigned", .field_type = u32 },
+            },
+            .decls = &[_]TypeInfo.Declaration{},
+        },
+    });
+    var tagged = Tagged{ .signed = -1 };
+    testing.expectEqual(Tag.signed, tagged);
+    tagged = .{ .unsigned = 1 };
+    testing.expectEqual(Tag.unsigned, tagged);
+}
+
+test "Type.Union from Type.Enum" {
+    const Tag = @Type(.{
+        .Enum = .{
+            .layout = .Auto,
+            .tag_type = u0,
+            .fields = &[_]TypeInfo.EnumField{
+                .{ .name = "working_as_expected", .value = 0 },
+            },
+            .decls = &[_]TypeInfo.Declaration{},
+            .is_exhaustive = true,
+        },
+    });
+    const T = @Type(.{
+        .Union = .{
+            .layout = .Auto,
+            .tag_type = Tag,
+            .fields = &[_]TypeInfo.UnionField{
+                .{ .name = "working_as_expected", .field_type = u32 },
+            },
+            .decls = &[_]TypeInfo.Declaration{},
+        },
+    });
+    _ = T;
+    _ = @typeInfo(T).Union;
+}
+
+test "Type.Union from regular enum" {
+    const E = enum { working_as_expected = 0 };
+    const T = @Type(.{
+        .Union = .{
+            .layout = .Auto,
+            .tag_type = E,
+            .fields = &[_]TypeInfo.UnionField{
+                .{ .name = "working_as_expected", .field_type = u32 },
+            },
+            .decls = &[_]TypeInfo.Declaration{},
+        },
+    });
+    _ = T;
+    _ = @typeInfo(T).Union;
+}

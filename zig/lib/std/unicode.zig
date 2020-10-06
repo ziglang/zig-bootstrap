@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("./std.zig");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
@@ -235,6 +240,22 @@ pub const Utf8Iterator = struct {
             else => unreachable,
         }
     }
+
+    /// Look ahead at the next n codepoints without advancing the iterator.
+    /// If fewer than n codepoints are available, then return the remainder of the string.
+    pub fn peek(it: *Utf8Iterator, n: usize) []const u8 {
+        const original_i = it.i;
+        defer it.i = original_i;
+
+        var end_ix = original_i;
+        var found: usize = 0;
+        while (found < n) : (found += 1) {
+            const next_codepoint = it.nextCodepointSlice() orelse return it.bytes[original_i..];
+            end_ix += next_codepoint.len;
+        }
+
+        return it.bytes[original_i..end_ix];
+    }
 };
 
 pub const Utf16LeIterator = struct {
@@ -451,6 +472,31 @@ fn testMiscInvalidUtf8() void {
     testValid("\xee\x80\x80", 0xe000);
 }
 
+test "utf8 iterator peeking" {
+    comptime testUtf8Peeking();
+    testUtf8Peeking();
+}
+
+fn testUtf8Peeking() void {
+    const s = Utf8View.initComptime("noël");
+    var it = s.iterator();
+
+    testing.expect(std.mem.eql(u8, "n", it.nextCodepointSlice().?));
+
+    testing.expect(std.mem.eql(u8, "o", it.peek(1)));
+    testing.expect(std.mem.eql(u8, "oë", it.peek(2)));
+    testing.expect(std.mem.eql(u8, "oël", it.peek(3)));
+    testing.expect(std.mem.eql(u8, "oël", it.peek(4)));
+    testing.expect(std.mem.eql(u8, "oël", it.peek(10)));
+
+    testing.expect(std.mem.eql(u8, "o", it.nextCodepointSlice().?));
+    testing.expect(std.mem.eql(u8, "ë", it.nextCodepointSlice().?));
+    testing.expect(std.mem.eql(u8, "l", it.nextCodepointSlice().?));
+    testing.expect(it.nextCodepointSlice() == null);
+
+    testing.expect(std.mem.eql(u8, &[_]u8{}, it.peek(1)));
+}
+
 fn testError(bytes: []const u8, expected_err: anyerror) void {
     testing.expectError(expected_err, testDecode(bytes));
 }
@@ -660,6 +706,9 @@ fn calcUtf16LeLen(utf8: []const u8) usize {
 }
 
 test "utf8ToUtf16LeStringLiteral" {
+    // https://github.com/ziglang/zig/issues/5127
+    if (std.Target.current.cpu.arch == .mips) return error.SkipZigTest;
+
     {
         const bytes = [_:0]u16{0x41};
         const utf16 = utf8ToUtf16LeStringLiteral("A");

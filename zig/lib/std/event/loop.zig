@@ -1,15 +1,20 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("../std.zig");
 const builtin = @import("builtin");
 const root = @import("root");
 const assert = std.debug.assert;
 const testing = std.testing;
 const mem = std.mem;
-const AtomicRmwOp = builtin.AtomicRmwOp;
-const AtomicOrder = builtin.AtomicOrder;
 const os = std.os;
 const windows = os.windows;
 const maxInt = std.math.maxInt;
 const Thread = std.Thread;
+
+const is_windows = std.Target.current.os.tag == .windows;
 
 pub const Loop = struct {
     next_tick_queue: std.atomic.Queue(anyframe),
@@ -17,6 +22,14 @@ pub const Loop = struct {
     final_resume_node: ResumeNode,
     pending_event_count: usize,
     extra_threads: []*Thread,
+    /// TODO change this to a pool of configurable number of threads
+    /// and rename it to be not file-system-specific. it will become
+    /// a thread pool for turning non-CPU-bound blocking things into
+    /// async things. A fallback for any missing OS-specific API.
+    fs_thread: *Thread,
+    fs_queue: std.atomic.Queue(Request),
+    fs_end_request: Request.Node,
+    fs_thread_wakeup: std.ResetEvent,
 
     /// For resources that have the same lifetime as the `Loop`.
     /// This is only used by `Loop` for the thread pool and associated resources.
@@ -99,7 +112,9 @@ pub const Loop = struct {
     /// have the correct pointer value.
     /// https://github.com/ziglang/zig/issues/2761 and https://github.com/ziglang/zig/issues/2765
     pub fn init(self: *Loop) !void {
-        if (builtin.single_threaded) {
+        if (builtin.single_threaded or
+            (@hasDecl(root, "event_loop_mode") and root.event_loop_mode == .single_threaded))
+        {
             return self.initSingleThreaded();
         } else {
             return self.initMultiThreaded();
@@ -143,7 +158,12 @@ pub const Loop = struct {
                 .handle = undefined,
                 .overlapped = ResumeNode.overlapped_init,
             },
+            .fs_end_request = .{ .data = .{ .msg = .end, .finish = .NoAction } },
+            .fs_queue = std.atomic.Queue(Request).init(),
+            .fs_thread = undefined,
+            .fs_thread_wakeup = std.ResetEvent.init(),
         };
+        errdefer self.fs_thread_wakeup.deinit();
         errdefer self.arena.deinit();
 
         // We need at least one of these in case the fs thread wants to use onNextTick
@@ -158,10 +178,19 @@ pub const Loop = struct {
 
         try self.initOsData(extra_thread_count);
         errdefer self.deinitOsData();
+
+        if (!builtin.single_threaded) {
+            self.fs_thread = try Thread.spawn(self, posixFsRun);
+        }
+        errdefer if (!builtin.single_threaded) {
+            self.posixFsRequest(&self.fs_end_request);
+            self.fs_thread.wait();
+        };
     }
 
     pub fn deinit(self: *Loop) void {
         self.deinitOsData();
+        self.fs_thread_wakeup.deinit();
         self.arena.deinit();
         self.* = undefined;
     }
@@ -173,21 +202,10 @@ pub const Loop = struct {
     const wakeup_bytes = [_]u8{0x1} ** 8;
 
     fn initOsData(self: *Loop, extra_thread_count: usize) InitOsDataError!void {
-        switch (builtin.os.tag) {
+        nosuspend switch (builtin.os.tag) {
             .linux => {
-                self.os_data.fs_queue = std.atomic.Queue(Request).init();
-                self.os_data.fs_queue_item = 0;
-                // we need another thread for the file system because Linux does not have an async
-                // file system I/O API.
-                self.os_data.fs_end_request = Request.Node{
-                    .data = Request{
-                        .msg = .end,
-                        .finish = .NoAction,
-                    },
-                };
-
                 errdefer {
-                    while (self.available_eventfd_resume_nodes.pop()) |node| noasync os.close(node.data.eventfd);
+                    while (self.available_eventfd_resume_nodes.pop()) |node| os.close(node.data.eventfd);
                 }
                 for (self.eventfd_resume_nodes) |*eventfd_node| {
                     eventfd_node.* = std.atomic.Stack(ResumeNode.EventFd).Node{
@@ -206,10 +224,10 @@ pub const Loop = struct {
                 }
 
                 self.os_data.epollfd = try os.epoll_create1(os.EPOLL_CLOEXEC);
-                errdefer noasync os.close(self.os_data.epollfd);
+                errdefer os.close(self.os_data.epollfd);
 
                 self.os_data.final_eventfd = try os.eventfd(0, os.EFD_CLOEXEC | os.EFD_NONBLOCK);
-                errdefer noasync os.close(self.os_data.final_eventfd);
+                errdefer os.close(self.os_data.final_eventfd);
 
                 self.os_data.final_eventfd_event = os.epoll_event{
                     .events = os.EPOLLIN,
@@ -222,12 +240,6 @@ pub const Loop = struct {
                     &self.os_data.final_eventfd_event,
                 );
 
-                self.os_data.fs_thread = try Thread.spawn(self, posixFsRun);
-                errdefer {
-                    self.posixFsRequest(&self.os_data.fs_end_request);
-                    self.os_data.fs_thread.wait();
-                }
-
                 if (builtin.single_threaded) {
                     assert(extra_thread_count == 0);
                     return;
@@ -236,7 +248,7 @@ pub const Loop = struct {
                 var extra_thread_index: usize = 0;
                 errdefer {
                     // writing 8 bytes to an eventfd cannot fail
-                    const amt = noasync os.write(self.os_data.final_eventfd, &wakeup_bytes) catch unreachable;
+                    const amt = os.write(self.os_data.final_eventfd, &wakeup_bytes) catch unreachable;
                     assert(amt == wakeup_bytes.len);
                     while (extra_thread_index != 0) {
                         extra_thread_index -= 1;
@@ -249,22 +261,7 @@ pub const Loop = struct {
             },
             .macosx, .freebsd, .netbsd, .dragonfly => {
                 self.os_data.kqfd = try os.kqueue();
-                errdefer noasync os.close(self.os_data.kqfd);
-
-                self.os_data.fs_kqfd = try os.kqueue();
-                errdefer noasync os.close(self.os_data.fs_kqfd);
-
-                self.os_data.fs_queue = std.atomic.Queue(Request).init();
-                // we need another thread for the file system because Darwin does not have an async
-                // file system I/O API.
-                self.os_data.fs_end_request = Request.Node{
-                    .prev = undefined,
-                    .next = undefined,
-                    .data = Request{
-                        .msg = .end,
-                        .finish = .NoAction,
-                    },
-                };
+                errdefer os.close(self.os_data.kqfd);
 
                 const empty_kevs = &[0]os.Kevent{};
 
@@ -309,30 +306,6 @@ pub const Loop = struct {
                 _ = try os.kevent(self.os_data.kqfd, final_kev_arr, empty_kevs, null);
                 self.os_data.final_kevent.flags = os.EV_ENABLE;
                 self.os_data.final_kevent.fflags = os.NOTE_TRIGGER;
-
-                self.os_data.fs_kevent_wake = os.Kevent{
-                    .ident = 0,
-                    .filter = os.EVFILT_USER,
-                    .flags = os.EV_ADD | os.EV_ENABLE,
-                    .fflags = os.NOTE_TRIGGER,
-                    .data = 0,
-                    .udata = undefined,
-                };
-
-                self.os_data.fs_kevent_wait = os.Kevent{
-                    .ident = 0,
-                    .filter = os.EVFILT_USER,
-                    .flags = os.EV_ADD | os.EV_CLEAR,
-                    .fflags = 0,
-                    .data = 0,
-                    .udata = undefined,
-                };
-
-                self.os_data.fs_thread = try Thread.spawn(self, posixFsRun);
-                errdefer {
-                    self.posixFsRequest(&self.os_data.fs_end_request);
-                    self.os_data.fs_thread.wait();
-                }
 
                 if (builtin.single_threaded) {
                     assert(extra_thread_count == 0);
@@ -401,25 +374,24 @@ pub const Loop = struct {
                 }
             },
             else => {},
-        }
+        };
     }
 
     fn deinitOsData(self: *Loop) void {
-        switch (builtin.os.tag) {
+        nosuspend switch (builtin.os.tag) {
             .linux => {
-                noasync os.close(self.os_data.final_eventfd);
-                while (self.available_eventfd_resume_nodes.pop()) |node| noasync os.close(node.data.eventfd);
-                noasync os.close(self.os_data.epollfd);
+                os.close(self.os_data.final_eventfd);
+                while (self.available_eventfd_resume_nodes.pop()) |node| os.close(node.data.eventfd);
+                os.close(self.os_data.epollfd);
             },
             .macosx, .freebsd, .netbsd, .dragonfly => {
-                noasync os.close(self.os_data.kqfd);
-                noasync os.close(self.os_data.fs_kqfd);
+                os.close(self.os_data.kqfd);
             },
             .windows => {
                 windows.CloseHandle(self.os_data.io_port);
             },
             else => {},
-        }
+        };
     }
 
     /// resume_node must live longer than the anyframe that it holds a reference to.
@@ -492,7 +464,7 @@ pub const Loop = struct {
                         => {
                             // Even poll() didn't work. The best we can do now is sleep for a
                             // small duration and then hope that something changed.
-                            std.time.sleep(1 * std.time.millisecond);
+                            std.time.sleep(1 * std.time.ns_per_ms);
                         },
                     };
                     resume @frame();
@@ -502,18 +474,43 @@ pub const Loop = struct {
     }
 
     pub fn waitUntilFdReadable(self: *Loop, fd: os.fd_t) void {
-        return self.linuxWaitFd(fd, os.EPOLLET | os.EPOLLONESHOT | os.EPOLLIN);
+        switch (builtin.os.tag) {
+            .linux => {
+                self.linuxWaitFd(fd, os.EPOLLET | os.EPOLLONESHOT | os.EPOLLIN);
+            },
+            .macosx, .freebsd, .netbsd, .dragonfly => {
+                self.bsdWaitKev(@intCast(usize, fd), os.EVFILT_READ, os.EV_ONESHOT);
+            },
+            else => @compileError("Unsupported OS"),
+        }
     }
 
     pub fn waitUntilFdWritable(self: *Loop, fd: os.fd_t) void {
-        return self.linuxWaitFd(fd, os.EPOLLET | os.EPOLLONESHOT | os.EPOLLOUT);
+        switch (builtin.os.tag) {
+            .linux => {
+                self.linuxWaitFd(fd, os.EPOLLET | os.EPOLLONESHOT | os.EPOLLOUT);
+            },
+            .macosx, .freebsd, .netbsd, .dragonfly => {
+                self.bsdWaitKev(@intCast(usize, fd), os.EVFILT_WRITE, os.EV_ONESHOT);
+            },
+            else => @compileError("Unsupported OS"),
+        }
     }
 
     pub fn waitUntilFdWritableOrReadable(self: *Loop, fd: os.fd_t) void {
-        return self.linuxWaitFd(fd, os.EPOLLET | os.EPOLLONESHOT | os.EPOLLOUT | os.EPOLLIN);
+        switch (builtin.os.tag) {
+            .linux => {
+                self.linuxWaitFd(fd, os.EPOLLET | os.EPOLLONESHOT | os.EPOLLOUT | os.EPOLLIN);
+            },
+            .macosx, .freebsd, .netbsd, .dragonfly => {
+                self.bsdWaitKev(@intCast(usize, fd), os.EVFILT_READ, os.EV_ONESHOT);
+                self.bsdWaitKev(@intCast(usize, fd), os.EVFILT_WRITE, os.EV_ONESHOT);
+            },
+            else => @compileError("Unsupported OS"),
+        }
     }
 
-    pub async fn bsdWaitKev(self: *Loop, ident: usize, filter: i16, fflags: u32) !os.Kevent {
+    pub fn bsdWaitKev(self: *Loop, ident: usize, filter: i16, flags: u16) void {
         var resume_node = ResumeNode.Basic{
             .base = ResumeNode{
                 .id = ResumeNode.Id.Basic,
@@ -522,42 +519,46 @@ pub const Loop = struct {
             },
             .kev = undefined,
         };
-        defer self.bsdRemoveKev(ident, filter);
-        suspend {
-            try self.bsdAddKev(&resume_node, ident, filter, fflags);
+
+        defer {
+            // If the kevent was set to be ONESHOT, it doesn't need to be deleted manually.
+            if (flags & os.EV_ONESHOT != 0) {
+                self.bsdRemoveKev(ident, filter);
+            }
         }
-        return resume_node.kev;
+
+        suspend {
+            self.bsdAddKev(&resume_node, ident, filter, flags) catch unreachable;
+        }
     }
 
     /// resume_node must live longer than the anyframe that it holds a reference to.
-    pub fn bsdAddKev(self: *Loop, resume_node: *ResumeNode.Basic, ident: usize, filter: i16, fflags: u32) !void {
+    pub fn bsdAddKev(self: *Loop, resume_node: *ResumeNode.Basic, ident: usize, filter: i16, flags: u16) !void {
         self.beginOneEvent();
         errdefer self.finishOneEvent();
-        var kev = os.Kevent{
+        var kev = [1]os.Kevent{os.Kevent{
             .ident = ident,
             .filter = filter,
-            .flags = os.EV_ADD | os.EV_ENABLE | os.EV_CLEAR,
-            .fflags = fflags,
+            .flags = os.EV_ADD | os.EV_ENABLE | os.EV_CLEAR | flags,
+            .fflags = 0,
             .data = 0,
             .udata = @ptrToInt(&resume_node.base),
-        };
-        const kevent_array = (*const [1]os.Kevent)(&kev);
-        const empty_kevs = ([*]os.Kevent)(undefined)[0..0];
-        _ = try os.kevent(self.os_data.kqfd, kevent_array, empty_kevs, null);
+        }};
+        const empty_kevs = &[0]os.Kevent{};
+        _ = try os.kevent(self.os_data.kqfd, &kev, empty_kevs, null);
     }
 
     pub fn bsdRemoveKev(self: *Loop, ident: usize, filter: i16) void {
-        var kev = os.Kevent{
+        var kev = [1]os.Kevent{os.Kevent{
             .ident = ident,
             .filter = filter,
             .flags = os.EV_DELETE,
             .fflags = 0,
             .data = 0,
             .udata = 0,
-        };
-        const kevent_array = (*const [1]os.Kevent)(&kev);
-        const empty_kevs = ([*]os.Kevent)(undefined)[0..0];
-        _ = os.kevent(self.os_data.kqfd, kevent_array, empty_kevs, null) catch undefined;
+        }};
+        const empty_kevs = &[0]os.Kevent{};
+        _ = os.kevent(self.os_data.kqfd, &kev, empty_kevs, null) catch undefined;
         self.finishOneEvent();
     }
 
@@ -629,14 +630,16 @@ pub const Loop = struct {
 
         self.workerRun();
 
-        switch (builtin.os.tag) {
-            .linux,
-            .macosx,
-            .freebsd,
-            .netbsd,
-            .dragonfly,
-            => self.os_data.fs_thread.wait(),
-            else => {},
+        if (!builtin.single_threaded) {
+            switch (builtin.os.tag) {
+                .linux,
+                .macosx,
+                .freebsd,
+                .netbsd,
+                .dragonfly,
+                => self.fs_thread.wait(),
+                else => {},
+            }
         }
 
         for (self.extra_threads) |extra_thread| {
@@ -672,23 +675,30 @@ pub const Loop = struct {
 
     /// call finishOneEvent when done
     pub fn beginOneEvent(self: *Loop) void {
-        _ = @atomicRmw(usize, &self.pending_event_count, AtomicRmwOp.Add, 1, AtomicOrder.SeqCst);
+        _ = @atomicRmw(usize, &self.pending_event_count, .Add, 1, .SeqCst);
     }
 
     pub fn finishOneEvent(self: *Loop) void {
-        const prev = @atomicRmw(usize, &self.pending_event_count, AtomicRmwOp.Sub, 1, AtomicOrder.SeqCst);
-        if (prev == 1) {
+        nosuspend {
+            const prev = @atomicRmw(usize, &self.pending_event_count, .Sub, 1, .SeqCst);
+            if (prev != 1) return;
+
             // cause all the threads to stop
+            self.posixFsRequest(&self.fs_end_request);
+
             switch (builtin.os.tag) {
                 .linux => {
-                    self.posixFsRequest(&self.os_data.fs_end_request);
-                    // writing 8 bytes to an eventfd cannot fail
-                    const amt = noasync os.write(self.os_data.final_eventfd, &wakeup_bytes) catch unreachable;
-                    assert(amt == wakeup_bytes.len);
+                    // writing to the eventfd will only wake up one thread, thus multiple writes
+                    // are needed to wakeup all the threads
+                    var i: usize = 0;
+                    while (i < self.extra_threads.len + 1) : (i += 1) {
+                        // writing 8 bytes to an eventfd cannot fail
+                        const amt = os.write(self.os_data.final_eventfd, &wakeup_bytes) catch unreachable;
+                        assert(amt == wakeup_bytes.len);
+                    }
                     return;
                 },
                 .macosx, .freebsd, .netbsd, .dragonfly => {
-                    self.posixFsRequest(&self.os_data.fs_end_request);
                     const final_kevent = @as(*const [1]os.Kevent, &self.os_data.final_kevent);
                     const empty_kevs = &[0]os.Kevent{};
                     // cannot fail because we already added it and this just enables it
@@ -711,8 +721,52 @@ pub const Loop = struct {
         }
     }
 
+    /// ------- I/0 APIs -------
+    pub fn accept(
+        self: *Loop,
+        /// This argument is a socket that has been created with `socket`, bound to a local address
+        /// with `bind`, and is listening for connections after a `listen`.
+        sockfd: os.fd_t,
+        /// This argument is a pointer to a sockaddr structure.  This structure is filled in with  the
+        /// address  of  the  peer  socket, as known to the communications layer.  The exact format of the
+        /// address returned addr is determined by the socket's address  family  (see  `socket`  and  the
+        /// respective  protocol  man  pages).
+        addr: *os.sockaddr,
+        /// This argument is a value-result argument: the caller must initialize it to contain  the
+        /// size (in bytes) of the structure pointed to by addr; on return it will contain the actual size
+        /// of the peer address.
+        ///
+        /// The returned address is truncated if the buffer provided is too small; in this  case,  `addr_size`
+        /// will return a value greater than was supplied to the call.
+        addr_size: *os.socklen_t,
+        /// The following values can be bitwise ORed in flags to obtain different behavior:
+        /// * `SOCK_CLOEXEC`  - Set the close-on-exec (`FD_CLOEXEC`) flag on the new file descriptor.   See  the
+        ///   description  of the `O_CLOEXEC` flag in `open` for reasons why this may be useful.
+        flags: u32,
+    ) os.AcceptError!os.fd_t {
+        while (true) {
+            return os.accept(sockfd, addr, addr_size, flags | os.SOCK_NONBLOCK) catch |err| switch (err) {
+                error.WouldBlock => {
+                    self.waitUntilFdReadable(sockfd);
+                    continue;
+                },
+                else => return err,
+            };
+        }
+    }
+
+    pub fn connect(self: *Loop, sockfd: os.socket_t, sock_addr: *const os.sockaddr, len: os.socklen_t) os.ConnectError!void {
+        os.connect(sockfd, sock_addr, len) catch |err| switch (err) {
+            error.WouldBlock => {
+                self.waitUntilFdWritable(sockfd);
+                return os.getsockoptError(sockfd);
+            },
+            else => return err,
+        };
+    }
+
     /// Performs an async `os.open` using a separate thread.
-    pub fn openZ(self: *Loop, file_path: [*:0]const u8, flags: u32, mode: usize) os.OpenError!os.fd_t {
+    pub fn openZ(self: *Loop, file_path: [*:0]const u8, flags: u32, mode: os.mode_t) os.OpenError!os.fd_t {
         var req_node = Request.Node{
             .data = .{
                 .msg = .{
@@ -733,7 +787,7 @@ pub const Loop = struct {
     }
 
     /// Performs an async `os.opent` using a separate thread.
-    pub fn openatZ(self: *Loop, fd: os.fd_t, file_path: [*:0]const u8, flags: u32, mode: usize) os.OpenError!os.fd_t {
+    pub fn openatZ(self: *Loop, fd: os.fd_t, file_path: [*:0]const u8, flags: u32, mode: os.mode_t) os.OpenError!os.fd_t {
         var req_node = Request.Node{
             .data = .{
                 .msg = .{
@@ -769,152 +823,309 @@ pub const Loop = struct {
 
     /// Performs an async `os.read` using a separate thread.
     /// `fd` must block and not return EAGAIN.
-    pub fn read(self: *Loop, fd: os.fd_t, buf: []u8) os.ReadError!usize {
-        var req_node = Request.Node{
-            .data = .{
-                .msg = .{
-                    .read = .{
-                        .fd = fd,
-                        .buf = buf,
-                        .result = undefined,
+    pub fn read(self: *Loop, fd: os.fd_t, buf: []u8, simulate_evented: bool) os.ReadError!usize {
+        if (simulate_evented) {
+            var req_node = Request.Node{
+                .data = .{
+                    .msg = .{
+                        .read = .{
+                            .fd = fd,
+                            .buf = buf,
+                            .result = undefined,
+                        },
                     },
+                    .finish = .{ .TickNode = .{ .data = @frame() } },
                 },
-                .finish = .{ .TickNode = .{ .data = @frame() } },
-            },
-        };
-        suspend {
-            self.posixFsRequest(&req_node);
+            };
+            suspend {
+                self.posixFsRequest(&req_node);
+            }
+            return req_node.data.msg.read.result;
+        } else {
+            while (true) {
+                return os.read(fd, buf) catch |err| switch (err) {
+                    error.WouldBlock => {
+                        self.waitUntilFdReadable(fd);
+                        continue;
+                    },
+                    else => return err,
+                };
+            }
         }
-        return req_node.data.msg.read.result;
     }
 
     /// Performs an async `os.readv` using a separate thread.
     /// `fd` must block and not return EAGAIN.
-    pub fn readv(self: *Loop, fd: os.fd_t, iov: []const os.iovec) os.ReadError!usize {
-        var req_node = Request.Node{
-            .data = .{
-                .msg = .{
-                    .readv = .{
-                        .fd = fd,
-                        .iov = iov,
-                        .result = undefined,
+    pub fn readv(self: *Loop, fd: os.fd_t, iov: []const os.iovec, simulate_evented: bool) os.ReadError!usize {
+        if (simulate_evented) {
+            var req_node = Request.Node{
+                .data = .{
+                    .msg = .{
+                        .readv = .{
+                            .fd = fd,
+                            .iov = iov,
+                            .result = undefined,
+                        },
                     },
+                    .finish = .{ .TickNode = .{ .data = @frame() } },
                 },
-                .finish = .{ .TickNode = .{ .data = @frame() } },
-            },
-        };
-        suspend {
-            self.posixFsRequest(&req_node);
+            };
+            suspend {
+                self.posixFsRequest(&req_node);
+            }
+            return req_node.data.msg.readv.result;
+        } else {
+            while (true) {
+                return os.readv(fd, iov) catch |err| switch (err) {
+                    error.WouldBlock => {
+                        self.waitUntilFdReadable(fd);
+                        continue;
+                    },
+                    else => return err,
+                };
+            }
         }
-        return req_node.data.msg.readv.result;
     }
 
     /// Performs an async `os.pread` using a separate thread.
     /// `fd` must block and not return EAGAIN.
-    pub fn pread(self: *Loop, fd: os.fd_t, buf: []u8, offset: u64) os.PReadError!usize {
-        var req_node = Request.Node{
-            .data = .{
-                .msg = .{
-                    .pread = .{
-                        .fd = fd,
-                        .buf = buf,
-                        .offset = offset,
-                        .result = undefined,
+    pub fn pread(self: *Loop, fd: os.fd_t, buf: []u8, offset: u64, simulate_evented: bool) os.PReadError!usize {
+        if (simulate_evented) {
+            var req_node = Request.Node{
+                .data = .{
+                    .msg = .{
+                        .pread = .{
+                            .fd = fd,
+                            .buf = buf,
+                            .offset = offset,
+                            .result = undefined,
+                        },
                     },
+                    .finish = .{ .TickNode = .{ .data = @frame() } },
                 },
-                .finish = .{ .TickNode = .{ .data = @frame() } },
-            },
-        };
-        suspend {
-            self.posixFsRequest(&req_node);
+            };
+            suspend {
+                self.posixFsRequest(&req_node);
+            }
+            return req_node.data.msg.pread.result;
+        } else {
+            while (true) {
+                return os.pread(fd, buf, offset) catch |err| switch (err) {
+                    error.WouldBlock => {
+                        self.waitUntilFdReadable(fd);
+                        continue;
+                    },
+                    else => return err,
+                };
+            }
         }
-        return req_node.data.msg.pread.result;
     }
 
     /// Performs an async `os.preadv` using a separate thread.
     /// `fd` must block and not return EAGAIN.
-    pub fn preadv(self: *Loop, fd: os.fd_t, iov: []const os.iovec, offset: u64) os.ReadError!usize {
-        var req_node = Request.Node{
-            .data = .{
-                .msg = .{
-                    .preadv = .{
-                        .fd = fd,
-                        .iov = iov,
-                        .offset = offset,
-                        .result = undefined,
+    pub fn preadv(self: *Loop, fd: os.fd_t, iov: []const os.iovec, offset: u64, simulate_evented: bool) os.ReadError!usize {
+        if (simulate_evented) {
+            var req_node = Request.Node{
+                .data = .{
+                    .msg = .{
+                        .preadv = .{
+                            .fd = fd,
+                            .iov = iov,
+                            .offset = offset,
+                            .result = undefined,
+                        },
                     },
+                    .finish = .{ .TickNode = .{ .data = @frame() } },
                 },
-                .finish = .{ .TickNode = .{ .data = @frame() } },
-            },
-        };
-        suspend {
-            self.posixFsRequest(&req_node);
+            };
+            suspend {
+                self.posixFsRequest(&req_node);
+            }
+            return req_node.data.msg.preadv.result;
+        } else {
+            while (true) {
+                return os.preadv(fd, iov, offset) catch |err| switch (err) {
+                    error.WouldBlock => {
+                        self.waitUntilFdReadable(fd);
+                        continue;
+                    },
+                    else => return err,
+                };
+            }
         }
-        return req_node.data.msg.preadv.result;
     }
 
     /// Performs an async `os.write` using a separate thread.
     /// `fd` must block and not return EAGAIN.
-    pub fn write(self: *Loop, fd: os.fd_t, bytes: []const u8) os.WriteError!usize {
-        var req_node = Request.Node{
-            .data = .{
-                .msg = .{
-                    .write = .{
-                        .fd = fd,
-                        .bytes = bytes,
-                        .result = undefined,
+    pub fn write(self: *Loop, fd: os.fd_t, bytes: []const u8, simulate_evented: bool) os.WriteError!usize {
+        if (simulate_evented) {
+            var req_node = Request.Node{
+                .data = .{
+                    .msg = .{
+                        .write = .{
+                            .fd = fd,
+                            .bytes = bytes,
+                            .result = undefined,
+                        },
                     },
+                    .finish = .{ .TickNode = .{ .data = @frame() } },
                 },
-                .finish = .{ .TickNode = .{ .data = @frame() } },
-            },
-        };
-        suspend {
-            self.posixFsRequest(&req_node);
+            };
+            suspend {
+                self.posixFsRequest(&req_node);
+            }
+            return req_node.data.msg.write.result;
+        } else {
+            while (true) {
+                return os.write(fd, bytes) catch |err| switch (err) {
+                    error.WouldBlock => {
+                        self.waitUntilFdWritable(fd);
+                        continue;
+                    },
+                    else => return err,
+                };
+            }
         }
-        return req_node.data.msg.write.result;
     }
 
     /// Performs an async `os.writev` using a separate thread.
     /// `fd` must block and not return EAGAIN.
-    pub fn writev(self: *Loop, fd: os.fd_t, iov: []const os.iovec_const) os.WriteError!usize {
-        var req_node = Request.Node{
-            .data = .{
-                .msg = .{
-                    .writev = .{
-                        .fd = fd,
-                        .iov = iov,
-                        .result = undefined,
+    pub fn writev(self: *Loop, fd: os.fd_t, iov: []const os.iovec_const, simulate_evented: bool) os.WriteError!usize {
+        if (simulate_evented) {
+            var req_node = Request.Node{
+                .data = .{
+                    .msg = .{
+                        .writev = .{
+                            .fd = fd,
+                            .iov = iov,
+                            .result = undefined,
+                        },
                     },
+                    .finish = .{ .TickNode = .{ .data = @frame() } },
                 },
-                .finish = .{ .TickNode = .{ .data = @frame() } },
-            },
-        };
-        suspend {
-            self.posixFsRequest(&req_node);
+            };
+            suspend {
+                self.posixFsRequest(&req_node);
+            }
+            return req_node.data.msg.writev.result;
+        } else {
+            while (true) {
+                return os.writev(fd, iov) catch |err| switch (err) {
+                    error.WouldBlock => {
+                        self.waitUntilFdWritable(fd);
+                        continue;
+                    },
+                    else => return err,
+                };
+            }
         }
-        return req_node.data.msg.writev.result;
+    }
+
+    /// Performs an async `os.pwrite` using a separate thread.
+    /// `fd` must block and not return EAGAIN.
+    pub fn pwrite(self: *Loop, fd: os.fd_t, bytes: []const u8, offset: u64, simulate_evented: bool) os.PerformsWriteError!usize {
+        if (simulate_evented) {
+            var req_node = Request.Node{
+                .data = .{
+                    .msg = .{
+                        .pwrite = .{
+                            .fd = fd,
+                            .bytes = bytes,
+                            .offset = offset,
+                            .result = undefined,
+                        },
+                    },
+                    .finish = .{ .TickNode = .{ .data = @frame() } },
+                },
+            };
+            suspend {
+                self.posixFsRequest(&req_node);
+            }
+            return req_node.data.msg.pwrite.result;
+        } else {
+            while (true) {
+                return os.pwrite(fd, bytes, offset) catch |err| switch (err) {
+                    error.WouldBlock => {
+                        self.waitUntilFdWritable(fd);
+                        continue;
+                    },
+                    else => return err,
+                };
+            }
+        }
     }
 
     /// Performs an async `os.pwritev` using a separate thread.
     /// `fd` must block and not return EAGAIN.
-    pub fn pwritev(self: *Loop, fd: os.fd_t, iov: []const os.iovec_const, offset: u64) os.WriteError!usize {
-        var req_node = Request.Node{
-            .data = .{
-                .msg = .{
-                    .pwritev = .{
-                        .fd = fd,
-                        .iov = iov,
-                        .offset = offset,
-                        .result = undefined,
+    pub fn pwritev(self: *Loop, fd: os.fd_t, iov: []const os.iovec_const, offset: u64, simulate_evented: bool) os.PWriteError!usize {
+        if (simulate_evented) {
+            var req_node = Request.Node{
+                .data = .{
+                    .msg = .{
+                        .pwritev = .{
+                            .fd = fd,
+                            .iov = iov,
+                            .offset = offset,
+                            .result = undefined,
+                        },
                     },
+                    .finish = .{ .TickNode = .{ .data = @frame() } },
                 },
-                .finish = .{ .TickNode = .{ .data = @frame() } },
-            },
-        };
-        suspend {
-            self.posixFsRequest(&req_node);
+            };
+            suspend {
+                self.posixFsRequest(&req_node);
+            }
+            return req_node.data.msg.pwritev.result;
+        } else {
+            while (true) {
+                return os.pwritev(fd, iov, offset) catch |err| switch (err) {
+                    error.WouldBlock => {
+                        self.waitUntilFdWritable(fd);
+                        continue;
+                    },
+                    else => return err,
+                };
+            }
         }
-        return req_node.data.msg.pwritev.result;
+    }
+
+    pub fn sendto(
+        self: *Loop,
+        /// The file descriptor of the sending socket.
+        sockfd: os.fd_t,
+        /// Message to send.
+        buf: []const u8,
+        flags: u32,
+        dest_addr: ?*const os.sockaddr,
+        addrlen: os.socklen_t,
+    ) os.SendError!usize {
+        while (true) {
+            return os.sendto(sockfd, buf, flags, dest_addr, addrlen) catch |err| switch (err) {
+                error.WouldBlock => {
+                    self.waitUntilFdWritable(sockfd);
+                    continue;
+                },
+                else => return err,
+            };
+        }
+    }
+
+    pub fn recvfrom(
+        sockfd: os.fd_t,
+        buf: []u8,
+        flags: u32,
+        src_addr: ?*os.sockaddr,
+        addrlen: ?*os.socklen_t,
+    ) os.RecvFromError!usize {
+        while (true) {
+            return os.recvfrom(sockfd, buf, flags, src_addr, addrlen) catch |err| switch (err) {
+                error.WouldBlock => {
+                    self.waitUntilFdReadable(sockfd);
+                    continue;
+                },
+                else => return err,
+            };
+        }
     }
 
     /// Performs an async `os.faccessatZ` using a separate thread.
@@ -1041,70 +1252,58 @@ pub const Loop = struct {
 
     fn posixFsRequest(self: *Loop, request_node: *Request.Node) void {
         self.beginOneEvent(); // finished in posixFsRun after processing the msg
-        self.os_data.fs_queue.put(request_node);
-        switch (builtin.os.tag) {
-            .macosx, .freebsd, .netbsd, .dragonfly => {
-                const fs_kevs = @as(*const [1]os.Kevent, &self.os_data.fs_kevent_wake);
-                const empty_kevs = &[0]os.Kevent{};
-                _ = os.kevent(self.os_data.fs_kqfd, fs_kevs, empty_kevs, null) catch unreachable;
-            },
-            .linux => {
-                @atomicStore(i32, &self.os_data.fs_queue_item, 1, AtomicOrder.SeqCst);
-                const rc = os.linux.futex_wake(&self.os_data.fs_queue_item, os.linux.FUTEX_WAKE, 1);
-                switch (os.linux.getErrno(rc)) {
-                    0 => {},
-                    os.EINVAL => unreachable,
-                    else => unreachable,
-                }
-            },
-            else => @compileError("Unsupported OS"),
-        }
+        self.fs_queue.put(request_node);
+        self.fs_thread_wakeup.set();
     }
 
     fn posixFsCancel(self: *Loop, request_node: *Request.Node) void {
-        if (self.os_data.fs_queue.remove(request_node)) {
+        if (self.fs_queue.remove(request_node)) {
             self.finishOneEvent();
         }
     }
 
-    // TODO make this whole function noasync
-    // https://github.com/ziglang/zig/issues/3157
     fn posixFsRun(self: *Loop) void {
-        while (true) {
-            if (builtin.os.tag == .linux) {
-                @atomicStore(i32, &self.os_data.fs_queue_item, 0, .SeqCst);
-            }
-            while (self.os_data.fs_queue.get()) |node| {
+        nosuspend while (true) {
+            self.fs_thread_wakeup.reset();
+            while (self.fs_queue.get()) |node| {
                 switch (node.data.msg) {
                     .end => return,
                     .read => |*msg| {
-                        msg.result = noasync os.read(msg.fd, msg.buf);
+                        msg.result = os.read(msg.fd, msg.buf);
+                    },
+                    .readv => |*msg| {
+                        msg.result = os.readv(msg.fd, msg.iov);
                     },
                     .write => |*msg| {
-                        msg.result = noasync os.write(msg.fd, msg.bytes);
+                        msg.result = os.write(msg.fd, msg.bytes);
                     },
                     .writev => |*msg| {
-                        msg.result = noasync os.writev(msg.fd, msg.iov);
+                        msg.result = os.writev(msg.fd, msg.iov);
+                    },
+                    .pwrite => |*msg| {
+                        msg.result = os.pwrite(msg.fd, msg.bytes, msg.offset);
                     },
                     .pwritev => |*msg| {
-                        msg.result = noasync os.pwritev(msg.fd, msg.iov, msg.offset);
+                        msg.result = os.pwritev(msg.fd, msg.iov, msg.offset);
                     },
                     .pread => |*msg| {
-                        msg.result = noasync os.pread(msg.fd, msg.buf, msg.offset);
+                        msg.result = os.pread(msg.fd, msg.buf, msg.offset);
                     },
                     .preadv => |*msg| {
-                        msg.result = noasync os.preadv(msg.fd, msg.iov, msg.offset);
+                        msg.result = os.preadv(msg.fd, msg.iov, msg.offset);
                     },
                     .open => |*msg| {
-                        msg.result = noasync os.openZ(msg.path, msg.flags, msg.mode);
+                        if (is_windows) unreachable; // TODO
+                        msg.result = os.openZ(msg.path, msg.flags, msg.mode);
                     },
                     .openat => |*msg| {
-                        msg.result = noasync os.openatZ(msg.fd, msg.path, msg.flags, msg.mode);
+                        if (is_windows) unreachable; // TODO
+                        msg.result = os.openatZ(msg.fd, msg.path, msg.flags, msg.mode);
                     },
                     .faccessat => |*msg| {
-                        msg.result = noasync os.faccessatZ(msg.dirfd, msg.path, msg.mode, msg.flags);
+                        msg.result = os.faccessatZ(msg.dirfd, msg.path, msg.mode, msg.flags);
                     },
-                    .close => |*msg| noasync os.close(msg.fd),
+                    .close => |*msg| os.close(msg.fd),
                 }
                 switch (node.data.finish) {
                     .TickNode => |*tick_node| self.onNextTick(tick_node),
@@ -1112,22 +1311,8 @@ pub const Loop = struct {
                 }
                 self.finishOneEvent();
             }
-            switch (builtin.os.tag) {
-                .linux => {
-                    const rc = os.linux.futex_wait(&self.os_data.fs_queue_item, os.linux.FUTEX_WAIT, 0, null);
-                    switch (os.linux.getErrno(rc)) {
-                        0, os.EINTR, os.EAGAIN => continue,
-                        else => unreachable,
-                    }
-                },
-                .macosx, .freebsd, .netbsd, .dragonfly => {
-                    const fs_kevs = @as(*const [1]os.Kevent, &self.os_data.fs_kevent_wait);
-                    var out_kevs: [1]os.Kevent = undefined;
-                    _ = os.kevent(self.os_data.fs_kqfd, fs_kevs, out_kevs[0..], null) catch unreachable;
-                },
-                else => @compileError("Unsupported OS"),
-            }
-        }
+            self.fs_thread_wakeup.wait();
+        };
     }
 
     const OsData = switch (builtin.os.tag) {
@@ -1143,22 +1328,12 @@ pub const Loop = struct {
     const KEventData = struct {
         kqfd: i32,
         final_kevent: os.Kevent,
-        fs_kevent_wake: os.Kevent,
-        fs_kevent_wait: os.Kevent,
-        fs_thread: *Thread,
-        fs_kqfd: i32,
-        fs_queue: std.atomic.Queue(Request),
-        fs_end_request: Request.Node,
     };
 
     const LinuxOsData = struct {
         epollfd: i32,
         final_eventfd: i32,
         final_eventfd_event: os.linux.epoll_event,
-        fs_thread: *Thread,
-        fs_queue_item: i32,
-        fs_queue: std.atomic.Queue(Request),
-        fs_end_request: Request.Node,
     };
 
     pub const Request = struct {
@@ -1174,8 +1349,10 @@ pub const Loop = struct {
 
         pub const Msg = union(enum) {
             read: Read,
+            readv: ReadV,
             write: Write,
             writev: WriteV,
+            pwrite: PWrite,
             pwritev: PWriteV,
             pread: PRead,
             preadv: PReadV,
@@ -1195,6 +1372,14 @@ pub const Loop = struct {
                 pub const Error = os.ReadError;
             };
 
+            pub const ReadV = struct {
+                fd: os.fd_t,
+                iov: []const os.iovec,
+                result: Error!usize,
+
+                pub const Error = os.ReadError;
+            };
+
             pub const Write = struct {
                 fd: os.fd_t,
                 bytes: []const u8,
@@ -1209,6 +1394,15 @@ pub const Loop = struct {
                 result: Error!usize,
 
                 pub const Error = os.WriteError;
+            };
+
+            pub const PWrite = struct {
+                fd: os.fd_t,
+                bytes: []const u8,
+                offset: usize,
+                result: Error!usize,
+
+                pub const Error = os.PWriteError;
             };
 
             pub const PWriteV = struct {
@@ -1290,11 +1484,11 @@ test "std.event.Loop - basic" {
     loop.run();
 }
 
-async fn testEventLoop() i32 {
+fn testEventLoop() i32 {
     return 1234;
 }
 
-async fn testEventLoop2(h: anyframe->i32, did_it: *bool) void {
+fn testEventLoop2(h: anyframe->i32, did_it: *bool) void {
     const value = await h;
     testing.expect(value == 1234);
     did_it.* = true;

@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("../std.zig");
 const assert = std.debug.assert;
 const testing = std.testing;
@@ -34,7 +39,7 @@ pub fn Future(comptime T: type) type {
         /// Obtain the value. If it's not available, wait until it becomes
         /// available.
         /// Thread-safe.
-        pub async fn get(self: *Self) *T {
+        pub fn get(self: *Self) callconv(.Async) *T {
             if (@atomicLoad(Available, &self.available, .SeqCst) == .Finished) {
                 return &self.data;
             }
@@ -59,7 +64,7 @@ pub fn Future(comptime T: type) type {
         /// should start working on the data.
         /// It's not required to call start() before resolve() but it can be useful since
         /// this method is thread-safe.
-        pub async fn start(self: *Self) ?*T {
+        pub fn start(self: *Self) callconv(.Async) ?*T {
             const state = @cmpxchgStrong(Available, &self.available, .NotStarted, .Started, .SeqCst, .SeqCst) orelse return null;
             switch (state) {
                 .Started => {
@@ -90,7 +95,7 @@ test "std.event.Future" {
     // TODO provide a way to run tests in evented I/O mode
     if (!std.io.is_async) return error.SkipZigTest;
 
-    const handle = async testFuture();
+    testFuture();
 }
 
 fn testFuture() void {

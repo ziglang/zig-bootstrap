@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("../std.zig");
 const builtin = @import("builtin");
 const os = std.os;
@@ -8,7 +13,7 @@ const assert = std.debug.assert;
 const windows = os.windows;
 const Os = builtin.Os;
 const maxInt = std.math.maxInt;
-const need_async_thread = std.fs.need_async_thread;
+const is_windows = std.Target.current.os.tag == .windows;
 
 pub const File = struct {
     /// The OS-specific file descriptor or file handle.
@@ -17,28 +22,52 @@ pub const File = struct {
     /// On some systems, such as Linux, file system file descriptors are incapable of non-blocking I/O.
     /// This forces us to perform asynchronous I/O on a dedicated thread, to achieve non-blocking
     /// file-system I/O. To do this, `File` must be aware of whether it is a file system file descriptor,
-    /// or, more specifically, whether the I/O is blocking.
-    io_mode: io.Mode,
+    /// or, more specifically, whether the I/O is always blocking.
+    capable_io_mode: io.ModeOverride = io.default_mode,
 
-    /// Even when 'std.io.mode' is async, it is still sometimes desirable to perform blocking I/O, although
-    /// not by default. For example, when printing a stack trace to stderr.
-    async_block_allowed: @TypeOf(async_block_allowed_no) = async_block_allowed_no,
-
-    pub const async_block_allowed_yes = if (io.is_async) true else {};
-    pub const async_block_allowed_no = if (io.is_async) false else {};
+    /// Furthermore, even when `std.io.mode` is async, it is still sometimes desirable to perform blocking I/O,
+    /// although not by default. For example, when printing a stack trace to stderr.
+    /// This field tracks both by acting as an overriding I/O mode. When not building in async I/O mode,
+    /// the type only has the `.blocking` tag, making it a zero-bit type.
+    intended_io_mode: io.ModeOverride = io.default_mode,
 
     pub const Mode = os.mode_t;
+    pub const INode = os.ino_t;
+
+    pub const Kind = enum {
+        BlockDevice,
+        CharacterDevice,
+        Directory,
+        NamedPipe,
+        SymLink,
+        File,
+        UnixDomainSocket,
+        Whiteout,
+        Unknown,
+    };
 
     pub const default_mode = switch (builtin.os.tag) {
         .windows => 0,
+        .wasi => 0,
         else => 0o666,
     };
 
-    pub const OpenError = windows.CreateFileError || os.OpenError || os.FlockError;
+    pub const OpenError = error{
+        SharingViolation,
+        PathAlreadyExists,
+        FileNotFound,
+        AccessDenied,
+        PipeBusy,
+        NameTooLong,
+        /// On Windows, file paths must be valid Unicode.
+        InvalidUtf8,
+        /// On Windows, file paths cannot contain these characters:
+        /// '/', '*', '?', '"', '<', '>', '|'
+        BadPathName,
+        Unexpected,
+    } || os.OpenError || os.FlockError;
 
-    pub const Lock = enum {
-        None, Shared, Exclusive
-    };
+    pub const Lock = enum { None, Shared, Exclusive };
 
     /// TODO https://github.com/ziglang/zig/issues/3802
     pub const OpenFlags = struct {
@@ -63,12 +92,19 @@ pub const File = struct {
         /// Sets whether or not to wait until the file is locked to return. If set to true,
         /// `error.WouldBlock` will be returned. Otherwise, the file will wait until the file
         /// is available to proceed.
+        /// In async I/O mode, non-blocking at the OS level is
+        /// determined by `intended_io_mode`, and `true` means `error.WouldBlock` is returned,
+        /// and `false` means `error.WouldBlock` is handled by the event loop.
         lock_nonblocking: bool = false,
 
-        /// This prevents `O_NONBLOCK` from being passed even if `std.io.is_async`.
-        /// It allows the use of `noasync` when calling functions related to opening
-        /// the file, reading, and writing.
-        always_blocking: bool = false,
+        /// Setting this to `.blocking` prevents `O_NONBLOCK` from being passed even
+        /// if `std.io.is_async`. It allows the use of `nosuspend` when calling functions
+        /// related to opening the file, reading, writing, and locking.
+        intended_io_mode: io.ModeOverride = io.default_mode,
+
+        /// Set this to allow the opened file to automatically become the
+        /// controlling TTY for the current process.
+        allow_ctty: bool = false,
     };
 
     /// TODO https://github.com/ziglang/zig/issues/3802
@@ -93,7 +129,7 @@ pub const File = struct {
         /// This means that a process that does not respect the locking API can still get access
         /// to the file, despite the lock.
         ///
-        /// Windows' file locks are mandatory, and any process attempting to access the file will
+        /// Windows's file locks are mandatory, and any process attempting to access the file will
         /// receive an error.
         ///
         /// [1]: https://www.kernel.org/doc/Documentation/filesystems/mandatory-locking.txt
@@ -102,17 +138,27 @@ pub const File = struct {
         /// Sets whether or not to wait until the file is locked to return. If set to true,
         /// `error.WouldBlock` will be returned. Otherwise, the file will wait until the file
         /// is available to proceed.
+        /// In async I/O mode, non-blocking at the OS level is
+        /// determined by `intended_io_mode`, and `true` means `error.WouldBlock` is returned,
+        /// and `false` means `error.WouldBlock` is handled by the event loop.
         lock_nonblocking: bool = false,
 
         /// For POSIX systems this is the file system mode the file will
         /// be created with.
         mode: Mode = default_mode,
+
+        /// Setting this to `.blocking` prevents `O_NONBLOCK` from being passed even
+        /// if `std.io.is_async`. It allows the use of `nosuspend` when calling functions
+        /// related to opening the file, reading, writing, and locking.
+        intended_io_mode: io.ModeOverride = io.default_mode,
     };
 
     /// Upon success, the stream is in an uninitialized state. To continue using it,
     /// you must use the open() function.
     pub fn close(self: File) void {
-        if (need_async_thread and self.io_mode == .blocking and !self.async_block_allowed) {
+        if (is_windows) {
+            windows.CloseHandle(self.handle);
+        } else if (self.capable_io_mode != self.intended_io_mode) {
             std.event.Loop.instance.?.close(self.handle);
         } else {
             os.close(self.handle);
@@ -129,6 +175,12 @@ pub const File = struct {
     pub fn supportsAnsiEscapeCodes(self: File) bool {
         if (builtin.os.tag == .windows) {
             return os.isCygwinPty(self.handle);
+        }
+        if (builtin.os.tag == .wasi) {
+            // WASI sanitizes stdout when fd is a tty so ANSI escape codes
+            // will not be interpreted as actual cursor commands, and
+            // stderr is always sanitized.
+            return false;
         }
         if (self.isTty()) {
             if (self.handle == os.STDOUT_FILENO or self.handle == os.STDERR_FILENO) {
@@ -191,33 +243,31 @@ pub const File = struct {
     /// TODO: integrate with async I/O
     pub fn mode(self: File) ModeError!Mode {
         if (builtin.os.tag == .windows) {
-            return {};
+            return 0;
         }
         return (try self.stat()).mode;
     }
 
     pub const Stat = struct {
         /// A number that the system uses to point to the file metadata. This number is not guaranteed to be
-        /// unique across time, as some file systems may reuse an inode after it's file has been deleted.
+        /// unique across time, as some file systems may reuse an inode after its file has been deleted.
         /// Some systems may change the inode of a file over time.
         ///
-        /// On Linux, the inode _is_ structure that stores the metadata, and the inode _number_ is what
+        /// On Linux, the inode is a structure that stores the metadata, and the inode _number_ is what
         /// you see here: the index number of the inode.
         ///
         /// The FileIndex on Windows is similar. It is a number for a file that is unique to each filesystem.
-        inode: os.ino_t,
-
+        inode: INode,
         size: u64,
         mode: Mode,
+        kind: Kind,
 
-        /// access time in nanoseconds
-        atime: i64,
-
-        /// last modification time in nanoseconds
-        mtime: i64,
-
-        /// creation time in nanoseconds
-        ctime: i64,
+        /// Access time in nanoseconds, relative to UTC 1970-01-01.
+        atime: i128,
+        /// Last modification time in nanoseconds, relative to UTC 1970-01-01.
+        mtime: i128,
+        /// Creation time in nanoseconds, relative to UTC 1970-01-01.
+        ctime: i128,
     };
 
     pub const StatError = os.FStatError;
@@ -239,6 +289,7 @@ pub const File = struct {
                 .inode = info.InternalInformation.IndexNumber,
                 .size = @bitCast(u64, info.StandardInformation.EndOfFile),
                 .mode = 0,
+                .kind = if (info.StandardInformation.Directory == 0) .File else .Directory,
                 .atime = windows.fromSysTime(info.BasicInformation.LastAccessTime),
                 .mtime = windows.fromSysTime(info.BasicInformation.LastWriteTime),
                 .ctime = windows.fromSysTime(info.BasicInformation.CreationTime),
@@ -253,9 +304,30 @@ pub const File = struct {
             .inode = st.ino,
             .size = @bitCast(u64, st.size),
             .mode = st.mode,
-            .atime = @as(i64, atime.tv_sec) * std.time.ns_per_s + atime.tv_nsec,
-            .mtime = @as(i64, mtime.tv_sec) * std.time.ns_per_s + mtime.tv_nsec,
-            .ctime = @as(i64, ctime.tv_sec) * std.time.ns_per_s + ctime.tv_nsec,
+            .kind = switch (builtin.os.tag) {
+                .wasi => switch (st.filetype) {
+                    os.FILETYPE_BLOCK_DEVICE => Kind.BlockDevice,
+                    os.FILETYPE_CHARACTER_DEVICE => Kind.CharacterDevice,
+                    os.FILETYPE_DIRECTORY => Kind.Directory,
+                    os.FILETYPE_SYMBOLIC_LINK => Kind.SymLink,
+                    os.FILETYPE_REGULAR_FILE => Kind.File,
+                    os.FILETYPE_SOCKET_STREAM, os.FILETYPE_SOCKET_DGRAM => Kind.UnixDomainSocket,
+                    else => Kind.Unknown,
+                },
+                else => switch (st.mode & os.S_IFMT) {
+                    os.S_IFBLK => Kind.BlockDevice,
+                    os.S_IFCHR => Kind.CharacterDevice,
+                    os.S_IFDIR => Kind.Directory,
+                    os.S_IFIFO => Kind.NamedPipe,
+                    os.S_IFLNK => Kind.SymLink,
+                    os.S_IFREG => Kind.File,
+                    os.S_IFSOCK => Kind.UnixDomainSocket,
+                    else => Kind.Unknown,
+                },
+            },
+            .atime = @as(i128, atime.tv_sec) * std.time.ns_per_s + atime.tv_nsec,
+            .mtime = @as(i128, mtime.tv_sec) * std.time.ns_per_s + mtime.tv_nsec,
+            .ctime = @as(i128, ctime.tv_sec) * std.time.ns_per_s + ctime.tv_nsec,
         };
     }
 
@@ -269,9 +341,9 @@ pub const File = struct {
     pub fn updateTimes(
         self: File,
         /// access timestamp in nanoseconds
-        atime: i64,
+        atime: i128,
         /// last modification timestamp in nanoseconds
-        mtime: i64,
+        mtime: i128,
     ) UpdateTimesError!void {
         if (builtin.os.tag == .windows) {
             const atime_ft = windows.nanoSecondsToFileTime(atime);
@@ -291,14 +363,63 @@ pub const File = struct {
         try os.futimens(self.handle, &times);
     }
 
+    /// Reads all the bytes from the current position to the end of the file.
+    /// On success, caller owns returned buffer.
+    /// If the file is larger than `max_bytes`, returns `error.FileTooBig`.
+    pub fn readToEndAlloc(self: File, allocator: *mem.Allocator, max_bytes: usize) ![]u8 {
+        return self.readToEndAllocOptions(allocator, max_bytes, null, @alignOf(u8), null);
+    }
+
+    /// Reads all the bytes from the current position to the end of the file.
+    /// On success, caller owns returned buffer.
+    /// If the file is larger than `max_bytes`, returns `error.FileTooBig`.
+    /// If `size_hint` is specified the initial buffer size is calculated using
+    /// that value, otherwise an arbitrary value is used instead.
+    /// Allows specifying alignment and a sentinel value.
+    pub fn readToEndAllocOptions(
+        self: File,
+        allocator: *mem.Allocator,
+        max_bytes: usize,
+        size_hint: ?usize,
+        comptime alignment: u29,
+        comptime optional_sentinel: ?u8,
+    ) !(if (optional_sentinel) |s| [:s]align(alignment) u8 else []align(alignment) u8) {
+        // If no size hint is provided fall back to the size=0 code path
+        const size = size_hint orelse 0;
+
+        // The file size returned by stat is used as hint to set the buffer
+        // size. If the reported size is zero, as it happens on Linux for files
+        // in /proc, a small buffer is allocated instead.
+        const initial_cap = (if (size > 0) size else 1024) + @boolToInt(optional_sentinel != null);
+        var array_list = try std.ArrayListAligned(u8, alignment).initCapacity(allocator, initial_cap);
+        defer array_list.deinit();
+
+        self.reader().readAllArrayList(&array_list, max_bytes) catch |err| switch (err) {
+            error.StreamTooLong => return error.FileTooBig,
+            else => |e| return e,
+        };
+
+        if (optional_sentinel) |sentinel| {
+            try array_list.append(sentinel);
+            const buf = array_list.toOwnedSlice();
+            return buf[0 .. buf.len - 1 :sentinel];
+        } else {
+            return array_list.toOwnedSlice();
+        }
+    }
+
     pub const ReadError = os.ReadError;
     pub const PReadError = os.PReadError;
 
     pub fn read(self: File, buffer: []u8) ReadError!usize {
-        if (need_async_thread and self.io_mode == .blocking and !self.async_block_allowed) {
-            return std.event.Loop.instance.?.read(self.handle, buffer);
-        } else {
+        if (is_windows) {
+            return windows.ReadFile(self.handle, buffer, null, self.intended_io_mode);
+        }
+
+        if (self.intended_io_mode == .blocking) {
             return os.read(self.handle, buffer);
+        } else {
+            return std.event.Loop.instance.?.read(self.handle, buffer, self.capable_io_mode != self.intended_io_mode);
         }
     }
 
@@ -315,10 +436,14 @@ pub const File = struct {
     }
 
     pub fn pread(self: File, buffer: []u8, offset: u64) PReadError!usize {
-        if (need_async_thread and self.io_mode == .blocking and !self.async_block_allowed) {
-            return std.event.Loop.instance.?.pread(self.handle, buffer, offset);
-        } else {
+        if (is_windows) {
+            return windows.ReadFile(self.handle, buffer, offset, self.intended_io_mode);
+        }
+
+        if (self.intended_io_mode == .blocking) {
             return os.pread(self.handle, buffer, offset);
+        } else {
+            return std.event.Loop.instance.?.pread(self.handle, buffer, offset, self.capable_io_mode != self.intended_io_mode);
         }
     }
 
@@ -335,10 +460,17 @@ pub const File = struct {
     }
 
     pub fn readv(self: File, iovecs: []const os.iovec) ReadError!usize {
-        if (need_async_thread and self.io_mode == .blocking and !self.async_block_allowed) {
-            return std.event.Loop.instance.?.readv(self.handle, iovecs);
-        } else {
+        if (is_windows) {
+            // TODO improve this to use ReadFileScatter
+            if (iovecs.len == 0) return @as(usize, 0);
+            const first = iovecs[0];
+            return windows.ReadFile(self.handle, first.iov_base[0..first.iov_len], null, self.intended_io_mode);
+        }
+
+        if (self.intended_io_mode == .blocking) {
             return os.readv(self.handle, iovecs);
+        } else {
+            return std.event.Loop.instance.?.readv(self.handle, iovecs, self.capable_io_mode != self.intended_io_mode);
         }
     }
 
@@ -369,10 +501,17 @@ pub const File = struct {
     }
 
     pub fn preadv(self: File, iovecs: []const os.iovec, offset: u64) PReadError!usize {
-        if (need_async_thread and self.io_mode == .blocking and !self.async_block_allowed) {
-            return std.event.Loop.instance.?.preadv(self.handle, iovecs, offset);
-        } else {
+        if (is_windows) {
+            // TODO improve this to use ReadFileScatter
+            if (iovecs.len == 0) return @as(usize, 0);
+            const first = iovecs[0];
+            return windows.ReadFile(self.handle, first.iov_base[0..first.iov_len], offset, self.intended_io_mode);
+        }
+
+        if (self.intended_io_mode == .blocking) {
             return os.preadv(self.handle, iovecs, offset);
+        } else {
+            return std.event.Loop.instance.?.preadv(self.handle, iovecs, offset, self.capable_io_mode != self.intended_io_mode);
         }
     }
 
@@ -406,10 +545,14 @@ pub const File = struct {
     pub const PWriteError = os.PWriteError;
 
     pub fn write(self: File, bytes: []const u8) WriteError!usize {
-        if (need_async_thread and self.io_mode == .blocking and !self.async_block_allowed) {
-            return std.event.Loop.instance.?.write(self.handle, bytes);
-        } else {
+        if (is_windows) {
+            return windows.WriteFile(self.handle, bytes, null, self.intended_io_mode);
+        }
+
+        if (self.intended_io_mode == .blocking) {
             return os.write(self.handle, bytes);
+        } else {
+            return std.event.Loop.instance.?.write(self.handle, bytes, self.capable_io_mode != self.intended_io_mode);
         }
     }
 
@@ -421,10 +564,14 @@ pub const File = struct {
     }
 
     pub fn pwrite(self: File, bytes: []const u8, offset: u64) PWriteError!usize {
-        if (need_async_thread and self.io_mode == .blocking and !self.async_block_allowed) {
-            return std.event.Loop.instance.?.pwrite(self.handle, bytes, offset);
-        } else {
+        if (is_windows) {
+            return windows.WriteFile(self.handle, bytes, offset, self.intended_io_mode);
+        }
+
+        if (self.intended_io_mode == .blocking) {
             return os.pwrite(self.handle, bytes, offset);
+        } else {
+            return std.event.Loop.instance.?.pwrite(self.handle, bytes, offset, self.capable_io_mode != self.intended_io_mode);
         }
     }
 
@@ -436,10 +583,17 @@ pub const File = struct {
     }
 
     pub fn writev(self: File, iovecs: []const os.iovec_const) WriteError!usize {
-        if (need_async_thread and self.io_mode == .blocking and !self.async_block_allowed) {
-            return std.event.Loop.instance.?.writev(self.handle, iovecs);
-        } else {
+        if (is_windows) {
+            // TODO improve this to use WriteFileScatter
+            if (iovecs.len == 0) return @as(usize, 0);
+            const first = iovecs[0];
+            return windows.WriteFile(self.handle, first.iov_base[0..first.iov_len], null, self.intended_io_mode);
+        }
+
+        if (self.intended_io_mode == .blocking) {
             return os.writev(self.handle, iovecs);
+        } else {
+            return std.event.Loop.instance.?.writev(self.handle, iovecs, self.capable_io_mode != self.intended_io_mode);
         }
     }
 
@@ -462,10 +616,17 @@ pub const File = struct {
     }
 
     pub fn pwritev(self: File, iovecs: []os.iovec_const, offset: usize) PWriteError!usize {
-        if (need_async_thread and self.io_mode == .blocking and !self.async_block_allowed) {
-            return std.event.Loop.instance.?.pwritev(self.handle, iovecs, offset);
-        } else {
+        if (is_windows) {
+            // TODO improve this to use WriteFileScatter
+            if (iovecs.len == 0) return @as(usize, 0);
+            const first = iovecs[0];
+            return windows.WriteFile(self.handle, first.iov_base[0..first.iov_len], offset, self.intended_io_mode);
+        }
+
+        if (self.intended_io_mode == .blocking) {
             return os.pwritev(self.handle, iovecs, offset);
+        } else {
+            return std.event.Loop.instance.?.pwritev(self.handle, iovecs, offset, self.capable_io_mode != self.intended_io_mode);
         }
     }
 
@@ -487,6 +648,28 @@ pub const File = struct {
             iovecs[i].iov_base += amt;
             iovecs[i].iov_len -= amt;
         }
+    }
+
+    pub const CopyRangeError = os.CopyFileRangeError;
+
+    pub fn copyRange(in: File, in_offset: u64, out: File, out_offset: u64, len: usize) CopyRangeError!usize {
+        return os.copy_file_range(in.handle, in_offset, out.handle, out_offset, len, 0);
+    }
+
+    /// Returns the number of bytes copied. If the number read is smaller than `buffer.len`, it
+    /// means the in file reached the end. Reaching the end of a file is not an error condition.
+    pub fn copyRangeAll(in: File, in_offset: u64, out: File, out_offset: u64, len: usize) CopyRangeError!usize {
+        var total_bytes_copied: usize = 0;
+        var in_off = in_offset;
+        var out_off = out_offset;
+        while (total_bytes_copied < len) {
+            const amt_copied = try copyRange(in, in_off, out, out_off, len - total_bytes_copied);
+            if (amt_copied == 0) return total_bytes_copied;
+            total_bytes_copied += amt_copied;
+            in_off += amt_copied;
+            out_off += amt_copied;
+        }
+        return total_bytes_copied;
     }
 
     pub const WriteFileOptions = struct {
@@ -561,7 +744,7 @@ pub const File = struct {
         }
         var i: usize = 0;
         while (i < trailers.len) {
-            while (amt >= headers[i].iov_len) {
+            while (amt >= trailers[i].iov_len) {
                 amt -= trailers[i].iov_len;
                 i += 1;
                 if (i >= trailers.len) return;
@@ -572,15 +755,31 @@ pub const File = struct {
         }
     }
 
-    pub const InStream = io.InStream(File, ReadError, read);
+    pub const Reader = io.Reader(File, ReadError, read);
 
-    pub fn inStream(file: File) io.InStream(File, ReadError, read) {
+    /// Deprecated: use `Reader`
+    pub const InStream = Reader;
+
+    pub fn reader(file: File) Reader {
         return .{ .context = file };
     }
 
-    pub const OutStream = io.OutStream(File, WriteError, write);
+    /// Deprecated: use `reader`
+    pub fn inStream(file: File) Reader {
+        return .{ .context = file };
+    }
 
-    pub fn outStream(file: File) OutStream {
+    pub const Writer = io.Writer(File, WriteError, write);
+
+    /// Deprecated: use `Writer`
+    pub const OutStream = Writer;
+
+    pub fn writer(file: File) Writer {
+        return .{ .context = file };
+    }
+
+    /// Deprecated: use `writer`
+    pub fn outStream(file: File) Writer {
         return .{ .context = file };
     }
 

@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("../std.zig");
 const builtin = @import("builtin");
 const Lock = std.event.Lock;
@@ -65,7 +70,7 @@ pub fn Group(comptime ReturnType: type) type {
         /// allocated by the group and freed by `wait`.
         /// `func` must be async and have return type `ReturnType`.
         /// Thread-safe.
-        pub fn call(self: *Self, comptime func: var, args: var) error{OutOfMemory}!void {
+        pub fn call(self: *Self, comptime func: anytype, args: anytype) error{OutOfMemory}!void {
             var frame = try self.allocator.create(@TypeOf(@call(.{ .modifier = .async_kw }, func, args)));
             errdefer self.allocator.destroy(frame);
             const node = try self.allocator.create(AllocStack.Node);
@@ -84,7 +89,7 @@ pub fn Group(comptime ReturnType: type) type {
         /// Wait for all the calls and promises of the group to complete.
         /// Thread-safe.
         /// Safe to call any number of times.
-        pub async fn wait(self: *Self) ReturnType {
+        pub fn wait(self: *Self) callconv(.Async) ReturnType {
             const held = self.lock.acquire();
             defer held.release();
 
@@ -127,8 +132,7 @@ test "std.event.Group" {
 
     const handle = async testGroup(std.heap.page_allocator);
 }
-
-async fn testGroup(allocator: *Allocator) void {
+fn testGroup(allocator: *Allocator) callconv(.Async) void {
     var count: usize = 0;
     var group = Group(void).init(allocator);
     var sleep_a_little_frame = async sleepALittle(&count);
@@ -145,20 +149,17 @@ async fn testGroup(allocator: *Allocator) void {
     another.add(&something_that_fails_frame) catch @panic("memory");
     testing.expectError(error.ItBroke, another.wait());
 }
-
-async fn sleepALittle(count: *usize) void {
-    std.time.sleep(1 * std.time.millisecond);
+fn sleepALittle(count: *usize) callconv(.Async) void {
+    std.time.sleep(1 * std.time.ns_per_ms);
     _ = @atomicRmw(usize, count, .Add, 1, .SeqCst);
 }
-
-async fn increaseByTen(count: *usize) void {
+fn increaseByTen(count: *usize) callconv(.Async) void {
     var i: usize = 0;
     while (i < 10) : (i += 1) {
         _ = @atomicRmw(usize, count, .Add, 1, .SeqCst);
     }
 }
-
-async fn doSomethingThatFails() anyerror!void {}
-async fn somethingElse() anyerror!void {
+fn doSomethingThatFails() callconv(.Async) anyerror!void {}
+fn somethingElse() callconv(.Async) anyerror!void {
     return error.ItBroke;
 }

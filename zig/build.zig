@@ -9,10 +9,14 @@ const ArrayList = std.ArrayList;
 const io = std.io;
 const fs = std.fs;
 const InstallDirectoryOptions = std.build.InstallDirectoryOptions;
+const assert = std.debug.assert;
+
+const zig_version = std.builtin.Version{ .major = 0, .minor = 6, .patch = 0 };
 
 pub fn build(b: *Builder) !void {
     b.setPreferredReleaseMode(.ReleaseFast);
     const mode = b.standardReleaseOptions();
+    const target = b.standardTargetOptions(.{});
 
     var docgen_exe = b.addExecutable("docgen", "doc/docgen.zig");
 
@@ -34,23 +38,11 @@ pub fn build(b: *Builder) !void {
 
     const test_step = b.step("test", "Run all the tests");
 
-    const config_h_text = if (b.option(
-        []const u8,
-        "config_h",
-        "Path to the generated config.h",
-    )) |config_h_path|
-        try std.fs.cwd().readFileAlloc(b.allocator, toNativePathSep(b, config_h_path), max_config_h_bytes)
-    else
-        try findAndReadConfigH(b);
-
-    var test_stage2 = b.addTest("src-self-hosted/test.zig");
-    test_stage2.setBuildMode(builtin.Mode.Debug);
+    var test_stage2 = b.addTest("src/test.zig");
+    test_stage2.setBuildMode(mode);
     test_stage2.addPackagePath("stage2_tests", "test/stage2/test.zig");
 
     const fmt_build_zig = b.addFmt(&[_][]const u8{"build.zig"});
-
-    var exe = b.addExecutable("zig", "src-self-hosted/main.zig");
-    exe.setBuildMode(mode);
 
     const skip_release = b.option(bool, "skip-release", "Main test suite skips release builds") orelse false;
     const skip_release_small = b.option(bool, "skip-release-small", "Main test suite skips release-small builds") orelse skip_release;
@@ -58,35 +50,129 @@ pub fn build(b: *Builder) !void {
     const skip_release_safe = b.option(bool, "skip-release-safe", "Main test suite skips release-safe builds") orelse skip_release;
     const skip_non_native = b.option(bool, "skip-non-native", "Main test suite skips non-native builds") orelse false;
     const skip_libc = b.option(bool, "skip-libc", "Main test suite skips tests that link libc") orelse false;
-    const skip_self_hosted = (b.option(bool, "skip-self-hosted", "Main test suite skips building self hosted compiler") orelse false) or true; // TODO evented I/O good enough that this passes everywhere
-    if (!skip_self_hosted) {
-        test_step.dependOn(&exe.step);
-    }
+    const skip_compile_errors = b.option(bool, "skip-compile-errors", "Main test suite skips compile error tests") orelse false;
 
     const only_install_lib_files = b.option(bool, "lib-files-only", "Only install library files") orelse false;
-    if (!only_install_lib_files and !skip_self_hosted) {
-        var ctx = parseConfigH(b, config_h_text);
-        ctx.llvm = try findLLVM(b, ctx.llvm_config_exe);
-
-        try configureStage2(b, test_stage2, ctx);
-        try configureStage2(b, exe, ctx);
-
-        b.default_step.dependOn(&exe.step);
-        exe.install();
-    }
+    const enable_llvm = b.option(bool, "enable-llvm", "Build self-hosted compiler with LLVM backend enabled") orelse false;
+    const config_h_path_option = b.option([]const u8, "config_h", "Path to the generated config.h");
 
     b.installDirectory(InstallDirectoryOptions{
         .source_dir = "lib",
         .install_dir = .Lib,
         .install_subdir = "zig",
-        .exclude_extensions = &[_][]const u8{ "test.zig", "README.md" },
+        .exclude_extensions = &[_][]const u8{
+            "test.zig",
+            "README.md",
+            ".z.0",
+            ".z.9",
+            ".gz",
+            "rfc1951.txt",
+        },
     });
+
+    if (only_install_lib_files)
+        return;
+
+    const tracy = b.option([]const u8, "tracy", "Enable Tracy integration. Supply path to Tracy source");
+    const link_libc = b.option(bool, "force-link-libc", "Force self-hosted compiler to link libc") orelse enable_llvm;
+
+    var exe = b.addExecutable("zig", "src/main.zig");
+    exe.install();
+    exe.setBuildMode(mode);
+    exe.setTarget(target);
+    test_step.dependOn(&exe.step);
+    b.default_step.dependOn(&exe.step);
+
+    exe.addBuildOption(bool, "have_llvm", enable_llvm);
+    if (enable_llvm) {
+        const config_h_text = if (config_h_path_option) |config_h_path|
+            try std.fs.cwd().readFileAlloc(b.allocator, toNativePathSep(b, config_h_path), max_config_h_bytes)
+        else
+            try findAndReadConfigH(b);
+
+        var ctx = parseConfigH(b, config_h_text);
+        ctx.llvm = try findLLVM(b, ctx.llvm_config_exe);
+
+        try configureStage2(b, exe, ctx, tracy != null);
+    }
+    if (link_libc) {
+        exe.linkLibC();
+        test_stage2.linkLibC();
+    }
+
+    const log_scopes = b.option([]const []const u8, "log", "Which log scopes to enable") orelse &[0][]const u8{};
+    const zir_dumps = b.option([]const []const u8, "dump-zir", "Which functions to dump ZIR for before codegen") orelse &[0][]const u8{};
+
+    const opt_version_string = b.option([]const u8, "version-string", "Override Zig version string. Default is to find out with git.");
+    const version = if (opt_version_string) |version| version else v: {
+        const version_string = b.fmt("{}.{}.{}", .{ zig_version.major, zig_version.minor, zig_version.patch });
+
+        var code: u8 = undefined;
+        const git_sha_untrimmed = b.execAllowFail(&[_][]const u8{
+            "git",    "-C",          b.build_root,     "name-rev", "HEAD",
+            "--tags", "--name-only", "--no-undefined", "--always",
+        }, &code, .Ignore) catch {
+            break :v version_string;
+        };
+        const git_sha_trimmed = mem.trim(u8, git_sha_untrimmed, " \n\r");
+        // Detect dirty changes.
+        const diff_untrimmed = b.execAllowFail(&[_][]const u8{
+            "git", "-C", b.build_root, "diff", "HEAD",
+        }, &code, .Ignore) catch |err| {
+            std.debug.print("Error executing git diff: {}", .{err});
+            std.process.exit(1);
+        };
+        const trimmed_diff = mem.trim(u8, diff_untrimmed, " \n\r");
+        const dirty_suffix = if (trimmed_diff.len == 0) "" else s: {
+            const dirty_hash = std.hash.Wyhash.hash(0, trimmed_diff);
+            break :s b.fmt("dirty{x}", .{@truncate(u32, dirty_hash)});
+        };
+
+        // This will look like e.g. "0.6.0^0" for a tag commit.
+        if (mem.endsWith(u8, git_sha_trimmed, "^0")) {
+            const git_ver_string = git_sha_trimmed[0 .. git_sha_trimmed.len - 2];
+            if (!mem.eql(u8, git_ver_string, version_string)) {
+                std.debug.print("Expected git tag '{}', found '{}'", .{ version_string, git_ver_string });
+                std.process.exit(1);
+            }
+            break :v b.fmt("{}{}", .{ version_string, dirty_suffix });
+        } else {
+            break :v b.fmt("{}+{}{}", .{ version_string, git_sha_trimmed, dirty_suffix });
+        }
+    };
+    exe.addBuildOption([]const u8, "version", version);
+
+    exe.addBuildOption([]const []const u8, "log_scopes", log_scopes);
+    exe.addBuildOption([]const []const u8, "zir_dumps", zir_dumps);
+    exe.addBuildOption(bool, "enable_tracy", tracy != null);
+    exe.addBuildOption(bool, "is_stage1", false);
+    if (tracy) |tracy_path| {
+        const client_cpp = fs.path.join(
+            b.allocator,
+            &[_][]const u8{ tracy_path, "TracyClient.cpp" },
+        ) catch unreachable;
+        exe.addIncludeDir(tracy_path);
+        exe.addCSourceFile(client_cpp, &[_][]const u8{ "-DTRACY_ENABLE=1", "-fno-sanitize=undefined" });
+        if (!enable_llvm) {
+            exe.linkSystemLibraryName("c++");
+        }
+        exe.linkLibC();
+    }
 
     const test_filter = b.option([]const u8, "test-filter", "Skip tests that do not match filter");
 
     const is_wine_enabled = b.option(bool, "enable-wine", "Use Wine to run cross compiled Windows tests") orelse false;
     const is_qemu_enabled = b.option(bool, "enable-qemu", "Use QEMU to run cross compiled foreign architecture tests") orelse false;
+    const is_wasmtime_enabled = b.option(bool, "enable-wasmtime", "Use Wasmtime to enable and run WASI libstd tests") orelse false;
     const glibc_multi_dir = b.option([]const u8, "enable-foreign-glibc", "Provide directory with glibc installations to run cross compiled tests that link glibc");
+
+    test_stage2.addBuildOption(bool, "is_stage1", false);
+    test_stage2.addBuildOption(bool, "have_llvm", enable_llvm);
+    test_stage2.addBuildOption(bool, "enable_qemu", is_qemu_enabled);
+    test_stage2.addBuildOption(bool, "enable_wine", is_wine_enabled);
+    test_stage2.addBuildOption(bool, "enable_wasmtime", is_wasmtime_enabled);
+    test_stage2.addBuildOption(?[]const u8, "glibc_multi_install_dir", glibc_multi_dir);
+    test_stage2.addBuildOption([]const u8, "version", version);
 
     const test_stage2_step = b.step("test-stage2", "Run the stage2 compiler tests");
     test_stage2_step.dependOn(&test_stage2.step);
@@ -115,11 +201,12 @@ pub fn build(b: *Builder) !void {
     const fmt_step = b.step("test-fmt", "Run zig fmt against build.zig to make sure it works");
     fmt_step.dependOn(&fmt_build_zig.step);
 
-    test_step.dependOn(tests.addPkgTests(b, test_filter, "test/stage1/behavior.zig", "behavior", "Run the behavior tests", modes, false, skip_non_native, skip_libc, is_wine_enabled, is_qemu_enabled, glibc_multi_dir));
+    // TODO for the moment, skip wasm32-wasi until bugs are sorted out.
+    test_step.dependOn(tests.addPkgTests(b, test_filter, "test/stage1/behavior.zig", "behavior", "Run the behavior tests", modes, false, skip_non_native, skip_libc, is_wine_enabled, is_qemu_enabled, is_wasmtime_enabled, glibc_multi_dir));
 
-    test_step.dependOn(tests.addPkgTests(b, test_filter, "lib/std/std.zig", "std", "Run the standard library tests", modes, false, skip_non_native, skip_libc, is_wine_enabled, is_qemu_enabled, glibc_multi_dir));
+    test_step.dependOn(tests.addPkgTests(b, test_filter, "lib/std/std.zig", "std", "Run the standard library tests", modes, false, skip_non_native, skip_libc, is_wine_enabled, is_qemu_enabled, is_wasmtime_enabled, glibc_multi_dir));
 
-    test_step.dependOn(tests.addPkgTests(b, test_filter, "lib/std/special/compiler_rt.zig", "compiler-rt", "Run the compiler_rt tests", modes, true, skip_non_native, true, is_wine_enabled, is_qemu_enabled, glibc_multi_dir));
+    test_step.dependOn(tests.addPkgTests(b, test_filter, "lib/std/special/compiler_rt.zig", "compiler-rt", "Run the compiler_rt tests", modes, true, skip_non_native, true, is_wine_enabled, is_qemu_enabled, is_wasmtime_enabled, glibc_multi_dir));
 
     test_step.dependOn(tests.addCompareOutputTests(b, test_filter, modes));
     test_step.dependOn(tests.addStandaloneTests(b, test_filter, modes));
@@ -130,12 +217,14 @@ pub fn build(b: *Builder) !void {
     test_step.dependOn(tests.addTranslateCTests(b, test_filter));
     test_step.dependOn(tests.addRunTranslatedCTests(b, test_filter));
     // tests for this feature are disabled until we have the self-hosted compiler available
-    //test_step.dependOn(tests.addGenHTests(b, test_filter));
-    test_step.dependOn(tests.addCompileErrorTests(b, test_filter, modes));
+    // test_step.dependOn(tests.addGenHTests(b, test_filter));
+    if (!skip_compile_errors) {
+        test_step.dependOn(tests.addCompileErrorTests(b, test_filter, modes));
+    }
     test_step.dependOn(docs_step);
 }
 
-fn dependOnLib(b: *Builder, lib_exe_obj: var, dep: LibraryDep) void {
+fn dependOnLib(b: *Builder, lib_exe_obj: anytype, dep: LibraryDep) void {
     for (dep.libdirs.items) |lib_dir| {
         lib_exe_obj.addLibPath(lib_dir);
     }
@@ -175,10 +264,10 @@ fn fileExists(filename: []const u8) !bool {
     return true;
 }
 
-fn addCppLib(b: *Builder, lib_exe_obj: var, cmake_binary_dir: []const u8, lib_name: []const u8) void {
+fn addCppLib(b: *Builder, lib_exe_obj: anytype, cmake_binary_dir: []const u8, lib_name: []const u8) void {
     lib_exe_obj.addObjectFile(fs.path.join(b.allocator, &[_][]const u8{
         cmake_binary_dir,
-        "zig_cpp",
+        "zigcpp",
         b.fmt("{}{}{}", .{ lib_exe_obj.target.libPrefix(), lib_name, lib_exe_obj.target.staticLibSuffix() }),
     }) catch unreachable);
 }
@@ -257,21 +346,17 @@ fn findLLVM(b: *Builder, llvm_config_exe: []const u8) !LibraryDep {
     return result;
 }
 
-fn configureStage2(b: *Builder, exe: var, ctx: Context) !void {
+fn configureStage2(b: *Builder, exe: anytype, ctx: Context, need_cpp_includes: bool) !void {
     exe.addIncludeDir("src");
     exe.addIncludeDir(ctx.cmake_binary_dir);
-    addCppLib(b, exe, ctx.cmake_binary_dir, "zig_cpp");
-    if (ctx.lld_include_dir.len != 0) {
-        exe.addIncludeDir(ctx.lld_include_dir);
+    addCppLib(b, exe, ctx.cmake_binary_dir, "zigcpp");
+    assert(ctx.lld_include_dir.len != 0);
+    exe.addIncludeDir(ctx.lld_include_dir);
+    {
         var it = mem.tokenize(ctx.lld_libraries, ";");
         while (it.next()) |lib| {
             exe.addObjectFile(lib);
         }
-    } else {
-        addCppLib(b, exe, ctx.cmake_binary_dir, "embedded_lld_wasm");
-        addCppLib(b, exe, ctx.cmake_binary_dir, "embedded_lld_elf");
-        addCppLib(b, exe, ctx.cmake_binary_dir, "embedded_lld_coff");
-        addCppLib(b, exe, ctx.cmake_binary_dir, "embedded_lld_lib");
     }
     {
         var it = mem.tokenize(ctx.clang_libraries, ";");
@@ -281,50 +366,60 @@ fn configureStage2(b: *Builder, exe: var, ctx: Context) !void {
     }
     dependOnLib(b, exe, ctx.llvm);
 
-    if (exe.target.getOsTag() == .linux) {
-        // First we try to static link against gcc libstdc++. If that doesn't work,
-        // we fall back to -lc++ and cross our fingers.
-        addCxxKnownPath(b, ctx, exe, "libstdc++.a", "") catch |err| switch (err) {
-            error.RequiredLibraryNotFound => {
-                exe.linkSystemLibrary("c++");
-            },
-            else => |e| return e,
-        };
+    // Boy, it sure would be nice to simply linkSystemLibrary("c++") and rely on zig's
+    // ability to provide libc++ right? Well thanks to C++ not having a stable ABI this
+    // will cause linker errors. It would work in the situation when `zig cc` is used to
+    // build LLVM, Clang, and LLD, however when depending on them as system libraries, system
+    // libc++ must be used.
+    const cross_compile = false; // TODO
+    if (cross_compile) {
+        // In this case we assume that zig cc was used to build the LLVM, Clang, LLD dependencies.
+        exe.linkSystemLibrary("c++");
+    } else {
+        if (exe.target.getOsTag() == .linux) {
+            // First we try to static link against gcc libstdc++. If that doesn't work,
+            // we fall back to -lc++ and cross our fingers.
+            addCxxKnownPath(b, ctx, exe, "libstdc++.a", "", need_cpp_includes) catch |err| switch (err) {
+                error.RequiredLibraryNotFound => {
+                    exe.linkSystemLibrary("c++");
+                },
+                else => |e| return e,
+            };
 
-        exe.linkSystemLibrary("pthread");
-    } else if (exe.target.isFreeBSD()) {
-        try addCxxKnownPath(b, ctx, exe, "libc++.a", null);
-        exe.linkSystemLibrary("pthread");
-    } else if (exe.target.isDarwin()) {
-        if (addCxxKnownPath(b, ctx, exe, "libgcc_eh.a", "")) {
-            // Compiler is GCC.
-            try addCxxKnownPath(b, ctx, exe, "libstdc++.a", null);
             exe.linkSystemLibrary("pthread");
-            // TODO LLD cannot perform this link.
-            // See https://github.com/ziglang/zig/issues/1535
-            exe.enableSystemLinkerHack();
-        } else |err| switch (err) {
-            error.RequiredLibraryNotFound => {
-                // System compiler, not gcc.
-                exe.linkSystemLibrary("c++");
-            },
-            else => |e| return e,
+        } else if (exe.target.isFreeBSD()) {
+            try addCxxKnownPath(b, ctx, exe, "libc++.a", null, need_cpp_includes);
+            exe.linkSystemLibrary("pthread");
+        } else if (exe.target.isDarwin()) {
+            if (addCxxKnownPath(b, ctx, exe, "libgcc_eh.a", "", need_cpp_includes)) {
+                // Compiler is GCC.
+                try addCxxKnownPath(b, ctx, exe, "libstdc++.a", null, need_cpp_includes);
+                exe.linkSystemLibrary("pthread");
+                // TODO LLD cannot perform this link.
+                // See https://github.com/ziglang/zig/issues/1535
+                exe.enableSystemLinkerHack();
+            } else |err| switch (err) {
+                error.RequiredLibraryNotFound => {
+                    // System compiler, not gcc.
+                    exe.linkSystemLibrary("c++");
+                },
+                else => |e| return e,
+            }
+        }
+
+        if (ctx.dia_guids_lib.len != 0) {
+            exe.addObjectFile(ctx.dia_guids_lib);
         }
     }
-
-    if (ctx.dia_guids_lib.len != 0) {
-        exe.addObjectFile(ctx.dia_guids_lib);
-    }
-
-    exe.linkSystemLibrary("c");
 }
 
 fn addCxxKnownPath(
     b: *Builder,
     ctx: Context,
-    exe: var,
+    exe: anytype,
     objname: []const u8,
     errtxt: ?[]const u8,
+    need_cpp_includes: bool,
 ) !void {
     const path_padded = try b.exec(&[_][]const u8{
         ctx.cxx_compiler,
@@ -340,6 +435,16 @@ fn addCxxKnownPath(
         return error.RequiredLibraryNotFound;
     }
     exe.addObjectFile(path_unpadded);
+
+    // TODO a way to integrate with system c++ include files here
+    // cc -E -Wp,-v -xc++ /dev/null
+    if (need_cpp_includes) {
+        // I used these temporarily for testing something but we obviously need a
+        // more general purpose solution here.
+        //exe.addIncludeDir("/nix/store/b3zsk4ihlpiimv3vff86bb5bxghgdzb9-gcc-9.2.0/lib/gcc/x86_64-unknown-linux-gnu/9.2.0/../../../../include/c++/9.2.0");
+        //exe.addIncludeDir("/nix/store/b3zsk4ihlpiimv3vff86bb5bxghgdzb9-gcc-9.2.0/lib/gcc/x86_64-unknown-linux-gnu/9.2.0/../../../../include/c++/9.2.0/x86_64-unknown-linux-gnu");
+        //exe.addIncludeDir("/nix/store/b3zsk4ihlpiimv3vff86bb5bxghgdzb9-gcc-9.2.0/lib/gcc/x86_64-unknown-linux-gnu/9.2.0/../../../../include/c++/9.2.0/backward");
+    }
 }
 
 const Context = struct {

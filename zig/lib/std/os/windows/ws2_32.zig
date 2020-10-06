@@ -1,13 +1,18 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 usingnamespace @import("bits.zig");
 
-pub const SOCKET = *@OpaqueType();
+pub const SOCKET = *@Type(.Opaque);
 pub const INVALID_SOCKET = @intToPtr(SOCKET, ~@as(usize, 0));
 pub const SOCKET_ERROR = -1;
 
 pub const WSADESCRIPTION_LEN = 256;
 pub const WSASYS_STATUS_LEN = 128;
 
-pub const WSADATA = if (usize.bit_count == u64.bit_count)
+pub const WSADATA = if (@sizeOf(usize) == @sizeOf(u64))
     extern struct {
         wVersion: WORD,
         wHighVersion: WORD,
@@ -106,7 +111,7 @@ pub const WSAOVERLAPPED = extern struct {
     hEvent: ?WSAEVENT,
 };
 
-pub const WSAOVERLAPPED_COMPLETION_ROUTINE = extern fn (dwError: DWORD, cbTransferred: DWORD, lpOverlapped: *WSAOVERLAPPED, dwFlags: DWORD) void;
+pub const WSAOVERLAPPED_COMPLETION_ROUTINE = fn (dwError: DWORD, cbTransferred: DWORD, lpOverlapped: *WSAOVERLAPPED, dwFlags: DWORD) callconv(.C) void;
 
 pub const ADDRESS_FAMILY = u16;
 
@@ -163,9 +168,33 @@ pub const IPPROTO_UDP = 17;
 pub const IPPROTO_ICMPV6 = 58;
 pub const IPPROTO_RM = 113;
 
+pub const AI_PASSIVE = 0x00001;
+pub const AI_CANONNAME = 0x00002;
+pub const AI_NUMERICHOST = 0x00004;
+pub const AI_NUMERICSERV = 0x00008;
+pub const AI_ADDRCONFIG = 0x00400;
+pub const AI_V4MAPPED = 0x00800;
+pub const AI_NON_AUTHORITATIVE = 0x04000;
+pub const AI_SECURE = 0x08000;
+pub const AI_RETURN_PREFERRED_NAMES = 0x10000;
+pub const AI_DISABLE_IDN_ENCODING = 0x80000;
+
+pub const FIONBIO = -2147195266;
+
 pub const sockaddr = extern struct {
     family: ADDRESS_FAMILY,
     data: [14]u8,
+};
+
+pub const addrinfo = extern struct {
+    flags: i32,
+    family: i32,
+    socktype: i32,
+    protocol: i32,
+    addrlen: usize,
+    canonname: ?[*:0]u8,
+    addr: ?*sockaddr,
+    next: ?*addrinfo,
 };
 
 /// IPv4 socket address
@@ -728,7 +757,7 @@ pub extern "ws2_32" fn WSARecvFrom(
     lpNumberOfBytesRecvd: ?*DWORD,
     lpFlags: *DWORD,
     lpFrom: ?*sockaddr,
-    lpFromlen: socklen_t,
+    lpFromlen: ?*socklen_t,
     lpOverlapped: ?*WSAOVERLAPPED,
     lpCompletionRoutine: ?WSAOVERLAPPED_COMPLETION_ROUTINE,
 ) callconv(.Stdcall) c_int;
@@ -751,4 +780,18 @@ pub extern "ws2_32" fn WSASendTo(
     iTolen: socklen_t,
     lpOverlapped: ?*WSAOVERLAPPED,
     lpCompletionRoutine: ?WSAOVERLAPPED_COMPLETION_ROUTINE,
+) callconv(.Stdcall) c_int;
+pub extern "ws2_32" fn getaddrinfo(
+    pNodeName: [*:0]const u8,
+    pServiceName: [*:0]const u8,
+    pHints: *const addrinfo,
+    ppResult: **addrinfo,
+) callconv(.Stdcall) i32;
+pub extern "ws2_32" fn freeaddrinfo(
+    pAddrInfo: *addrinfo,
+) callconv(.Stdcall) void;
+pub extern "ws2_32" fn ioctlsocket(
+    s: SOCKET,
+    cmd: c_long,
+    argp: *c_ulong,
 ) callconv(.Stdcall) c_int;

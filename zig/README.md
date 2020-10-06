@@ -17,9 +17,12 @@ A general-purpose programming language and toolchain for maintaining
 [![Build Status](https://dev.azure.com/ziglang/zig/_apis/build/status/ziglang.zig?branchName=master)](https://dev.azure.com/ziglang/zig/_build/latest?definitionId=1&branchName=master)
 
 Note that you can
-[download a binary of master branch](https://ziglang.org/download/#release-master).
+[download a binary of master branch](https://ziglang.org/download/#release-master) or 
+[install Zig from a package manager](https://github.com/ziglang/zig/wiki/Install-Zig-from-a-Package-Manager).
 
 ### Stage 1: Build Zig from C++ Source Code
+
+This step must be repeated when you make changes to any of the C++ source code.
 
 #### Dependencies
 
@@ -27,7 +30,7 @@ Note that you can
 
  * cmake >= 2.8.5
  * gcc >= 5.0.0 or clang >= 3.6.0
- * LLVM, Clang, LLD development libraries == 10.x, compiled with the same gcc or clang version above
+ * LLVM, Clang, LLD development libraries == 11.x, compiled with the same gcc or clang version above
    - Use the system package manager, or [build from source](https://github.com/ziglang/zig/wiki/How-to-build-LLVM,-libclang,-and-liblld-from-source#posix).
 
 ##### Windows
@@ -37,7 +40,7 @@ Note that you can
    - 2015 (version 14)
    - 2017 (version 15.8)
    - 2019 (version 16)
- * LLVM, Clang, LLD development libraries == 10.x
+ * LLVM, Clang, LLD development libraries == 11.x
    - Use the [pre-built binaries](https://github.com/ziglang/zig/wiki/Building-Zig-on-Windows) or [build from source](https://github.com/ziglang/zig/wiki/How-to-build-LLVM,-libclang,-and-liblld-from-source#windows).
 
 #### Instructions
@@ -51,6 +54,8 @@ cmake ..
 make install
 ```
 
+Need help? [Troubleshooting Build Issues](https://github.com/ziglang/zig/wiki/Troubleshooting-Build-Issues)
+
 ##### MacOS
 
 ```
@@ -58,7 +63,7 @@ brew install cmake llvm
 brew outdated llvm || brew upgrade llvm
 mkdir build
 cd build
-cmake .. -DCMAKE_PREFIX_PATH=$(brew --prefix llvm) -DZIG_PREFER_CLANG_CPP_DYLIB=ON
+cmake .. -DCMAKE_PREFIX_PATH=$(brew --prefix llvm)
 make install
 ```
 
@@ -68,17 +73,13 @@ See https://github.com/ziglang/zig/wiki/Building-Zig-on-Windows
 
 ### Stage 2: Build Self-Hosted Zig from Zig Source Code
 
-*Note: Stage 2 compiler is not complete. Beta users of Zig should use the
-Stage 1 compiler for now.*
-
-Dependencies are the same as Stage 1, except now you can use stage 1 to compile
-Zig code.
+Now we use the stage1 binary:
 
 ```
-bin/zig build --prefix $(pwd)/stage2
+zig build --prefix $(pwd)/stage2 -Denable-llvm
 ```
 
-This produces `./stage2/bin/zig` which can be used for testing and development.
+This produces `stage2/bin/zig` which can be used for testing and development.
 Once it is feature complete, it will be used to build stage 3 - the final compiler
 binary.
 
@@ -94,11 +95,31 @@ use stage 1.
 #### Debug / Development Build
 
 ```
-./stage2/bin/zig build --prefix $(pwd)/stage3
+stage2/bin/zig build
 ```
+
+This produces `zig-cache/bin/zig`.
 
 #### Release / Install Build
 
 ```
-./stage2/bin/zig build install -Drelease
+stage2/bin/zig build install -Drelease
 ```
+
+## License
+
+The ultimate goal of the Zig project is to serve users. As a first-order
+effect, this means users of the compiler, helping programmers to write better
+code. Even more important, however, are the end users.
+
+Zig is intended to be used to help end users accomplish their goals. For
+example, it would be inappropriate and offensive to use Zig to implement
+[dark patterns](https://en.wikipedia.org/wiki/Dark_pattern) and it would be
+shameful to utilize Zig to exploit people instead of benefit them.
+
+However, such problems are best solved with social norms, not with software
+licenses. Any attempt to complicate the software license of Zig would risk
+compromising the value Zig provides to users.
+
+Therefore, Zig is available under the MIT (Expat) License, and comes with a
+humble request: use it to make software better serve the needs of end users.

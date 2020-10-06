@@ -9,41 +9,41 @@
 
 find_path(CLANG_INCLUDE_DIRS NAMES clang/Frontend/ASTUnit.h
   PATHS
-    /usr/lib/llvm/10/include
-    /usr/lib/llvm-10/include
-    /usr/lib/llvm-10.0/include
-    /usr/local/llvm100/include
-    /usr/local/llvm10/include
+    /usr/lib/llvm/11/include
+    /usr/lib/llvm-11/include
+    /usr/lib/llvm-11.0/include
+    /usr/local/llvm110/include
+    /usr/local/llvm11/include
     /mingw64/include
 )
 
 if(ZIG_PREFER_CLANG_CPP_DYLIB)
-  find_library(CLANG_CPP_DYLIB
+  find_library(CLANG_LIBRARIES
     NAMES
-      clang-cpp-10.0
-      clang-cpp100
+      clang-cpp-11.0
+      clang-cpp110
       clang-cpp
     PATHS
       ${CLANG_LIBDIRS}
-      /usr/lib/llvm-10/lib
-      /usr/local/llvm100/lib
-      /usr/local/llvm10/lib
+      /usr/lib/llvm/11/lib
+      /usr/lib/llvm/11/lib64
+      /usr/lib/llvm-11/lib
+      /usr/local/llvm110/lib
+      /usr/local/llvm11/lib
   )
 endif()
 
-if(CLANG_CPP_DYLIB)
-  set(CLANG_LIBRARIES ${CLANG_CPP_DYLIB})
-else()
+if(NOT CLANG_LIBRARIES)
   macro(FIND_AND_ADD_CLANG_LIB _libname_)
     string(TOUPPER ${_libname_} _prettylibname_)
     find_library(CLANG_${_prettylibname_}_LIB NAMES ${_libname_}
       PATHS
         ${CLANG_LIBDIRS}
-        /usr/lib/llvm/10/lib
-        /usr/lib/llvm-10/lib
-        /usr/lib/llvm-10.0/lib
-        /usr/local/llvm100/lib
-        /usr/local/llvm10/lib
+        /usr/lib/llvm/11/lib
+        /usr/lib/llvm-11/lib
+        /usr/lib/llvm-11.0/lib
+        /usr/local/llvm110/lib
+        /usr/local/llvm11/lib
         /mingw64/lib
         /c/msys64/mingw64/lib
         c:\\msys64\\mingw64\\lib
@@ -75,6 +75,7 @@ else()
   FIND_AND_ADD_CLANG_LIB(clangRewrite)
   FIND_AND_ADD_CLANG_LIB(clangCrossTU)
   FIND_AND_ADD_CLANG_LIB(clangIndex)
+  FIND_AND_ADD_CLANG_LIB(clangToolingCore)
 endif()
 
 include(FindPackageHandleStandardArgs)

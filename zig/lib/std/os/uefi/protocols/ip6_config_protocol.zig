@@ -1,13 +1,18 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const uefi = @import("std").os.uefi;
 const Guid = uefi.Guid;
 const Event = uefi.Event;
 const Status = uefi.Status;
 
 pub const Ip6ConfigProtocol = extern struct {
-    _set_data: extern fn (*const Ip6ConfigProtocol, Ip6ConfigDataType, usize, *const c_void) Status,
-    _get_data: extern fn (*const Ip6ConfigProtocol, Ip6ConfigDataType, *usize, ?*const c_void) Status,
-    _register_data_notify: extern fn (*const Ip6ConfigProtocol, Ip6ConfigDataType, Event) Status,
-    _unregister_data_notify: extern fn (*const Ip6ConfigProtocol, Ip6ConfigDataType, Event) Status,
+    _set_data: fn (*const Ip6ConfigProtocol, Ip6ConfigDataType, usize, *const c_void) callconv(.C) Status,
+    _get_data: fn (*const Ip6ConfigProtocol, Ip6ConfigDataType, *usize, ?*const c_void) callconv(.C) Status,
+    _register_data_notify: fn (*const Ip6ConfigProtocol, Ip6ConfigDataType, Event) callconv(.C) Status,
+    _unregister_data_notify: fn (*const Ip6ConfigProtocol, Ip6ConfigDataType, Event) callconv(.C) Status,
 
     pub fn setData(self: *const Ip6ConfigProtocol, data_type: Ip6ConfigDataType, data_size: usize, data: *const c_void) Status {
         return self._set_data(self, data_type, data_size, data);

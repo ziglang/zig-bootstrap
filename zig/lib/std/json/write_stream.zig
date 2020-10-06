@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("../std.zig");
 const assert = std.debug.assert;
 const maxInt = std.math.maxInt;
@@ -152,7 +157,7 @@ pub fn WriteStream(comptime OutStream: type, comptime max_depth: usize) type {
             self: *Self,
             /// An integer, float, or `std.math.BigInt`. Emitted as a bare number if it fits losslessly
             /// in a IEEE 754 double float, otherwise emitted as a string to the full precision.
-            value: var,
+            value: anytype,
         ) !void {
             assert(self.state[self.state_index] == State.Value);
             switch (@typeInfo(@TypeOf(value))) {
@@ -168,8 +173,11 @@ pub fn WriteStream(comptime OutStream: type, comptime max_depth: usize) type {
                         return;
                     }
                 },
-                .Float => if (@floatCast(f64, value) == value) {
-                    try self.stream.print("{}", .{value});
+                .ComptimeInt => {
+                    return self.emitNumber(@as(std.math.IntFittingRange(value, value), value));
+                },
+                .Float, .ComptimeFloat => if (@floatCast(f64, value) == value) {
+                    try self.stream.print("{}", .{@floatCast(f64, value)});
                     self.popState();
                     return;
                 },
@@ -180,6 +188,7 @@ pub fn WriteStream(comptime OutStream: type, comptime max_depth: usize) type {
         }
 
         pub fn emitString(self: *Self, string: []const u8) !void {
+            assert(self.state[self.state_index] == State.Value);
             try self.writeEscapedString(string);
             self.popState();
         }
@@ -191,7 +200,9 @@ pub fn WriteStream(comptime OutStream: type, comptime max_depth: usize) type {
 
         /// Writes the complete json into the output stream
         pub fn emitJson(self: *Self, json: std.json.Value) Stream.Error!void {
+            assert(self.state[self.state_index] == State.Value);
             try self.stringify(json);
+            self.popState();
         }
 
         fn indent(self: *Self) !void {
@@ -209,7 +220,7 @@ pub fn WriteStream(comptime OutStream: type, comptime max_depth: usize) type {
             self.state_index -= 1;
         }
 
-        fn stringify(self: *Self, value: var) !void {
+        fn stringify(self: *Self, value: anytype) !void {
             try std.json.stringify(value, std.json.StringifyOptions{
                 .whitespace = self.whitespace,
             }, self.stream);
@@ -218,7 +229,7 @@ pub fn WriteStream(comptime OutStream: type, comptime max_depth: usize) type {
 }
 
 pub fn writeStream(
-    out_stream: var,
+    out_stream: anytype,
     comptime max_depth: usize,
 ) WriteStream(@TypeOf(out_stream), max_depth) {
     return WriteStream(@TypeOf(out_stream), max_depth).init(out_stream);
@@ -233,7 +244,32 @@ test "json write stream" {
     defer arena_allocator.deinit();
 
     var w = std.json.writeStream(out, 10);
-    try w.emitJson(try getJson(&arena_allocator.allocator));
+
+    try w.beginObject();
+
+    try w.objectField("object");
+    try w.emitJson(try getJsonObject(&arena_allocator.allocator));
+
+    try w.objectField("string");
+    try w.emitString("This is a string");
+
+    try w.objectField("array");
+    try w.beginArray();
+    try w.arrayElem();
+    try w.emitString("Another string");
+    try w.arrayElem();
+    try w.emitNumber(@as(i32, 1));
+    try w.arrayElem();
+    try w.emitNumber(@as(f32, 3.5));
+    try w.endArray();
+
+    try w.objectField("int");
+    try w.emitNumber(@as(i32, 10));
+
+    try w.objectField("float");
+    try w.emitNumber(@as(f32, 3.5));
+
+    try w.endObject();
 
     const result = slice_stream.getWritten();
     const expected =
@@ -246,38 +282,18 @@ test "json write stream" {
         \\ "array": [
         \\  "Another string",
         \\  1,
-        \\  3.14e+00
+        \\  3.5e+00
         \\ ],
         \\ "int": 10,
-        \\ "float": 3.14e+00
+        \\ "float": 3.5e+00
         \\}
     ;
     std.testing.expect(std.mem.eql(u8, expected, result));
-}
-
-fn getJson(allocator: *std.mem.Allocator) !std.json.Value {
-    var value = std.json.Value{ .Object = std.json.ObjectMap.init(allocator) };
-    _ = try value.Object.put("string", std.json.Value{ .String = "This is a string" });
-    _ = try value.Object.put("int", std.json.Value{ .Integer = @intCast(i64, 10) });
-    _ = try value.Object.put("float", std.json.Value{ .Float = 3.14 });
-    _ = try value.Object.put("array", try getJsonArray(allocator));
-    _ = try value.Object.put("object", try getJsonObject(allocator));
-    return value;
 }
 
 fn getJsonObject(allocator: *std.mem.Allocator) !std.json.Value {
     var value = std.json.Value{ .Object = std.json.ObjectMap.init(allocator) };
     _ = try value.Object.put("one", std.json.Value{ .Integer = @intCast(i64, 1) });
     _ = try value.Object.put("two", std.json.Value{ .Float = 2.0 });
-    return value;
-}
-
-fn getJsonArray(allocator: *std.mem.Allocator) !std.json.Value {
-    var value = std.json.Value{ .Array = std.json.Array.init(allocator) };
-    var array = &value.Array;
-    _ = try array.append(std.json.Value{ .String = "Another string" });
-    _ = try array.append(std.json.Value{ .Integer = @intCast(i64, 1) });
-    _ = try array.append(std.json.Value{ .Float = 3.14 });
-
     return value;
 }

@@ -17,7 +17,6 @@ mkdir -p "$ROOTDIR/out/build-llvm-host"
 cd "$ROOTDIR/out/build-llvm-host"
 cmake "$ROOTDIR/llvm" \
   -DLLVM_ENABLE_PROJECTS="lld;clang" \
-  -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD="AVR" \
   -DLLVM_ENABLE_LIBXML2=OFF \
   -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/host" \
   -DCMAKE_PREFIX_PATH="$ROOTDIR/out/host" \
@@ -41,15 +40,14 @@ make "$JOBS" install
 
 # Now we have Zig as a cross compiler
 ZIG="$ROOTDIR/out/host/bin/zig"
-export CC="$ZIG cc -target $TARGET -mcpu=$MCPU"
-export CXX="$ZIG c++ -target $TARGET -mcpu=$MCPU"
+export CC="$ZIG cc -fno-sanitize=all -target $TARGET -mcpu=$MCPU"
+export CXX="$ZIG c++ -fno-sanitize=all -target $TARGET -mcpu=$MCPU"
 
 # Rebuild LLVM with Zig.
 mkdir -p "$ROOTDIR/out/build-llvm-$TARGET"
 cd "$ROOTDIR/out/build-llvm-$TARGET"
 cmake "$ROOTDIR/llvm" \
   -DLLVM_ENABLE_PROJECTS="lld;clang" \
-  -DLLVM_EXPERIMENTAL_TARGETS_TO_BUILD="AVR" \
   -DLLVM_ENABLE_LIBXML2=OFF \
   -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/$TARGET" \
   -DCMAKE_PREFIX_PATH="$ROOTDIR/out/$TARGET" \

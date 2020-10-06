@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 const std = @import("../std.zig");
 const builtin = std.builtin;
 
@@ -6,9 +11,10 @@ usingnamespace std.c;
 extern "c" fn __errno() *c_int;
 pub const _errno = __errno;
 
-pub const dl_iterate_phdr_callback = extern fn (info: *dl_phdr_info, size: usize, data: ?*c_void) c_int;
+pub const dl_iterate_phdr_callback = fn (info: *dl_phdr_info, size: usize, data: ?*c_void) callconv(.C) c_int;
 pub extern "c" fn dl_iterate_phdr(callback: dl_iterate_phdr_callback, data: ?*c_void) c_int;
 
+pub extern "c" fn arc4random_buf(buf: [*]u8, len: usize) void;
 pub extern "c" fn __fstat50(fd: fd_t, buf: *Stat) c_int;
 pub extern "c" fn __stat50(path: [*:0]const u8, buf: *Stat) c_int;
 pub extern "c" fn __clock_gettime50(clk_id: c_int, tp: *timespec) c_int;

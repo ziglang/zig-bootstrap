@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2015-2020 Zig Contributors
+// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
+// The MIT license requires this copyright notice to be included in all copies
+// and substantial portions of the software.
 // riscv64-specific declarations that are intended to be imported into the POSIX namespace.
 const std = @import("../../../std.zig");
 const uid_t = std.os.linux.uid_t;
@@ -5,6 +10,8 @@ const gid_t = std.os.linux.gid_t;
 const pid_t = std.os.linux.pid_t;
 
 pub const SYS = extern enum(usize) {
+    pub const arch_specific_syscall = 244;
+
     io_setup = 0,
     io_destroy = 1,
     io_submit = 2,
@@ -249,7 +256,6 @@ pub const SYS = extern enum(usize) {
     accept4 = 242,
     recvmmsg = 243,
 
-    pub const arch_specific_syscall = 244;
     riscv_flush_icache = arch_specific_syscall + 15,
 
     wait4 = 260,
