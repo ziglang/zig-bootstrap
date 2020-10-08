@@ -5,11 +5,13 @@ end with a fully operational Zig compiler for any target.
 
 ## Version Information
 
-This repository copies sources from upstream, with no patches.
+This repository copies sources from upstream, with no patches, except to delete
+some unused files.
 
- * LLVM 10
- * Clang 10
- * Zig 0.6.0
+ * LLVM 11 rc6
+ * Clang 11 rc6
+ * LLD 11 rc6
+ * Zig llvm11 branch (will be zig 0.7.0 when the release is tagged)
 
 ## Host System Dependencies
 
