@@ -329,8 +329,8 @@ pub extern "c" fn pthread_cond_signal(cond: *pthread_cond_t) c_int;
 pub extern "c" fn pthread_cond_broadcast(cond: *pthread_cond_t) c_int;
 pub extern "c" fn pthread_cond_destroy(cond: *pthread_cond_t) c_int;
 
-pub const pthread_t = *@Type(.Opaque);
-pub const FILE = @Type(.Opaque);
+pub const pthread_t = *opaque {};
+pub const FILE = opaque {};
 
 pub extern "c" fn dlopen(path: [*:0]const u8, mode: c_int) ?*c_void;
 pub extern "c" fn dlclose(handle: *c_void) c_int;
@@ -342,3 +342,6 @@ pub extern "c" fn fsync(fd: c_int) c_int;
 pub extern "c" fn fdatasync(fd: c_int) c_int;
 
 pub extern "c" fn prctl(option: c_int, ...) c_int;
+
+pub extern "c" fn getrlimit(resource: rlimit_resource, rlim: *rlimit) c_int;
+pub extern "c" fn setrlimit(resource: rlimit_resource, rlim: *const rlimit) c_int;

@@ -3,6 +3,22 @@ const std = @import("std");
 const CrossTarget = std.zig.CrossTarget;
 
 pub fn addCases(cases: *tests.TranslateCContext) void {
+    cases.add("macro expressions respect C operator precedence",
+        \\#define FOO *((foo) + 2)
+        \\#define VALUE  (1 + 2 * 3 + 4 * 5 + 6 << 7 | 8 == 9)
+        \\#define _AL_READ3BYTES(p)   ((*(unsigned char *)(p))            \
+        \\                             | (*((unsigned char *)(p) + 1) << 8)  \
+        \\                             | (*((unsigned char *)(p) + 2) << 16))
+    , &[_][]const u8{
+        \\pub const FOO = (foo + 2).*;
+    ,
+        \\pub const VALUE = ((((1 + (2 * 3)) + (4 * 5)) + 6) << 7) | @boolToInt(8 == 9);
+    ,
+        \\pub inline fn _AL_READ3BYTES(p: anytype) @TypeOf(((@import("std").meta.cast([*c]u8, p)).* | (((@import("std").meta.cast([*c]u8, p)) + 1).* << 8)) | (((@import("std").meta.cast([*c]u8, p)) + 2).* << 16)) {
+        \\    return ((@import("std").meta.cast([*c]u8, p)).* | (((@import("std").meta.cast([*c]u8, p)) + 1).* << 8)) | (((@import("std").meta.cast([*c]u8, p)) + 2).* << 16);
+        \\}
+    });
+
     cases.add("extern variable in block scope",
         \\float bar;
         \\int foo() {
@@ -121,9 +137,9 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\struct foo { int x; int y[]; };
         \\struct bar { int x; int y[0]; };
     , &[_][]const u8{
-        \\pub const struct_foo = @Type(.Opaque);
+        \\pub const struct_foo = opaque {};
     ,
-        \\pub const struct_bar = @Type(.Opaque);
+        \\pub const struct_bar = opaque {};
     });
 
     cases.add("nested loops without blocks",
@@ -191,7 +207,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\pub const struct_arcan_shmif_page = //
     ,
         \\warning: unsupported type: 'Atomic'
-        \\    @Type(.Opaque); //
+        \\    opaque {}; //
     ,
         \\ warning: struct demoted to opaque type - unable to translate type of field abufused
     , // TODO should be `addr: *struct_arcan_shmif_page`
@@ -370,8 +386,8 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\    struct opaque_2 *cast = (struct opaque_2 *)opaque;
         \\}
     , &[_][]const u8{
-        \\pub const struct_opaque = @Type(.Opaque);
-        \\pub const struct_opaque_2 = @Type(.Opaque);
+        \\pub const struct_opaque = opaque {};
+        \\pub const struct_opaque_2 = opaque {};
         \\pub export fn function(arg_opaque_1: ?*struct_opaque) void {
         \\    var opaque_1 = arg_opaque_1;
         \\    var cast: ?*struct_opaque_2 = @ptrCast(?*struct_opaque_2, opaque_1);
@@ -612,7 +628,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\    struct Foo *foo;
         \\};
     , &[_][]const u8{
-        \\pub const struct_Foo = @Type(.Opaque);
+        \\pub const struct_Foo = opaque {};
     ,
         \\pub const struct_Bar = extern struct {
         \\    foo: ?*struct_Foo,
@@ -689,7 +705,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\struct Foo;
         \\struct Foo *some_func(struct Foo *foo, int x);
     , &[_][]const u8{
-        \\pub const struct_Foo = @Type(.Opaque);
+        \\pub const struct_Foo = opaque {};
     ,
         \\pub extern fn some_func(foo: ?*struct_Foo, x: c_int) ?*struct_Foo;
     ,
@@ -2978,7 +2994,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
     cases.add("string concatenation in macros: three strings",
         \\#define FOO "a" "b" "c"
     , &[_][]const u8{
-        \\pub const FOO = "a" ++ ("b" ++ "c");
+        \\pub const FOO = "a" ++ "b" ++ "c";
     });
 
     cases.add("multibyte character literals",

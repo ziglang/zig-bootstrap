@@ -2,6 +2,235 @@ const tests = @import("tests.zig");
 const std = @import("std");
 
 pub fn addCases(cases: *tests.CompileErrorContext) void {
+    cases.add("array in c exported function",
+        \\export fn zig_array(x: [10]u8) void {
+        \\    expect(std.mem.eql(u8, &x, "1234567890"));
+        \\}
+        \\
+        \\export fn zig_return_array() [10]u8 {
+        \\    return "1234567890".*;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:1:24: error: parameter of type '[10]u8' not allowed in function with calling convention 'C'",
+        "tmp.zig:5:30: error: return type '[10]u8' not allowed in function with calling convention 'C'",
+    });
+
+    cases.add("@Type for exhaustive enum with undefined tag type",
+        \\const TypeInfo = @import("builtin").TypeInfo;
+        \\const Tag = @Type(.{
+        \\    .Enum = .{
+        \\        .layout = .Auto,
+        \\        .tag_type = undefined,
+        \\        .fields = &[_]TypeInfo.EnumField{},
+        \\        .decls = &[_]TypeInfo.Declaration{},
+        \\        .is_exhaustive = false,
+        \\    },
+        \\});
+        \\export fn entry() void {
+        \\    _ = @intToEnum(Tag, 0);
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:20: error: use of undefined value here causes undefined behavior",
+    });
+
+    cases.add("extern struct with non-extern-compatible integer tag type",
+        \\pub const E = enum(u31) { A, B, C };
+        \\pub const S = extern struct {
+        \\    e: E,
+        \\};
+        \\export fn entry() void {
+        \\    const s: S = undefined;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:3:5: error: extern structs cannot contain fields of type 'E'",
+    });
+
+    cases.add("@Type for exhaustive enum with non-integer tag type",
+        \\const TypeInfo = @import("builtin").TypeInfo;
+        \\const Tag = @Type(.{
+        \\    .Enum = .{
+        \\        .layout = .Auto,
+        \\        .tag_type = bool,
+        \\        .fields = &[_]TypeInfo.EnumField{},
+        \\        .decls = &[_]TypeInfo.Declaration{},
+        \\        .is_exhaustive = false,
+        \\    },
+        \\});
+        \\export fn entry() void {
+        \\    _ = @intToEnum(Tag, 0);
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:20: error: TypeInfo.Enum.tag_type must be an integer type, not 'bool'",
+    });
+
+    cases.add("extern struct with extern-compatible but inferred integer tag type",
+        \\pub const E = enum {
+        \\@"0",@"1",@"2",@"3",@"4",@"5",@"6",@"7",@"8",@"9",@"10",@"11",@"12",
+        \\@"13",@"14",@"15",@"16",@"17",@"18",@"19",@"20",@"21",@"22",@"23",
+        \\@"24",@"25",@"26",@"27",@"28",@"29",@"30",@"31",@"32",@"33",@"34",
+        \\@"35",@"36",@"37",@"38",@"39",@"40",@"41",@"42",@"43",@"44",@"45",
+        \\@"46",@"47",@"48",@"49",@"50",@"51",@"52",@"53",@"54",@"55",@"56",
+        \\@"57",@"58",@"59",@"60",@"61",@"62",@"63",@"64",@"65",@"66",@"67",
+        \\@"68",@"69",@"70",@"71",@"72",@"73",@"74",@"75",@"76",@"77",@"78",
+        \\@"79",@"80",@"81",@"82",@"83",@"84",@"85",@"86",@"87",@"88",@"89",
+        \\@"90",@"91",@"92",@"93",@"94",@"95",@"96",@"97",@"98",@"99",@"100",
+        \\@"101",@"102",@"103",@"104",@"105",@"106",@"107",@"108",@"109",
+        \\@"110",@"111",@"112",@"113",@"114",@"115",@"116",@"117",@"118",
+        \\@"119",@"120",@"121",@"122",@"123",@"124",@"125",@"126",@"127",
+        \\@"128",@"129",@"130",@"131",@"132",@"133",@"134",@"135",@"136",
+        \\@"137",@"138",@"139",@"140",@"141",@"142",@"143",@"144",@"145",
+        \\@"146",@"147",@"148",@"149",@"150",@"151",@"152",@"153",@"154",
+        \\@"155",@"156",@"157",@"158",@"159",@"160",@"161",@"162",@"163",
+        \\@"164",@"165",@"166",@"167",@"168",@"169",@"170",@"171",@"172",
+        \\@"173",@"174",@"175",@"176",@"177",@"178",@"179",@"180",@"181",
+        \\@"182",@"183",@"184",@"185",@"186",@"187",@"188",@"189",@"190",
+        \\@"191",@"192",@"193",@"194",@"195",@"196",@"197",@"198",@"199",
+        \\@"200",@"201",@"202",@"203",@"204",@"205",@"206",@"207",@"208",
+        \\@"209",@"210",@"211",@"212",@"213",@"214",@"215",@"216",@"217",
+        \\@"218",@"219",@"220",@"221",@"222",@"223",@"224",@"225",@"226",
+        \\@"227",@"228",@"229",@"230",@"231",@"232",@"233",@"234",@"235",
+        \\@"236",@"237",@"238",@"239",@"240",@"241",@"242",@"243",@"244",
+        \\@"245",@"246",@"247",@"248",@"249",@"250",@"251",@"252",@"253",
+        \\@"254",@"255"
+        \\};
+        \\pub const S = extern struct {
+        \\    e: E,
+        \\};
+        \\export fn entry() void {
+        \\    if (@TagType(E) != u8) @compileError("did not infer u8 tag type");
+        \\    const s: S = undefined;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:31:5: error: extern structs cannot contain fields of type 'E'",
+    });
+
+    cases.add("@Type for tagged union with extra enum field",
+        \\const TypeInfo = @import("builtin").TypeInfo;
+        \\const Tag = @Type(.{
+        \\    .Enum = .{
+        \\        .layout = .Auto,
+        \\        .tag_type = u2,
+        \\        .fields = &[_]TypeInfo.EnumField{
+        \\            .{ .name = "signed", .value = 0 },
+        \\            .{ .name = "unsigned", .value = 1 },
+        \\            .{ .name = "arst", .value = 2 },
+        \\        },
+        \\        .decls = &[_]TypeInfo.Declaration{},
+        \\        .is_exhaustive = true,
+        \\    },
+        \\});
+        \\const Tagged = @Type(.{
+        \\    .Union = .{
+        \\        .layout = .Auto,
+        \\        .tag_type = Tag,
+        \\        .fields = &[_]TypeInfo.UnionField{
+        \\            .{ .name = "signed", .field_type = i32, .alignment = @alignOf(i32) },
+        \\            .{ .name = "unsigned", .field_type = u32, .alignment = @alignOf(u32) },
+        \\        },
+        \\        .decls = &[_]TypeInfo.Declaration{},
+        \\    },
+        \\});
+        \\export fn entry() void {
+        \\    var tagged = Tagged{ .signed = -1 };
+        \\    tagged = .{ .unsigned = 1 };
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:15:23: error: enum field missing: 'arst'",
+        "tmp.zig:27:24: note: referenced here",
+    });
+
+    cases.add("field access of opaque type",
+        \\const MyType = opaque {};
+        \\
+        \\export fn entry() bool {
+        \\    var x: i32 = 1;
+        \\    return bar(@ptrCast(*MyType, &x));
+        \\}
+        \\
+        \\fn bar(x: *MyType) bool {
+        \\    return x.blah;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:9:13: error: no member named 'blah' in opaque type 'MyType'",
+    });
+
+    cases.add("opaque type with field",
+        \\const Opaque = opaque { foo: i32 };
+        \\export fn entry() void {
+        \\    const foo: ?*Opaque = null;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:1:25: error: opaque types cannot have fields",
+    });
+
+    cases.add("@Type(.Fn) with is_generic = true",
+        \\const Foo = @Type(.{
+        \\    .Fn = .{
+        \\        .calling_convention = .Unspecified,
+        \\        .alignment = 0,
+        \\        .is_generic = true,
+        \\        .is_var_args = false,
+        \\        .return_type = u0,
+        \\        .args = &[_]@import("builtin").TypeInfo.FnArg{},
+        \\    },
+        \\});
+        \\comptime { _ = Foo; }
+    , &[_][]const u8{
+        "tmp.zig:1:20: error: TypeInfo.Fn.is_generic must be false for @Type",
+    });
+
+    cases.add("@Type(.Fn) with is_var_args = true and non-C callconv",
+        \\const Foo = @Type(.{
+        \\    .Fn = .{
+        \\        .calling_convention = .Unspecified,
+        \\        .alignment = 0,
+        \\        .is_generic = false,
+        \\        .is_var_args = true,
+        \\        .return_type = u0,
+        \\        .args = &[_]@import("builtin").TypeInfo.FnArg{},
+        \\    },
+        \\});
+        \\comptime { _ = Foo; }
+    , &[_][]const u8{
+        "tmp.zig:1:20: error: varargs functions must have C calling convention",
+    });
+
+    cases.add("@Type(.Fn) with return_type = null",
+        \\const Foo = @Type(.{
+        \\    .Fn = .{
+        \\        .calling_convention = .Unspecified,
+        \\        .alignment = 0,
+        \\        .is_generic = false,
+        \\        .is_var_args = false,
+        \\        .return_type = null,
+        \\        .args = &[_]@import("builtin").TypeInfo.FnArg{},
+        \\    },
+        \\});
+        \\comptime { _ = Foo; }
+    , &[_][]const u8{
+        "tmp.zig:1:20: error: TypeInfo.Fn.return_type must be non-null for @Type",
+    });
+
+    cases.add("@Type for union with opaque field",
+        \\const TypeInfo = @import("builtin").TypeInfo;
+        \\const Untagged = @Type(.{
+        \\    .Union = .{
+        \\        .layout = .Auto,
+        \\        .tag_type = null,
+        \\        .fields = &[_]TypeInfo.UnionField{
+        \\            .{ .name = "foo", .field_type = opaque {}, .alignment = 1 },
+        \\        },
+        \\        .decls = &[_]TypeInfo.Declaration{},
+        \\    },
+        \\});
+        \\export fn entry() void {
+        \\    _ = Untagged{};
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:2:25: error: opaque types have unknown size and therefore cannot be directly embedded in unions",
+        "tmp.zig:13:17: note: referenced here",
+    });
+
     cases.add("slice sentinel mismatch",
         \\export fn entry() void {
         \\    const x = @import("std").meta.Vector(3, f32){ 25, 75, 5, 0 };
@@ -16,26 +245,6 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\}
     , &[_][]const u8{
         "tmp.zig:2:37: error: expected type '[:1]const u8', found '*const [2:2]u8'",
-    });
-
-    cases.add("@Type for union with opaque field",
-        \\const TypeInfo = @import("builtin").TypeInfo;
-        \\const Untagged = @Type(.{
-        \\    .Union = .{
-        \\        .layout = .Auto,
-        \\        .tag_type = null,
-        \\        .fields = &[_]TypeInfo.UnionField{
-        \\            .{ .name = "foo", .field_type = @Type(.Opaque) },
-        \\        },
-        \\        .decls = &[_]TypeInfo.Declaration{},
-        \\    },
-        \\});
-        \\export fn entry() void {
-        \\    _ = Untagged{};
-        \\}
-    , &[_][]const u8{
-        "tmp.zig:2:25: error: opaque types have unknown size and therefore cannot be directly embedded in unions",
-        "tmp.zig:13:17: note: referenced here",
     });
 
     cases.add("@Type for union with zero fields",
@@ -94,9 +303,9 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\        .layout = .Auto,
         \\        .tag_type = Tag,
         \\        .fields = &[_]TypeInfo.UnionField{
-        \\            .{ .name = "signed", .field_type = i32 },
-        \\            .{ .name = "unsigned", .field_type = u32 },
-        \\            .{ .name = "arst", .field_type = f32 },
+        \\            .{ .name = "signed", .field_type = i32, .alignment = @alignOf(i32) },
+        \\            .{ .name = "unsigned", .field_type = u32, .alignment = @alignOf(u32) },
+        \\            .{ .name = "arst", .field_type = f32, .alignment = @alignOf(f32) },
         \\        },
         \\        .decls = &[_]TypeInfo.Declaration{},
         \\    },
@@ -109,42 +318,6 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         "tmp.zig:14:23: error: enum field not found: 'arst'",
         "tmp.zig:2:20: note: enum declared here",
         "tmp.zig:27:24: note: referenced here",
-    });
-
-    cases.add("@Type for tagged union with extra enum field",
-        \\const TypeInfo = @import("builtin").TypeInfo;
-        \\const Tag = @Type(.{
-        \\    .Enum = .{
-        \\        .layout = .Auto,
-        \\        .tag_type = u2,
-        \\        .fields = &[_]TypeInfo.EnumField{
-        \\            .{ .name = "signed", .value = 0 },
-        \\            .{ .name = "unsigned", .value = 1 },
-        \\            .{ .name = "arst", .field_type = 2 },
-        \\        },
-        \\        .decls = &[_]TypeInfo.Declaration{},
-        \\        .is_exhaustive = true,
-        \\    },
-        \\});
-        \\const Tagged = @Type(.{
-        \\    .Union = .{
-        \\        .layout = .Auto,
-        \\        .tag_type = Tag,
-        \\        .fields = &[_]TypeInfo.UnionField{
-        \\            .{ .name = "signed", .field_type = i32 },
-        \\            .{ .name = "unsigned", .field_type = u32 },
-        \\        },
-        \\        .decls = &[_]TypeInfo.Declaration{},
-        \\    },
-        \\});
-        \\export fn entry() void {
-        \\    var tagged = Tagged{ .signed = -1 };
-        \\    tagged = .{ .unsigned = 1 };
-        \\}
-    , &[_][]const u8{
-        "tmp.zig:9:32: error: no member named 'field_type' in struct 'std.builtin.EnumField'",
-        "tmp.zig:18:21: note: referenced here",
-        "tmp.zig:27:18: note: referenced here",
     });
 
     cases.add("@Type with undefined",
@@ -2152,7 +2325,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    return error.OutOfMemory;
         \\}
     , &[_][]const u8{
-        "tmp.zig:2:12: error: error is discarded",
+        "tmp.zig:2:12: error: error is discarded. consider using `try`, `catch`, or `if`",
     });
 
     cases.add("volatile on global assembly",
@@ -2203,9 +2376,9 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    return error.Bad;
         \\}
     , &[_][]const u8{
-        "tmp.zig:2:24: error: expression value is ignored",
-        "tmp.zig:6:25: error: expression value is ignored",
-        "tmp.zig:10:25: error: expression value is ignored",
+        "tmp.zig:2:24: error: error is ignored. consider using `try`, `catch`, or `if`",
+        "tmp.zig:6:25: error: error is ignored. consider using `try`, `catch`, or `if`",
+        "tmp.zig:10:25: error: error is ignored. consider using `try`, `catch`, or `if`",
     });
 
     cases.add("empty while loop body",
@@ -2478,7 +2651,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     });
 
     cases.add("directly embedding opaque type in struct and union",
-        \\const O = @Type(.Opaque);
+        \\const O = opaque {};
         \\const Foo = struct {
         \\    o: O,
         \\};
@@ -2493,7 +2666,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    var bar: Bar = undefined;
         \\}
         \\export fn c() void {
-        \\    var baz: *@Type(.Opaque) = undefined;
+        \\    var baz: *opaque {} = undefined;
         \\    const qux = .{baz.*};
         \\}
     , &[_][]const u8{
@@ -3457,7 +3630,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     });
 
     cases.add("unknown length pointer to opaque",
-        \\export const T = [*]@Type(.Opaque);
+        \\export const T = [*]opaque {};
     , &[_][]const u8{
         "tmp.zig:1:21: error: unknown-length pointer to opaque",
     });
@@ -6101,7 +6274,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\}
         \\fn bar() anyerror!i32 { return 0; }
     , &[_][]const u8{
-        "tmp.zig:2:14: error: expression value is ignored",
+        "tmp.zig:2:14: error: error is ignored. consider using `try`, `catch`, or `if`",
     });
 
     cases.add("dereference an array",
@@ -6692,8 +6865,8 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         "tmp.zig:2:31: error: index 2 outside array of size 2",
     });
 
-    cases.add("wrong pointer coerced to pointer to @Type(.Opaque)",
-        \\const Derp = @Type(.Opaque);
+    cases.add("wrong pointer coerced to pointer to opaque {}",
+        \\const Derp = opaque {};
         \\extern fn bar(d: *Derp) void;
         \\export fn foo() void {
         \\    var x = @as(u8, 1);
@@ -6719,8 +6892,8 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\export fn entry5() void {
         \\   var d = null;
         \\}
-        \\export fn entry6(opaque: *Opaque) void {
-        \\   var e = opaque.*;
+        \\export fn entry6(opaque_: *Opaque) void {
+        \\   var e = opaque_.*;
         \\}
         \\export fn entry7() void {
         \\   var f = i32;
@@ -6731,7 +6904,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\export fn entry9() void {
         \\   var z: noreturn = return;
         \\}
-        \\const Opaque = @Type(.Opaque);
+        \\const Opaque = opaque {};
         \\const Foo = struct {
         \\    fn bar(self: *const Foo) void {}
         \\};
@@ -6882,21 +7055,6 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\}
     , &[_][]const u8{
         "tmp.zig:37:29: error: cannot store runtime value in compile time variable",
-    });
-
-    cases.add("field access of opaque type",
-        \\const MyType = @Type(.Opaque);
-        \\
-        \\export fn entry() bool {
-        \\    var x: i32 = 1;
-        \\    return bar(@ptrCast(*MyType, &x));
-        \\}
-        \\
-        \\fn bar(x: *MyType) bool {
-        \\    return x.blah;
-        \\}
-    , &[_][]const u8{
-        "tmp.zig:9:13: error: type '*MyType' does not support field access",
     });
 
     cases.add("invalid legacy unicode escape",
@@ -7488,7 +7646,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     });
 
     cases.add("function returning opaque type",
-        \\const FooType = @Type(.Opaque);
+        \\const FooType = opaque {};
         \\export fn bar() !FooType {
         \\    return error.InvalidValue;
         \\}
@@ -7506,7 +7664,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     });
 
     cases.add("generic function returning opaque type",
-        \\const FooType = @Type(.Opaque);
+        \\const FooType = opaque {};
         \\fn generic(comptime T: type) !T {
         \\    return undefined;
         \\}
@@ -7530,7 +7688,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     });
 
     cases.add("function parameter is opaque",
-        \\const FooType = @Type(.Opaque);
+        \\const FooType = opaque {};
         \\export fn entry1() void {
         \\    const someFuncPtr: fn (FooType) void = undefined;
         \\}
@@ -7556,7 +7714,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     });
 
     cases.add( // fixed bug #2032
-        "compile diagnostic string for top level decl type",
+    "compile diagnostic string for top level decl type",
         \\export fn entry() void {
         \\    var foo: u32 = @This(){};
         \\}

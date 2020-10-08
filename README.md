@@ -11,7 +11,9 @@ some unused files.
  * LLVM 11 rc6
  * Clang 11 rc6
  * LLD 11 rc6
- * Zig llvm11 branch (will be zig 0.7.0 when the release is tagged)
+ * Zig llvm11 branch (currently 4053b95d8e but will be zig 0.7.0 when the release is tagged)
+
+For other versions, check the git tags of this repository.
 
 ## Host System Dependencies
 
