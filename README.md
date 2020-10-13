@@ -8,10 +8,10 @@ end with a fully operational Zig compiler for any target.
 This repository copies sources from upstream, with no patches, except to delete
 some unused files.
 
- * LLVM 11 rc6
- * Clang 11 rc6
- * LLD 11 rc6
- * Zig llvm11 branch (currently 4053b95d8e but will be zig 0.7.0 when the release is tagged)
+ * LLVM 11
+ * Clang 11
+ * LLD 11
+ * Zig master branch (currently ea45ee5484 but will be zig 0.7.0 when the release is tagged)
 
 For other versions, check the git tags of this repository.
 
@@ -98,9 +98,11 @@ is more portable across Linux distributions.
 | `s390x-linux-musl`         | not tested     |
 | `sparc-linux-gnu`          | not tested     |
 | `sparcv9-linux-gnu`        | [ziglang/zig#4931](https://github.com/ziglang/zig/issues/4931) |
+| `x86_64-freebsd-gnu`       | [#36](https://github.com/ziglang/bootstrap/issues/36) |
 | `x86_64-linux-gnu`         | OK             |
 | `x86_64-linux-gnux32`      | [#20](https://github.com/ziglang/bootstrap/issues/20) |
 | `x86_64-linux-musl`        | OK             |
+| `x86_64-macos-gnu`         | [#36](https://github.com/ziglang/bootstrap/issues/36) |
 | `x86_64-windows-gnu`       | OK             |
 
 #### Other Notable Targets Known to Work
