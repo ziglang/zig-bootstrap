@@ -7,6 +7,7 @@ TARGET="$2" # Example: riscv64-linux-gnu
 MCPU="$3" # Examples: `baseline`, `native`, `generic+v7a`, or `arm1176jzf_s`
 
 ROOTDIR="$(pwd)"
+ZIG_VERSION="0.6.0+ea45ee548"
 
 TARGET_OS_AND_ABI=${TARGET#*-} # Example: linux-gnu
 
@@ -40,10 +41,14 @@ make "$JOBS" install
 # Clang, LLD we just built from source.
 mkdir -p "$ROOTDIR/out/build-zig-host"
 cd "$ROOTDIR/out/build-zig-host"
-cmake "$ROOTDIR/zig" -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/host" -DCMAKE_PREFIX_PATH="$ROOTDIR/out/host" -DCMAKE_BUILD_TYPE=Release
+cmake "$ROOTDIR/zig" \
+  -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/host" \
+  -DCMAKE_PREFIX_PATH="$ROOTDIR/out/host" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DZIG_VERSION="$ZIG_VERSION"
 make "$JOBS" install
 
-# Now we have Zig as a cross compiler
+# Now we have Zig as a cross compiler.
 ZIG="$ROOTDIR/out/host/bin/zig"
 export CC="$ZIG cc -fno-sanitize=all -target $TARGET -mcpu=$MCPU"
 export CXX="$ZIG c++ -fno-sanitize=all -target $TARGET -mcpu=$MCPU"
@@ -99,5 +104,6 @@ cmake "$ROOTDIR/zig" \
   -DCMAKE_BUILD_TYPE=Release \
   -DZIG_TARGET_TRIPLE="$TARGET" \
   -DZIG_TARGET_MCPU="$MCPU" \
-  -DZIG_EXECUTABLE="$ZIG"
+  -DZIG_EXECUTABLE="$ZIG" \
+  -DZIG_VERSION="$ZIG_VERSION"
 make "$JOBS" install
