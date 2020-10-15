@@ -54,13 +54,13 @@ export CC="$ZIG cc -fno-sanitize=all -target $TARGET -mcpu=$MCPU"
 export CXX="$ZIG c++ -fno-sanitize=all -target $TARGET -mcpu=$MCPU"
 
 # Rebuild LLVM with Zig.
-mkdir -p "$ROOTDIR/out/build-llvm-$TARGET"
-cd "$ROOTDIR/out/build-llvm-$TARGET"
+mkdir -p "$ROOTDIR/out/build-llvm-$TARGET-$MCPU"
+cd "$ROOTDIR/out/build-llvm-$TARGET-$MCPU"
 cmake "$ROOTDIR/llvm" \
   -DLLVM_ENABLE_PROJECTS="lld;clang" \
   -DLLVM_ENABLE_LIBXML2=OFF \
-  -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/$TARGET" \
-  -DCMAKE_PREFIX_PATH="$ROOTDIR/out/$TARGET" \
+  -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/$TARGET-$MCPU" \
+  -DCMAKE_PREFIX_PATH="$ROOTDIR/out/$TARGET-$MCPU" \
   -DCMAKE_BUILD_TYPE=Release \
   -DCMAKE_CROSSCOMPILING=True \
   -DCMAKE_SYSTEM_NAME="$TARGET_OS_CMAKE" \
@@ -82,21 +82,21 @@ cmake "$ROOTDIR/llvm" \
   -DLLVM_BUILD_STATIC=ON \
   -DLIBCLANG_BUILD_STATIC=ON \
   -DLLVM_DEFAULT_TARGET_TRIPLE="$TARGET"
-cd "$ROOTDIR/out/build-llvm-$TARGET/tools/lld"
+cd "$ROOTDIR/out/build-llvm-$TARGET-$MCPU/tools/lld"
 make "$JOBS" install
-cd "$ROOTDIR/out/build-llvm-$TARGET/tools/clang/lib"
+cd "$ROOTDIR/out/build-llvm-$TARGET-$MCPU/tools/clang/lib"
 make "$JOBS" install
-cd "$ROOTDIR/out/build-llvm-$TARGET/lib"
+cd "$ROOTDIR/out/build-llvm-$TARGET-$MCPU/lib"
 make "$JOBS" install
-cd "$ROOTDIR/out/build-llvm-$TARGET"
+cd "$ROOTDIR/out/build-llvm-$TARGET-$MCPU"
 make "$JOBS" install-llvm-headers install-clang-headers install-LLVMSupport install-LLVMDemangle
 
 # Finally, we can cross compile Zig itself, with Zig.
-mkdir -p "$ROOTDIR/out/build-zig-$TARGET"
-cd "$ROOTDIR/out/build-zig-$TARGET"
+mkdir -p "$ROOTDIR/out/build-zig-$TARGET-$MCPU"
+cd "$ROOTDIR/out/build-zig-$TARGET-$MCPU"
 cmake "$ROOTDIR/zig" \
   -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/zig-$TARGET-$MCPU" \
-  -DCMAKE_PREFIX_PATH="$ROOTDIR/out/$TARGET" \
+  -DCMAKE_PREFIX_PATH="$ROOTDIR/out/$TARGET-$MCPU" \
   -DCMAKE_CROSSCOMPILING=True \
   -DCMAKE_SYSTEM_NAME="$TARGET_OS_CMAKE" \
   -DCMAKE_AR="$ROOTDIR/out/host/bin/llvm-ar" \
