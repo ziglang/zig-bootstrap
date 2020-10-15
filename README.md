@@ -99,11 +99,11 @@ is more portable across Linux distributions.
 | `s390x-linux-musl`         | not tested     |
 | `sparc-linux-gnu`          | not tested     |
 | `sparcv9-linux-gnu`        | [ziglang/zig#4931](https://github.com/ziglang/zig/issues/4931) |
-| `x86_64-freebsd-gnu`       | [#36](https://github.com/ziglang/bootstrap/issues/36) |
+| `x86_64-freebsd-gnu`       | not tested |
 | `x86_64-linux-gnu`         | OK             |
 | `x86_64-linux-gnux32`      | [#20](https://github.com/ziglang/bootstrap/issues/20) |
 | `x86_64-linux-musl`        | OK             |
-| `x86_64-macos-gnu`         | [#36](https://github.com/ziglang/bootstrap/issues/36) |
+| `x86_64-macos-gnu`         | [#38](https://github.com/ziglang/bootstrap/issues/38) |
 | `x86_64-windows-gnu`       | OK             |
 
 #### Other Notable Targets Known to Work
