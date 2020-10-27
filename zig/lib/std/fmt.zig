@@ -65,6 +65,8 @@ fn peekIsAlign(comptime fmt: []const u8) bool {
 ///   - format the non-numeric value as a string of bytes in hexadecimal notation ("binary dump") in either lower case or upper case
 ///   - output numeric value in hexadecimal notation
 /// - `s`: print a pointer-to-many as a c-string, use zero-termination
+/// - `z`: escape the string with @"" syntax if it is not a valid Zig identifier.
+/// - `Z`: print the string escaping non-printable characters using Zig escape sequences.
 /// - `B` and `Bi`: output a memory size in either metric (1000) or power-of-two (1024) based notation. works for both float and integer values.
 /// - `e` and `E`: if printing a string, escape non-printable characters
 /// - `e`: output floating point value in scientific notation
@@ -494,6 +496,7 @@ pub fn formatType(
             const buffer = [_]u8{'.'} ++ @tagName(value);
             return formatType(buffer, fmt, options, writer, max_depth);
         },
+        .Null => return formatBuf("null", options, writer),
         else => @compileError("Unable to format type '" ++ @typeName(T) ++ "'"),
     }
 }
@@ -542,6 +545,13 @@ pub fn formatIntValue(
             return formatAsciiChar(@as(u8, int_value), options, writer);
         } else {
             @compileError("Cannot print integer that is larger than 8 bits as a ascii");
+        }
+    } else if (comptime std.mem.eql(u8, fmt, "Z")) {
+        if (@typeInfo(@TypeOf(int_value)).Int.bits <= 8) {
+            const c: u8 = int_value;
+            return formatZigEscapes(@as(*const [1]u8, &c), options, writer);
+        } else {
+            @compileError("Cannot escape character with more than 8 bits");
         }
     } else if (comptime std.mem.eql(u8, fmt, "b")) {
         radix = 2;
@@ -612,6 +622,10 @@ pub fn formatText(
             }
         }
         return;
+    } else if (comptime std.mem.eql(u8, fmt, "z")) {
+        return formatZigIdentifier(bytes, options, writer);
+    } else if (comptime std.mem.eql(u8, fmt, "Z")) {
+        return formatZigEscapes(bytes, options, writer);
     } else {
         @compileError("Unknown format string: '" ++ fmt ++ "'");
     }
@@ -652,9 +666,55 @@ pub fn formatBuf(
     }
 }
 
-// Print a float in scientific notation to the specified precision. Null uses full precision.
-// It should be the case that every full precision, printed value can be re-parsed back to the
-// same type unambiguously.
+/// Print the string as a Zig identifier escaping it with @"" syntax if needed.
+pub fn formatZigIdentifier(
+    bytes: []const u8,
+    options: FormatOptions,
+    writer: anytype,
+) !void {
+    if (isValidZigIdentifier(bytes)) {
+        return writer.writeAll(bytes);
+    }
+    try writer.writeAll("@\"");
+    try formatZigEscapes(bytes, options, writer);
+    try writer.writeByte('"');
+}
+
+fn isValidZigIdentifier(bytes: []const u8) bool {
+    for (bytes) |c, i| {
+        switch (c) {
+            '_', 'a'...'z', 'A'...'Z' => {},
+            '0'...'9' => if (i == 0) return false,
+            else => return false,
+        }
+    }
+    return std.zig.Token.getKeyword(bytes) == null;
+}
+
+pub fn formatZigEscapes(
+    bytes: []const u8,
+    options: FormatOptions,
+    writer: anytype,
+) !void {
+    for (bytes) |byte| switch (byte) {
+        '\n' => try writer.writeAll("\\n"),
+        '\r' => try writer.writeAll("\\r"),
+        '\t' => try writer.writeAll("\\t"),
+        '\\' => try writer.writeAll("\\\\"),
+        '"' => try writer.writeAll("\\\""),
+        '\'' => try writer.writeAll("\\'"),
+        ' ', '!', '#'...'&', '('...'[', ']'...'~' => try writer.writeByte(byte),
+        // Use hex escapes for rest any unprintable characters.
+        else => {
+            try writer.writeAll("\\x");
+            try formatInt(byte, 16, false, .{ .width = 2, .fill = '0' }, writer);
+        },
+    };
+}
+
+/// Print a float in scientific notation to the specified precision. Null uses full precision.
+/// It should be the case that every full precision, printed value can be re-parsed back to the
+/// same type unambiguously.
 pub fn formatFloatScientific(
     value: anytype,
     options: FormatOptions,
@@ -746,8 +806,8 @@ pub fn formatFloatScientific(
     }
 }
 
-// Print a float of the format x.yyyyy where the number of y is specified by the precision argument.
-// By default floats are printed at full precision (no rounding).
+/// Print a float of the format x.yyyyy where the number of y is specified by the precision argument.
+/// By default floats are printed at full precision (no rounding).
 pub fn formatFloatDecimal(
     value: anytype,
     options: FormatOptions,
@@ -950,7 +1010,7 @@ pub fn formatInt(
     // The type must have the same size as `base` or be wider in order for the
     // division to work
     const min_int_bits = comptime math.max(value_info.bits, 8);
-    const MinInt = std.meta.Int(false, min_int_bits);
+    const MinInt = std.meta.Int(.unsigned, min_int_bits);
 
     const abs_value = math.absCast(int_value);
     // The worst case in terms of space needed is base 2, plus 1 for the sign
@@ -1131,7 +1191,12 @@ pub fn bufPrint(buf: []u8, comptime fmt: []const u8, args: anytype) BufPrintErro
     return fbs.getWritten();
 }
 
-// Count the characters needed for format. Useful for preallocating memory
+pub fn bufPrintZ(buf: []u8, comptime fmt: []const u8, args: anytype) BufPrintError![:0]u8 {
+    const result = try bufPrint(buf, fmt ++ "\x00", args);
+    return result[0 .. result.len - 1 :0];
+}
+
+/// Count the characters needed for format. Useful for preallocating memory
 pub fn count(comptime fmt: []const u8, args: anytype) u64 {
     var counting_writer = std.io.countingWriter(std.io.null_writer);
     format(counting_writer.writer(), fmt, args) catch |err| switch (err) {};
@@ -1151,7 +1216,10 @@ pub fn allocPrint(allocator: *mem.Allocator, comptime fmt: []const u8, args: any
     };
 }
 
-pub fn allocPrint0(allocator: *mem.Allocator, comptime fmt: []const u8, args: anytype) AllocPrintError![:0]u8 {
+/// Deprecated, use allocPrintZ
+pub const allocPrint0 = allocPrintZ;
+
+pub fn allocPrintZ(allocator: *mem.Allocator, comptime fmt: []const u8, args: anytype) AllocPrintError![:0]u8 {
     const result = try allocPrint(allocator, fmt ++ "\x00", args);
     return result[0 .. result.len - 1 :0];
 }
@@ -1324,6 +1392,17 @@ test "escape non-printable" {
     try testFmt("abc", "{e}", .{"abc"});
     try testFmt("ab\\xffc", "{e}", .{"ab\xffc"});
     try testFmt("ab\\xFFc", "{E}", .{"ab\xffc"});
+}
+
+test "escape invalid identifiers" {
+    try testFmt("@\"while\"", "{z}", .{"while"});
+    try testFmt("hello", "{z}", .{"hello"});
+    try testFmt("@\"11\\\"23\"", "{z}", .{"11\"23"});
+    try testFmt("@\"11\\x0f23\"", "{z}", .{"11\x0F23"});
+    try testFmt("\\x0f", "{Z}", .{0x0f});
+    try testFmt(
+        \\" \\ hi \x07 \x11 \" derp \'"
+    , "\"{Z}\"", .{" \\ hi \x07 \x11 \" derp '"});
 }
 
 test "pointer" {
@@ -1830,3 +1909,9 @@ test "sci float padding" {
     try testFmt("center-pad: *3.141e+00*\n", "center-pad: {e:*^11.3}\n", .{number});
     try testFmt("right-pad:  3.141e+00**\n", "right-pad:  {e:*<11.3}\n", .{number});
 }
+
+test "null" {
+    const inst = null;
+    try testFmt("null", "{}", .{inst});
+}
+

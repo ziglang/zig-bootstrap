@@ -615,6 +615,7 @@ pub fn connectUnixSocket(path: []const u8) !fs.File {
     var addr = try std.net.Address.initUnix(path);
 
     if (std.io.is_async) {
+        const loop = std.event.Loop.instance orelse return error.WouldBlock;
         try loop.connect(sockfd, &addr.any, addr.getOsSockLen());
     } else {
         try os.connect(sockfd, &addr.any, addr.getOsSockLen());
@@ -1572,7 +1573,7 @@ fn dnsParseCallback(ctx: dpc_ctx, rr: u8, data: []const u8, packet: []const u8) 
 
 pub const StreamServer = struct {
     /// Copied from `Options` on `init`.
-    kernel_backlog: u32,
+    kernel_backlog: u31,
     reuse_address: bool,
 
     /// `undefined` until `listen` returns successfully.
@@ -1584,7 +1585,7 @@ pub const StreamServer = struct {
         /// How many connections the kernel will accept on the application's behalf.
         /// If more than this many connections pool in the kernel, clients will start
         /// seeing "Connection refused".
-        kernel_backlog: u32 = 128,
+        kernel_backlog: u31 = 128,
 
         /// Enable SO_REUSEADDR on the socket.
         reuse_address: bool = false,

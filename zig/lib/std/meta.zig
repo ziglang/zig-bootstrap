@@ -655,13 +655,7 @@ pub fn fieldIndex(comptime T: type, comptime name: []const u8) ?comptime_int {
     return null;
 }
 
-/// Given a type, reference all the declarations inside, so that the semantic analyzer sees them.
-pub fn refAllDecls(comptime T: type) void {
-    if (!builtin.is_test) return;
-    inline for (declarations(T)) |decl| {
-        _ = decl;
-    }
-}
+pub const refAllDecls = @compileError("refAllDecls has been moved from std.meta to std.testing");
 
 /// Returns a slice of pointers to public declarations of a namespace.
 pub fn declList(comptime Namespace: type, comptime Decl: type) []const *const Decl {
@@ -684,10 +678,15 @@ pub fn declList(comptime Namespace: type, comptime Decl: type) []const *const De
 /// Deprecated: use Int
 pub const IntType = Int;
 
-pub fn Int(comptime is_signed: bool, comptime bit_count: u16) type {
+pub const Signedness = enum {
+    unsigned,
+    signed,
+};
+
+pub fn Int(comptime signedness: Signedness, comptime bit_count: u16) type {
     return @Type(TypeInfo{
         .Int = .{
-            .is_signed = is_signed,
+            .is_signed = signedness == .signed,
             .bits = bit_count,
         },
     });
@@ -847,14 +846,15 @@ pub fn ArgsTuple(comptime Function: type) type {
 
     var argument_field_list: [function_info.args.len]std.builtin.TypeInfo.StructField = undefined;
     inline for (function_info.args) |arg, i| {
+        const T = arg.arg_type.?;
         @setEvalBranchQuota(10_000);
         var num_buf: [128]u8 = undefined;
         argument_field_list[i] = std.builtin.TypeInfo.StructField{
             .name = std.fmt.bufPrint(&num_buf, "{d}", .{i}) catch unreachable,
-            .field_type = arg.arg_type.?,
-            .default_value = @as(?(arg.arg_type.?), null),
+            .field_type = T,
+            .default_value = @as(?T, null),
             .is_comptime = false,
-            .alignment = @alignOf(arg.arg_type.?),
+            .alignment = if (@sizeOf(T) > 0) @alignOf(T) else 0,
         };
     }
 
@@ -885,7 +885,7 @@ pub fn Tuple(comptime types: []const type) type {
             .field_type = T,
             .default_value = @as(?T, null),
             .is_comptime = false,
-            .alignment = @alignOf(T),
+            .alignment = if (@sizeOf(T) > 0) @alignOf(T) else 0,
         };
     }
 
@@ -928,12 +928,12 @@ test "ArgsTuple" {
     TupleTester.assertTuple(.{}, ArgsTuple(fn () void));
     TupleTester.assertTuple(.{u32}, ArgsTuple(fn (a: u32) []const u8));
     TupleTester.assertTuple(.{ u32, f16 }, ArgsTuple(fn (a: u32, b: f16) noreturn));
-    TupleTester.assertTuple(.{ u32, f16, []const u8 }, ArgsTuple(fn (a: u32, b: f16, c: []const u8) noreturn));
+    TupleTester.assertTuple(.{ u32, f16, []const u8, void }, ArgsTuple(fn (a: u32, b: f16, c: []const u8, void) noreturn));
 }
 
 test "Tuple" {
     TupleTester.assertTuple(.{}, Tuple(&[_]type{}));
     TupleTester.assertTuple(.{u32}, Tuple(&[_]type{u32}));
     TupleTester.assertTuple(.{ u32, f16 }, Tuple(&[_]type{ u32, f16 }));
-    TupleTester.assertTuple(.{ u32, f16, []const u8 }, Tuple(&[_]type{ u32, f16, []const u8 }));
+    TupleTester.assertTuple(.{ u32, f16, []const u8, void }, Tuple(&[_]type{ u32, f16, []const u8, void }));
 }

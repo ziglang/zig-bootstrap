@@ -45,6 +45,7 @@ pub const Builder = struct {
     verbose_llvm_ir: bool,
     verbose_cimport: bool,
     verbose_llvm_cpu_features: bool,
+    color: enum { auto, on, off } = .auto,
     invalid_user_input: bool,
     zig_exe: []const u8,
     default_step: *Step,
@@ -305,6 +306,23 @@ pub const Builder = struct {
             switch (byte.*) {
                 '/', '\\' => byte.* = fs.path.sep,
                 else => {},
+            }
+        }
+        return the_copy;
+    }
+
+    pub fn dupePkg(self: *Builder, package: Pkg) Pkg {
+        var the_copy = Pkg{
+            .name = self.dupe(package.name),
+            .path = self.dupePath(package.path),
+        };
+
+        if (package.dependencies) |dependencies| {
+            const new_dependencies = self.allocator.alloc(Pkg, dependencies.len) catch unreachable;
+            the_copy.dependencies = new_dependencies;
+
+            for (dependencies) |dep_package, i| {
+                new_dependencies[i] = self.dupePkg(dep_package);
             }
         }
         return the_copy;
@@ -1766,26 +1784,21 @@ pub const LibExeObjStep = struct {
         const out = self.build_options_contents.outStream();
         switch (T) {
             []const []const u8 => {
-                out.print("pub const {}: []const []const u8 = &[_][]const u8{{\n", .{name}) catch unreachable;
+                out.print("pub const {z}: []const []const u8 = &[_][]const u8{{\n", .{name}) catch unreachable;
                 for (value) |slice| {
-                    out.writeAll("    ") catch unreachable;
-                    std.zig.renderStringLiteral(slice, out) catch unreachable;
-                    out.writeAll(",\n") catch unreachable;
+                    out.print("    \"{Z}\",\n", .{slice}) catch unreachable;
                 }
                 out.writeAll("};\n") catch unreachable;
                 return;
             },
             []const u8 => {
-                out.print("pub const {}: []const u8 = ", .{name}) catch unreachable;
-                std.zig.renderStringLiteral(value, out) catch unreachable;
-                out.writeAll(";\n") catch unreachable;
+                out.print("pub const {z}: []const u8 = \"{Z}\";\n", .{ name, value }) catch unreachable;
                 return;
             },
             ?[]const u8 => {
-                out.print("pub const {}: ?[]const u8 = ", .{name}) catch unreachable;
+                out.print("pub const {z}: ?[]const u8 = ", .{name}) catch unreachable;
                 if (value) |payload| {
-                    std.zig.renderStringLiteral(payload, out) catch unreachable;
-                    out.writeAll(";\n") catch unreachable;
+                    out.print("\"{Z}\";\n", .{payload}) catch unreachable;
                 } else {
                     out.writeAll("null;\n") catch unreachable;
                 }
@@ -1795,15 +1808,15 @@ pub const LibExeObjStep = struct {
         }
         switch (@typeInfo(T)) {
             .Enum => |enum_info| {
-                out.print("pub const {} = enum {{\n", .{@typeName(T)}) catch unreachable;
+                out.print("pub const {z} = enum {{\n", .{@typeName(T)}) catch unreachable;
                 inline for (enum_info.fields) |field| {
-                    out.print("    {},\n", .{field.name}) catch unreachable;
+                    out.print("    {z},\n", .{field.name}) catch unreachable;
                 }
                 out.writeAll("};\n") catch unreachable;
             },
             else => {},
         }
-        out.print("pub const {} = {};\n", .{ name, value }) catch unreachable;
+        out.print("pub const {z} = {};\n", .{ name, value }) catch unreachable;
     }
 
     /// The value is the path in the cache dir.
@@ -1830,7 +1843,7 @@ pub const LibExeObjStep = struct {
     }
 
     pub fn addPackage(self: *LibExeObjStep, package: Pkg) void {
-        self.packages.append(package) catch unreachable;
+        self.packages.append(self.builder.dupePkg(package)) catch unreachable;
     }
 
     pub fn addPackagePath(self: *LibExeObjStep, name: []const u8, pkg_index_path: []const u8) void {
@@ -1946,6 +1959,11 @@ pub const LibExeObjStep = struct {
         };
         zig_args.append(cmd) catch unreachable;
 
+        if (builder.color != .auto) {
+            try zig_args.append("--color");
+            try zig_args.append(@tagName(builder.color));
+        }
+
         if (self.root_src) |root_src| try zig_args.append(root_src.getPath(builder));
 
         var prev_has_extra_flags = false;
@@ -2011,9 +2029,7 @@ pub const LibExeObjStep = struct {
             // Render build artifact options at the last minute, now that the path is known.
             for (self.build_options_artifact_args.items) |item| {
                 const out = self.build_options_contents.writer();
-                out.print("pub const {}: []const u8 = ", .{item.name}) catch unreachable;
-                std.zig.renderStringLiteral(item.artifact.getOutputPath(), out) catch unreachable;
-                out.writeAll(";\n") catch unreachable;
+                out.print("pub const {}: []const u8 = \"{Z}\";\n", .{ item.name, item.artifact.getOutputPath() }) catch unreachable;
             }
 
             const build_options_file = try fs.path.join(
@@ -2270,9 +2286,9 @@ pub const LibExeObjStep = struct {
 
         if (self.valgrind_support) |valgrind_support| {
             if (valgrind_support) {
-                try zig_args.append("--enable-valgrind");
+                try zig_args.append("-fvalgrind");
             } else {
-                try zig_args.append("--disable-valgrind");
+                try zig_args.append("-fno-valgrind");
             }
         }
 
@@ -2692,9 +2708,91 @@ pub const InstalledFile = struct {
     path: []const u8,
 };
 
+test "Builder.dupePkg()" {
+    if (builtin.os.tag == .wasi) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    var builder = try Builder.create(
+        &arena.allocator,
+        "test",
+        "test",
+        "test",
+    );
+    defer builder.destroy();
+
+    var pkg_dep = Pkg{
+        .name = "pkg_dep",
+        .path = "/not/a/pkg_dep.zig",
+    };
+    var pkg_top = Pkg{
+        .name = "pkg_top",
+        .path = "/not/a/pkg_top.zig",
+        .dependencies = &[_]Pkg{pkg_dep},
+    };
+    const dupe = builder.dupePkg(pkg_top);
+
+    const original_deps = pkg_top.dependencies.?;
+    const dupe_deps = dupe.dependencies.?;
+
+    // probably the same top level package details
+    std.testing.expectEqualStrings(pkg_top.name, dupe.name);
+
+    // probably the same dependencies
+    std.testing.expectEqual(original_deps.len, dupe_deps.len);
+    std.testing.expectEqual(original_deps[0].name, pkg_dep.name);
+
+    // could segfault otherwise if pointers in duplicated package's fields are
+    // the same as those in stack allocated package's fields
+    std.testing.expect(dupe_deps.ptr != original_deps.ptr);
+    std.testing.expect(dupe.name.ptr != pkg_top.name.ptr);
+    std.testing.expect(dupe.path.ptr != pkg_top.path.ptr);
+    std.testing.expect(dupe_deps[0].name.ptr != pkg_dep.name.ptr);
+    std.testing.expect(dupe_deps[0].path.ptr != pkg_dep.path.ptr);
+}
+
+test "LibExeObjStep.addPackage" {
+    if (builtin.os.tag == .wasi) return error.SkipZigTest;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var builder = try Builder.create(
+        &arena.allocator,
+        "test",
+        "test",
+        "test",
+    );
+    defer builder.destroy();
+
+    const pkg_dep = Pkg{
+        .name = "pkg_dep",
+        .path = "/not/a/pkg_dep.zig",
+    };
+    const pkg_top = Pkg{
+        .name = "pkg_dep",
+        .path = "/not/a/pkg_top.zig",
+        .dependencies = &[_]Pkg{pkg_dep},
+    };
+
+    var exe = builder.addExecutable("not_an_executable", "/not/an/executable.zig");
+    exe.addPackage(pkg_top);
+
+    std.testing.expectEqual(@as(usize, 1), exe.packages.items.len);
+
+    const dupe = exe.packages.items[0];
+    std.testing.expectEqualStrings(pkg_top.name, dupe.name);
+}
+
 test "" {
     // The only purpose of this test is to get all these untested functions
     // to be referenced to avoid regression so it is okay to skip some targets.
-    if (comptime std.Target.current.cpu.arch.ptrBitWidth() == 64)
-        std.meta.refAllDecls(@This());
+    if (comptime std.Target.current.cpu.arch.ptrBitWidth() == 64) {
+        std.testing.refAllDecls(@This());
+        std.testing.refAllDecls(Builder);
+
+        inline for (std.meta.declarations(@This())) |decl|
+            if (comptime mem.endsWith(u8, decl.name, "Step"))
+                std.testing.refAllDecls(decl.data.Type);
+    }
 }

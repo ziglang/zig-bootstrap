@@ -6,15 +6,14 @@
 
 /// Authenticated Encryption with Associated Data
 pub const aead = struct {
-    const chacha20 = @import("crypto/chacha20.zig");
-
     pub const Gimli = @import("crypto/gimli.zig").Aead;
-    pub const ChaCha20Poly1305 = chacha20.Chacha20Poly1305;
-    pub const XChaCha20Poly1305 = chacha20.XChacha20Poly1305;
-    pub const AEGIS128L = @import("crypto/aegis.zig").AEGIS128L;
-    pub const AEGIS256 = @import("crypto/aegis.zig").AEGIS256;
-    pub const AES128GCM = @import("crypto/aes_gcm.zig").AES128GCM;
-    pub const AES256GCM = @import("crypto/aes_gcm.zig").AES256GCM;
+    pub const ChaCha20Poly1305 = @import("crypto/chacha20.zig").Chacha20Poly1305;
+    pub const XChaCha20Poly1305 = @import("crypto/chacha20.zig").XChacha20Poly1305;
+    pub const Aegis128L = @import("crypto/aegis.zig").Aegis128L;
+    pub const Aegis256 = @import("crypto/aegis.zig").Aegis256;
+    pub const Aes128Gcm = @import("crypto/aes_gcm.zig").Aes128Gcm;
+    pub const Aes256Gcm = @import("crypto/aes_gcm.zig").Aes256Gcm;
+    pub const XSalsa20Poly1305 = @import("crypto/salsa20.zig").XSalsa20Poly1305;
 };
 
 /// Authentication (MAC) functions.
@@ -87,6 +86,7 @@ pub const onetimeauth = struct {
 ///
 /// Password hashing functions must be used whenever sensitive data has to be directly derived from a password.
 pub const pwhash = struct {
+    pub const bcrypt = @import("crypto/bcrypt.zig");
     pub const pbkdf2 = @import("crypto/pbkdf2.zig").pbkdf2;
 };
 
@@ -101,6 +101,15 @@ pub const stream = struct {
     pub const ChaCha20IETF = @import("crypto/chacha20.zig").ChaCha20IETF;
     pub const XChaCha20IETF = @import("crypto/chacha20.zig").XChaCha20IETF;
     pub const ChaCha20With64BitNonce = @import("crypto/chacha20.zig").ChaCha20With64BitNonce;
+    pub const Salsa20 = @import("crypto/salsa20.zig").Salsa20;
+    pub const XSalsa20 = @import("crypto/salsa20.zig").XSalsa20;
+};
+
+pub const nacl = struct {
+    const salsa20 = @import("crypto/salsa20.zig");
+    pub const box = salsa20.box;
+    pub const secretBox = salsa20.secretBox;
+    pub const sealedBox = salsa20.sealedBox;
 };
 
 const std = @import("std.zig");
@@ -110,7 +119,7 @@ test "crypto" {
     inline for (std.meta.declarations(@This())) |decl| {
         switch (decl.data) {
             .Type => |t| {
-                std.meta.refAllDecls(t);
+                std.testing.refAllDecls(t);
             },
             .Var => |v| {
                 _ = v;
@@ -122,6 +131,7 @@ test "crypto" {
     }
 
     _ = @import("crypto/aes.zig");
+    _ = @import("crypto/bcrypt.zig");
     _ = @import("crypto/blake2.zig");
     _ = @import("crypto/blake3.zig");
     _ = @import("crypto/chacha20.zig");
@@ -134,6 +144,7 @@ test "crypto" {
     _ = @import("crypto/sha1.zig");
     _ = @import("crypto/sha2.zig");
     _ = @import("crypto/sha3.zig");
+    _ = @import("crypto/salsa20.zig");
     _ = @import("crypto/siphash.zig");
     _ = @import("crypto/25519/curve25519.zig");
     _ = @import("crypto/25519/ed25519.zig");
@@ -156,8 +167,11 @@ test "issue #4532: no index out of bounds" {
         hash.sha3.Sha3_256,
         hash.sha3.Sha3_384,
         hash.sha3.Sha3_512,
+        hash.blake2.Blake2s128,
         hash.blake2.Blake2s224,
         hash.blake2.Blake2s256,
+        hash.blake2.Blake2b128,
+        hash.blake2.Blake2b256,
         hash.blake2.Blake2b384,
         hash.blake2.Blake2b512,
         hash.Gimli,
@@ -170,11 +184,11 @@ test "issue #4532: no index out of bounds" {
         const h0 = Hasher.init(.{});
         var h = h0;
         h.update(block[0..]);
-        h.final(out1[0..]);
+        h.final(&out1);
         h = h0;
         h.update(block[0..1]);
         h.update(block[1..]);
-        h.final(out2[0..]);
+        h.final(&out2);
 
         std.testing.expectEqual(out1, out2);
     }

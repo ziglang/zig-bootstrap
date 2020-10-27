@@ -25,7 +25,9 @@ comptime {
 pub const log = stage2.log;
 pub const log_level = stage2.log_level;
 
-pub export fn main(argc: c_int, argv: [*]const [*:0]const u8) c_int {
+pub export fn main(argc: c_int, argv: [*][*:0]u8) c_int {
+    std.os.argv = argv[0..@intCast(usize, argc)];
+
     std.debug.maybeEnableSegfaultHandler();
 
     zig_stage1_os_init();
@@ -426,5 +428,7 @@ export fn stage2_fetch_file(
     const max_file_size = std.math.maxInt(u32);
     const contents = comp.stage1_cache_manifest.addFilePostFetch(file_path, max_file_size) catch return null;
     result_len.* = contents.len;
+    // TODO https://github.com/ziglang/zig/issues/3328#issuecomment-716749475
+    if (contents.len == 0) return @intToPtr(?[*]const u8, 0x1);
     return contents.ptr;
 }

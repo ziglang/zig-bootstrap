@@ -29,7 +29,15 @@ comptime {
             if (!@hasDecl(root, "WinMain") and !@hasDecl(root, "WinMainCRTStartup") and
                 !@hasDecl(root, "wWinMain") and !@hasDecl(root, "wWinMainCRTStartup"))
             {
-                @export(WinMainCRTStartup, .{ .name = "WinMainCRTStartup" });
+                @export(WinStartup, .{ .name = "wWinMainCRTStartup" });
+            } else if (@hasDecl(root, "WinMain") and !@hasDecl(root, "WinMainCRTStartup") and
+                !@hasDecl(root, "wWinMain") and !@hasDecl(root, "wWinMainCRTStartup"))
+            {
+                @compileError("WinMain not supported; declare wWinMain or main instead");
+            } else if (@hasDecl(root, "wWinMain") and !@hasDecl(root, "wWinMainCRTStartup") and
+                !@hasDecl(root, "WinMain") and !@hasDecl(root, "WinMainCRTStartup"))
+            {
+                @export(wWinMainCRTStartup, .{ .name = "wWinMainCRTStartup" });
             }
         } else if (builtin.os.tag == .uefi) {
             if (!@hasDecl(root, "EfiMain")) @export(EfiMain, .{ .name = "EfiMain" });
@@ -94,46 +102,49 @@ fn _start() callconv(.Naked) noreturn {
 
     switch (builtin.arch) {
         .x86_64 => {
-            starting_stack_ptr = asm (""
+            starting_stack_ptr = asm volatile (
+                \\ xor %%rbp, %%rbp
                 : [argc] "={rsp}" (-> [*]usize)
             );
         },
         .i386 => {
-            starting_stack_ptr = asm (""
+            starting_stack_ptr = asm volatile (
+                \\ xor %%ebp, %%ebp
                 : [argc] "={esp}" (-> [*]usize)
             );
         },
-        .aarch64, .aarch64_be, .arm => {
-            starting_stack_ptr = asm ("mov %[argc], sp"
-                : [argc] "=r" (-> [*]usize)
+        .aarch64, .aarch64_be, .arm, .armeb => {
+            starting_stack_ptr = asm volatile (
+                \\ mov fp, #0
+                \\ mov lr, #0
+                : [argc] "={sp}" (-> [*]usize)
             );
         },
         .riscv64 => {
-            starting_stack_ptr = asm ("mv %[argc], sp"
-                : [argc] "=r" (-> [*]usize)
+            starting_stack_ptr = asm volatile (
+                \\ li s0, 0
+                \\ li ra, 0
+                : [argc] "={sp}" (-> [*]usize)
             );
         },
         .mips, .mipsel => {
-            // Need noat here because LLVM is free to pick any register
-            starting_stack_ptr = asm (
-                \\ .set noat
-                \\ move %[argc], $sp
-                : [argc] "=r" (-> [*]usize)
+            // The lr is already zeroed on entry, as specified by the ABI.
+            starting_stack_ptr = asm volatile (
+                \\ move $fp, $0
+                : [argc] "={sp}" (-> [*]usize)
             );
         },
         .powerpc64le => {
-            // Before returning the stack pointer, we have to set up a backchain
-            // and a few other registers required by the ELFv2 ABI.
+            // Setup the initial stack frame and clear the back chain pointer.
             // TODO: Support powerpc64 (big endian) on ELFv2.
-            starting_stack_ptr = asm (
+            starting_stack_ptr = asm volatile (
                 \\ mr 4, 1
-                \\ subi 1, 1, 32
-                \\ li 5, 0
-                \\ std 5, 0(1)
-                \\ mr %[argc], 4
-                : [argc] "=r" (-> [*]usize)
+                \\ li 0, 0
+                \\ stdu 0, -32(1)
+                \\ mtlr 0
+                : [argc] "={r4}" (-> [*]usize)
                 :
-                : "r4", "r5"
+                : "r0"
             );
         },
         else => @compileError("unsupported arch"),
@@ -143,7 +154,7 @@ fn _start() callconv(.Naked) noreturn {
     @call(.{ .modifier = .never_inline }, posixCallMainAndExit, .{});
 }
 
-fn WinMainCRTStartup() callconv(.Stdcall) noreturn {
+fn WinStartup() callconv(.Stdcall) noreturn {
     @setAlignStack(16);
     if (!builtin.single_threaded) {
         _ = @import("start_windows_tls.zig");
@@ -152,6 +163,18 @@ fn WinMainCRTStartup() callconv(.Stdcall) noreturn {
     std.debug.maybeEnableSegfaultHandler();
 
     std.os.windows.kernel32.ExitProcess(initEventLoopAndCallMain());
+}
+
+fn wWinMainCRTStartup() callconv(.Stdcall) noreturn {
+    @setAlignStack(16);
+    if (!builtin.single_threaded) {
+        _ = @import("start_windows_tls.zig");
+    }
+
+    std.debug.maybeEnableSegfaultHandler();
+
+    const result: std.os.windows.INT = initEventLoopAndCallWinMain();
+    std.os.windows.kernel32.ExitProcess(@bitCast(std.os.windows.UINT, result));
 }
 
 // TODO https://github.com/ziglang/zig/issues/265
@@ -244,8 +267,39 @@ inline fn initEventLoopAndCallMain() u8 {
     // and we want fewer call frames in stack traces.
     return @call(.{ .modifier = .always_inline }, callMain, .{});
 }
+
+// This is marked inline because for some reason LLVM in release mode fails to inline it,
+// and we want fewer call frames in stack traces.
+// TODO This function is duplicated from initEventLoopAndCallMain instead of using generics
+// because it is working around stage1 compiler bugs.
+inline fn initEventLoopAndCallWinMain() std.os.windows.INT {
+    if (std.event.Loop.instance) |loop| {
+        if (!@hasDecl(root, "event_loop")) {
+            loop.init() catch |err| {
+                std.log.err("{}", .{@errorName(err)});
+                if (@errorReturnTrace()) |trace| {
+                    std.debug.dumpStackTrace(trace.*);
+                }
+                return 1;
+            };
+            defer loop.deinit();
+
+            var result: u8 = undefined;
+            var frame: @Frame(callMainAsync) = undefined;
+            _ = @asyncCall(&frame, &result, callMainAsync, .{loop});
+            loop.run();
+            return result;
+        }
+    }
+
+    // This is marked inline because for some reason LLVM in release mode fails to inline it,
+    // and we want fewer call frames in stack traces.
+    return @call(.{ .modifier = .always_inline }, call_wWinMain, .{});
+}
+
 fn callMainAsync(loop: *std.event.Loop) callconv(.Async) u8 {
     // This prevents the event loop from terminating at least until main() has returned.
+    // TODO This shouldn't be needed here; it should be in the event loop code.
     loop.beginOneEvent();
     defer loop.finishOneEvent();
     return callMain();
@@ -289,4 +343,16 @@ pub fn callMain() u8 {
         },
         else => @compileError(bad_main_ret),
     }
+}
+
+pub fn call_wWinMain() std.os.windows.INT {
+    const hInstance = @ptrCast(std.os.windows.HINSTANCE, std.os.windows.kernel32.GetModuleHandleW(null).?);
+    const hPrevInstance: ?std.os.windows.HINSTANCE = null; // MSDN: "This parameter is always NULL"
+    const lpCmdLine = std.os.windows.kernel32.GetCommandLineW();
+
+    // There's no (documented) way to get the nCmdShow parameter, so we're
+    // using this fairly standard default.
+    const nCmdShow = std.os.windows.user32.SW_SHOW;
+
+    return root.wWinMain(hInstance, hPrevInstance, lpCmdLine, nCmdShow);
 }

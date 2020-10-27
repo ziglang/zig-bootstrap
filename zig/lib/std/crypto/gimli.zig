@@ -19,23 +19,33 @@ const debug = std.debug;
 const assert = std.debug.assert;
 const testing = std.testing;
 const htest = @import("test.zig");
+const Vector = std.meta.Vector;
 
 pub const State = struct {
     pub const BLOCKBYTES = 48;
     pub const RATE = 16;
 
-    data: [BLOCKBYTES / 4]u32,
+    data: [BLOCKBYTES / 4]u32 align(16),
 
     const Self = @This();
 
+    pub fn init(initial_state: [State.BLOCKBYTES]u8) Self {
+        var data: [BLOCKBYTES / 4]u32 = undefined;
+        var i: usize = 0;
+        while (i < State.BLOCKBYTES) : (i += 4) {
+            data[i / 4] = mem.readIntLittle(u32, initial_state[i..][0..4]);
+        }
+        return Self{ .data = data };
+    }
+
     /// TODO follow the span() convention instead of having this and `toSliceConst`
-    pub fn toSlice(self: *Self) []u8 {
-        return mem.sliceAsBytes(self.data[0..]);
+    pub fn toSlice(self: *Self) *[BLOCKBYTES]u8 {
+        return mem.asBytes(&self.data);
     }
 
     /// TODO follow the span() convention instead of having this and `toSlice`
-    pub fn toSliceConst(self: *Self) []const u8 {
-        return mem.sliceAsBytes(self.data[0..]);
+    pub fn toSliceConst(self: *const Self) *const [BLOCKBYTES]u8 {
+        return mem.asBytes(&self.data);
     }
 
     fn permute_unrolled(self: *Self) void {
@@ -94,7 +104,57 @@ pub const State = struct {
         }
     }
 
-    pub const permute = if (std.builtin.mode == .ReleaseSmall) permute_small else permute_unrolled;
+    const Lane = Vector(4, u32);
+
+    inline fn shift(x: Lane, comptime n: comptime_int) Lane {
+        return x << @splat(4, @as(u5, n));
+    }
+
+    inline fn rot(x: Lane, comptime n: comptime_int) Lane {
+        return (x << @splat(4, @as(u5, n))) | (x >> @splat(4, @as(u5, 32 - n)));
+    }
+
+    fn permute_vectorized(self: *Self) void {
+        const state = &self.data;
+        var x = Lane{ state[0], state[1], state[2], state[3] };
+        var y = Lane{ state[4], state[5], state[6], state[7] };
+        var z = Lane{ state[8], state[9], state[10], state[11] };
+        var round = @as(u32, 24);
+        while (round > 0) : (round -= 1) {
+            x = rot(x, 24);
+            y = rot(y, 9);
+            const newz = x ^ shift(z, 1) ^ shift(y & z, 2);
+            const newy = y ^ x ^ shift(x | z, 1);
+            const newx = z ^ y ^ shift(x & y, 3);
+            x = newx;
+            y = newy;
+            z = newz;
+            switch (round & 3) {
+                0 => {
+                    x = @shuffle(u32, x, undefined, [_]i32{ 1, 0, 3, 2 });
+                    x[0] ^= round | 0x9e377900;
+                },
+                2 => {
+                    x = @shuffle(u32, x, undefined, [_]i32{ 2, 3, 0, 1 });
+                },
+                else => {},
+            }
+        }
+        comptime var i: usize = 0;
+        inline while (i < 4) : (i += 1) {
+            state[0 + i] = x[i];
+            state[4 + i] = y[i];
+            state[8 + i] = z[i];
+        }
+    }
+
+    pub const permute = if (std.Target.current.cpu.arch == .x86_64) impl: {
+        break :impl permute_vectorized;
+    } else if (std.builtin.mode == .ReleaseSmall) impl: {
+        break :impl permute_small;
+    } else impl: {
+        break :impl permute_unrolled;
+    };
 
     pub fn squeeze(self: *Self, out: []u8) void {
         var i = @as(usize, 0);
@@ -140,6 +200,7 @@ pub const Hash = struct {
     buf_off: usize,
 
     pub const block_length = State.RATE;
+    pub const digest_length = 32;
     pub const Options = struct {};
 
     const Self = @This();
@@ -171,15 +232,13 @@ pub const Hash = struct {
         }
     }
 
-    pub const digest_length = 32;
-
     /// Finish the current hashing operation, writing the hash to `out`
     ///
     /// From 4.9 "Application to hashing"
     /// By default, Gimli-Hash provides a fixed-length output of 32 bytes
     /// (the concatenation of two 16-byte blocks).  However, Gimli-Hash can
     /// be used as an “extendable one-way function” (XOF).
-    pub fn final(self: *Self, out: []u8) void {
+    pub fn final(self: *Self, out: *[digest_length]u8) void {
         const buf = self.state.toSlice();
 
         // XOR 1 into the next byte of the state
@@ -191,7 +250,7 @@ pub const Hash = struct {
     }
 };
 
-pub fn hash(out: []u8, in: []const u8, options: Hash.Options) void {
+pub fn hash(out: *[Hash.digest_length]u8, in: []const u8, options: Hash.Options) void {
     var st = Hash.init(options);
     st.update(in);
     st.final(out);

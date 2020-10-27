@@ -34,7 +34,7 @@ const maxInt = std.math.maxInt;
 pub const DefaultPrng = Xoroshiro128;
 
 /// Cryptographically secure random numbers.
-pub const DefaultCsprng = Isaac64;
+pub const DefaultCsprng = Gimli;
 
 pub const Random = struct {
     fillFn: fn (r: *Random, buf: []u8) void,
@@ -52,8 +52,8 @@ pub const Random = struct {
     /// `i` is evenly distributed.
     pub fn int(r: *Random, comptime T: type) T {
         const bits = @typeInfo(T).Int.bits;
-        const UnsignedT = std.meta.Int(false, bits);
-        const ByteAlignedT = std.meta.Int(false, @divTrunc(bits + 7, 8) * 8);
+        const UnsignedT = std.meta.Int(.unsigned, bits);
+        const ByteAlignedT = std.meta.Int(.unsigned, @divTrunc(bits + 7, 8) * 8);
 
         var rand_bytes: [@sizeOf(ByteAlignedT)]u8 = undefined;
         r.bytes(rand_bytes[0..]);
@@ -95,9 +95,9 @@ pub const Random = struct {
         assert(0 < less_than);
         // Small is typically u32
         const small_bits = @divTrunc(bits + 31, 32) * 32;
-        const Small = std.meta.Int(false, small_bits);
+        const Small = std.meta.Int(.unsigned, small_bits);
         // Large is typically u64
-        const Large = std.meta.Int(false, small_bits * 2);
+        const Large = std.meta.Int(.unsigned, small_bits * 2);
 
         // adapted from:
         //   http://www.pcg-random.org/posts/bounded-rands.html
@@ -109,7 +109,7 @@ pub const Random = struct {
             // TODO: workaround for https://github.com/ziglang/zig/issues/1770
             // should be:
             //   var t: Small = -%less_than;
-            var t: Small = @bitCast(Small, -%@bitCast(std.meta.Int(true, small_bits), @as(Small, less_than)));
+            var t: Small = @bitCast(Small, -%@bitCast(std.meta.Int(.signed, small_bits), @as(Small, less_than)));
 
             if (t >= less_than) {
                 t -= less_than;
@@ -156,7 +156,7 @@ pub const Random = struct {
         const info = @typeInfo(T).Int;
         if (info.is_signed) {
             // Two's complement makes this math pretty easy.
-            const UnsignedT = std.meta.Int(false, info.bits);
+            const UnsignedT = std.meta.Int(.unsigned, info.bits);
             const lo = @bitCast(UnsignedT, at_least);
             const hi = @bitCast(UnsignedT, less_than);
             const result = lo +% r.uintLessThanBiased(UnsignedT, hi -% lo);
@@ -175,7 +175,7 @@ pub const Random = struct {
         const info = @typeInfo(T).Int;
         if (info.is_signed) {
             // Two's complement makes this math pretty easy.
-            const UnsignedT = std.meta.Int(false, info.bits);
+            const UnsignedT = std.meta.Int(.unsigned, info.bits);
             const lo = @bitCast(UnsignedT, at_least);
             const hi = @bitCast(UnsignedT, less_than);
             const result = lo +% r.uintLessThan(UnsignedT, hi -% lo);
@@ -193,7 +193,7 @@ pub const Random = struct {
         const info = @typeInfo(T).Int;
         if (info.is_signed) {
             // Two's complement makes this math pretty easy.
-            const UnsignedT = std.meta.Int(false, info.bits);
+            const UnsignedT = std.meta.Int(.unsigned, info.bits);
             const lo = @bitCast(UnsignedT, at_least);
             const hi = @bitCast(UnsignedT, at_most);
             const result = lo +% r.uintAtMostBiased(UnsignedT, hi -% lo);
@@ -212,7 +212,7 @@ pub const Random = struct {
         const info = @typeInfo(T).Int;
         if (info.is_signed) {
             // Two's complement makes this math pretty easy.
-            const UnsignedT = std.meta.Int(false, info.bits);
+            const UnsignedT = std.meta.Int(.unsigned, info.bits);
             const lo = @bitCast(UnsignedT, at_least);
             const hi = @bitCast(UnsignedT, at_most);
             const result = lo +% r.uintAtMost(UnsignedT, hi -% lo);
@@ -290,7 +290,7 @@ pub const Random = struct {
 pub fn limitRangeBiased(comptime T: type, random_int: T, less_than: T) T {
     comptime assert(@typeInfo(T).Int.is_signed == false);
     const bits = @typeInfo(T).Int.bits;
-    const T2 = std.meta.Int(false, bits * 2);
+    const T2 = std.meta.Int(.unsigned, bits * 2);
 
     // adapted from:
     //   http://www.pcg-random.org/posts/bounded-rands.html
@@ -749,28 +749,34 @@ pub const Gimli = struct {
     random: Random,
     state: std.crypto.core.Gimli,
 
-    pub fn init(init_s: u64) Gimli {
+    pub const secret_seed_length = 32;
+
+    /// The seed must be uniform, secret and `secret_seed_length` bytes long.
+    /// It can be generated using `std.crypto.randomBytes()`.
+    pub fn init(secret_seed: [secret_seed_length]u8) Gimli {
+        var initial_state: [std.crypto.core.Gimli.BLOCKBYTES]u8 = undefined;
+        mem.copy(u8, initial_state[0..secret_seed_length], &secret_seed);
+        mem.set(u8, initial_state[secret_seed_length..], 0);
         var self = Gimli{
             .random = Random{ .fillFn = fill },
-            .state = std.crypto.core.Gimli{
-                .data = [_]u32{0} ** (std.crypto.gimli.State.BLOCKBYTES / 4),
-            },
+            .state = std.crypto.core.Gimli.init(initial_state),
         };
-        self.state.data[0] = @truncate(u32, init_s >> 32);
-        self.state.data[1] = @truncate(u32, init_s);
         return self;
     }
 
     fn fill(r: *Random, buf: []u8) void {
         const self = @fieldParentPtr(Gimli, "random", r);
 
-        self.state.squeeze(buf);
+        if (buf.len != 0) {
+            self.state.squeeze(buf);
+        } else {
+            self.state.permute();
+        }
+        mem.set(u8, self.state.toSlice()[0..std.crypto.core.Gimli.RATE], 0);
     }
 };
 
 // ISAAC64 - http://www.burtleburtle.net/bob/rand/isaacafa.html
-//
-// CSPRNG
 //
 // Follows the general idea of the implementation from here with a few shortcuts.
 // https://doc.rust-lang.org/rand/src/rand/prng/isaac64.rs.html
@@ -1139,6 +1145,16 @@ fn testRangeBias(r: *Random, start: i8, end: i8, biased: bool) void {
     }
 }
 
+test "CSPRNG" {
+    var secret_seed: [DefaultCsprng.secret_seed_length]u8 = undefined;
+    try std.crypto.randomBytes(&secret_seed);
+    var csprng = DefaultCsprng.init(secret_seed);
+    const a = csprng.random.int(u64);
+    const b = csprng.random.int(u64);
+    const c = csprng.random.int(u64);
+    assert(a ^ b ^ c != 0);
+}
+
 test "" {
-    std.meta.refAllDecls(@This());
+    std.testing.refAllDecls(@This());
 }

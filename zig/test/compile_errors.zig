@@ -2,6 +2,15 @@ const tests = @import("tests.zig");
 const std = @import("std");
 
 pub fn addCases(cases: *tests.CompileErrorContext) void {
+    cases.add("indexing a undefined slice at comptime",
+        \\comptime {
+        \\    var slice: []u8 = undefined;
+        \\    slice[0] = 2;
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:3:10: error: index 0 outside slice of size 0",
+    });
+
     cases.add("array in c exported function",
         \\export fn zig_array(x: [10]u8) void {
         \\    expect(std.mem.eql(u8, &x, "1234567890"));
@@ -2935,7 +2944,6 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         "tmp.zig:4:18: error: expected type 'fn(i32) void', found 'fn(bool) void",
         "tmp.zig:4:18: note: parameter 0: 'bool' cannot cast into 'i32'",
     });
-
     cases.add("cast negative value to unsigned integer",
         \\comptime {
         \\    const value: i32 = -1;
@@ -2946,7 +2954,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    const unsigned: u32 = value;
         \\}
     , &[_][]const u8{
-        "tmp.zig:3:36: error: cannot cast negative value -1 to unsigned integer type 'u32'",
+        "tmp.zig:3:22: error: attempt to cast negative value to unsigned integer",
         "tmp.zig:7:27: error: cannot cast negative value -1 to unsigned integer type 'u32'",
     });
 
@@ -2968,7 +2976,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    var unsigned: u64 = signed;
         \\}
     , &[_][]const u8{
-        "tmp.zig:3:31: error: integer value 300 cannot be coerced to type 'u8'",
+        "tmp.zig:3:18: error: cast from 'u16' to 'u8' truncates bits",
         "tmp.zig:7:22: error: integer value 300 cannot be coerced to type 'u8'",
         "tmp.zig:11:20: error: expected type 'u8', found 'u16'",
         "tmp.zig:11:20: note: unsigned 8-bit int cannot represent all possible unsigned 16-bit values",
@@ -7714,7 +7722,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     });
 
     cases.add( // fixed bug #2032
-    "compile diagnostic string for top level decl type",
+        "compile diagnostic string for top level decl type",
         \\export fn entry() void {
         \\    var foo: u32 = @This(){};
         \\}
@@ -8163,14 +8171,19 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
     , &[_][]const u8{
         "tmp.zig:2:9: error: @wasmMemoryGrow is a wasm32 feature only",
     });
-
     cases.add("Issue #5586: Make unary minus for unsigned types a compile error",
-        \\export fn f(x: u32) u32 {
+        \\export fn f1(x: u32) u32 {
+        \\    const y = -%x;
+        \\    return -y;
+        \\}
+        \\const V = @import("std").meta.Vector;
+        \\export fn f2(x: V(4, u32)) V(4, u32) {
         \\    const y = -%x;
         \\    return -y;
         \\}
     , &[_][]const u8{
         "tmp.zig:3:12: error: negation of type 'u32'",
+        "tmp.zig:8:12: error: negation of type 'u32'",
     });
 
     cases.add("Issue #5618: coercion of ?*c_void to *c_void must fail.",

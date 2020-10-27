@@ -64,6 +64,15 @@ pub const Edwards25519 = struct {
         .is_base = true,
     };
 
+    /// The edwards25519 neutral element.
+    pub const neutralElement = Edwards25519{
+        .x = Fe{ .limbs = .{ 2251799813685229, 2251799813685247, 2251799813685247, 2251799813685247, 2251799813685247 } },
+        .y = Fe{ .limbs = .{ 1507481815385608, 2223447444246085, 1083941587175919, 2059929906842505, 1581435440146976 } },
+        .z = Fe{ .limbs = .{ 1507481815385608, 2223447444246085, 1083941587175919, 2059929906842505, 1581435440146976 } },
+        .t = Fe{ .limbs = .{ 2251799813685229, 2251799813685247, 2251799813685247, 2251799813685247, 2251799813685247 } },
+        .is_base = false,
+    };
+
     const identityElement = Edwards25519{ .x = Fe.zero, .y = Fe.one, .z = Fe.one, .t = Fe.zero };
 
     /// Reject the neutral element.
@@ -71,6 +80,11 @@ pub const Edwards25519 = struct {
         if (p.x.isZero()) {
             return error.IdentityElement;
         }
+    }
+
+    /// Multiply a point by the cofactor
+    pub fn clearCofactor(p: Edwards25519) Edwards25519 {
+        return p.dbl().dbl().dbl();
     }
 
     /// Flip the sign of the X coordinate.
@@ -114,6 +128,11 @@ pub const Edwards25519 = struct {
         };
     }
 
+    /// Substract two Edwards25519 points.
+    pub fn sub(p: Edwards25519, q: Edwards25519) Edwards25519 {
+        return p.add(q.neg());
+    }
+
     inline fn cMov(p: *Edwards25519, a: Edwards25519, c: u64) void {
         p.x.cMov(a.x, c);
         p.y.cMov(a.y, c);
@@ -130,13 +149,19 @@ pub const Edwards25519 = struct {
         return t;
     }
 
-    fn pcMul(pc: [16]Edwards25519, s: [32]u8) !Edwards25519 {
+    fn pcMul(pc: [16]Edwards25519, s: [32]u8, comptime vartime: bool) !Edwards25519 {
         var q = Edwards25519.identityElement;
         var pos: usize = 252;
         while (true) : (pos -= 4) {
             q = q.dbl().dbl().dbl().dbl();
             const bit = (s[pos >> 3] >> @truncate(u3, pos)) & 0xf;
-            q = q.add(pcSelect(pc, bit));
+            if (vartime) {
+                if (bit != 0) {
+                    q = q.add(pc[bit]);
+                }
+            } else {
+                q = q.add(pcSelect(pc, bit));
+            }
             if (pos == 0) break;
         }
         try q.rejectIdentity();
@@ -166,7 +191,50 @@ pub const Edwards25519 = struct {
             pc = precompute(p);
             pc[4].rejectIdentity() catch |_| return error.WeakPublicKey;
         }
-        return pcMul(pc, s);
+        return pcMul(pc, s, false);
+    }
+
+    /// Multiply an Edwards25519 point by a *PUBLIC* scalar *IN VARIABLE TIME*
+    /// This can be used for signature verification.
+    pub fn mulPublic(p: Edwards25519, s: [32]u8) !Edwards25519 {
+        var pc: [16]Edwards25519 = undefined;
+        if (p.is_base) {
+            @setEvalBranchQuota(10000);
+            pc = comptime precompute(Edwards25519.basePoint);
+        } else {
+            pc = precompute(p);
+            pc[4].rejectIdentity() catch |_| return error.WeakPublicKey;
+        }
+        return pcMul(pc, s, true);
+    }
+
+    /// Multiscalar multiplication *IN VARIABLE TIME* for public data
+    /// Computes ps0*ss0 + ps1*ss1 + ps2*ss2... faster than doing many of these operations individually
+    pub fn mulMulti(comptime count: usize, ps: [count]Edwards25519, ss: [count][32]u8) !Edwards25519 {
+        var pcs: [count][16]Edwards25519 = undefined;
+        for (ps) |p, i| {
+            if (p.is_base) {
+                @setEvalBranchQuota(10000);
+                pcs[i] = comptime precompute(Edwards25519.basePoint);
+            } else {
+                pcs[i] = precompute(p);
+                pcs[i][4].rejectIdentity() catch |_| return error.WeakPublicKey;
+            }
+        }
+        var q = Edwards25519.identityElement;
+        var pos: usize = 252;
+        while (true) : (pos -= 4) {
+            q = q.dbl().dbl().dbl().dbl();
+            for (ss) |s, i| {
+                const bit = (s[pos >> 3] >> @truncate(u3, pos)) & 0xf;
+                if (bit != 0) {
+                    q = q.add(pcs[i][bit]);
+                }
+            }
+            if (pos == 0) break;
+        }
+        try q.rejectIdentity();
+        return q;
     }
 
     /// Multiply an Edwards25519 point by a scalar after "clamping" it.
@@ -216,4 +284,18 @@ test "edwards25519 packing/unpacking" {
         const small_p = try Edwards25519.fromBytes(small_order_s);
         std.testing.expectError(error.WeakPublicKey, small_p.mul(s));
     }
+}
+
+test "edwards25519 point addition/substraction" {
+    var s1: [32]u8 = undefined;
+    var s2: [32]u8 = undefined;
+    try std.crypto.randomBytes(&s1);
+    try std.crypto.randomBytes(&s2);
+    const p = try Edwards25519.basePoint.clampedMul(s1);
+    const q = try Edwards25519.basePoint.clampedMul(s2);
+    const r = p.add(q).add(q).sub(q).sub(q);
+    try r.rejectIdentity();
+    std.testing.expectError(error.IdentityElement, r.sub(p).rejectIdentity());
+    std.testing.expectError(error.IdentityElement, p.sub(p).rejectIdentity());
+    std.testing.expectError(error.IdentityElement, p.sub(q).add(q).sub(p).rejectIdentity());
 }
