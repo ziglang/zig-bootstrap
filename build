@@ -18,6 +18,7 @@ case $TARGET_OS_CMAKE in
   freebsd) TARGET_OS_CMAKE="FreeBSD";;
   windows) TARGET_OS_CMAKE="Windows";;
   linux) TARGET_OS_CMAKE="Linux";;
+  native) TARGET_OS_CMAKE="";;
 esac
 
 # First build the libraries for Zig to link against, as well as native `llvm-tblgen`.
