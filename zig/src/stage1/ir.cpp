@@ -10953,13 +10953,13 @@ static bool float_is_nan(ZigValue *op) {
     } else if (op->type->id == ZigTypeIdFloat) {
         switch (op->type->data.floating.bit_count) {
             case 16:
-                return f16_isSignalingNaN(op->data.x_f16);
+                return zig_f16_isNaN(op->data.x_f16);
             case 32:
                 return op->data.x_f32 != op->data.x_f32;
             case 64:
                 return op->data.x_f64 != op->data.x_f64;
             case 128:
-                return f128M_isSignalingNaN(&op->data.x_f128);
+                return zig_f128_isNaN(&op->data.x_f128);
             default:
                 zig_unreachable();
         }
@@ -16313,6 +16313,9 @@ static void set_optional_payload(ZigValue *opt_val, ZigValue *payload) {
     assert(opt_val->type->id == ZigTypeIdOptional);
     if (payload == nullptr) {
         set_optional_value_to_null(opt_val);
+    } else if (get_src_ptr_type(opt_val->type)) {
+        assert(get_src_ptr_type(payload->type));
+        opt_val->data.x_ptr = payload->data.x_ptr;
     } else if (is_opt_err_set(opt_val->type)) {
         assert(payload->type->id == ZigTypeIdErrorSet);
         opt_val->data.x_err_set = payload->data.x_err_set;
@@ -21589,6 +21592,11 @@ static IrInstGen *ir_analyze_instruction_cond_br(IrAnalyze *ira, IrInstSrcCondBr
 static IrInstGen *ir_analyze_instruction_unreachable(IrAnalyze *ira,
         IrInstSrcUnreachable *unreachable_instruction)
 {
+    if (ir_should_inline(ira->old_irb.exec, unreachable_instruction->base.base.scope)) {
+        ir_add_error(ira, &unreachable_instruction->base.base, buf_sprintf("reached unreachable code"));
+        return ir_unreach_error(ira);
+    }
+
     IrInstGen *result = ir_build_unreachable_gen(ira, &unreachable_instruction->base.base);
     return ir_finish_anal(ira, result);
 }
@@ -25972,24 +25980,30 @@ static Error get_const_field_buf(IrAnalyze *ira, AstNode *source_node, ZigValue 
     ZigValue *ptr = slice->data.x_struct.fields[slice_ptr_index];
     ZigValue *len = slice->data.x_struct.fields[slice_len_index];
     assert(ptr->data.x_ptr.special == ConstPtrSpecialBaseArray);
-    assert(ptr->data.x_ptr.data.base_array.elem_index == 0);
     ZigValue *arr = ptr->data.x_ptr.data.base_array.array_val;
     assert(arr->special == ConstValSpecialStatic);
+
+    const size_t start_value = ptr->data.x_ptr.data.base_array.elem_index;
+    const size_t len_value = bigint_as_usize(&len->data.x_bigint);
+
     switch (arr->data.x_array.special) {
         case ConstArraySpecialUndef:
             return ErrorSemanticAnalyzeFail;
         case ConstArraySpecialNone: {
+            assert(start_value <= arr->type->data.array.len);
+            assert(start_value + len_value <= arr->type->data.array.len);
             buf_resize(out, 0);
-            size_t count = bigint_as_usize(&len->data.x_bigint);
-            for (size_t j = 0; j < count; j++) {
-                ZigValue *ch_val = &arr->data.x_array.data.s_none.elements[j];
+            for (size_t j = 0; j < len_value; j++) {
+                ZigValue *ch_val = &arr->data.x_array.data.s_none.elements[start_value + j];
                 unsigned ch = bigint_as_u32(&ch_val->data.x_bigint);
                 buf_append_char(out, ch);
             }
             break;
         }
         case ConstArraySpecialBuf:
-            buf_init_from_buf(out, arr->data.x_array.data.s_buf);
+            assert(start_value <= buf_len(arr->data.x_array.data.s_buf));
+            assert(start_value + len_value <= buf_len(arr->data.x_array.data.s_buf));
+            buf_init_from_mem(out, buf_ptr(arr->data.x_array.data.s_buf) + start_value, len_value);
             break;
     }
     return ErrorNone;
@@ -27032,7 +27046,8 @@ static ErrorMsg *ir_eval_reduce(IrAnalyze *ira, IrInst *source_instr, ReduceOp o
         return nullptr;
     }
 
-    if (op != ReduceOp_min && op != ReduceOp_max) {
+    // Evaluate and/or/xor.
+    if (op == ReduceOp_and || op == ReduceOp_or || op == ReduceOp_xor) {
         ZigValue *first_elem_val = &value->data.x_array.data.s_none.elements[0];
 
         copy_const_val(ira->codegen, out_value, first_elem_val);
@@ -27057,6 +27072,43 @@ static ErrorMsg *ir_eval_reduce(IrAnalyze *ira, IrInst *source_instr, ReduceOp o
         return nullptr;
     }
 
+    // Evaluate add/sub.
+    // Perform the reduction sequentially, starting from the neutral value.
+    if (op == ReduceOp_add || op == ReduceOp_mul) {
+        if (scalar_type->id == ZigTypeIdInt) {
+            if (op == ReduceOp_add) {
+                bigint_init_unsigned(&out_value->data.x_bigint, 0);
+            } else {
+                bigint_init_unsigned(&out_value->data.x_bigint, 1);
+            }
+        } else {
+            if (op == ReduceOp_add) {
+                float_init_f64(out_value, -0.0);
+            } else {
+                float_init_f64(out_value, 1.0);
+            }
+        }
+
+        for (size_t i = 0; i < len; i++) {
+            ZigValue *elem_val = &value->data.x_array.data.s_none.elements[i];
+
+            IrBinOp bin_op;
+            switch (op) {
+                case ReduceOp_add: bin_op = IrBinOpAdd; break;
+                case ReduceOp_mul: bin_op = IrBinOpMult; break;
+                default: zig_unreachable();
+            }
+
+            ErrorMsg *msg = ir_eval_math_op_scalar(ira, source_instr, scalar_type,
+                    out_value, bin_op, elem_val, out_value);
+            if (msg != nullptr)
+                return msg;
+        }
+
+        return nullptr;
+    }
+
+    // Evaluate min/max.
     ZigValue *candidate_elem_val = &value->data.x_array.data.s_none.elements[0];
 
     ZigValue *dummy_cmp_value = ira->codegen->pass1_arena->create<ZigValue>();

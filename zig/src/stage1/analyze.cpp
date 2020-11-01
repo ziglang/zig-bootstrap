@@ -5686,7 +5686,13 @@ static bool can_mutate_comptime_var_state(ZigValue *value) {
             zig_unreachable();
         case ZigTypeIdStruct:
             for (uint32_t i = 0; i < value->type->data.structure.src_field_count; i += 1) {
-                if (can_mutate_comptime_var_state(value->data.x_struct.fields[i]))
+                TypeStructField *type_struct_field = value->type->data.structure.fields[i];
+
+                ZigValue *field_value = type_struct_field->is_comptime ?
+                        type_struct_field->init_val :
+                        value->data.x_struct.fields[i];
+
+                if (can_mutate_comptime_var_state(field_value))
                     return true;
             }
             return false;
@@ -6815,9 +6821,12 @@ static Error resolve_pointer_zero_bits(CodeGen *g, ZigType *ty) {
         TypeStructField *field = find_struct_type_field(isf->inferred_struct_type, isf->field_name);
         assert(field != nullptr);
         if (field->is_comptime) {
+            ty->data.pointer.resolve_loop_flag_zero_bits = false;
+
             ty->abi_size = 0;
             ty->size_in_bits = 0;
             ty->abi_align = 0;
+
             return ErrorNone;
         }
         elem_type = field->type_entry;
@@ -6828,6 +6837,8 @@ static Error resolve_pointer_zero_bits(CodeGen *g, ZigType *ty) {
     bool has_bits;
     if ((err = type_has_bits2(g, elem_type, &has_bits)))
         return err;
+
+    ty->data.pointer.resolve_loop_flag_zero_bits = false;
 
     if (has_bits) {
         ty->abi_size = g->builtin_types.entry_usize->abi_size;
@@ -9690,6 +9701,11 @@ void copy_const_val(CodeGen *g, ZigValue *dest, ZigValue *src) {
     if (dest->type->id == ZigTypeIdStruct) {
         dest->data.x_struct.fields = alloc_const_vals_ptrs(g, dest->type->data.structure.src_field_count);
         for (size_t i = 0; i < dest->type->data.structure.src_field_count; i += 1) {
+            TypeStructField *type_struct_field = dest->type->data.structure.fields[i];
+            // comptime-known values are stored in the field init_val inside
+            // the struct type.
+            if (type_struct_field->is_comptime)
+                continue;
             copy_const_val(g, dest->data.x_struct.fields[i], src->data.x_struct.fields[i]);
             dest->data.x_struct.fields[i]->parent.id = ConstParentIdStruct;
             dest->data.x_struct.fields[i]->parent.data.p_struct.struct_val = dest;
