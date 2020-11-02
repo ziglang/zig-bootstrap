@@ -95,7 +95,7 @@ is more portable across Linux distributions.
 | `powerpc-linux-gnu`        | not tested     |
 | `powerpc-linux-musl`       | not tested     |
 | `riscv64-linux-gnu`        | not tested     |
-| `riscv64-linux-musl`       | [#4](https://github.com/ziglang/bootstrap/issues/4) |
+| `riscv64-linux-musl`       | OK             |
 | `s390x-linux-gnu`          | not tested     |
 | `s390x-linux-musl`         | not tested     |
 | `sparc-linux-gnu`          | not tested     |
