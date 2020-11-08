@@ -479,7 +479,6 @@ fn clone() callconv(.Naked) void {
                 \\  syscall
             );
         },
-
         .powerpc64, .powerpc64le => {
             asm volatile (
                 \\  # store non-volatile regs r30, r31 on stack in order to put our
@@ -528,7 +527,49 @@ fn clone() callconv(.Naked) void {
                 \\  blr
             );
         },
-
+        .sparcv9 => {
+            // __clone(func, stack, flags, arg, ptid, tls, ctid)
+            //           i0,    i1,    i2,  i3,   i4,  i5,   sp
+            // syscall(SYS_clone, flags, stack, ptid, tls, ctid)
+            //                g1     o0,    o1,   o2,  o3,   o4
+            asm volatile (
+                \\ save %%sp, -192, %%sp
+                \\ # Save the func pointer and the arg pointer
+                \\ mov %%i0, %%g2
+                \\ mov %%i3, %%g3
+                \\ # Shuffle the arguments
+                \\ mov 217, %%g1
+                \\ mov %%i2, %%o0
+                \\ sub %%i1, 2047, %%o1
+                \\ mov %%i4, %%o2
+                \\ mov %%i5, %%o3
+                \\ ldx [%%fp + 192 - 2*8 + 2047], %%o4
+                \\ t 0x6d
+                \\ bcs,pn %%xcc, 2f
+                \\ nop
+                \\ # sparc64 returns the child pid in o0 and a flag telling
+                \\ # whether the process is the child in o1
+                \\ brnz %%o1, 1f
+                \\ nop
+                \\ # This is the parent process, return the child pid
+                \\ mov %%o0, %%i0
+                \\ ret
+                \\ restore
+                \\1:
+                \\ # This is the child process
+                \\ mov %%g0, %%fp
+                \\ call %%g2
+                \\ mov %%g3, %%o0
+                \\ # Exit
+                \\ mov 1, %%g1
+                \\ t 0x6d
+                \\2:
+                \\ # The syscall failed
+                \\ sub %%g0, %%o0, %%i0
+                \\ ret
+                \\ restore
+            );
+        },
         else => @compileError("Implement clone() for this arch."),
     }
 }
@@ -871,14 +912,14 @@ test "sqrt" {
     const epsilon = 0.000001;
 
     std.testing.expect(sqrt(0.0) == 0.0);
-    std.testing.expect(std.math.approxEq(f64, sqrt(2.0), 1.414214, epsilon));
-    std.testing.expect(std.math.approxEq(f64, sqrt(3.6), 1.897367, epsilon));
+    std.testing.expect(std.math.approxEqAbs(f64, sqrt(2.0), 1.414214, epsilon));
+    std.testing.expect(std.math.approxEqAbs(f64, sqrt(3.6), 1.897367, epsilon));
     std.testing.expect(sqrt(4.0) == 2.0);
-    std.testing.expect(std.math.approxEq(f64, sqrt(7.539840), 2.745877, epsilon));
-    std.testing.expect(std.math.approxEq(f64, sqrt(19.230934), 4.385309, epsilon));
+    std.testing.expect(std.math.approxEqAbs(f64, sqrt(7.539840), 2.745877, epsilon));
+    std.testing.expect(std.math.approxEqAbs(f64, sqrt(19.230934), 4.385309, epsilon));
     std.testing.expect(sqrt(64.0) == 8.0);
-    std.testing.expect(std.math.approxEq(f64, sqrt(64.1), 8.006248, epsilon));
-    std.testing.expect(std.math.approxEq(f64, sqrt(8942.230469), 94.563367, epsilon));
+    std.testing.expect(std.math.approxEqAbs(f64, sqrt(64.1), 8.006248, epsilon));
+    std.testing.expect(std.math.approxEqAbs(f64, sqrt(8942.230469), 94.563367, epsilon));
 }
 
 test "sqrt special" {
@@ -969,14 +1010,14 @@ test "sqrtf" {
     const epsilon = 0.000001;
 
     std.testing.expect(sqrtf(0.0) == 0.0);
-    std.testing.expect(std.math.approxEq(f32, sqrtf(2.0), 1.414214, epsilon));
-    std.testing.expect(std.math.approxEq(f32, sqrtf(3.6), 1.897367, epsilon));
+    std.testing.expect(std.math.approxEqAbs(f32, sqrtf(2.0), 1.414214, epsilon));
+    std.testing.expect(std.math.approxEqAbs(f32, sqrtf(3.6), 1.897367, epsilon));
     std.testing.expect(sqrtf(4.0) == 2.0);
-    std.testing.expect(std.math.approxEq(f32, sqrtf(7.539840), 2.745877, epsilon));
-    std.testing.expect(std.math.approxEq(f32, sqrtf(19.230934), 4.385309, epsilon));
+    std.testing.expect(std.math.approxEqAbs(f32, sqrtf(7.539840), 2.745877, epsilon));
+    std.testing.expect(std.math.approxEqAbs(f32, sqrtf(19.230934), 4.385309, epsilon));
     std.testing.expect(sqrtf(64.0) == 8.0);
-    std.testing.expect(std.math.approxEq(f32, sqrtf(64.1), 8.006248, epsilon));
-    std.testing.expect(std.math.approxEq(f32, sqrtf(8942.230469), 94.563370, epsilon));
+    std.testing.expect(std.math.approxEqAbs(f32, sqrtf(64.1), 8.006248, epsilon));
+    std.testing.expect(std.math.approxEqAbs(f32, sqrtf(8942.230469), 94.563370, epsilon));
 }
 
 test "sqrtf special" {

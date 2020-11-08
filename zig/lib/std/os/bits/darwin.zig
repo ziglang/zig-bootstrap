@@ -72,13 +72,7 @@ pub const Flock = extern struct {
     l_whence: i16,
 };
 
-/// Renamed to Stat to not conflict with the stat function.
-/// atime, mtime, and ctime have functions to return `timespec`,
-/// because although this is a POSIX API, the layout and names of
-/// the structs are inconsistent across operating systems, and
-/// in C, macros are used to hide the differences. Here we use
-/// methods to accomplish this.
-pub const Stat = extern struct {
+pub const libc_stat = extern struct {
     dev: i32,
     mode: u16,
     nlink: u16,
@@ -102,21 +96,21 @@ pub const Stat = extern struct {
     lspare: i32,
     qspare: [2]i64,
 
-    pub fn atime(self: Stat) timespec {
+    pub fn atime(self: @This()) timespec {
         return timespec{
             .tv_sec = self.atimesec,
             .tv_nsec = self.atimensec,
         };
     }
 
-    pub fn mtime(self: Stat) timespec {
+    pub fn mtime(self: @This()) timespec {
         return timespec{
             .tv_sec = self.mtimesec,
             .tv_nsec = self.mtimensec,
         };
     }
 
-    pub fn ctime(self: Stat) timespec {
+    pub fn ctime(self: @This()) timespec {
         return timespec{
             .tv_sec = self.ctimesec,
             .tv_nsec = self.ctimensec,
@@ -1475,6 +1469,9 @@ pub const CLOCK_UPTIME_RAW_APPROX = 9;
 pub const CLOCK_PROCESS_CPUTIME_ID = 12;
 pub const CLOCK_THREAD_CPUTIME_ID = 16;
 
+/// Max open files per process
+/// https://opensource.apple.com/source/xnu/xnu-4903.221.2/bsd/sys/syslimits.h.auto.html
+pub const OPEN_MAX = 10240;
 pub const RUSAGE_SELF = 0;
 pub const RUSAGE_CHILDREN = -1;
 

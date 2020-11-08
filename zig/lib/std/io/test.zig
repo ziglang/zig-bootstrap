@@ -40,11 +40,7 @@ test "write a file, read it, then delete it" {
 
     {
         // Make sure the exclusive flag is honored.
-        if (tmp.dir.createFile(tmp_file_name, .{ .exclusive = true })) |file| {
-            unreachable;
-        } else |err| {
-            std.debug.assert(err == File.OpenError.PathAlreadyExists);
-        }
+        expectError(File.OpenError.PathAlreadyExists, tmp.dir.createFile(tmp_file_name, .{ .exclusive = true }));
     }
 
     {
@@ -140,9 +136,6 @@ test "File seek ops" {
 }
 
 test "setEndPos" {
-    // https://github.com/ziglang/zig/issues/5127
-    if (std.Target.current.cpu.arch == .mips) return error.SkipZigTest;
-
     var tmp = tmpDir(.{});
     defer tmp.cleanup();
 

@@ -57,6 +57,9 @@ pub const Options = struct {
     /// other objects.
     /// Otherwise (depending on `use_lld`) this link code directly outputs and updates the final binary.
     use_llvm: bool,
+    /// Darwin-only. If this is true, `use_llvm` is true, and `is_native_os` is true, this link code will
+    /// use system linker `ld` instead of the LLD.
+    system_linker_hack: bool,
     link_libc: bool,
     link_libcpp: bool,
     function_sections: bool,
@@ -88,6 +91,8 @@ pub const Options = struct {
     llvm_cpu_features: ?[*:0]const u8,
     /// Extra args passed directly to LLD. Ignored when not linking with LLD.
     extra_lld_args: []const []const u8,
+    /// Darwin-only. Set the root path to the system libraries and frameworks.
+    syslibroot: ?[]const u8,
 
     objects: []const []const u8,
     framework_dirs: []const []const u8,

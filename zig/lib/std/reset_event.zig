@@ -158,7 +158,7 @@ const PosixEvent = struct {
                 var tv: os.darwin.timeval = undefined;
                 assert(os.darwin.gettimeofday(&tv, null) == 0);
                 timeout_abs += @intCast(u64, tv.tv_sec) * time.ns_per_s;
-                timeout_abs += @intCast(u64, tv.tv_usec) * time.us_per_s;
+                timeout_abs += @intCast(u64, tv.tv_usec) * time.ns_per_us;
             } else {
                 os.clock_gettime(os.CLOCK_REALTIME, &ts) catch unreachable;
                 timeout_abs += @intCast(u64, ts.tv_sec) * time.ns_per_s;
@@ -359,7 +359,12 @@ const AtomicEvent = struct {
     };
 };
 
-test "std.ResetEvent" {
+test "ResetEvent" {
+    if (std.Target.current.os.tag == .macos) {
+        // https://github.com/ziglang/zig/issues/7009
+        return error.SkipZigTest;
+    }
+
     var event = ResetEvent.init();
     defer event.deinit();
 
@@ -431,6 +436,20 @@ test "std.ResetEvent" {
             self.in.wait();
             assert(self.value == 3);
         }
+
+        fn sleeper(self: *Self) void {
+            self.in.set();
+            time.sleep(time.ns_per_ms * 2);
+            self.value = 5;
+            self.out.set();
+        }
+
+        fn timedWaiter(self: *Self) !void {
+            self.in.wait();
+            testing.expectError(error.TimedOut, self.out.timedWait(time.ns_per_us));
+            try self.out.timedWait(time.ns_per_ms * 10);
+            testing.expect(self.value == 5);
+        }
     };
 
     var context = Context.init();
@@ -438,4 +457,10 @@ test "std.ResetEvent" {
     const receiver = try std.Thread.spawn(&context, Context.receiver);
     defer receiver.wait();
     context.sender();
+
+    var timed = Context.init();
+    defer timed.deinit();
+    const sleeper = try std.Thread.spawn(&timed, Context.sleeper);
+    defer sleeper.wait();
+    try timed.timedWaiter();
 }

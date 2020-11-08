@@ -472,6 +472,23 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             break :blk false;
         };
 
+        const DarwinOptions = struct {
+            syslibroot: ?[]const u8 = null,
+            system_linker_hack: bool = false,
+        };
+
+        const darwin_options: DarwinOptions = if (build_options.have_llvm and comptime std.Target.current.isDarwin()) outer: {
+            const opts: DarwinOptions = if (use_lld and options.is_native_os and options.target.isDarwin()) inner: {
+                const syslibroot = try std.zig.system.getSDKPath(arena);
+                const system_linker_hack = std.os.getenv("ZIG_SYSTEM_LINKER_HACK") != null;
+                break :inner .{
+                    .syslibroot = syslibroot,
+                    .system_linker_hack = system_linker_hack,
+                };
+            } else .{};
+            break :outer opts;
+        } else .{};
+
         const link_libc = options.link_libc or target_util.osRequiresLibC(options.target);
 
         const must_dynamic_link = dl: {
@@ -767,12 +784,14 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             .optimize_mode = options.optimize_mode,
             .use_lld = use_lld,
             .use_llvm = use_llvm,
+            .system_linker_hack = darwin_options.system_linker_hack,
             .link_libc = link_libc,
             .link_libcpp = options.link_libcpp,
             .objects = options.link_objects,
             .frameworks = options.frameworks,
             .framework_dirs = options.framework_dirs,
             .system_libs = system_libs,
+            .syslibroot = darwin_options.syslibroot,
             .lib_dirs = options.lib_dirs,
             .rpath_list = options.rpath_list,
             .strip = strip,
