@@ -21,6 +21,7 @@ For other versions, check the git tags of this repository.
  * cmake 3.4.3 or later
  * make
  * POSIX system (bash, mkdir, cd)
+ * Python
 
 ## Build Instructions
 
