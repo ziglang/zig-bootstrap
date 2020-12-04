@@ -221,6 +221,7 @@ bool ZigLLVMTargetMachineEmitToFile(LLVMTargetMachineRef targ_machine_ref, LLVMM
     PMBuilder->DisableUnrollLoops = is_debug;
     PMBuilder->SLPVectorize = !is_debug;
     PMBuilder->LoopVectorize = !is_debug;
+    PMBuilder->LoopsInterleaved = !PMBuilder->DisableUnrollLoops;
     PMBuilder->RerollLoops = !is_debug;
     // Leaving NewGVN as default (off) because when on it caused issue #673
     //PMBuilder->NewGVN = !is_debug;
@@ -854,6 +855,14 @@ void ZigLLVMAddModuleCodeViewFlag(LLVMModuleRef module) {
     unwrap(module)->addModuleFlag(Module::Warning, "CodeView", 1);
 }
 
+void ZigLLVMSetModulePICLevel(LLVMModuleRef module) {
+    unwrap(module)->setPICLevel(PICLevel::Level::BigPIC);
+}
+
+void ZigLLVMSetModulePIELevel(LLVMModuleRef module) {
+    unwrap(module)->setPIELevel(PIELevel::Level::Large);
+}
+
 static AtomicOrdering mapFromLLVMOrdering(LLVMAtomicOrdering Ordering) {
     switch (Ordering) {
         case LLVMAtomicOrderingNotAtomic: return AtomicOrdering::NotAtomic;
@@ -1061,6 +1070,7 @@ bool ZigLLDLink(ZigLLVM_ObjectFormatType oformat, const char **args, size_t arg_
         case ZigLLVM_UnknownObjectFormat:
         case ZigLLVM_XCOFF:
             assert(false); // unreachable
+            break;
 
         case ZigLLVM_COFF:
             return lld::coff::link(array_ref_args, false, diag_stdout, diag_stderr);
@@ -1073,6 +1083,9 @@ bool ZigLLDLink(ZigLLVM_ObjectFormatType oformat, const char **args, size_t arg_
 
         case ZigLLVM_Wasm:
             return lld::wasm::link(array_ref_args, false, diag_stdout, diag_stderr);
+
+        default:
+            break;
     }
     assert(false); // unreachable
     abort();

@@ -442,33 +442,30 @@ pub fn ReadFile(in_hFile: HANDLE, buffer: []u8, offset: ?u64, io_mode: std.io.Mo
         }
         return @as(usize, bytes_transferred);
     } else {
-        var index: usize = 0;
-        while (index < buffer.len) {
-            const want_read_count = @intCast(DWORD, math.min(@as(DWORD, maxInt(DWORD)), buffer.len - index));
+        while (true) {
+            const want_read_count = @intCast(DWORD, math.min(@as(DWORD, maxInt(DWORD)), buffer.len));
             var amt_read: DWORD = undefined;
             var overlapped_data: OVERLAPPED = undefined;
             const overlapped: ?*OVERLAPPED = if (offset) |off| blk: {
                 overlapped_data = .{
                     .Internal = 0,
                     .InternalHigh = 0,
-                    .Offset = @truncate(u32, off + index),
-                    .OffsetHigh = @truncate(u32, (off + index) >> 32),
+                    .Offset = @truncate(u32, off),
+                    .OffsetHigh = @truncate(u32, off >> 32),
                     .hEvent = null,
                 };
                 break :blk &overlapped_data;
             } else null;
-            if (kernel32.ReadFile(in_hFile, buffer.ptr + index, want_read_count, &amt_read, overlapped) == 0) {
+            if (kernel32.ReadFile(in_hFile, buffer.ptr, want_read_count, &amt_read, overlapped) == 0) {
                 switch (kernel32.GetLastError()) {
                     .OPERATION_ABORTED => continue,
-                    .BROKEN_PIPE => return index,
-                    .HANDLE_EOF => return index,
+                    .BROKEN_PIPE => return 0,
+                    .HANDLE_EOF => return 0,
                     else => |err| return unexpectedError(err),
                 }
             }
-            if (amt_read == 0) return index;
-            index += amt_read;
+            return amt_read;
         }
-        return index;
     }
 }
 
@@ -555,6 +552,43 @@ pub fn WriteFile(
             }
         }
         return bytes_written;
+    }
+}
+
+pub const SetCurrentDirectoryError = error{
+    NameTooLong,
+    InvalidUtf8,
+    FileNotFound,
+    NotDir,
+    AccessDenied,
+    NoDevice,
+    BadPathName,
+    Unexpected,
+};
+
+pub fn SetCurrentDirectory(path_name: []const u16) SetCurrentDirectoryError!void {
+    const path_len_bytes = math.cast(u16, path_name.len * 2) catch |err| switch (err) {
+        error.Overflow => return error.NameTooLong,
+    };
+    
+    var nt_name = UNICODE_STRING{
+        .Length = path_len_bytes,
+        .MaximumLength = path_len_bytes,
+        .Buffer = @intToPtr([*]u16, @ptrToInt(path_name.ptr)),
+    };
+    
+    const rc = ntdll.RtlSetCurrentDirectory_U(&nt_name);
+    switch (rc) {
+        .SUCCESS => {},
+        .OBJECT_NAME_INVALID => return error.BadPathName,
+        .OBJECT_NAME_NOT_FOUND => return error.FileNotFound,
+        .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
+        .NO_MEDIA_IN_DEVICE => return error.NoDevice,
+        .INVALID_PARAMETER => unreachable,
+        .ACCESS_DENIED => return error.AccessDenied,
+        .OBJECT_PATH_SYNTAX_BAD => unreachable,
+        .NOT_A_DIRECTORY => return error.NotDir,
+        else => return unexpectedStatus(rc),
     }
 }
 

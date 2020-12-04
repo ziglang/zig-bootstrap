@@ -83,7 +83,7 @@ static void render_const_val_global(CodeGen *g, ZigValue *const_val, const char 
 static LLVMValueRef gen_const_val(CodeGen *g, ZigValue *const_val, const char *name);
 static void generate_error_name_table(CodeGen *g);
 static bool value_is_all_undef(CodeGen *g, ZigValue *const_val);
-static void gen_undef_init(CodeGen *g, uint32_t ptr_align_bytes, ZigType *value_type, LLVMValueRef ptr);
+static void gen_undef_init(CodeGen *g, ZigType *ptr_type, ZigType *value_type, LLVMValueRef ptr);
 static LLVMValueRef build_alloca(CodeGen *g, ZigType *type_entry, const char *name, uint32_t alignment);
 static LLVMValueRef gen_await_early_return(CodeGen *g, IrInstGen *source_instr,
         LLVMValueRef target_frame_ptr, ZigType *result_type, ZigType *ptr_result_type,
@@ -155,6 +155,7 @@ static const char *get_mangled_name(CodeGen *g, const char *original_name) {
     }
 }
 
+// Sync this with emit_error_unless_callconv_allowed_for_target in analyze.cpp
 static ZigLLVM_CallingConv get_llvm_cc(CodeGen *g, CallingConvention cc) {
     switch (cc) {
         case CallingConventionUnspecified:
@@ -164,38 +165,32 @@ static ZigLLVM_CallingConv get_llvm_cc(CodeGen *g, CallingConvention cc) {
         case CallingConventionNaked:
             zig_unreachable();
         case CallingConventionStdcall:
-            if (g->zig_target->arch == ZigLLVM_x86)
-                return ZigLLVM_X86_StdCall;
-            return ZigLLVM_C;
+            assert(g->zig_target->arch == ZigLLVM_x86);
+            return ZigLLVM_X86_StdCall;
         case CallingConventionFastcall:
-            if (g->zig_target->arch == ZigLLVM_x86)
-                return ZigLLVM_X86_FastCall;
-            return ZigLLVM_C;
+            assert(g->zig_target->arch == ZigLLVM_x86);
+            return ZigLLVM_X86_FastCall;
         case CallingConventionVectorcall:
             if (g->zig_target->arch == ZigLLVM_x86)
                 return ZigLLVM_X86_VectorCall;
             if (target_is_arm(g->zig_target) &&
                 target_arch_pointer_bit_width(g->zig_target->arch) == 64)
                 return ZigLLVM_AArch64_VectorCall;
-            return ZigLLVM_C;
+            zig_unreachable();
         case CallingConventionThiscall:
-            if (g->zig_target->arch == ZigLLVM_x86)
-                return ZigLLVM_X86_ThisCall;
-            return ZigLLVM_C;
+            assert(g->zig_target->arch == ZigLLVM_x86);
+            return ZigLLVM_X86_ThisCall;
         case CallingConventionAsync:
             return ZigLLVM_Fast;
         case CallingConventionAPCS:
-            if (target_is_arm(g->zig_target))
-                return ZigLLVM_ARM_APCS;
-            return ZigLLVM_C;
+            assert(target_is_arm(g->zig_target));
+            return ZigLLVM_ARM_APCS;
         case CallingConventionAAPCS:
-            if (target_is_arm(g->zig_target))
-                return ZigLLVM_ARM_AAPCS;
-            return ZigLLVM_C;
+            assert(target_is_arm(g->zig_target));
+            return ZigLLVM_ARM_AAPCS;
         case CallingConventionAAPCSVFP:
-            if (target_is_arm(g->zig_target))
-                return ZigLLVM_ARM_AAPCS_VFP;
-            return ZigLLVM_C;
+            assert(target_is_arm(g->zig_target));
+            return ZigLLVM_ARM_AAPCS_VFP;
         case CallingConventionInterrupt:
             if (g->zig_target->arch == ZigLLVM_x86 ||
                 g->zig_target->arch == ZigLLVM_x86_64)
@@ -204,11 +199,10 @@ static ZigLLVM_CallingConv get_llvm_cc(CodeGen *g, CallingConvention cc) {
                 return ZigLLVM_AVR_INTR;
             if (g->zig_target->arch == ZigLLVM_msp430)
                 return ZigLLVM_MSP430_INTR;
-            return ZigLLVM_C;
+            zig_unreachable();
         case CallingConventionSignal:
-            if (g->zig_target->arch == ZigLLVM_avr)
-                return ZigLLVM_AVR_SIGNAL;
-            return ZigLLVM_C;
+            assert(g->zig_target->arch == ZigLLVM_avr);
+            return ZigLLVM_AVR_SIGNAL;
     }
     zig_unreachable();
 }
@@ -242,14 +236,24 @@ struct CalcLLVMFieldIndex {
 static void calc_llvm_field_index_add(CodeGen *g, CalcLLVMFieldIndex *calc, ZigType *ty) {
     if (!type_has_bits(g, ty)) return;
     uint32_t ty_align = get_abi_alignment(g, ty);
+
     if (calc->offset % ty_align != 0) {
         uint32_t llvm_align = LLVMABIAlignmentOfType(g->target_data_ref, get_llvm_type(g, ty));
-        if (llvm_align >= ty_align) {
-            ty_align = llvm_align; // llvm's padding is sufficient
-        } else if (calc->offset) {
-            calc->field_index += 1; // zig will insert an extra padding field here
-        }
-        calc->offset += ty_align - (calc->offset % ty_align); // padding bytes
+
+        // Alignment according to Zig.
+        uint32_t adj_offset = calc->offset + (ty_align - (calc->offset % ty_align));
+        // Alignment according to LLVM.
+        uint32_t adj_llvm_offset = (calc->offset % llvm_align) ?
+                calc->offset + (llvm_align - (calc->offset % llvm_align)) :
+                calc->offset;
+        // Cannot under-align structure fields.
+        assert(adj_offset >= adj_llvm_offset);
+
+        // Zig will insert an extra padding field here.
+        if (adj_offset != adj_llvm_offset)
+            calc->field_index += 1;
+
+        calc->offset = adj_offset;
     }
     calc->offset += ty->abi_size;
     calc->field_index += 1;
@@ -380,9 +384,36 @@ static LLVMValueRef make_fn_llvm_value(CodeGen *g, ZigFn *fn) {
     LLVMTypeRef fn_llvm_type = fn->raw_type_ref;
     LLVMValueRef llvm_fn = nullptr;
     if (fn->body_node == nullptr) {
+        assert(fn->proto_node->type == NodeTypeFnProto);
+        AstNodeFnProto *fn_proto = &fn->proto_node->data.fn_proto;
+
         const unsigned fn_addrspace = ZigLLVMDataLayoutGetProgramAddressSpace(g->target_data_ref);
+
+        // The compiler tries to deduplicate extern definitions by looking up
+        // their name, this was introduced to allow the declaration of the same
+        // extern function with differing prototypes.
+        // When Wasm is targeted this check becomes a problem as the user may
+        // declare two (or more) extern functions sharing the same name but
+        // imported from different modules!
+        // To overcome this problem we generate a mangled identifier out of the
+        // import and the function name, this name is only visible within the
+        // compiler as we're telling LLVM (using 'wasm-import-name' and
+        // 'wasm-import-name') what the real function name is and where to find
+        // it.
+        const bool use_mangled_name = target_is_wasm(g->zig_target) &&
+                fn_proto->is_extern && fn_proto->lib_name != nullptr;
+        // Pick a weird name to avoid collisions...
+        // This whole function should be burned to the ground.
+        Buf *mangled_symbol_buf = use_mangled_name ?
+                buf_sprintf("%s|%s", unmangled_name, buf_ptr(fn_proto->lib_name)) :
+                nullptr;
+        symbol_name = use_mangled_name ?
+                buf_ptr(mangled_symbol_buf) : unmangled_name;
+
         LLVMValueRef existing_llvm_fn = LLVMGetNamedFunction(g->module, symbol_name);
+
         if (existing_llvm_fn) {
+            if (mangled_symbol_buf) buf_destroy(mangled_symbol_buf);
             return LLVMConstBitCast(existing_llvm_fn, LLVMPointerType(fn_llvm_type, fn_addrspace));
         } else {
             Buf *buf_symbol_name = buf_create_from_str(symbol_name);
@@ -392,12 +423,9 @@ static LLVMValueRef make_fn_llvm_value(CodeGen *g, ZigFn *fn) {
             if (entry == nullptr) {
                 llvm_fn = LLVMAddFunction(g->module, symbol_name, fn_llvm_type);
 
-                if (target_is_wasm(g->zig_target)) {
-                    assert(fn->proto_node->type == NodeTypeFnProto);
-                    AstNodeFnProto *fn_proto = &fn->proto_node->data.fn_proto;
-                    if (fn_proto-> is_extern && fn_proto->lib_name != nullptr ) {
-                        addLLVMFnAttrStr(llvm_fn, "wasm-import-module", buf_ptr(fn_proto->lib_name));
-                    }
+                if (use_mangled_name) {
+                    addLLVMFnAttrStr(llvm_fn, "wasm-import-name", unmangled_name);
+                    addLLVMFnAttrStr(llvm_fn, "wasm-import-module", buf_ptr(fn_proto->lib_name));
                 }
             } else {
                 assert(entry->value->id == TldIdFn);
@@ -407,8 +435,11 @@ static LLVMValueRef make_fn_llvm_value(CodeGen *g, ZigFn *fn) {
                 tld_fn->fn_entry->llvm_value = LLVMAddFunction(g->module, symbol_name,
                         tld_fn->fn_entry->raw_type_ref);
                 llvm_fn = LLVMConstBitCast(tld_fn->fn_entry->llvm_value, LLVMPointerType(fn_llvm_type, fn_addrspace));
+                if (mangled_symbol_buf) buf_destroy(mangled_symbol_buf);
                 return llvm_fn;
             }
+
+            if (mangled_symbol_buf) buf_destroy(mangled_symbol_buf);
         }
     } else {
         if (llvm_fn == nullptr) {
@@ -482,6 +513,12 @@ static LLVMValueRef make_fn_llvm_value(CodeGen *g, ZigFn *fn) {
 
     if (fn->alignstack_value != 0) {
         addLLVMFnAttrInt(llvm_fn, "alignstack", fn->alignstack_value);
+    }
+
+    if (g->build_mode == BuildModeSmallRelease) {
+        // Optimize for small code size.
+        addLLVMFnAttr(llvm_fn, "minsize");
+        addLLVMFnAttr(llvm_fn, "optsize");
     }
 
     addLLVMFnAttr(llvm_fn, "nounwind");
@@ -1487,7 +1524,7 @@ static LLVMValueRef gen_widen_or_shorten(CodeGen *g, bool want_runtime_safety, Z
         LLVMBuildCondBr(g->builder, ok_bit, ok_block, fail_block);
 
         LLVMPositionBuilderAtEnd(g->builder, fail_block);
-        gen_safety_crash(g, actual_type->data.integral.is_signed ? PanicMsgIdCastNegativeToUnsigned : PanicMsgIdCastTruncatedData);
+        gen_safety_crash(g, scalar_actual_type->data.integral.is_signed ? PanicMsgIdCastNegativeToUnsigned : PanicMsgIdCastTruncatedData);
 
         LLVMPositionBuilderAtEnd(g->builder, ok_block);
     }
@@ -3306,9 +3343,9 @@ static LLVMValueRef ir_render_ptr_of_array_to_slice(CodeGen *g, IrExecutableGen 
         LLVMValueRef expr_val = ir_llvm_value(g, instruction->operand);
         LLVMValueRef slice_start_ptr = LLVMBuildInBoundsGEP(g->builder, expr_val, indices, 2, "");
         gen_store_untyped(g, slice_start_ptr, ptr_field_ptr, 0, false);
-    } else if (ir_want_runtime_safety(g, &instruction->base)) {
+    } else if (ir_want_runtime_safety(g, &instruction->base) && ptr_index != SIZE_MAX) {
         LLVMValueRef ptr_field_ptr = LLVMBuildStructGEP(g->builder, result_loc, ptr_index, "");
-        gen_undef_init(g, slice_ptr_type->abi_align, slice_ptr_type, ptr_field_ptr);
+        gen_undef_init(g, slice_ptr_type, slice_ptr_type, ptr_field_ptr);
     }
 
     LLVMValueRef len_field_ptr = LLVMBuildStructGEP(g->builder, result_loc, len_index, "");
@@ -3773,22 +3810,35 @@ static void gen_valgrind_undef(CodeGen *g, LLVMValueRef dest_ptr, LLVMValueRef b
     gen_valgrind_client_request(g, zero, req, ptr_as_usize, byte_count, zero, zero, zero);
 }
 
-static void gen_undef_init(CodeGen *g, uint32_t ptr_align_bytes, ZigType *value_type, LLVMValueRef ptr) {
+static void gen_undef_init(CodeGen *g, ZigType *ptr_type, ZigType *value_type, LLVMValueRef ptr) {
     assert(type_has_bits(g, value_type));
+
+    uint64_t ptr_align_bytes = get_ptr_align(g, ptr_type);
+    assert(ptr_align_bytes > 0);
     uint64_t size_bytes = LLVMStoreSizeOfType(g->target_data_ref, get_llvm_type(g, value_type));
     assert(size_bytes > 0);
-    assert(ptr_align_bytes > 0);
-    // memset uninitialized memory to 0xaa
-    LLVMTypeRef ptr_u8 = LLVMPointerType(LLVMInt8Type(), 0);
-    LLVMValueRef fill_char = LLVMConstInt(LLVMInt8Type(), 0xaa, false);
-    LLVMValueRef dest_ptr = LLVMBuildBitCast(g->builder, ptr, ptr_u8, "");
-    ZigType *usize = g->builtin_types.entry_usize;
-    LLVMValueRef byte_count = LLVMConstInt(usize->llvm_type, size_bytes, false);
-    ZigLLVMBuildMemSet(g->builder, dest_ptr, fill_char, byte_count, ptr_align_bytes, false);
-    // then tell valgrind that the memory is undefined even though we just memset it
-    if (g->valgrind_enabled) {
-        gen_valgrind_undef(g, dest_ptr, byte_count);
+
+    if (ptr_type->data.pointer.host_int_bytes == 0) {
+        // memset uninitialized memory to 0xaa
+        LLVMTypeRef ptr_u8 = LLVMPointerType(LLVMInt8Type(), 0);
+        LLVMValueRef fill_char = LLVMConstInt(LLVMInt8Type(), 0xaa, false);
+        LLVMValueRef dest_ptr = LLVMBuildBitCast(g->builder, ptr, ptr_u8, "");
+        ZigType *usize = g->builtin_types.entry_usize;
+        LLVMValueRef byte_count = LLVMConstInt(usize->llvm_type, size_bytes, false);
+        ZigLLVMBuildMemSet(g->builder, dest_ptr, fill_char, byte_count, ptr_align_bytes, false);
+        // then tell valgrind that the memory is undefined even though we just memset it
+        if (g->valgrind_enabled) {
+            gen_valgrind_undef(g, dest_ptr, byte_count);
+        }
+        return;
     }
+
+    // This is a pointer into a packed struct, we can't use memset here.
+    // The jury is still out on what pattern should be written here so clear the
+    // old value and call it a day. Generating a 0xAA...AA mask for this n-bit
+    // value is left as an exercise for the (bored) reader.
+    LLVMValueRef zero = LLVMConstNull(get_llvm_type(g, value_type));
+    gen_assign_raw(g, ptr, ptr_type, zero);
 }
 
 static LLVMValueRef ir_render_store_ptr(CodeGen *g, IrExecutableGen *executable, IrInstGenStorePtr *instruction) {
@@ -3817,7 +3867,7 @@ static LLVMValueRef ir_render_store_ptr(CodeGen *g, IrExecutableGen *executable,
         LLVMValueRef value = ir_llvm_value(g, instruction->value);
         gen_assign_raw(g, ptr, ptr_type, value);
     } else if (ir_want_runtime_safety(g, &instruction->base)) {
-        gen_undef_init(g, get_ptr_align(g, ptr_type), instruction->value->value->type,
+        gen_undef_init(g, ptr_type, instruction->value->value->type,
             ir_llvm_value(g, instruction->ptr));
     }
     return nullptr;
@@ -3837,15 +3887,30 @@ static LLVMValueRef ir_render_vector_store_elem(CodeGen *g, IrExecutableGen *exe
 }
 
 static LLVMValueRef ir_render_var_ptr(CodeGen *g, IrExecutableGen *executable, IrInstGenVarPtr *instruction) {
-    if (instruction->base.value->special != ConstValSpecialRuntime)
-        return ir_llvm_value(g, &instruction->base);
-    ZigVar *var = instruction->var;
-    if (type_has_bits(g, var->var_type)) {
-        assert(var->value_ref);
-        return var->value_ref;
-    } else {
+    Error err;
+
+    ZigType *ptr_type = instruction->base.value->type;
+    assert(ptr_type->id == ZigTypeIdPointer);
+    bool ptr_type_has_bits;
+    if ((err = type_has_bits2(g, ptr_type, &ptr_type_has_bits)))
+        codegen_report_errors_and_exit(g);
+
+    if (!ptr_type_has_bits) {
         return nullptr;
     }
+
+    // The extra bitcasts are needed in case the LLVM value is an unnamed
+    // struct, as it happens when rendering container types with extra alignment
+    // fields.
+    if (instruction->base.value->special != ConstValSpecialRuntime) {
+        return LLVMBuildBitCast(g->builder, ir_llvm_value(g, &instruction->base),
+                get_llvm_type(g, ptr_type), "");
+    }
+
+    ZigVar *var = instruction->var;
+    assert(var->value_ref);
+    return LLVMBuildBitCast(g->builder, var->value_ref,
+            get_llvm_type(g, ptr_type), "");
 }
 
 static LLVMValueRef ir_render_return_ptr(CodeGen *g, IrExecutableGen *executable,
@@ -4378,8 +4443,10 @@ static LLVMValueRef ir_render_call(CodeGen *g, IrExecutableGen *executable, IrIn
             arg_calc = arg_calc_start;
             for (size_t arg_i = 0; arg_i < gen_param_values.length; arg_i += 1) {
                 CalcLLVMFieldIndex prev = arg_calc;
+                // Use the declared argument type and not the value one to be
+                // consistent with the assignment operation below.
                 calc_llvm_field_index_add(g, &arg_calc, gen_param_types.at(arg_i));
-                field_types[arg_calc.field_index - 1] = LLVMTypeOf(gen_param_values.at(arg_i));
+                field_types[arg_calc.field_index - 1] = get_llvm_type(g, gen_param_types.at(arg_i));
                 if (arg_calc.field_index - prev.field_index > 1) {
                     // Padding field
                     uint32_t pad_bytes = arg_calc.offset - prev.offset - gen_param_types.at(arg_i)->abi_size;
@@ -4793,6 +4860,29 @@ static LLVMValueRef ir_render_asm_gen(CodeGen *g, IrExecutableGen *executable, I
         }
     }
 
+    // Add some architecture-specific clobbers.
+    const char *arch_clobbers = nullptr;
+    switch (g->zig_target->arch) {
+        case ZigLLVM_x86:
+        case ZigLLVM_x86_64:
+            arch_clobbers = "~{dirflag},~{fpsr},~{flags}";
+            break;
+        case ZigLLVM_mips:
+        case ZigLLVM_mipsel:
+        case ZigLLVM_mips64:
+        case ZigLLVM_mips64el:
+            arch_clobbers = "~{$1}";
+            break;
+        default:
+            break;
+    }
+
+    if (arch_clobbers != nullptr) {
+        if (buf_len(&constraint_buf))
+            buf_append_char(&constraint_buf, ',');
+        buf_append_str(&constraint_buf, arch_clobbers);
+    }
+
     LLVMTypeRef ret_type;
     if (instruction->return_count == 0) {
         ret_type = LLVMVoidType();
@@ -5088,11 +5178,7 @@ static LLVMValueRef ir_render_ref(CodeGen *g, IrExecutableGen *executable, IrIns
 
 static LLVMValueRef ir_render_err_name(CodeGen *g, IrExecutableGen *executable, IrInstGenErrName *instruction) {
     assert(g->generate_error_name_table);
-
-    if (g->errors_by_index.length == 1) {
-        LLVMBuildUnreachable(g->builder);
-        return nullptr;
-    }
+    assert(g->errors_by_index.length > 0);
 
     LLVMValueRef err_val = ir_llvm_value(g, instruction->value);
     if (ir_want_runtime_safety(g, &instruction->base)) {
@@ -5817,7 +5903,7 @@ static LLVMValueRef ir_render_slice(CodeGen *g, IrExecutableGen *executable, IrI
         if (slice_start_ptr != nullptr) {
             gen_store_untyped(g, slice_start_ptr, ptr_field_ptr, 0, false);
         } else if (want_runtime_safety) {
-            gen_undef_init(g, slice_ptr_type->abi_align, slice_ptr_type, ptr_field_ptr);
+            gen_undef_init(g, slice_ptr_type, slice_ptr_type, ptr_field_ptr);
         } else {
             gen_store_untyped(g, LLVMGetUndef(get_llvm_type(g, slice_ptr_type)), ptr_field_ptr, 0, false);
         }
@@ -6312,6 +6398,30 @@ static LLVMValueRef ir_render_bswap(CodeGen *g, IrExecutableGen *executable, IrI
     LLVMValueRef shifted = ZigLLVMBuildLShrExact(g->builder, swapped, shift_amt, "");
     // 00ccbbaa
     return LLVMBuildTrunc(g->builder, shifted, get_llvm_type(g, expr_type), "");
+}
+
+static LLVMValueRef ir_render_extern(CodeGen *g, IrExecutableGen *executable,
+        IrInstGenExtern *instruction)
+{
+    ZigType *expr_type = instruction->base.value->type;
+    assert(get_src_ptr_type(expr_type));
+
+    const char *symbol_name = buf_ptr(instruction->name);
+    const LLVMLinkage linkage = to_llvm_linkage(instruction->linkage, true);
+
+    LLVMValueRef global_value = LLVMGetNamedGlobal(g->module, symbol_name);
+    if (global_value == nullptr) {
+        global_value = LLVMAddGlobal(g->module, get_llvm_type(g, expr_type), symbol_name);
+        LLVMSetLinkage(global_value, linkage);
+        LLVMSetGlobalConstant(global_value, true);
+        if (instruction->is_thread_local)
+            LLVMSetThreadLocalMode(global_value, LLVMGeneralDynamicTLSModel);
+    } else if (LLVMGetLinkage(global_value) != linkage) {
+        // XXX: Handle this case better!
+        zig_panic("duplicate extern symbol");
+    }
+
+    return LLVMBuildBitCast(g->builder, global_value, get_llvm_type(g, expr_type), "");
 }
 
 static LLVMValueRef ir_render_bit_reverse(CodeGen *g, IrExecutableGen *executable, IrInstGenBitReverse *instruction) {
@@ -6827,6 +6937,8 @@ static LLVMValueRef ir_render_instruction(CodeGen *g, IrExecutableGen *executabl
             return ir_render_wasm_memory_size(g, executable, (IrInstGenWasmMemorySize *) instruction);
         case IrInstGenIdWasmMemoryGrow:
             return ir_render_wasm_memory_grow(g, executable, (IrInstGenWasmMemoryGrow *) instruction);
+        case IrInstGenIdExtern:
+            return ir_render_extern(g, executable, (IrInstGenExtern *) instruction);
     }
     zig_unreachable();
 }
@@ -6878,9 +6990,12 @@ static LLVMValueRef gen_parent_ptr(CodeGen *g, ZigValue *val, ConstParent *paren
             render_const_val(g, val, "");
             render_const_val_global(g, val, "");
             return val->llvm_global;
-        case ConstParentIdStruct:
-            return gen_const_ptr_struct_recursive(g, parent->data.p_struct.struct_val,
-                    parent->data.p_struct.field_index);
+        case ConstParentIdStruct: {
+            ZigValue *struct_val = parent->data.p_struct.struct_val;
+            size_t src_field_index = parent->data.p_struct.field_index;
+            size_t gen_field_index = struct_val->type->data.structure.fields[src_field_index]->gen_index;
+            return gen_const_ptr_struct_recursive(g, struct_val, gen_field_index);
+        }
         case ConstParentIdErrUnionCode:
             return gen_const_ptr_err_union_code_recursive(g, parent->data.p_err_union_code.err_union_val);
         case ConstParentIdErrUnionPayload:
@@ -6934,7 +7049,14 @@ static LLVMValueRef gen_const_ptr_struct_recursive(CodeGen *g, ZigValue *struct_
         LLVMConstNull(get_llvm_type(g, u32)),
         LLVMConstInt(get_llvm_type(g, u32), field_index, false),
     };
-    return LLVMConstInBoundsGEP(base_ptr, indices, 2);
+
+    // The structure pointed by base_ptr may include trailing padding for
+    // alignment purposes and have the following LLVM type: <{ %T, [N x i8] }>.
+    // Add an extra bitcast as we're only interested in the %T part.
+    assert(handle_is_ptr(g, struct_const_val->type));
+    LLVMValueRef casted_base_ptr = LLVMConstBitCast(base_ptr,
+            LLVMPointerType(get_llvm_type(g, struct_const_val->type), 0));
+    return LLVMConstInBoundsGEP(casted_base_ptr, indices, 2);
 }
 
 static LLVMValueRef gen_const_ptr_err_union_code_recursive(CodeGen *g, ZigValue *err_union_const_val) {
@@ -7764,7 +7886,7 @@ static void render_const_val_global(CodeGen *g, ZigValue *const_val, const char 
 }
 
 static void generate_error_name_table(CodeGen *g) {
-    if (g->err_name_table != nullptr || !g->generate_error_name_table || g->errors_by_index.length == 1) {
+    if (g->err_name_table != nullptr || !g->generate_error_name_table) {
         return;
     }
 
@@ -8485,7 +8607,60 @@ static void define_builtin_types(CodeGen *g) {
     add_fp_entry(g, "f32", 32, LLVMFloatType(), &g->builtin_types.entry_f32);
     add_fp_entry(g, "f64", 64, LLVMDoubleType(), &g->builtin_types.entry_f64);
     add_fp_entry(g, "f128", 128, LLVMFP128Type(), &g->builtin_types.entry_f128);
-    add_fp_entry(g, "c_longdouble", 80, LLVMX86FP80Type(), &g->builtin_types.entry_c_longdouble);
+
+    switch (g->zig_target->arch) {
+        case ZigLLVM_x86:
+        case ZigLLVM_x86_64:
+            if (g->zig_target->abi != ZigLLVM_MSVC)
+                add_fp_entry(g, "c_longdouble", 80, LLVMX86FP80Type(), &g->builtin_types.entry_c_longdouble);
+            else
+                add_fp_entry(g, "c_longdouble", 64, LLVMDoubleType(), &g->builtin_types.entry_c_longdouble);
+            break;
+        case ZigLLVM_arm:
+        case ZigLLVM_armeb:
+        case ZigLLVM_thumb:
+        case ZigLLVM_thumbeb:
+            add_fp_entry(g, "c_longdouble", 64, LLVMDoubleType(), &g->builtin_types.entry_c_longdouble);
+            break;
+        case ZigLLVM_aarch64:
+        case ZigLLVM_aarch64_be:
+            if (g->zig_target->os == OsWindows || target_os_is_darwin(g->zig_target->os))
+                add_fp_entry(g, "c_longdouble", 64, LLVMDoubleType(), &g->builtin_types.entry_c_longdouble);
+            else
+                add_fp_entry(g, "c_longdouble", 128, LLVMFP128Type(), &g->builtin_types.entry_c_longdouble);
+            break;
+        case ZigLLVM_riscv32:
+        case ZigLLVM_riscv64:
+            add_fp_entry(g, "c_longdouble", 128, LLVMFP128Type(), &g->builtin_types.entry_c_longdouble);
+            break;
+        case ZigLLVM_wasm32:
+        case ZigLLVM_wasm64:
+            add_fp_entry(g, "c_longdouble", 128, LLVMFP128Type(), &g->builtin_types.entry_c_longdouble);
+            break;
+        case ZigLLVM_mips:
+        case ZigLLVM_mipsel:
+            // Assume o32 ABI
+            add_fp_entry(g, "c_longdouble", 64, LLVMDoubleType(), &g->builtin_types.entry_c_longdouble);
+            break;
+        case ZigLLVM_mips64:
+        case ZigLLVM_mips64el:
+            add_fp_entry(g, "c_longdouble", 128, LLVMFP128Type(), &g->builtin_types.entry_c_longdouble);
+            break;
+        case ZigLLVM_ppc:
+        case ZigLLVM_ppc64:
+        case ZigLLVM_ppc64le:
+            add_fp_entry(g, "c_longdouble", 128, LLVMFP128Type(), &g->builtin_types.entry_c_longdouble);
+            break;
+        case ZigLLVM_sparcv9:
+            add_fp_entry(g, "c_longdouble", 128, LLVMFP128Type(), &g->builtin_types.entry_c_longdouble);
+            break;
+        case ZigLLVM_avr:
+            // It's either a float or a double, depending on a toolchain switch
+            add_fp_entry(g, "c_longdouble", 64, LLVMDoubleType(), &g->builtin_types.entry_c_longdouble);
+            break;
+        default:
+            zig_panic("TODO implement mapping for c_longdouble");
+    }
 
     {
         ZigType *entry = new_type_table_entry(ZigTypeIdVoid);
@@ -8672,6 +8847,7 @@ static void define_builtin_fns(CodeGen *g) {
     create_builtin_fn(g, BuiltinFnIdAlignCast, "alignCast", 2);
     create_builtin_fn(g, BuiltinFnIdSetAlignStack, "setAlignStack", 1);
     create_builtin_fn(g, BuiltinFnIdExport, "export", 2);
+    create_builtin_fn(g, BuiltinFnIdExtern, "extern", 2);
     create_builtin_fn(g, BuiltinFnIdErrorReturnTrace, "errorReturnTrace", 0);
     create_builtin_fn(g, BuiltinFnIdAtomicRmw, "atomicRmw", 5);
     create_builtin_fn(g, BuiltinFnIdAtomicLoad, "atomicLoad", 3);
@@ -8888,6 +9064,7 @@ Buf *codegen_generate_builtin_source(CodeGen *g) {
     buf_appendf(contents, "pub const have_error_return_tracing = %s;\n", bool_to_str(g->have_err_ret_tracing));
     buf_appendf(contents, "pub const valgrind_support = false;\n");
     buf_appendf(contents, "pub const position_independent_code = %s;\n", bool_to_str(g->have_pic));
+    buf_appendf(contents, "pub const position_independent_executable = %s;\n", bool_to_str(g->have_pie));
     buf_appendf(contents, "pub const strip_debug_info = %s;\n", bool_to_str(g->strip_debug_symbols));
     buf_appendf(contents, "pub const code_model = CodeModel.default;\n");
 
@@ -9013,6 +9190,14 @@ static void init(CodeGen *g) {
         reloc_mode = LLVMRelocDynamicNoPic;
     } else {
         reloc_mode = LLVMRelocStatic;
+    }
+
+    if (g->have_pic) {
+        ZigLLVMSetModulePICLevel(g->module);
+    }
+
+    if (g->have_pie) {
+        ZigLLVMSetModulePIELevel(g->module);
     }
 
     const char *target_specific_cpu_args = "";

@@ -28,7 +28,7 @@ test "type info: integer, floating point type info" {
 fn testIntFloat() void {
     const u8_info = @typeInfo(u8);
     expect(u8_info == .Int);
-    expect(!u8_info.Int.is_signed);
+    expect(u8_info.Int.signedness == .unsigned);
     expect(u8_info.Int.bits == 8);
 
     const f64_info = @typeInfo(f64);
@@ -82,9 +82,6 @@ fn testNullTerminatedPtr() void {
     expect(ptr_info.Pointer.sentinel.? == 0);
 
     expect(@typeInfo([:0]u8).Pointer.sentinel != null);
-    expect(@typeInfo([10:0]u8).Array.sentinel != null);
-    expect(@typeInfo([10:0]u8).Array.len == 10);
-    expect(@sizeOf([10:0]u8) == 11);
 }
 
 test "type info: C pointer type info" {
@@ -123,10 +120,21 @@ test "type info: array type info" {
 }
 
 fn testArray() void {
-    const arr_info = @typeInfo([42]bool);
-    expect(arr_info == .Array);
-    expect(arr_info.Array.len == 42);
-    expect(arr_info.Array.child == bool);
+    {
+        const info = @typeInfo([42]u8);
+        expect(info == .Array);
+        expect(info.Array.len == 42);
+        expect(info.Array.child == u8);
+        expect(info.Array.sentinel == null);
+    }
+
+    {
+        const info = @typeInfo([10:0]u8);
+        expect(info.Array.len == 10);
+        expect(info.Array.child == u8);
+        expect(info.Array.sentinel.? == @as(u8, 0));
+        expect(@sizeOf([10:0]u8) == info.Array.len + 1);
+    }
 }
 
 test "type info: optional type info" {
@@ -459,4 +467,18 @@ test "StructField.is_comptime" {
     const info = @typeInfo(struct { x: u8 = 3, comptime y: u32 = 5 }).Struct;
     expect(!info.fields[0].is_comptime);
     expect(info.fields[1].is_comptime);
+}
+
+test "typeInfo resolves usingnamespace declarations" {
+    const A = struct {
+        pub const f1 = 42;
+    };
+
+    const B = struct {
+        const f0 = 42;
+        usingnamespace A;
+    };
+
+    expect(@typeInfo(B).Struct.decls.len == 2);
+    //a
 }

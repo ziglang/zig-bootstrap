@@ -145,6 +145,7 @@ pub extern "c" fn ioctl(fd: fd_t, request: c_int, ...) c_int;
 pub extern "c" fn uname(buf: *utsname) c_int;
 
 pub extern "c" fn gethostname(name: [*]u8, len: usize) c_int;
+pub extern "c" fn shutdown(socket: fd_t, how: c_int) c_int;
 pub extern "c" fn bind(socket: fd_t, address: ?*const sockaddr, address_len: socklen_t) c_int;
 pub extern "c" fn socketpair(domain: c_uint, sock_type: c_uint, protocol: c_uint, sv: *[2]fd_t) c_int;
 pub extern "c" fn listen(sockfd: fd_t, backlog: c_uint) c_int;
@@ -245,22 +246,9 @@ pub extern "c" fn setregid(rgid: gid_t, egid: gid_t) c_int;
 pub extern "c" fn setresuid(ruid: uid_t, euid: uid_t, suid: uid_t) c_int;
 pub extern "c" fn setresgid(rgid: gid_t, egid: gid_t, sgid: gid_t) c_int;
 
-pub extern "c" fn aligned_alloc(alignment: usize, size: usize) ?*c_void;
 pub extern "c" fn malloc(usize) ?*c_void;
-
-pub usingnamespace switch (builtin.os.tag) {
-    .linux, .freebsd, .kfreebsd, .netbsd => struct {
-        pub extern "c" fn malloc_usable_size(?*const c_void) usize;
-    },
-    .macos, .ios, .watchos, .tvos => struct {
-        pub extern "c" fn malloc_size(?*const c_void) usize;
-    },
-    else => struct {},
-};
-
 pub extern "c" fn realloc(?*c_void, usize) ?*c_void;
 pub extern "c" fn free(*c_void) void;
-pub extern "c" fn posix_memalign(memptr: **c_void, alignment: usize, size: usize) c_int;
 
 pub extern "c" fn futimes(fd: fd_t, times: *[2]timeval) c_int;
 pub extern "c" fn utimes(path: [*:0]const u8, times: *[2]timeval) c_int;
@@ -271,6 +259,7 @@ pub extern "c" fn futimens(fd: fd_t, times: *const [2]timespec) c_int;
 pub extern "c" fn pthread_create(noalias newthread: *pthread_t, noalias attr: ?*const pthread_attr_t, start_routine: fn (?*c_void) callconv(.C) ?*c_void, noalias arg: ?*c_void) c_int;
 pub extern "c" fn pthread_attr_init(attr: *pthread_attr_t) c_int;
 pub extern "c" fn pthread_attr_setstack(attr: *pthread_attr_t, stackaddr: *c_void, stacksize: usize) c_int;
+pub extern "c" fn pthread_attr_setstacksize(attr: *pthread_attr_t, stacksize: usize) c_int;
 pub extern "c" fn pthread_attr_setguardsize(attr: *pthread_attr_t, guardsize: usize) c_int;
 pub extern "c" fn pthread_attr_destroy(attr: *pthread_attr_t) c_int;
 pub extern "c" fn pthread_self() pthread_t;
@@ -308,6 +297,7 @@ pub extern "c" fn getnameinfo(
 pub extern "c" fn gai_strerror(errcode: EAI) [*:0]const u8;
 
 pub extern "c" fn poll(fds: [*]pollfd, nfds: nfds_t, timeout: c_int) c_int;
+pub extern "c" fn ppoll(fds: [*]pollfd, nfds: nfds_t, timeout: ?*const timespec, sigmask: ?*const sigset_t) c_int;
 
 pub extern "c" fn dn_expand(
     msg: [*:0]const u8,
@@ -345,3 +335,13 @@ pub extern "c" fn prctl(option: c_int, ...) c_int;
 
 pub extern "c" fn getrlimit(resource: rlimit_resource, rlim: *rlimit) c_int;
 pub extern "c" fn setrlimit(resource: rlimit_resource, rlim: *const rlimit) c_int;
+
+pub const max_align_t = if (std.Target.current.abi == .msvc)
+    f64
+else if (std.Target.current.isDarwin())
+    c_longdouble
+else
+    extern struct {
+        a: c_longlong,
+        b: c_longdouble,
+    };

@@ -25,6 +25,30 @@ const tmpDir = std.testing.tmpDir;
 const Dir = std.fs.Dir;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
+test "chdir smoke test" {
+    if (builtin.os.tag == .wasi) return error.SkipZigTest;
+
+    // Get current working directory path
+    var old_cwd_buf: [fs.MAX_PATH_BYTES]u8 = undefined;
+    const old_cwd = try os.getcwd(old_cwd_buf[0..]);
+
+    {
+        // Firstly, changing to itself should have no effect
+        try os.chdir(old_cwd);
+        var new_cwd_buf: [fs.MAX_PATH_BYTES]u8 = undefined;
+        const new_cwd = try os.getcwd(new_cwd_buf[0..]);
+        expect(mem.eql(u8, old_cwd, new_cwd));
+    }
+    {
+        // Next, change current working directory to one level above
+        const parent = fs.path.dirname(old_cwd) orelse unreachable; // old_cwd should be absolute
+        try os.chdir(parent);
+        var new_cwd_buf: [fs.MAX_PATH_BYTES]u8 = undefined;
+        const new_cwd = try os.getcwd(new_cwd_buf[0..]);
+        expect(mem.eql(u8, parent, new_cwd));
+    }
+}
+
 test "open smoke test" {
     if (builtin.os.tag == .wasi) return error.SkipZigTest;
 
@@ -602,4 +626,23 @@ test "getrlimit and setrlimit" {
         const limit = try os.getrlimit(resource);
         try os.setrlimit(resource, limit);
     }
+}
+
+test "shutdown socket" {
+    if (builtin.os.tag == .wasi)
+        return error.SkipZigTest;
+    if (builtin.os.tag == .windows) {
+        _ = try std.os.windows.WSAStartup(2, 2);
+    }
+    defer {
+        if (builtin.os.tag == .windows) {
+            std.os.windows.WSACleanup() catch unreachable;
+        }
+    }
+    const sock = try os.socket(os.AF_INET, os.SOCK_STREAM, 0);
+    os.shutdown(sock, .both) catch |err| switch (err) {
+        error.SocketNotConnected => {},
+        else => |e| return e,
+    };
+    os.closeSocket(sock);
 }

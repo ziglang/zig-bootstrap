@@ -5,7 +5,7 @@ const mem = std.mem;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const fs = std.fs;
-const leb = std.debug.leb;
+const leb = std.leb;
 const log = std.log.scoped(.link);
 
 const Module = @import("../Module.zig");
@@ -282,6 +282,11 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
         break :blk full_obj_path;
     } else null;
 
+    const compiler_rt_path: ?[]const u8 = if (self.base.options.include_compiler_rt)
+        comp.compiler_rt_static_lib.?.full_object_path
+    else
+        null;
+
     const target = self.base.options.target;
 
     const id_symlink_basename = "lld.id";
@@ -302,6 +307,7 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
             _ = try man.addFile(entry.key.status.success.object_path, null);
         }
         try man.addOptionalFile(module_obj_path);
+        try man.addOptionalFile(compiler_rt_path);
         man.hash.addOptional(self.base.options.stack_size_override);
         man.hash.addListOfBytes(self.base.options.extra_lld_args);
 
@@ -339,8 +345,11 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
     // Create an LLD command line and invoke it.
     var argv = std.ArrayList([]const u8).init(self.base.allocator);
     defer argv.deinit();
-    // Even though we're calling LLD as a library it thinks the first argument is its own exe name.
-    try argv.append("lld");
+    // The first argument is ignored as LLD is called as a library, set it
+    // anyway to the correct LLD driver name for this target so that it's
+    // correctly printed when `verbose_link` is true. This is needed for some
+    // tools such as CMake when Zig is used as C compiler.
+    try argv.append("ld-wasm");
     if (is_obj) {
         try argv.append("-r");
     }
@@ -378,11 +387,15 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
         try argv.append(p);
     }
 
-    if (self.base.options.output_mode != .Obj and !self.base.options.is_compiler_rt_or_libc) {
-        if (!self.base.options.link_libc) {
-            try argv.append(comp.libc_static_lib.?.full_object_path);
-        }
-        try argv.append(comp.compiler_rt_static_lib.?.full_object_path);
+    if (self.base.options.output_mode != .Obj and
+        !self.base.options.is_compiler_rt_or_libc and
+        !self.base.options.link_libc)
+    {
+        try argv.append(comp.libc_static_lib.?.full_object_path);
+    }
+
+    if (compiler_rt_path) |p| {
+        try argv.append(p);
     }
 
     if (self.base.options.verbose_link) {

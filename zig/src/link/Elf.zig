@@ -8,7 +8,7 @@ const fs = std.fs;
 const elf = std.elf;
 const log = std.log.scoped(.link);
 const DW = std.dwarf;
-const leb128 = std.debug.leb;
+const leb128 = std.leb;
 
 const ir = @import("../ir.zig");
 const Module = @import("../Module.zig");
@@ -1260,6 +1260,13 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
     const gc_sections = self.base.options.gc_sections orelse !is_obj;
     const stack_size = self.base.options.stack_size_override orelse 16777216;
     const allow_shlib_undefined = self.base.options.allow_shlib_undefined orelse !self.base.options.is_native_os;
+    const compiler_rt_path: ?[]const u8 = if (self.base.options.include_compiler_rt) blk: {
+        if (is_exe_or_dyn_lib) {
+            break :blk comp.compiler_rt_static_lib.?.full_object_path;
+        } else {
+            break :blk comp.compiler_rt_obj.?.full_object_path;
+        }
+    } else null;
 
     // Here we want to determine whether we can save time by not invoking LLD when the
     // output is unchanged. None of the linker options or the object files that are being
@@ -1289,6 +1296,8 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
             _ = try man.addFile(entry.key.status.success.object_path, null);
         }
         try man.addOptionalFile(module_obj_path);
+        try man.addOptionalFile(compiler_rt_path);
+
         // We can skip hashing libc and libc++ components that we are in charge of building from Zig
         // installation sources because they are always a product of the compiler version + target information.
         man.hash.add(stack_size);
@@ -1313,10 +1322,8 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
                 man.hash.addOptionalBytes(self.base.options.dynamic_linker);
             }
         }
-        if (is_dyn_lib) {
-            man.hash.addOptionalBytes(self.base.options.override_soname);
-            man.hash.addOptional(self.base.options.version);
-        }
+        man.hash.addOptionalBytes(self.base.options.soname);
+        man.hash.addOptional(self.base.options.version);
         man.hash.addStringSet(self.base.options.system_libs);
         man.hash.add(allow_shlib_undefined);
         man.hash.add(self.base.options.bind_global_refs_locally);
@@ -1353,8 +1360,11 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
     // Create an LLD command line and invoke it.
     var argv = std.ArrayList([]const u8).init(self.base.allocator);
     defer argv.deinit();
-    // Even though we're calling LLD as a library it thinks the first argument is its own exe name.
-    try argv.append("lld");
+    // The first argument is ignored as LLD is called as a library, set it
+    // anyway to the correct LLD driver name for this target so that it's
+    // correctly printed when `verbose_link` is true. This is needed for some
+    // tools such as CMake when Zig is used as C compiler.
+    try argv.append("ld.lld");
     if (is_obj) {
         try argv.append("-r");
     }
@@ -1422,7 +1432,7 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
         try argv.append("-shared");
     }
 
-    if (target_util.requiresPIE(target) and self.base.options.output_mode == .Exe) {
+    if (self.base.options.pie and self.base.options.output_mode == .Exe) {
         try argv.append("-pie");
     }
 
@@ -1441,7 +1451,11 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
                     break :o "crtbegin_static.o";
                 }
             } else if (self.base.options.link_mode == .Static) {
-                break :o "crt1.o";
+                if (self.base.options.pie) {
+                    break :o "rcrt1.o";
+                } else {
+                    break :o "crt1.o";
+                }
             } else {
                 break :o "Scrt1.o";
             }
@@ -1505,13 +1519,10 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
     }
 
     if (is_dyn_lib) {
-        const soname = self.base.options.override_soname orelse if (self.base.options.version) |ver|
-            try std.fmt.allocPrint(arena, "lib{}.so.{}", .{ self.base.options.root_name, ver.major })
-        else
-            try std.fmt.allocPrint(arena, "lib{}.so", .{self.base.options.root_name});
-        try argv.append("-soname");
-        try argv.append(soname);
-
+        if (self.base.options.soname) |soname| {
+            try argv.append("-soname");
+            try argv.append(soname);
+        }
         if (self.base.options.version_script) |version_script| {
             try argv.append("-version-script");
             try argv.append(version_script);
@@ -1529,25 +1540,29 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
         try argv.append(p);
     }
 
-    // compiler-rt and libc
-    if (is_exe_or_dyn_lib and !self.base.options.is_compiler_rt_or_libc) {
-        if (!self.base.options.link_libc) {
-            try argv.append(comp.libc_static_lib.?.full_object_path);
-        }
-        try argv.append(comp.compiler_rt_static_lib.?.full_object_path);
+    // libc
+    if (is_exe_or_dyn_lib and !self.base.options.is_compiler_rt_or_libc and !self.base.options.link_libc) {
+        try argv.append(comp.libc_static_lib.?.full_object_path);
+    }
+
+    // compiler-rt
+    if (compiler_rt_path) |p| {
+        try argv.append(p);
     }
 
     // Shared libraries.
-    const system_libs = self.base.options.system_libs.items();
-    try argv.ensureCapacity(argv.items.len + system_libs.len);
-    for (system_libs) |entry| {
-        const link_lib = entry.key;
-        // By this time, we depend on these libs being dynamically linked libraries and not static libraries
-        // (the check for that needs to be earlier), but they could be full paths to .so files, in which
-        // case we want to avoid prepending "-l".
-        const ext = Compilation.classifyFileExt(link_lib);
-        const arg = if (ext == .shared_library) link_lib else try std.fmt.allocPrint(arena, "-l{}", .{link_lib});
-        argv.appendAssumeCapacity(arg);
+    if (is_exe_or_dyn_lib) {
+        const system_libs = self.base.options.system_libs.items();
+        try argv.ensureCapacity(argv.items.len + system_libs.len);
+        for (system_libs) |entry| {
+            const link_lib = entry.key;
+            // By this time, we depend on these libs being dynamically linked libraries and not static libraries
+            // (the check for that needs to be earlier), but they could be full paths to .so files, in which
+            // case we want to avoid prepending "-l".
+            const ext = Compilation.classifyFileExt(link_lib);
+            const arg = if (ext == .shared_library) link_lib else try std.fmt.allocPrint(arena, "-l{}", .{link_lib});
+            argv.appendAssumeCapacity(arg);
+        }
     }
 
     if (!is_obj) {
@@ -2443,7 +2458,10 @@ fn addDbgInfoType(self: *Elf, ty: Type, dbg_info_buffer: *std.ArrayList(u8)) !vo
             try dbg_info_buffer.ensureCapacity(dbg_info_buffer.items.len + 12);
             dbg_info_buffer.appendAssumeCapacity(abbrev_base_type);
             // DW.AT_encoding, DW.FORM_data1
-            dbg_info_buffer.appendAssumeCapacity(if (info.signed) DW.ATE_signed else DW.ATE_unsigned);
+            dbg_info_buffer.appendAssumeCapacity(switch (info.signedness) {
+                .signed => DW.ATE_signed,
+                .unsigned => DW.ATE_unsigned,
+            });
             // DW.AT_byte_size,  DW.FORM_data1
             dbg_info_buffer.appendAssumeCapacity(@intCast(u8, ty.abiSize(self.base.options.target)));
             // DW.AT_name,  DW.FORM_string

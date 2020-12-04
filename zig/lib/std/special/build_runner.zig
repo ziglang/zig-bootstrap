@@ -69,7 +69,7 @@ pub fn main() !void {
         } else if (mem.startsWith(u8, arg, "-")) {
             if (mem.eql(u8, arg, "--verbose")) {
                 builder.verbose = true;
-            } else if (mem.eql(u8, arg, "--help")) {
+            } else if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
                 return usage(builder, false, stdout_stream);
             } else if (mem.eql(u8, arg, "--prefix")) {
                 builder.install_prefix = nextArg(args, &arg_idx) orelse {
@@ -130,7 +130,7 @@ pub fn main() !void {
     if (builder.validateUserInputDidItFail())
         return usageAndErr(builder, true, stderr_stream);
 
-    builder.make(targets.span()) catch |err| {
+    builder.make(targets.items) catch |err| {
         switch (err) {
             error.InvalidStepName => {
                 return usageAndErr(builder, true, stderr_stream);
@@ -165,7 +165,7 @@ fn usage(builder: *Builder, already_ran_build: bool, out_stream: anytype) !void 
     , .{builder.zig_exe});
 
     const allocator = builder.allocator;
-    for (builder.top_level_steps.span()) |top_level_step| {
+    for (builder.top_level_steps.items) |top_level_step| {
         const name = if (&top_level_step.step == builder.default_step)
             try fmt.allocPrint(allocator, "{} (default)", .{top_level_step.step.name})
         else
@@ -176,7 +176,7 @@ fn usage(builder: *Builder, already_ran_build: bool, out_stream: anytype) !void 
     try out_stream.writeAll(
         \\
         \\General Options:
-        \\  --help                      Print this help and exit
+        \\  -h, --help                  Print this help and exit
         \\  --verbose                   Print commands before executing them
         \\  --prefix [path]             Override default install prefix
         \\  --search-prefix [path]      Add a path to look for binaries, libraries, headers
@@ -189,7 +189,7 @@ fn usage(builder: *Builder, already_ran_build: bool, out_stream: anytype) !void 
     if (builder.available_options_list.items.len == 0) {
         try out_stream.print("  (none)\n", .{});
     } else {
-        for (builder.available_options_list.span()) |option| {
+        for (builder.available_options_list.items) |option| {
             const name = try fmt.allocPrint(allocator, "  -D{}=[{}]", .{
                 option.name,
                 Builder.typeIdName(option.type_id),

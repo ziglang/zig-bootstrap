@@ -11,7 +11,7 @@ const fs = std.fs;
 const InstallDirectoryOptions = std.build.InstallDirectoryOptions;
 const assert = std.debug.assert;
 
-const zig_version = std.builtin.Version{ .major = 0, .minor = 6, .patch = 0 };
+const zig_version = std.builtin.Version{ .major = 0, .minor = 7, .patch = 0 };
 
 pub fn build(b: *Builder) !void {
     b.setPreferredReleaseMode(.ReleaseFast);
@@ -83,6 +83,7 @@ pub fn build(b: *Builder) !void {
     test_step.dependOn(&exe.step);
     b.default_step.dependOn(&exe.step);
 
+    exe.addBuildOption(bool, "skip_non_native", skip_non_native);
     exe.addBuildOption(bool, "have_llvm", enable_llvm);
     if (enable_llvm) {
         const config_h_text = if (config_h_path_option) |config_h_path|
@@ -128,11 +129,11 @@ pub fn build(b: *Builder) !void {
             break :s b.fmt("dirty{x}", .{@truncate(u32, dirty_hash)});
         };
 
-        // This will look like e.g. "0.6.0^0" for a tag commit.
+        // This will look like e.g. "0.7.0^0" for a tag commit.
         if (mem.endsWith(u8, git_sha_trimmed, "^0")) {
             const git_ver_string = git_sha_trimmed[0 .. git_sha_trimmed.len - 2];
             if (!mem.eql(u8, git_ver_string, version_string)) {
-                std.debug.print("Expected git tag '{}', found '{}'", .{ version_string, git_ver_string });
+                std.debug.print("Expected git tag '{}', found '{}'\n", .{ version_string, git_ver_string });
                 std.process.exit(1);
             }
             break :v b.fmt("{}{}", .{ version_string, dirty_suffix });
@@ -166,6 +167,7 @@ pub fn build(b: *Builder) !void {
     const is_wasmtime_enabled = b.option(bool, "enable-wasmtime", "Use Wasmtime to enable and run WASI libstd tests") orelse false;
     const glibc_multi_dir = b.option([]const u8, "enable-foreign-glibc", "Provide directory with glibc installations to run cross compiled tests that link glibc");
 
+    test_stage2.addBuildOption(bool, "skip_non_native", skip_non_native);
     test_stage2.addBuildOption(bool, "is_stage1", false);
     test_stage2.addBuildOption(bool, "have_llvm", enable_llvm);
     test_stage2.addBuildOption(bool, "enable_qemu", is_qemu_enabled);

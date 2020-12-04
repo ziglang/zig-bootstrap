@@ -49,6 +49,40 @@ fn testReadLink(dir: Dir, target_path: []const u8, symlink_path: []const u8) !vo
     testing.expect(mem.eql(u8, target_path, given));
 }
 
+test "accessAbsolute" {
+    if (builtin.os.tag == .wasi) return error.SkipZigTest;
+
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const base_path = blk: {
+        const relative_path = try fs.path.join(&arena.allocator, &[_][]const u8{ "zig-cache", "tmp", tmp.sub_path[0..] });
+        break :blk try fs.realpathAlloc(&arena.allocator, relative_path);
+    };
+
+    try fs.accessAbsolute(base_path, .{});
+}
+
+test "openDirAbsolute" {
+    if (builtin.os.tag == .wasi) return error.SkipZigTest;
+
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makeDir("subdir");
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const base_path = blk: {
+        const relative_path = try fs.path.join(&arena.allocator, &[_][]const u8{ "zig-cache", "tmp", tmp.sub_path[0..], "subdir" });
+        break :blk try fs.realpathAlloc(&arena.allocator, relative_path);
+    };
+
+    var dir = try fs.openDirAbsolute(base_path, .{});
+    defer dir.close();
+}
+
 test "readLinkAbsolute" {
     if (builtin.os.tag == .wasi) return error.SkipZigTest;
 
@@ -227,7 +261,7 @@ test "directory operations on files" {
     testing.expectError(error.NotDir, tmp_dir.dir.openDir(test_file_name, .{}));
     testing.expectError(error.NotDir, tmp_dir.dir.deleteDir(test_file_name));
 
-    if (builtin.os.tag != .wasi and builtin.os.tag != .freebsd) {
+    if (builtin.os.tag != .wasi and builtin.os.tag != .freebsd and builtin.os.tag != .openbsd) {
         const absolute_path = try tmp_dir.dir.realpathAlloc(testing.allocator, test_file_name);
         defer testing.allocator.free(absolute_path);
 
@@ -264,7 +298,7 @@ test "file operations on directories" {
     // TODO: Add a read-only test as well, see https://github.com/ziglang/zig/issues/5732
     testing.expectError(error.IsDir, tmp_dir.dir.openFile(test_dir_name, .{ .write = true }));
 
-    if (builtin.os.tag != .wasi and builtin.os.tag != .freebsd) {
+    if (builtin.os.tag != .wasi and builtin.os.tag != .freebsd and builtin.os.tag != .openbsd) {
         const absolute_path = try tmp_dir.dir.realpathAlloc(testing.allocator, test_dir_name);
         defer testing.allocator.free(absolute_path);
 
@@ -657,9 +691,6 @@ test "realpath" {
 test "open file with exclusive nonblocking lock twice" {
     if (builtin.os.tag == .wasi) return error.SkipZigTest;
 
-    // TODO: fix this test on FreeBSD. https://github.com/ziglang/zig/issues/1759
-    if (builtin.os.tag == .freebsd) return error.SkipZigTest;
-
     const filename = "file_nonblocking_lock_test.txt";
 
     var tmp = tmpDir(.{});
@@ -675,9 +706,6 @@ test "open file with exclusive nonblocking lock twice" {
 test "open file with shared and exclusive nonblocking lock" {
     if (builtin.os.tag == .wasi) return error.SkipZigTest;
 
-    // TODO: fix this test on FreeBSD. https://github.com/ziglang/zig/issues/1759
-    if (builtin.os.tag == .freebsd) return error.SkipZigTest;
-
     const filename = "file_nonblocking_lock_test.txt";
 
     var tmp = tmpDir(.{});
@@ -692,9 +720,6 @@ test "open file with shared and exclusive nonblocking lock" {
 
 test "open file with exclusive and shared nonblocking lock" {
     if (builtin.os.tag == .wasi) return error.SkipZigTest;
-
-    // TODO: fix this test on FreeBSD. https://github.com/ziglang/zig/issues/1759
-    if (builtin.os.tag == .freebsd) return error.SkipZigTest;
 
     const filename = "file_nonblocking_lock_test.txt";
 
@@ -713,11 +738,6 @@ test "open file with exclusive lock twice, make sure it waits" {
 
     if (std.io.is_async) {
         // This test starts its own threads and is not compatible with async I/O.
-        return error.SkipZigTest;
-    }
-
-    if (std.Target.current.os.tag == .windows) {
-        // https://github.com/ziglang/zig/issues/7010
         return error.SkipZigTest;
     }
 
@@ -745,20 +765,21 @@ test "open file with exclusive lock twice, make sure it waits" {
     defer t.wait();
 
     const SLEEP_TIMEOUT_NS = 10 * std.time.ns_per_ms;
-
-    std.time.sleep(SLEEP_TIMEOUT_NS);
+    // Make sure we've slept enough.
+    var timer = try std.time.Timer.start();
+    while (true) {
+        std.time.sleep(SLEEP_TIMEOUT_NS);
+        if (timer.read() >= SLEEP_TIMEOUT_NS) break;
+    }
     // Check that createFile is still waiting for the lock to be released.
     testing.expect(!evt.isSet());
     file.close();
-    // Generous timeout to avoid failures on heavily loaded systems.
-    try evt.timedWait(SLEEP_TIMEOUT_NS);
+    // No timeout to avoid failures on heavily loaded systems.
+    evt.wait();
 }
 
 test "open file with exclusive nonblocking lock twice (absolute paths)" {
     if (builtin.os.tag == .wasi) return error.SkipZigTest;
-
-    // TODO: fix this test on FreeBSD. https://github.com/ziglang/zig/issues/1759
-    if (builtin.os.tag == .freebsd) return error.SkipZigTest;
 
     const allocator = testing.allocator;
 

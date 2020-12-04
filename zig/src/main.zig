@@ -41,11 +41,12 @@ const usage =
     \\  build            Build project from build.zig
     \\  build-exe        Create executable from source or object files
     \\  build-lib        Create library from source or object files
-    \\  build-obj        Create object from source or assembly
+    \\  build-obj        Create object from source or object files
     \\  cc               Use Zig as a drop-in C compiler
     \\  c++              Use Zig as a drop-in C++ compiler
-    \\  env              Print lib path, std path, compiler id and version
-    \\  fmt              Parse file and render in canonical zig format
+    \\  env              Print lib path, std path, cache directory, and version
+    \\  fmt              Reformat Zig source into canonical form
+    \\  help             Print this help and exit
     \\  init-exe         Initialize a `zig build` application in the cwd
     \\  init-lib         Initialize a `zig build` library in the cwd
     \\  libc             Display native libc paths file or validate one
@@ -54,11 +55,11 @@ const usage =
     \\  targets          List available compilation targets
     \\  test             Create and run a test build
     \\  version          Print version number and exit
-    \\  zen              Print zen of zig and exit
+    \\  zen              Print Zen of Zig and exit
     \\
     \\General Options:
     \\
-    \\  --help           Print command-specific usage
+    \\  -h, --help       Print command-specific usage
     \\
 ;
 
@@ -102,7 +103,7 @@ pub fn log(
 var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
 
 pub fn main() anyerror!void {
-    const gpa = if (std.builtin.link_libc) std.heap.c_allocator else &general_purpose_allocator.allocator;
+    const gpa = if (std.builtin.link_libc) std.heap.raw_c_allocator else &general_purpose_allocator.allocator;
     defer if (!std.builtin.link_libc) {
         _ = general_purpose_allocator.deinit();
     };
@@ -195,7 +196,7 @@ pub fn mainArgs(gpa: *Allocator, arena: *Allocator, args: []const []const u8) !v
         try @import("print_env.zig").cmdEnv(arena, cmd_args, io.getStdOut().outStream());
     } else if (mem.eql(u8, cmd, "zen")) {
         try io.getStdOut().writeAll(info_zen);
-    } else if (mem.eql(u8, cmd, "help")) {
+    } else if (mem.eql(u8, cmd, "help") or mem.eql(u8, cmd, "-h") or mem.eql(u8, cmd, "--help")) {
         try io.getStdOut().writeAll(usage);
     } else {
         std.log.info("{}", .{usage});
@@ -269,6 +270,8 @@ const usage_build_generic =
     \\  --main-pkg-path           Set the directory of the root package
     \\  -fPIC                     Force-enable Position Independent Code
     \\  -fno-PIC                  Force-disable Position Independent Code
+    \\  -fPIE                     Force-enable Position Independent Executable
+    \\  -fno-PIE                  Force-disable Position Independent Executable
     \\  -fstack-check             Enable stack probing in unsafe builds
     \\  -fno-stack-check          Disable stack probing in safe builds
     \\  -fsanitize-c              Enable C undefined behavior detection in unsafe builds
@@ -277,6 +280,10 @@ const usage_build_generic =
     \\  -fno-valgrind             Omit valgrind client requests in debug builds
     \\  -fdll-export-fns          Mark exported functions as DLL exports (Windows)
     \\  -fno-dll-export-fns       Force-disable marking exported functions as DLL exports
+    \\  -fLLVM                    Force using LLVM as the codegen backend
+    \\  -fno-LLVM                 Prevent using LLVM as a codegen backend
+    \\  -fClang                   Force using Clang as the C/C++ compilation backend
+    \\  -fno-Clang                Prevent using Clang as the C/C++ compilation backend
     \\  --strip                   Omit debug symbols
     \\  --single-threaded         Code assumes it is only used single-threaded
     \\  -ofmt=[mode]              Override target object format
@@ -303,6 +310,12 @@ const usage_build_generic =
     \\  --version-script [path]        Provide a version .map file
     \\  --dynamic-linker [path]        Set the dynamic interpreter path (usually ld.so)
     \\  --version [ver]                Dynamic library semver
+    \\  -fsoname[=name]                (Linux) Override the default SONAME value
+    \\  -fno-soname                    (Linux) Disable emitting a SONAME
+    \\  -fLLD                          Force using LLD as the linker
+    \\  -fno-LLD                       Prevent using LLD as the linker
+    \\  -fcompiler-rt                  Always include compiler-rt symbols in output
+    \\  -fno-compiler-rt               Prevent including compiler-rt symbols in output
     \\  -rdynamic                      Add all symbols to the dynamic symbol table
     \\  -rpath [path]                  Add directory to the runtime library search path
     \\  -feach-lib-rpath               Ensure adding rpath for each used dynamic library
@@ -312,11 +325,11 @@ const usage_build_generic =
     \\  -dynamic                       Force output to be dynamically linked
     \\  -static                        Force output to be statically linked
     \\  -Bsymbolic                     Bind global references locally
-    \\  --subsystem [subsystem]        (windows) /SUBSYSTEM:<subsystem> to the linker\n"
+    \\  --subsystem [subsystem]        (Windows) /SUBSYSTEM:<subsystem> to the linker\n"
     \\  --stack [size]                 Override default stack size
     \\  --image-base [addr]            Set base address for executable image
-    \\  -framework [name]              (darwin) link against framework
-    \\  -F[dir]                        (darwin) add search path for frameworks
+    \\  -framework [name]              (Darwin) link against framework
+    \\  -F[dir]                        (Darwin) add search path for frameworks
     \\
     \\Test Options:
     \\  --test-filter [text]           Skip tests that do not match filter
@@ -346,6 +359,12 @@ const repl_help =
     \\    exit   Quit this repl
     \\
 ;
+
+const SOName = union(enum) {
+    no,
+    yes_default_value,
+    yes: []const u8,
+};
 
 const Emit = union(enum) {
     no,
@@ -449,6 +468,7 @@ fn buildOutputType(
     var target_ofmt: ?[]const u8 = null;
     var output_mode: std.builtin.OutputMode = undefined;
     var emit_h: Emit = undefined;
+    var soname: SOName = undefined;
     var ensure_libc_on_non_freestanding = false;
     var ensure_libcpp_on_non_freestanding = false;
     var link_libc = false;
@@ -456,14 +476,15 @@ fn buildOutputType(
     var want_native_include_dirs = false;
     var enable_cache: ?bool = null;
     var want_pic: ?bool = null;
+    var want_pie: ?bool = null;
     var want_sanitize_c: ?bool = null;
     var want_stack_check: ?bool = null;
     var want_valgrind: ?bool = null;
+    var want_compiler_rt: ?bool = null;
     var rdynamic: bool = false;
     var linker_script: ?[]const u8 = null;
     var version_script: ?[]const u8 = null;
     var disable_c_depfile = false;
-    var override_soname: ?[]const u8 = null;
     var linker_gc_sections: ?bool = null;
     var linker_allow_shlib_undefined: ?bool = null;
     var linker_bind_global_refs_locally: ?bool = null;
@@ -560,6 +581,8 @@ fn buildOutputType(
             //    .translate_c, .zig_test, .run => emit_h = .no,
             //    else => unreachable,
             //}
+
+            soname = .yes_default_value;
             const args = all_args[2..];
             var i: usize = 0;
             args_loop: while (i < args.len) : (i += 1) {
@@ -774,6 +797,10 @@ fn buildOutputType(
                         if (i + 1 >= args.len) fatal("expected parameter after {}", .{arg});
                         i += 1;
                         override_lib_dir = args[i];
+                    } else if (mem.eql(u8, arg, "-fcompiler-rt")) {
+                        want_compiler_rt = true;
+                    } else if (mem.eql(u8, arg, "-fno-compiler-rt")) {
+                        want_compiler_rt = false;
                     } else if (mem.eql(u8, arg, "-feach-lib-rpath")) {
                         each_lib_rpath = true;
                     } else if (mem.eql(u8, arg, "-fno-each-lib-rpath")) {
@@ -794,6 +821,10 @@ fn buildOutputType(
                         want_pic = true;
                     } else if (mem.eql(u8, arg, "-fno-PIC")) {
                         want_pic = false;
+                    } else if (mem.eql(u8, arg, "-fPIE")) {
+                        want_pie = true;
+                    } else if (mem.eql(u8, arg, "-fno-PIE")) {
+                        want_pie = false;
                     } else if (mem.eql(u8, arg, "-fstack-check")) {
                         want_stack_check = true;
                     } else if (mem.eql(u8, arg, "-fno-stack-check")) {
@@ -820,6 +851,12 @@ fn buildOutputType(
                         use_clang = false;
                     } else if (mem.eql(u8, arg, "-rdynamic")) {
                         rdynamic = true;
+                    } else if (mem.eql(u8, arg, "-fsoname")) {
+                        soname = .yes_default_value;
+                    } else if (mem.startsWith(u8, arg, "-fsoname=")) {
+                        soname = .{ .yes = arg["-fsoname=".len..] };
+                    } else if (mem.eql(u8, arg, "-fno-soname")) {
+                        soname = .no;
                     } else if (mem.eql(u8, arg, "-femit-bin")) {
                         emit_bin = .yes_default_path;
                     } else if (mem.startsWith(u8, arg, "-femit-bin=")) {
@@ -947,6 +984,7 @@ fn buildOutputType(
         },
         .cc, .cpp => {
             emit_h = .no;
+            soname = .no;
             strip = true;
             ensure_libc_on_non_freestanding = true;
             ensure_libcpp_on_non_freestanding = arg_mode == .cpp;
@@ -1005,6 +1043,8 @@ fn buildOutputType(
                     },
                     .pic => want_pic = true,
                     .no_pic => want_pic = false,
+                    .pie => want_pie = true,
+                    .no_pie => want_pie = false,
                     .nostdlib => ensure_libc_on_non_freestanding = false,
                     .nostdlib_cpp => ensure_libcpp_on_non_freestanding = false,
                     .shared => {
@@ -1061,9 +1101,17 @@ fn buildOutputType(
                         }
                     },
                     .linker_script => linker_script = it.only_arg,
-                    .verbose_cmds => {
-                        verbose_cc = true;
+                    .verbose => {
                         verbose_link = true;
+                        // Have Clang print more infos, some tools such as CMake
+                        // parse this to discover any implicit include and
+                        // library dir to look-up into.
+                        try clang_argv.append("-v");
+                    },
+                    .dry_run => {
+                        verbose_link = true;
+                        try clang_argv.append("-###");
+                        // XXX: Don't execute anything!
                     },
                     .for_linker => try linker_args.append(it.only_arg),
                     .linker_input_z => {
@@ -1090,33 +1138,33 @@ fn buildOutputType(
                     if (i >= linker_args.items.len) {
                         fatal("expected linker arg after '{}'", .{arg});
                     }
-                    const soname = linker_args.items[i];
-                    override_soname = soname;
+                    const name = linker_args.items[i];
+                    soname = .{ .yes = name };
                     // Use it as --name.
                     // Example: libsoundio.so.2
                     var prefix: usize = 0;
-                    if (mem.startsWith(u8, soname, "lib")) {
+                    if (mem.startsWith(u8, name, "lib")) {
                         prefix = 3;
                     }
-                    var end: usize = soname.len;
-                    if (mem.endsWith(u8, soname, ".so")) {
+                    var end: usize = name.len;
+                    if (mem.endsWith(u8, name, ".so")) {
                         end -= 3;
                     } else {
                         var found_digit = false;
-                        while (end > 0 and std.ascii.isDigit(soname[end - 1])) {
+                        while (end > 0 and std.ascii.isDigit(name[end - 1])) {
                             found_digit = true;
                             end -= 1;
                         }
-                        if (found_digit and end > 0 and soname[end - 1] == '.') {
+                        if (found_digit and end > 0 and name[end - 1] == '.') {
                             end -= 1;
                         } else {
-                            end = soname.len;
+                            end = name.len;
                         }
-                        if (mem.endsWith(u8, soname[prefix..end], ".so")) {
+                        if (mem.endsWith(u8, name[prefix..end], ".so")) {
                             end -= 3;
                         }
                     }
-                    provided_name = soname[prefix..end];
+                    provided_name = name[prefix..end];
                 } else if (mem.eql(u8, arg, "-rpath")) {
                     i += 1;
                     if (i >= linker_args.items.len) {
@@ -1266,12 +1314,6 @@ fn buildOutputType(
         fatal("`zig test` expects a zig source file argument", .{});
     }
 
-    if (link_objects.items.len == 0 and root_src_file == null and
-        c_source_files.items.len == 0 and arg_mode == .run)
-    {
-        fatal("`zig run` expects at least one positional argument", .{});
-    }
-
     const root_name = if (provided_name) |n| n else blk: {
         if (arg_mode == .zig_test) {
             break :blk "test";
@@ -1290,9 +1332,12 @@ fn buildOutputType(
         } else if (show_builtin) {
             break :blk "builtin";
         } else if (arg_mode == .run) {
-            break :blk "run";
+            fatal("`zig run` expects at least one positional argument", .{});
+            // TODO once the attempt to unwrap error: LinkingWithoutZigSourceUnimplemented
+            // is solved, remove the above fatal() and uncomment the `break` below.
+            //break :blk "run";
         } else {
-            fatal("--name [name] not provided and unable to infer", .{});
+            fatal("expected a positional argument, -femit-bin=[path], --show-builtin, or --name [name]", .{});
         }
     };
 
@@ -1356,6 +1401,9 @@ fn buildOutputType(
                 _ = system_libs.orderedRemove(i);
                 continue;
             }
+            if (std.fs.path.isAbsolute(lib_name)) {
+                fatal("cannot use absolute path as a system library: {s}", .{lib_name});
+            }
             i += 1;
         }
     }
@@ -1417,6 +1465,18 @@ fn buildOutputType(
 
     const have_enable_cache = enable_cache orelse false;
     const optional_version = if (have_version) version else null;
+
+    const resolved_soname: ?[]const u8 = switch (soname) {
+        .yes => |explicit| explicit,
+        .no => null,
+        .yes_default_value => switch (object_format) {
+            .elf => if (have_version)
+                try std.fmt.allocPrint(arena, "lib{s}.so.{d}", .{ root_name, version.major })
+            else
+                try std.fmt.allocPrint(arena, "lib{s}.so", .{root_name}),
+            else => null,
+        },
+    };
 
     const emit_bin_loc: ?Compilation.EmitLoc = switch (emit_bin) {
         .no => null,
@@ -1634,9 +1694,11 @@ fn buildOutputType(
         .link_libc = link_libc,
         .link_libcpp = link_libcpp,
         .want_pic = want_pic,
+        .want_pie = want_pie,
         .want_sanitize_c = want_sanitize_c,
         .want_stack_check = want_stack_check,
         .want_valgrind = want_valgrind,
+        .want_compiler_rt = want_compiler_rt,
         .use_llvm = use_llvm,
         .use_lld = use_lld,
         .use_clang = use_clang,
@@ -1644,7 +1706,7 @@ fn buildOutputType(
         .linker_script = linker_script,
         .version_script = version_script,
         .disable_c_depfile = disable_c_depfile,
-        .override_soname = override_soname,
+        .soname = resolved_soname,
         .linker_gc_sections = linker_gc_sections,
         .linker_allow_shlib_undefined = linker_allow_shlib_undefined,
         .linker_bind_global_refs_locally = linker_bind_global_refs_locally,
@@ -1707,7 +1769,11 @@ fn buildOutputType(
         }
     };
 
-    try updateModule(gpa, comp, zir_out_path, hook);
+    updateModule(gpa, comp, zir_out_path, hook) catch |err| switch (err) {
+        error.SemanticAnalyzeFail => process.exit(1),
+        else => |e| return e,
+    };
+    try comp.makeBinFileExecutable();
 
     if (build_options.is_stage1 and comp.stage1_lock != null and watch) {
         warn("--watch is not recommended with the stage1 backend; it leaks memory and is not capable of incremental compilation", .{});
@@ -1806,9 +1872,7 @@ fn buildOutputType(
 
     while (watch) {
         try stderr.print("(zig) ", .{});
-        if (output_mode == .Exe) {
-            try comp.makeBinFileExecutable();
-        }
+        try comp.makeBinFileExecutable();
         if (stdin.readUntilDelimiterOrEof(&repl_buf, '\n') catch |err| {
             try stderr.print("\nUnable to parse command: {}\n", .{@errorName(err)});
             continue;
@@ -1819,7 +1883,10 @@ fn buildOutputType(
                 if (output_mode == .Exe) {
                     try comp.makeBinFileWritable();
                 }
-                try updateModule(gpa, comp, zir_out_path, hook);
+                updateModule(gpa, comp, zir_out_path, hook) catch |err| switch (err) {
+                    error.SemanticAnalyzeFail => continue,
+                    else => |e| return e,
+                };
             } else if (mem.eql(u8, actual_line, "exit")) {
                 break;
             } else if (mem.eql(u8, actual_line, "help")) {
@@ -1849,6 +1916,7 @@ fn updateModule(gpa: *Allocator, comp: *Compilation, zir_out_path: ?[]const u8, 
         for (errors.list) |full_err_msg| {
             full_err_msg.renderToStdErr();
         }
+        return error.SemanticAnalyzeFail;
     } else switch (hook) {
         .none => {},
         .print => |bin_path| try io.getStdOut().writer().print("{s}\n", .{bin_path}),
@@ -2013,7 +2081,7 @@ pub fn cmdLibC(gpa: *Allocator, args: []const []const u8) !void {
         while (i < args.len) : (i += 1) {
             const arg = args[i];
             if (mem.startsWith(u8, arg, "-")) {
-                if (mem.eql(u8, arg, "--help")) {
+                if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
                     const stdout = io.getStdOut().writer();
                     try stdout.writeAll(usage_libc);
                     return cleanExit();
@@ -2055,7 +2123,7 @@ pub const usage_init =
     \\   directory.
     \\
     \\Options:
-    \\   --help                 Print this help and exit
+    \\   -h, --help             Print this help and exit
     \\
     \\
 ;
@@ -2071,7 +2139,7 @@ pub fn cmdInit(
         while (i < args.len) : (i += 1) {
             const arg = args[i];
             if (mem.startsWith(u8, arg, "-")) {
-                if (mem.eql(u8, arg, "--help")) {
+                if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
                     try io.getStdOut().writeAll(usage_init);
                     return cleanExit();
                 } else {
@@ -2144,7 +2212,7 @@ pub const usage_build =
     \\   Build a project from build.zig.
     \\
     \\Options:
-    \\   --help                 Print this help and exit
+    \\   -h, --help             Print this help and exit
     \\
     \\
 ;
@@ -2341,6 +2409,7 @@ pub fn cmdBuild(gpa: *Allocator, arena: *Allocator, args: []const []const u8) !v
         defer comp.destroy();
 
         try updateModule(gpa, comp, null, .none);
+        try comp.makeBinFileExecutable();
 
         child_argv.items[argv_index_exe] = try comp.bin_file.options.emit.?.directory.join(
             arena,
@@ -2396,7 +2465,7 @@ pub const usage_fmt =
     \\   recursively.
     \\
     \\Options:
-    \\   --help                 Print this help and exit
+    \\   -h, --help             Print this help and exit
     \\   --color [auto|off|on]  Enable or disable colored error messages
     \\   --stdin                Format code from stdin; output to stdout
     \\   --check                List non-conforming files and exit with an error
@@ -2428,7 +2497,7 @@ pub fn cmdFmt(gpa: *Allocator, args: []const []const u8) !void {
         while (i < args.len) : (i += 1) {
             const arg = args[i];
             if (mem.startsWith(u8, arg, "-")) {
-                if (mem.eql(u8, arg, "--help")) {
+                if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
                     const stdout = io.getStdOut().outStream();
                     try stdout.writeAll(usage_fmt);
                     return cleanExit();
@@ -2501,7 +2570,7 @@ pub fn cmdFmt(gpa: *Allocator, args: []const []const u8) !void {
     defer fmt.seen.deinit();
     defer fmt.out_buffer.deinit();
 
-    for (input_files.span()) |file_path| {
+    for (input_files.items) |file_path| {
         // Get the real path here to avoid Windows failing on relative file paths with . or .. in them.
         const real_path = fs.realpathAlloc(gpa, file_path) catch |err| {
             fatal("unable to open '{}': {}", .{ file_path, err });
@@ -2681,7 +2750,7 @@ fn printErrMsgToFile(
     defer text_buf.deinit();
     const out_stream = text_buf.outStream();
     try parse_error.render(tree.token_ids, out_stream);
-    const text = text_buf.span();
+    const text = text_buf.items;
 
     const stream = file.outStream();
     try stream.print("{}:{}:{}: error: {}\n", .{ path, start_loc.line + 1, start_loc.column + 1, text });
@@ -2760,6 +2829,8 @@ pub const ClangArgIterator = struct {
         driver_punt,
         pic,
         no_pic,
+        pie,
+        no_pie,
         nostdlib,
         nostdlib_cpp,
         shared,
@@ -2771,7 +2842,8 @@ pub const ClangArgIterator = struct {
         debug,
         sanitize,
         linker_script,
-        verbose_cmds,
+        dry_run,
+        verbose,
         for_linker,
         linker_input_z,
         lib_dir,
@@ -2830,7 +2902,7 @@ pub const ClangArgIterator = struct {
             defer resp_arg_list.deinit();
             {
                 errdefer {
-                    for (resp_arg_list.span()) |item| {
+                    for (resp_arg_list.items) |item| {
                         allocator.free(mem.span(item));
                     }
                 }

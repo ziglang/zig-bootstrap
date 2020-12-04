@@ -745,8 +745,14 @@ ZigType *get_error_union_type(CodeGen *g, ZigType *err_set_type, ZigType *payloa
         return existing_entry->value;
     }
 
+    Error err;
+    if ((err = type_resolve(g, err_set_type, ResolveStatusSizeKnown)))
+        return g->builtin_types.entry_invalid;
+
+    if ((err = type_resolve(g, payload_type, ResolveStatusSizeKnown)))
+        return g->builtin_types.entry_invalid;
+
     ZigType *entry = new_type_table_entry(ZigTypeIdErrorUnion);
-    assert(type_is_resolved(payload_type, ResolveStatusSizeKnown));
 
     buf_resize(&entry->name, 0);
     buf_appendf(&entry->name, "%s!%s", buf_ptr(&err_set_type->name), buf_ptr(&payload_type->name));
@@ -965,9 +971,9 @@ const char *calling_convention_name(CallingConvention cc) {
         case CallingConventionFastcall: return "Fastcall";
         case CallingConventionVectorcall: return "Vectorcall";
         case CallingConventionThiscall: return "Thiscall";
-        case CallingConventionAPCS: return "Apcs";
-        case CallingConventionAAPCS: return "Aapcs";
-        case CallingConventionAAPCSVFP: return "Aapcsvfp";
+        case CallingConventionAPCS: return "APCS";
+        case CallingConventionAAPCS: return "AAPCS";
+        case CallingConventionAAPCSVFP: return "AAPCSVFP";
     }
     zig_unreachable();
 }
@@ -1453,7 +1459,12 @@ Error type_val_resolve_abi_align(CodeGen *g, AstNode *source_node, ZigValue *typ
         case LazyValueIdArrayType: {
             LazyValueArrayType *lazy_array_type =
                 reinterpret_cast<LazyValueArrayType *>(type_val->data.x_lazy);
-            return type_val_resolve_abi_align(g, source_node, lazy_array_type->elem_type->value, abi_align);
+
+            if (lazy_array_type->length + (lazy_array_type->sentinel != nullptr) != 0)
+                return type_val_resolve_abi_align(g, source_node, lazy_array_type->elem_type->value, abi_align);
+
+            *abi_align = 0;
+            return ErrorNone;
         }
         case LazyValueIdErrUnionType: {
             LazyValueErrUnionType *lazy_err_union_type =
@@ -1869,6 +1880,58 @@ ZigType *get_auto_err_set_type(CodeGen *g, ZigFn *fn_entry) {
     return err_set_type;
 }
 
+// Sync this with get_llvm_cc in codegen.cpp
+static Error emit_error_unless_callconv_allowed_for_target(CodeGen *g, AstNode *source_node, CallingConvention cc) {
+    Error ret = ErrorNone;
+    const char *allowed_platforms = nullptr;
+    switch (cc) {
+        case CallingConventionUnspecified:
+        case CallingConventionC:
+        case CallingConventionNaked:
+        case CallingConventionAsync:
+            break;
+        case CallingConventionInterrupt:
+            if (g->zig_target->arch != ZigLLVM_x86
+                && g->zig_target->arch != ZigLLVM_x86_64
+                && g->zig_target->arch != ZigLLVM_avr
+                && g->zig_target->arch != ZigLLVM_msp430)
+            {
+                allowed_platforms = "x86, x86_64, AVR, and MSP430";
+            }
+            break;
+        case CallingConventionSignal:
+            if (g->zig_target->arch != ZigLLVM_avr)
+                allowed_platforms = "AVR";
+            break;
+        case CallingConventionStdcall:
+        case CallingConventionFastcall:
+        case CallingConventionThiscall:
+            if (g->zig_target->arch != ZigLLVM_x86)
+                allowed_platforms = "x86";
+            break;
+        case CallingConventionVectorcall:
+            if (g->zig_target->arch != ZigLLVM_x86
+                && !(target_is_arm(g->zig_target) && target_arch_pointer_bit_width(g->zig_target->arch) == 64))
+            {
+                allowed_platforms = "x86 and AArch64";
+            }
+            break;
+        case CallingConventionAPCS:
+        case CallingConventionAAPCS:
+        case CallingConventionAAPCSVFP:
+            if (!target_is_arm(g->zig_target))
+                allowed_platforms = "ARM";
+    }
+    if (allowed_platforms != nullptr) {
+        add_node_error(g, source_node, buf_sprintf(
+            "callconv '%s' is only available on %s, not %s",
+            calling_convention_name(cc), allowed_platforms,
+            target_arch_name(g->zig_target->arch)));
+        ret = ErrorSemanticAnalyzeFail;
+    }
+    return ret;
+}
+
 static ZigType *analyze_fn_type(CodeGen *g, AstNode *proto_node, Scope *child_scope, ZigFn *fn_entry,
         CallingConvention cc)
 {
@@ -2002,6 +2065,9 @@ static ZigType *analyze_fn_type(CodeGen *g, AstNode *proto_node, Scope *child_sc
         }
         fn_entry->align_bytes = fn_type_id.alignment;
     }
+
+    if ((err = emit_error_unless_callconv_allowed_for_target(g, proto_node->data.fn_proto.callconv_expr, cc)))
+        return g->builtin_types.entry_invalid;
 
     if (fn_proto->return_anytype_token != nullptr) {
         if (!calling_convention_allows_zig_types(fn_type_id.cc)) {
@@ -3473,7 +3539,29 @@ static Error resolve_union_zero_bits(CodeGen *g, ZigType *union_type) {
         union_type->abi_size = SIZE_MAX;
         union_type->size_in_bits = SIZE_MAX;
     }
-    union_type->data.unionation.resolve_status = zero_bits ? ResolveStatusSizeKnown : ResolveStatusZeroBitsKnown;
+
+    if (zero_bits) {
+        // Don't forget to resolve the types for each union member even though
+        // the type is zero sized.
+        // XXX: Do it in a nicer way in stage2.
+        union_type->data.unionation.resolve_loop_flag_other = true;
+
+        for (uint32_t i = 0; i < field_count; i += 1) {
+            TypeUnionField *union_field = &union_type->data.unionation.fields[i];
+            ZigType *field_type = resolve_union_field_type(g, union_field);
+            if (field_type == nullptr) {
+                union_type->data.unionation.resolve_status = ResolveStatusInvalid;
+                return ErrorSemanticAnalyzeFail;
+            }
+        }
+
+        union_type->data.unionation.resolve_loop_flag_other = false;
+        union_type->data.unionation.resolve_status = ResolveStatusSizeKnown;
+
+        return ErrorNone;
+    }
+
+    union_type->data.unionation.resolve_status = ResolveStatusZeroBitsKnown;
 
     return ErrorNone;
 }
@@ -3566,9 +3654,13 @@ void add_var_export(CodeGen *g, ZigVar *var, const char *symbol_name, GlobalLink
 }
 
 void add_fn_export(CodeGen *g, ZigFn *fn_table_entry, const char *symbol_name, GlobalLinkageId linkage, CallingConvention cc) {
+    CallingConvention winapi_cc = g->zig_target->arch == ZigLLVM_x86
+        ? CallingConventionStdcall
+        : CallingConventionC;
+
     if (cc == CallingConventionC && strcmp(symbol_name, "main") == 0 && g->link_libc) {
         g->stage1.have_c_main = true;
-    } else if (cc == CallingConventionStdcall && g->zig_target->os == OsWindows) {
+    } else if (cc == winapi_cc && g->zig_target->os == OsWindows) {
         if (strcmp(symbol_name, "WinMain") == 0) {
             g->stage1.have_winmain = true;
         } else if (strcmp(symbol_name, "wWinMain") == 0) {
@@ -4375,7 +4467,7 @@ void resolve_top_level_decl(CodeGen *g, Tld *tld, AstNode *source_node, bool all
     }
 }
 
-Tld *find_container_decl(CodeGen *g, ScopeDecls *decls_scope, Buf *name) {
+void resolve_container_usingnamespace_decls(CodeGen *g, ScopeDecls *decls_scope) {
     // resolve all the using_namespace decls
     for (size_t i = 0; i < decls_scope->use_decls.length; i += 1) {
         TldUsingNamespace *tld_using_namespace = decls_scope->use_decls.at(i);
@@ -4385,6 +4477,10 @@ Tld *find_container_decl(CodeGen *g, ScopeDecls *decls_scope, Buf *name) {
         }
     }
 
+}
+
+Tld *find_container_decl(CodeGen *g, ScopeDecls *decls_scope, Buf *name) {
+    resolve_container_usingnamespace_decls(g, decls_scope);
     auto entry = decls_scope->decl_table.maybe_get(name);
     return (entry == nullptr) ? nullptr : entry->value;
 }
@@ -7079,8 +7175,6 @@ bool const_values_equal(CodeGen *g, ZigValue *a, ZigValue *b) {
             if (bigint_cmp(&union1->tag, &union2->tag) == CmpEQ) {
                 TypeUnionField *field = find_union_field_by_tag(a->type, &union1->tag);
                 assert(field != nullptr);
-                if (!type_has_bits(g, field->type_entry))
-                    return true;
                 assert(find_union_field_by_tag(a->type, &union2->tag) != nullptr);
                 return const_values_equal(g, union1->payload, union2->payload);
             }
