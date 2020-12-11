@@ -176,6 +176,12 @@ pub fn mainArgs(gpa: *Allocator, arena: *Allocator, args: []const []const u8) !v
         mem.eql(u8, cmd, "-cc1") or mem.eql(u8, cmd, "-cc1as"))
     {
         return punt_to_clang(arena, args);
+    } else if (mem.eql(u8, cmd, "ld.lld") or
+        mem.eql(u8, cmd, "ld64.lld") or
+        mem.eql(u8, cmd, "lld-link") or
+        mem.eql(u8, cmd, "wasm-ld"))
+    {
+        return punt_to_lld(arena, args);
     } else if (mem.eql(u8, cmd, "build")) {
         return cmdBuild(gpa, arena, cmd_args);
     } else if (mem.eql(u8, cmd, "fmt")) {
@@ -420,6 +426,15 @@ const Emit = union(enum) {
     }
 };
 
+fn optionalStringEnvVar(arena: *Allocator, name: []const u8) !?[]const u8 {
+    if (std.process.getEnvVarOwned(arena, name)) |value| {
+        return value;
+    } else |err| switch (err) {
+        error.EnvironmentVariableNotFound => return null,
+        else => |e| return e,
+    }
+}
+
 fn buildOutputType(
     gpa: *Allocator,
     arena: *Allocator,
@@ -499,17 +514,14 @@ fn buildOutputType(
     var link_eh_frame_hdr = false;
     var link_emit_relocs = false;
     var each_lib_rpath: ?bool = null;
-    var libc_paths_file: ?[]const u8 = std.process.getEnvVarOwned(arena, "ZIG_LIBC") catch |err| switch (err) {
-        error.EnvironmentVariableNotFound => null,
-        else => |e| return e,
-    };
+    var libc_paths_file: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_LIBC");
     var machine_code_model: std.builtin.CodeModel = .default;
     var runtime_args_start: ?usize = null;
     var test_filter: ?[]const u8 = null;
     var test_name_prefix: ?[]const u8 = null;
-    var override_local_cache_dir: ?[]const u8 = null;
-    var override_global_cache_dir: ?[]const u8 = null;
-    var override_lib_dir: ?[]const u8 = null;
+    var override_local_cache_dir: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_LOCAL_CACHE_DIR");
+    var override_global_cache_dir: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_GLOBAL_CACHE_DIR");
+    var override_lib_dir: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_LIB_DIR");
     var main_pkg_path: ?[]const u8 = null;
     var clang_preprocessor_mode: Compilation.ClangPreprocessorMode = .no;
     var subsystem: ?std.Target.SubSystem = null;
@@ -688,11 +700,15 @@ fn buildOutputType(
                     } else if (mem.eql(u8, arg, "--stack")) {
                         if (i + 1 >= args.len) fatal("expected parameter after {}", .{arg});
                         i += 1;
-                        stack_size_override = parseAnyBaseInt(args[i]);
+                        stack_size_override = std.fmt.parseUnsigned(u64, args[i], 0) catch |err| {
+                            fatal("unable to parse '{}': {}", .{ arg, @errorName(err) });
+                        };
                     } else if (mem.eql(u8, arg, "--image-base")) {
                         if (i + 1 >= args.len) fatal("expected parameter after {}", .{arg});
                         i += 1;
-                        image_base_override = parseAnyBaseInt(args[i]);
+                        image_base_override = std.fmt.parseUnsigned(u64, args[i], 0) catch |err| {
+                            fatal("unable to parse '{}': {}", .{ arg, @errorName(err) });
+                        };
                     } else if (mem.eql(u8, arg, "--name")) {
                         if (i + 1 >= args.len) fatal("expected parameter after {}", .{arg});
                         i += 1;
@@ -1225,7 +1241,7 @@ fn buildOutputType(
                     if (i >= linker_args.items.len) {
                         fatal("expected linker arg after '{}'", .{arg});
                     }
-                    version.major = std.fmt.parseInt(u32, linker_args.items[i], 10) catch |err| {
+                    version.major = std.fmt.parseUnsigned(u32, linker_args.items[i], 10) catch |err| {
                         fatal("unable to parse '{}': {}", .{ arg, @errorName(err) });
                     };
                     have_version = true;
@@ -1234,7 +1250,7 @@ fn buildOutputType(
                     if (i >= linker_args.items.len) {
                         fatal("expected linker arg after '{}'", .{arg});
                     }
-                    version.minor = std.fmt.parseInt(u32, linker_args.items[i], 10) catch |err| {
+                    version.minor = std.fmt.parseUnsigned(u32, linker_args.items[i], 10) catch |err| {
                         fatal("unable to parse '{}': {}", .{ arg, @errorName(err) });
                     };
                     have_version = true;
@@ -1243,13 +1259,17 @@ fn buildOutputType(
                     if (i >= linker_args.items.len) {
                         fatal("expected linker arg after '{}'", .{arg});
                     }
-                    stack_size_override = parseAnyBaseInt(linker_args.items[i]);
+                    stack_size_override = std.fmt.parseUnsigned(u64, linker_args.items[i], 0) catch |err| {
+                        fatal("unable to parse '{}': {}", .{ arg, @errorName(err) });
+                    };
                 } else if (mem.eql(u8, arg, "--image-base")) {
                     i += 1;
                     if (i >= linker_args.items.len) {
                         fatal("expected linker arg after '{}'", .{arg});
                     }
-                    image_base_override = parseAnyBaseInt(linker_args.items[i]);
+                    image_base_override = std.fmt.parseUnsigned(u64, linker_args.items[i], 0) catch |err| {
+                        fatal("unable to parse '{}': {}", .{ arg, @errorName(err) });
+                    };
                 } else {
                     warn("unsupported linker arg: {}", .{arg});
                 }
@@ -1320,10 +1340,10 @@ fn buildOutputType(
         } else if (root_src_file) |file| {
             const basename = fs.path.basename(file);
             break :blk mem.split(basename, ".").next().?;
-        } else if (c_source_files.items.len == 1) {
+        } else if (c_source_files.items.len >= 1) {
             const basename = fs.path.basename(c_source_files.items[0].src_path);
             break :blk mem.split(basename, ".").next().?;
-        } else if (link_objects.items.len == 1) {
+        } else if (link_objects.items.len >= 1) {
             const basename = fs.path.basename(link_objects.items[0]);
             break :blk mem.split(basename, ".").next().?;
         } else if (emit_bin == .yes) {
@@ -1636,21 +1656,18 @@ fn buildOutputType(
         if (arg_mode == .run) {
             break :l global_cache_directory;
         }
-        const cache_dir_path = blk: {
-            if (root_pkg) |pkg| {
-                if (pkg.root_src_directory.path) |p| {
-                    break :blk try fs.path.join(arena, &[_][]const u8{ p, "zig-cache" });
-                }
-            }
-            break :blk "zig-cache";
-        };
-        const cache_parent_dir = if (root_pkg) |pkg| pkg.root_src_directory.handle else fs.cwd();
-        const dir = try cache_parent_dir.makeOpenPath("zig-cache", .{});
-        cleanup_local_cache_dir = dir;
-        break :l .{
-            .handle = dir,
-            .path = cache_dir_path,
-        };
+        if (root_pkg) |pkg| {
+            const cache_dir_path = try pkg.root_src_directory.join(arena, &[_][]const u8{"zig-cache"});
+            const dir = try pkg.root_src_directory.handle.makeOpenPath("zig-cache", .{});
+            cleanup_local_cache_dir = dir;
+            break :l .{
+                .handle = dir,
+                .path = cache_dir_path,
+            };
+        }
+        // Otherwise we really don't have a reasonable place to put the local cache directory,
+        // so we utilize the global one.
+        break :l global_cache_directory;
     };
 
     if (build_options.have_llvm and emit_asm != .no) {
@@ -2220,7 +2237,7 @@ pub const usage_build =
 pub fn cmdBuild(gpa: *Allocator, arena: *Allocator, args: []const []const u8) !void {
     // We want to release all the locks before executing the child process, so we make a nice
     // big block here to ensure the cleanup gets run when we extract out our argv.
-    const lock_and_argv = lock_and_argv: {
+    const child_argv = argv: {
         const self_exe_path = try fs.selfExePathAlloc(arena);
 
         var build_file: ?[]const u8 = null;
@@ -2238,6 +2255,9 @@ pub fn cmdBuild(gpa: *Allocator, arena: *Allocator, args: []const []const u8) !v
         _ = try child_argv.addOne();
 
         const argv_index_cache_dir = child_argv.items.len;
+        _ = try child_argv.addOne();
+
+        const argv_index_global_cache_dir = child_argv.items.len;
         _ = try child_argv.addOne();
 
         {
@@ -2260,13 +2280,11 @@ pub fn cmdBuild(gpa: *Allocator, arena: *Allocator, args: []const []const u8) !v
                         if (i + 1 >= args.len) fatal("expected argument after '{}'", .{arg});
                         i += 1;
                         override_local_cache_dir = args[i];
-                        try child_argv.appendSlice(&[_][]const u8{ arg, args[i] });
                         continue;
                     } else if (mem.eql(u8, arg, "--global-cache-dir")) {
                         if (i + 1 >= args.len) fatal("expected argument after '{}'", .{arg});
                         i += 1;
                         override_global_cache_dir = args[i];
-                        try child_argv.appendSlice(&[_][]const u8{ arg, args[i] });
                         continue;
                     }
                 }
@@ -2351,6 +2369,8 @@ pub fn cmdBuild(gpa: *Allocator, arena: *Allocator, args: []const []const u8) !v
         };
         defer global_cache_directory.handle.close();
 
+        child_argv.items[argv_index_global_cache_dir] = global_cache_directory.path orelse cwd_path;
+
         var local_cache_directory: Compilation.Directory = l: {
             if (override_local_cache_dir) |local_cache_dir_path| {
                 break :l .{
@@ -2416,15 +2436,8 @@ pub fn cmdBuild(gpa: *Allocator, arena: *Allocator, args: []const []const u8) !v
             &[_][]const u8{exe_basename},
         );
 
-        break :lock_and_argv .{
-            .child_argv = child_argv.items,
-            .lock = comp.bin_file.toOwnedLock(),
-        };
+        break :argv child_argv.items;
     };
-    const child_argv = lock_and_argv.child_argv;
-    var lock = lock_and_argv.lock;
-    defer lock.release();
-
     const child = try std.ChildProcess.init(child_argv, gpa);
     defer child.deinit();
 
@@ -2635,6 +2648,9 @@ fn fmtPathDir(
     var dir_it = dir.iterate();
     while (try dir_it.next()) |entry| {
         const is_dir = entry.kind == .Directory;
+
+        if (is_dir and std.mem.eql(u8, entry.name, "zig-cache")) continue;
+
         if (is_dir or mem.endsWith(u8, entry.name, ".zig")) {
             const full_path = try fs.path.join(fmt.gpa, &[_][]const u8{ file_path, entry.name });
             defer fmt.gpa.free(full_path);
@@ -2802,6 +2818,39 @@ fn punt_to_clang(arena: *Allocator, args: []const []const u8) error{OutOfMemory}
     }
     argv[args.len] = null;
     const exit_code = ZigClang_main(@intCast(c_int, args.len), argv[0..args.len :null].ptr);
+    process.exit(@bitCast(u8, @truncate(i8, exit_code)));
+}
+
+/// The first argument determines which backend is invoked. The options are:
+/// * `ld.lld` - ELF
+/// * `ld64.lld` - Mach-O
+/// * `lld-link` - COFF
+/// * `wasm-ld` - WebAssembly
+/// TODO https://github.com/ziglang/zig/issues/3257
+pub fn punt_to_lld(arena: *Allocator, args: []const []const u8) error{OutOfMemory} {
+    if (!build_options.have_llvm)
+        fatal("`zig {s}` unavailable: compiler built without LLVM extensions", .{args[0]});
+    // Convert the args to the format LLD expects.
+    // We subtract 1 to shave off the zig binary from args[0].
+    const argv = try arena.allocSentinel(?[*:0]const u8, args.len - 1, null);
+    for (args[1..]) |arg, i| {
+        argv[i] = try arena.dupeZ(u8, arg); // TODO If there was an argsAllocZ we could avoid this allocation.
+    }
+    const exit_code = rc: {
+        const llvm = @import("llvm.zig");
+        const argc = @intCast(c_int, argv.len);
+        if (mem.eql(u8, args[1], "ld.lld")) {
+            break :rc llvm.LinkELF(argc, argv.ptr, true);
+        } else if (mem.eql(u8, args[1], "ld64.lld")) {
+            break :rc llvm.LinkMachO(argc, argv.ptr, true);
+        } else if (mem.eql(u8, args[1], "lld-link")) {
+            break :rc llvm.LinkCOFF(argc, argv.ptr, true);
+        } else if (mem.eql(u8, args[1], "wasm-ld")) {
+            break :rc llvm.LinkWasm(argc, argv.ptr, true);
+        } else {
+            unreachable;
+        }
+    };
     process.exit(@bitCast(u8, @truncate(i8, exit_code)));
 }
 
@@ -3187,19 +3236,4 @@ pub fn cleanExit() void {
     } else {
         process.exit(0);
     }
-}
-
-fn parseAnyBaseInt(prefixed_bytes: []const u8) u64 {
-    const base: u8 = if (mem.startsWith(u8, prefixed_bytes, "0x"))
-        16
-    else if (mem.startsWith(u8, prefixed_bytes, "0o"))
-        8
-    else if (mem.startsWith(u8, prefixed_bytes, "0b"))
-        2
-    else
-        @as(u8, 10);
-    const bytes = if (base == 10) prefixed_bytes else prefixed_bytes[2..];
-    return std.fmt.parseInt(u64, bytes, base) catch |err| {
-        fatal("unable to parse '{}': {}", .{ prefixed_bytes, @errorName(err) });
-    };
 }

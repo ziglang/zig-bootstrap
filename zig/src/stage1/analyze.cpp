@@ -8,7 +8,6 @@
 #include "analyze.hpp"
 #include "ast_render.hpp"
 #include "codegen.hpp"
-#include "config.h"
 #include "error.hpp"
 #include "ir.hpp"
 #include "ir_print.hpp"
@@ -1881,7 +1880,7 @@ ZigType *get_auto_err_set_type(CodeGen *g, ZigFn *fn_entry) {
 }
 
 // Sync this with get_llvm_cc in codegen.cpp
-static Error emit_error_unless_callconv_allowed_for_target(CodeGen *g, AstNode *source_node, CallingConvention cc) {
+Error emit_error_unless_callconv_allowed_for_target(CodeGen *g, AstNode *source_node, CallingConvention cc) {
     Error ret = ErrorNone;
     const char *allowed_platforms = nullptr;
     switch (cc) {
@@ -2066,8 +2065,10 @@ static ZigType *analyze_fn_type(CodeGen *g, AstNode *proto_node, Scope *child_sc
         fn_entry->align_bytes = fn_type_id.alignment;
     }
 
-    if ((err = emit_error_unless_callconv_allowed_for_target(g, proto_node->data.fn_proto.callconv_expr, cc)))
-        return g->builtin_types.entry_invalid;
+    if (proto_node->data.fn_proto.callconv_expr != nullptr) {
+        if ((err = emit_error_unless_callconv_allowed_for_target(g, proto_node->data.fn_proto.callconv_expr, cc)))
+            return g->builtin_types.entry_invalid;
+    }
 
     if (fn_proto->return_anytype_token != nullptr) {
         if (!calling_convention_allows_zig_types(fn_type_id.cc)) {
@@ -3935,12 +3936,6 @@ void update_compile_var(CodeGen *g, Buf *name, ZigValue *value) {
 
 void scan_decls(CodeGen *g, ScopeDecls *decls_scope, AstNode *node) {
     switch (node->type) {
-        case NodeTypeContainerDecl:
-            for (size_t i = 0; i < node->data.container_decl.decls.length; i += 1) {
-                AstNode *child = node->data.container_decl.decls.at(i);
-                scan_decls(g, decls_scope, child);
-            }
-            break;
         case NodeTypeFnDef:
             scan_decls(g, decls_scope, node->data.fn_def.fn_proto);
             break;
@@ -3985,6 +3980,7 @@ void scan_decls(CodeGen *g, ScopeDecls *decls_scope, AstNode *node) {
         case NodeTypeCompTime:
             preview_comptime_decl(g, node, decls_scope);
             break;
+        case NodeTypeContainerDecl:
         case NodeTypeNoSuspend:
         case NodeTypeParamDecl:
         case NodeTypeReturnExpr:
@@ -6113,7 +6109,7 @@ ZigValue *get_the_one_possible_value(CodeGen *g, ZigType *type_entry) {
         TypeUnionField *only_field = &union_type->data.unionation.fields[0];
         ZigType *field_type = resolve_union_field_type(g, only_field);
         assert(field_type);
-        bigint_init_unsigned(&result->data.x_union.tag, 0);
+        bigint_init_bigint(&result->data.x_union.tag, &only_field->enum_field->value);
         result->data.x_union.payload = g->pass1_arena->create<ZigValue>();
         copy_const_val(g, result->data.x_union.payload,
                 get_the_one_possible_value(g, field_type));
@@ -6122,6 +6118,11 @@ ZigValue *get_the_one_possible_value(CodeGen *g, ZigType *type_entry) {
         result->data.x_ptr.mut = ConstPtrMutComptimeConst;
         result->data.x_ptr.special = ConstPtrSpecialRef;
         result->data.x_ptr.data.ref.pointee = get_the_one_possible_value(g, result->type->data.pointer.child_type);
+    } else if (result->type->id == ZigTypeIdEnum) {
+        ZigType *enum_type = result->type;
+        assert(enum_type->data.enumeration.src_field_count == 1);
+        TypeEnumField *only_field = &result->type->data.enumeration.fields[0];
+        bigint_init_bigint(&result->data.x_enum_tag, &only_field->value);
     }
     g->one_possible_values.put(type_entry, result);
     return result;

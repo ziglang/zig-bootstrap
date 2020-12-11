@@ -301,7 +301,10 @@ pub fn flushModule(self: *MachO, comp: *Compilation) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    switch (self.base.options.output_mode) {
+    const output_mode = self.base.options.output_mode;
+    const target = self.base.options.target;
+
+    switch (output_mode) {
         .Exe => {
             if (self.entry_addr) |addr| {
                 // Update LC_MAIN with entry offset.
@@ -312,12 +315,15 @@ pub fn flushModule(self: *MachO, comp: *Compilation) !void {
             try self.writeExportTrie();
             try self.writeSymbolTable();
             try self.writeStringTable();
-            // Preallocate space for the code signature.
-            // We need to do this at this stage so that we have the load commands with proper values
-            // written out to the file.
-            // The most important here is to have the correct vm and filesize of the __LINKEDIT segment
-            // where the code signature goes into.
-            try self.writeCodeSignaturePadding();
+
+            if (target.cpu.arch == .aarch64) {
+                // Preallocate space for the code signature.
+                // We need to do this at this stage so that we have the load commands with proper values
+                // written out to the file.
+                // The most important here is to have the correct vm and filesize of the __LINKEDIT segment
+                // where the code signature goes into.
+                try self.writeCodeSignaturePadding();
+            }
         },
         .Obj => {},
         .Lib => return error.TODOImplementWritingLibFiles,
@@ -339,9 +345,11 @@ pub fn flushModule(self: *MachO, comp: *Compilation) !void {
 
     assert(!self.cmd_table_dirty);
 
-    switch (self.base.options.output_mode) {
-        .Exe, .Lib => try self.writeCodeSignature(), // code signing always comes last
-        else => {},
+    if (target.cpu.arch == .aarch64) {
+        switch (output_mode) {
+            .Exe, .Lib => try self.writeCodeSignature(), // code signing always comes last
+            else => {},
+        }
     }
 }
 
@@ -489,12 +497,10 @@ fn linkWithLLD(self: *MachO, comp: *Compilation) !void {
         if (self.base.options.system_linker_hack) {
             try argv.append("ld");
         } else {
-            // The first argument is ignored as LLD is called as a library, set
-            // it anyway to the correct LLD driver name for this target so that
-            // it's correctly printed when `verbose_link` is true. This is
-            // needed for some tools such as CMake when Zig is used as C
-            // compiler.
-            try argv.append("ld64");
+            // We will invoke ourselves as a child process to gain access to LLD.
+            // This is necessary because LLD does not behave properly as a library -
+            // it calls exit() and does not reset all global data between invocations.
+            try argv.appendSlice(&[_][]const u8{ comp.self_exe_path.?, "ld64.lld" });
 
             try argv.append("-error-limit");
             try argv.append("0");
@@ -660,7 +666,9 @@ fn linkWithLLD(self: *MachO, comp: *Compilation) !void {
         }
 
         if (self.base.options.verbose_link) {
-            Compilation.dump_argv(argv.items);
+            // Potentially skip over our own name so that the LLD linker name is the first argv item.
+            const adjusted_argv = if (self.base.options.system_linker_hack) argv.items else argv.items[1..];
+            Compilation.dump_argv(adjusted_argv);
         }
 
         // TODO https://github.com/ziglang/zig/issues/6971
@@ -673,95 +681,115 @@ fn linkWithLLD(self: *MachO, comp: *Compilation) !void {
                 self.base.allocator.free(result.stderr);
             }
             if (result.stdout.len != 0) {
-                std.log.warn("unexpected LD stdout: {}", .{result.stdout});
+                log.warn("unexpected LD stdout: {}", .{result.stdout});
             }
             if (result.stderr.len != 0) {
-                std.log.warn("unexpected LD stderr: {}", .{result.stderr});
+                log.warn("unexpected LD stderr: {}", .{result.stderr});
             }
             if (result.term != .Exited or result.term.Exited != 0) {
                 // TODO parse this output and surface with the Compilation API rather than
                 // directly outputting to stderr here.
-                std.log.err("{}", .{result.stderr});
+                log.err("{}", .{result.stderr});
                 return error.LDReportedFailure;
             }
         } else {
-            const new_argv = try arena.allocSentinel(?[*:0]const u8, argv.items.len, null);
-            for (argv.items) |arg, i| {
-                new_argv[i] = try arena.dupeZ(u8, arg);
-            }
+            // Sadly, we must run LLD as a child process because it does not behave
+            // properly as a library.
+            const child = try std.ChildProcess.init(argv.items, arena);
+            defer child.deinit();
 
-            var stderr_context: LLDContext = .{
-                .macho = self,
-                .data = std.ArrayList(u8).init(self.base.allocator),
-            };
-            defer stderr_context.data.deinit();
-            var stdout_context: LLDContext = .{
-                .macho = self,
-                .data = std.ArrayList(u8).init(self.base.allocator),
-            };
-            defer stdout_context.data.deinit();
-            const llvm = @import("../llvm.zig");
-            const ok = llvm.Link(
-                .MachO,
-                new_argv.ptr,
-                new_argv.len,
-                append_diagnostic,
-                @ptrToInt(&stdout_context),
-                @ptrToInt(&stderr_context),
-            );
-            if (stderr_context.oom or stdout_context.oom) return error.OutOfMemory;
-            if (stdout_context.data.items.len != 0) {
-                std.log.warn("unexpected LLD stdout: {}", .{stdout_context.data.items});
-            }
-            if (!ok) {
-                // TODO parse this output and surface with the Compilation API rather than
-                // directly outputting to stderr here.
-                std.log.err("{}", .{stderr_context.data.items});
-                return error.LLDReportedFailure;
-            }
-            if (stderr_context.data.items.len != 0) {
-                std.log.warn("unexpected LLD stderr: {}", .{stderr_context.data.items});
+            if (comp.clang_passthrough_mode) {
+                child.stdin_behavior = .Inherit;
+                child.stdout_behavior = .Inherit;
+                child.stderr_behavior = .Inherit;
+
+                const term = child.spawnAndWait() catch |err| {
+                    log.err("unable to spawn {s}: {s}", .{ argv.items[0], @errorName(err) });
+                    return error.UnableToSpawnSelf;
+                };
+                switch (term) {
+                    .Exited => |code| {
+                        if (code != 0) {
+                            // TODO https://github.com/ziglang/zig/issues/6342
+                            std.process.exit(1);
+                        }
+                    },
+                    else => std.process.abort(),
+                }
+            } else {
+                child.stdin_behavior = .Ignore;
+                child.stdout_behavior = .Ignore;
+                child.stderr_behavior = .Pipe;
+
+                try child.spawn();
+
+                const stderr = try child.stderr.?.reader().readAllAlloc(arena, 10 * 1024 * 1024);
+
+                const term = child.wait() catch |err| {
+                    log.err("unable to spawn {s}: {s}", .{ argv.items[0], @errorName(err) });
+                    return error.UnableToSpawnSelf;
+                };
+
+                switch (term) {
+                    .Exited => |code| {
+                        if (code != 0) {
+                            // TODO parse this output and surface with the Compilation API rather than
+                            // directly outputting to stderr here.
+                            std.debug.print("{s}", .{stderr});
+                            return error.LLDReportedFailure;
+                        }
+                    },
+                    else => {
+                        log.err("{s} terminated with stderr:\n{s}", .{ argv.items[0], stderr });
+                        return error.LLDCrashed;
+                    },
+                }
+
+                if (stderr.len != 0) {
+                    log.warn("unexpected LLD stderr:\n{s}", .{stderr});
+                }
             }
 
             // At this stage, LLD has done its job. It is time to patch the resultant
             // binaries up!
-            const out_file = try directory.handle.openFile(self.base.options.emit.?.sub_path, .{ .write = true });
-            try self.parseFromFile(out_file);
-            if (self.code_signature_cmd_index == null) {
-                const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
-                const text_section = text_segment.sections.items[self.text_section_index.?];
-                const after_last_cmd_offset = self.header.?.sizeofcmds + @sizeOf(macho.mach_header_64);
-                const needed_size = @sizeOf(macho.linkedit_data_command);
-                if (needed_size + after_last_cmd_offset > text_section.offset) {
-                    // TODO We are in the position to be able to increase the padding by moving all sections
-                    // by the required offset, but this requires a little bit more thinking and bookkeeping.
-                    // For now, return an error informing the user of the problem.
-                    std.log.err("Not enough padding between load commands and start of __text section:\n", .{});
-                    std.log.err("Offset after last load command: 0x{x}\n", .{after_last_cmd_offset});
-                    std.log.err("Beginning of __text section: 0x{x}\n", .{text_section.offset});
-                    std.log.err("Needed size: 0x{x}\n", .{needed_size});
-                    return error.NotEnoughPadding;
+            // This is currently needed only for aarch64 targets.
+            if (target.cpu.arch == .aarch64) {
+                const out_file = try directory.handle.openFile(self.base.options.emit.?.sub_path, .{ .write = true });
+                try self.parseFromFile(out_file);
+                if (self.code_signature_cmd_index == null) {
+                    const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+                    const text_section = text_segment.sections.items[self.text_section_index.?];
+                    const after_last_cmd_offset = self.header.?.sizeofcmds + @sizeOf(macho.mach_header_64);
+                    const needed_size = @sizeOf(macho.linkedit_data_command) * alloc_num / alloc_den;
+
+                    if (needed_size + after_last_cmd_offset > text_section.offset) {
+                        std.log.err("Unable to extend padding between the end of load commands and start of __text section.", .{});
+                        std.log.err("Re-run the linker with '-headerpad 0x{x}' option if available, or", .{needed_size});
+                        std.log.err("fall back to the system linker by exporting 'ZIG_SYSTEM_LINKER_HACK=1'.", .{});
+                        return error.NotEnoughPadding;
+                    }
+
+                    const linkedit_segment = self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
+                    // TODO This is clunky.
+                    self.linkedit_segment_next_offset = @intCast(u32, mem.alignForwardGeneric(u64, linkedit_segment.inner.fileoff + linkedit_segment.inner.filesize, @sizeOf(u64)));
+                    // Add code signature load command
+                    self.code_signature_cmd_index = @intCast(u16, self.load_commands.items.len);
+                    try self.load_commands.append(self.base.allocator, .{
+                        .LinkeditData = .{
+                            .cmd = macho.LC_CODE_SIGNATURE,
+                            .cmdsize = @sizeOf(macho.linkedit_data_command),
+                            .dataoff = 0,
+                            .datasize = 0,
+                        },
+                    });
+                    // Pad out space for code signature
+                    try self.writeCodeSignaturePadding();
+                    // Write updated load commands and the header
+                    try self.writeLoadCommands();
+                    try self.writeHeader();
+                    // Generate adhoc code signature
+                    try self.writeCodeSignature();
                 }
-                const linkedit_segment = self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
-                // TODO This is clunky.
-                self.linkedit_segment_next_offset = @intCast(u32, mem.alignForwardGeneric(u64, linkedit_segment.inner.fileoff + linkedit_segment.inner.filesize, @sizeOf(u64)));
-                // Add code signature load command
-                self.code_signature_cmd_index = @intCast(u16, self.load_commands.items.len);
-                try self.load_commands.append(self.base.allocator, .{
-                    .LinkeditData = .{
-                        .cmd = macho.LC_CODE_SIGNATURE,
-                        .cmdsize = @sizeOf(macho.linkedit_data_command),
-                        .dataoff = 0,
-                        .datasize = 0,
-                    },
-                });
-                // Pad out space for code signature
-                try self.writeCodeSignaturePadding();
-                // Write updated load commands and the header
-                try self.writeLoadCommands();
-                try self.writeHeader();
-                // Generate adhoc code signature
-                try self.writeCodeSignature();
             }
         }
     }
@@ -770,30 +798,16 @@ fn linkWithLLD(self: *MachO, comp: *Compilation) !void {
         // Update the file with the digest. If it fails we can continue; it only
         // means that the next invocation will have an unnecessary cache miss.
         Cache.writeSmallFile(directory.handle, id_symlink_basename, &digest) catch |err| {
-            std.log.warn("failed to save linking hash digest file: {}", .{@errorName(err)});
+            log.warn("failed to save linking hash digest file: {}", .{@errorName(err)});
         };
         // Again failure here only means an unnecessary cache miss.
         man.writeManifest() catch |err| {
-            std.log.warn("failed to write cache manifest when linking: {}", .{@errorName(err)});
+            log.warn("failed to write cache manifest when linking: {}", .{@errorName(err)});
         };
         // We hang on to this lock so that the output file path can be used without
         // other processes clobbering it.
         self.base.lock = man.toOwnedLock();
     }
-}
-
-const LLDContext = struct {
-    data: std.ArrayList(u8),
-    macho: *MachO,
-    oom: bool = false,
-};
-
-fn append_diagnostic(context: usize, ptr: [*]const u8, len: usize) callconv(.C) void {
-    const lld_context = @intToPtr(*LLDContext, context);
-    const msg = ptr[0..len];
-    lld_context.data.appendSlice(msg) catch |err| switch (err) {
-        error.OutOfMemory => lld_context.oom = true,
-    };
 }
 
 fn darwinArchString(arch: std.Target.Cpu.Arch) []const u8 {
@@ -1791,38 +1805,40 @@ fn writeCodeSignature(self: *MachO) !void {
 fn writeExportTrie(self: *MachO) !void {
     if (self.global_symbols.items.len == 0) return;
 
-    var trie: Trie = .{};
-    defer trie.deinit(self.base.allocator);
+    var trie = Trie.init(self.base.allocator);
+    defer trie.deinit();
 
     const text_segment = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
     for (self.global_symbols.items) |symbol| {
         // TODO figure out if we should put all global symbols into the export trie
         const name = self.getString(symbol.n_strx);
         assert(symbol.n_value >= text_segment.inner.vmaddr);
-        try trie.put(self.base.allocator, .{
+        try trie.put(.{
             .name = name,
             .vmaddr_offset = symbol.n_value - text_segment.inner.vmaddr,
-            .export_flags = 0, // TODO workout creation of export flags
+            .export_flags = macho.EXPORT_SYMBOL_FLAGS_KIND_REGULAR,
         });
     }
 
-    var buffer: std.ArrayListUnmanaged(u8) = .{};
-    defer buffer.deinit(self.base.allocator);
-
-    try trie.writeULEB128Mem(self.base.allocator, &buffer);
+    try trie.finalize();
+    var buffer = try self.base.allocator.alloc(u8, trie.size);
+    defer self.base.allocator.free(buffer);
+    var stream = std.io.fixedBufferStream(buffer);
+    const nwritten = try trie.write(stream.writer());
+    assert(nwritten == trie.size);
 
     const dyld_info = &self.load_commands.items[self.dyld_info_cmd_index.?].DyldInfoOnly;
-    const export_size = @intCast(u32, mem.alignForward(buffer.items.len, @sizeOf(u64)));
+    const export_size = @intCast(u32, mem.alignForward(buffer.len, @sizeOf(u64)));
     dyld_info.export_off = self.linkedit_segment_next_offset.?;
     dyld_info.export_size = export_size;
 
     log.debug("writing export trie from 0x{x} to 0x{x}\n", .{ dyld_info.export_off, dyld_info.export_off + export_size });
 
-    if (export_size > buffer.items.len) {
+    if (export_size > buffer.len) {
         // Pad out to align(8).
         try self.base.file.?.pwriteAll(&[_]u8{0}, dyld_info.export_off + export_size);
     }
-    try self.base.file.?.pwriteAll(buffer.items, dyld_info.export_off);
+    try self.base.file.?.pwriteAll(buffer, dyld_info.export_off);
 
     self.linkedit_segment_next_offset = dyld_info.export_off + dyld_info.export_size;
     // Advance size of __LINKEDIT segment
@@ -1909,7 +1925,9 @@ fn parseFromFile(self: *MachO, file: fs.File) !void {
         switch (cmd.cmd()) {
             macho.LC_SEGMENT_64 => {
                 const x = cmd.Segment;
-                if (isSegmentOrSection(&x.inner.segname, "__LINKEDIT")) {
+                if (isSegmentOrSection(&x.inner.segname, "__PAGEZERO")) {
+                    self.pagezero_segment_cmd_index = i;
+                } else if (isSegmentOrSection(&x.inner.segname, "__LINKEDIT")) {
                     self.linkedit_segment_cmd_index = i;
                 } else if (isSegmentOrSection(&x.inner.segname, "__TEXT")) {
                     self.text_segment_cmd_index = i;
@@ -1918,16 +1936,48 @@ fn parseFromFile(self: *MachO, file: fs.File) !void {
                             self.text_section_index = @intCast(u16, j);
                         }
                     }
+                } else if (isSegmentOrSection(&x.inner.segname, "__DATA")) {
+                    self.data_segment_cmd_index = i;
                 }
+            },
+            macho.LC_DYLD_INFO_ONLY => {
+                self.dyld_info_cmd_index = i;
             },
             macho.LC_SYMTAB => {
                 self.symtab_cmd_index = i;
+            },
+            macho.LC_DYSYMTAB => {
+                self.dysymtab_cmd_index = i;
+            },
+            macho.LC_LOAD_DYLINKER => {
+                self.dylinker_cmd_index = i;
+            },
+            macho.LC_VERSION_MIN_MACOSX, macho.LC_VERSION_MIN_IPHONEOS, macho.LC_VERSION_MIN_WATCHOS, macho.LC_VERSION_MIN_TVOS => {
+                self.version_min_cmd_index = i;
+            },
+            macho.LC_SOURCE_VERSION => {
+                self.source_version_cmd_index = i;
+            },
+            macho.LC_MAIN => {
+                self.main_cmd_index = i;
+            },
+            macho.LC_LOAD_DYLIB => {
+                self.libsystem_cmd_index = i; // TODO This is incorrect, but we'll fixup later.
+            },
+            macho.LC_FUNCTION_STARTS => {
+                self.function_starts_cmd_index = i;
+            },
+            macho.LC_DATA_IN_CODE => {
+                self.data_in_code_cmd_index = i;
             },
             macho.LC_CODE_SIGNATURE => {
                 self.code_signature_cmd_index = i;
             },
             // TODO populate more MachO fields
-            else => {},
+            else => {
+                std.log.err("Unknown load command detected: 0x{x}.", .{cmd.cmd()});
+                return error.UnknownLoadCommand;
+            },
         }
         self.load_commands.appendAssumeCapacity(cmd);
     }

@@ -33,6 +33,7 @@ gpa: *Allocator,
 arena_state: std.heap.ArenaAllocator.State,
 bin_file: *link.File,
 c_object_table: std.AutoArrayHashMapUnmanaged(*CObject, void) = .{},
+c_object_cache_digest_set: std.AutoHashMapUnmanaged(Cache.BinDigest, void) = .{},
 stage1_lock: ?Cache.Lock = null,
 stage1_cache_manifest: *Cache.Manifest = undefined,
 
@@ -1152,6 +1153,7 @@ pub fn destroy(self: *Compilation) void {
         entry.key.destroy(gpa);
     }
     self.c_object_table.deinit(gpa);
+    self.c_object_cache_digest_set.deinit(gpa);
 
     for (self.failed_c_objects.items()) |entry| {
         entry.value.destroy(gpa);
@@ -1730,6 +1732,17 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_comp_progress_node: *
         }
     }
 
+    {
+        const gop = try comp.c_object_cache_digest_set.getOrPut(comp.gpa, man.hash.peekBin());
+        if (gop.found_existing) {
+            return comp.failCObj(
+                c_object,
+                "the same source file was already added to the same compilation with the same flags",
+                .{},
+            );
+        }
+    }
+
     var arena_allocator = std.heap.ArenaAllocator.init(comp.gpa);
     defer arena_allocator.deinit();
     const arena = &arena_allocator.allocator;
@@ -1804,7 +1817,7 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_comp_progress_node: *
                     if (comp.clang_preprocessor_mode == .stdout)
                         std.process.exit(0);
                 },
-                else => std.process.exit(1),
+                else => std.process.abort(),
             }
         } else {
             child.stdin_behavior = .Ignore;
@@ -2037,6 +2050,10 @@ pub fn addCCArgs(
 
             if (!comp.bin_file.options.strip) {
                 try argv.append("-g");
+                switch (comp.bin_file.options.object_format) {
+                    .coff, .pe => try argv.append("-gcodeview"),
+                    else => {},
+                }
             }
 
             if (comp.haveFramePointer()) {
@@ -3157,6 +3174,11 @@ pub fn build_crt_file(
 }
 
 pub fn stage1AddLinkLib(comp: *Compilation, lib_name: []const u8) !void {
+    // Avoid deadlocking on building import libs such as kernel32.lib
+    // This can happen when the user uses `build-exe foo.obj -lkernel32` and then
+    // when we create a sub-Compilation for zig libc, it also tries to build kernel32.lib.
+    if (comp.bin_file.options.is_compiler_rt_or_libc) return;
+
     // This happens when an `extern "foo"` function is referenced by the stage1 backend.
     // If we haven't seen this library yet and we're targeting Windows, we need to queue up
     // a work item to produce the DLL import library for this.

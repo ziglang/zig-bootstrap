@@ -184,8 +184,12 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
         const total_requested_bytes_init = if (config.enable_memory_limit) @as(usize, 0) else {};
         const requested_memory_limit_init = if (config.enable_memory_limit) @as(usize, math.maxInt(usize)) else {};
 
-        const mutex_init = if (config.MutexType) |T| T{} else
-          if (config.thread_safe) std.Mutex{} else std.mutex.Dummy{};
+        const mutex_init = if (config.MutexType) |T|
+            T{}
+        else if (config.thread_safe)
+            std.Mutex{}
+        else
+            std.mutex.Dummy{};
 
         const stack_n = config.stack_trace_frames;
         const one_trace_size = @sizeOf(usize) * stack_n;
@@ -528,7 +532,11 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
                         second_free_stack_trace,
                     });
                     if (new_size == 0) {
-                        // Recoverable.
+                        // Recoverable. Restore self.total_requested_bytes if needed, as we
+                        // don't return an error value so the errdefer above does not run.
+                        if (config.enable_memory_limit) {
+                            self.total_requested_bytes = prev_req_bytes;
+                        }
                         return @as(usize, 0);
                     }
                     @panic("Unrecoverable double free");
@@ -861,9 +869,9 @@ test "realloc large object to small object" {
 }
 
 test "overrideable mutexes" {
-    var gpa = GeneralPurposeAllocator(.{.MutexType = std.Mutex}){
+    var gpa = GeneralPurposeAllocator(.{ .MutexType = std.Mutex }){
         .backing_allocator = std.testing.allocator,
-        .mutex = std.Mutex{}
+        .mutex = std.Mutex{},
     };
     defer std.testing.expect(!gpa.deinit());
     const allocator = &gpa.allocator;
