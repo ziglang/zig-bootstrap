@@ -8,10 +8,10 @@ end with a fully operational Zig compiler for any target.
 This repository copies sources from upstream, with no patches, except to delete
 some unused files.
 
- * LLVM release/11.x branch
- * Clang release/11.x branch
- * LLD release/11.x branch
- * Zig 0.7.x branch
+ * LLVM release/11.x branch (abeec5d08)
+ * Clang release/11.x branch (abeec5d08)
+ * LLD release/11.x branch (abeec5d08)
+ * Zig 0.7.1
 
 For other versions, check the git tags of this repository.
 
