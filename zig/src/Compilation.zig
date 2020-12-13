@@ -227,32 +227,20 @@ pub const AllErrors = struct {
     arena: std.heap.ArenaAllocator.State,
     list: []const Message,
 
-    pub const Message = union(enum) {
-        src: struct {
-            src_path: []const u8,
-            line: usize,
-            column: usize,
-            byte_offset: usize,
-            msg: []const u8,
-        },
-        plain: struct {
-            msg: []const u8,
-        },
+    pub const Message = struct {
+        src_path: []const u8,
+        line: usize,
+        column: usize,
+        byte_offset: usize,
+        msg: []const u8,
 
         pub fn renderToStdErr(self: Message) void {
-            switch (self) {
-                .src => |src| {
-                    std.debug.print("{s}:{d}:{d}: error: {s}\n", .{
-                        src.src_path,
-                        src.line + 1,
-                        src.column + 1,
-                        src.msg,
-                    });
-                },
-                .plain => |plain| {
-                    std.debug.print("error: {s}\n", .{plain.msg});
-                },
-            }
+            std.debug.print("{}:{}:{}: error: {}\n", .{
+                self.src_path,
+                self.line + 1,
+                self.column + 1,
+                self.msg,
+            });
         }
     };
 
@@ -269,22 +257,12 @@ pub const AllErrors = struct {
     ) !void {
         const loc = std.zig.findLineColumn(source, simple_err_msg.byte_offset);
         try errors.append(.{
-            .src = .{
-                .src_path = try arena.allocator.dupe(u8, sub_file_path),
-                .msg = try arena.allocator.dupe(u8, simple_err_msg.msg),
-                .byte_offset = simple_err_msg.byte_offset,
-                .line = loc.line,
-                .column = loc.column,
-            },
+            .src_path = try arena.allocator.dupe(u8, sub_file_path),
+            .msg = try arena.allocator.dupe(u8, simple_err_msg.msg),
+            .byte_offset = simple_err_msg.byte_offset,
+            .line = loc.line,
+            .column = loc.column,
         });
-    }
-
-    fn addPlain(
-        arena: *std.heap.ArenaAllocator,
-        errors: *std.ArrayList(Message),
-        msg: []const u8,
-    ) !void {
-        try errors.append(.{ .plain = .{ .msg = msg } });
     }
 };
 
@@ -369,10 +347,6 @@ pub const InitOptions = struct {
     link_libc: bool = false,
     link_libcpp: bool = false,
     want_pic: ?bool = null,
-    /// This means that if the output mode is an executable it will be a
-    /// Position Independent Executable. If the output mode is not an
-    /// executable this field is ignored.
-    want_pie: ?bool = null,
     want_sanitize_c: ?bool = null,
     want_stack_check: ?bool = null,
     want_valgrind: ?bool = null,
@@ -385,6 +359,7 @@ pub const InitOptions = struct {
     single_threaded: bool = false,
     function_sections: bool = false,
     is_native_os: bool,
+    is_native_abi: bool,
     time_report: bool = false,
     stack_report: bool = false,
     link_eh_frame_hdr: bool = false,
@@ -600,7 +575,19 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
 
             break :dl false;
         };
-        const default_link_mode: std.builtin.LinkMode = if (must_dynamic_link) .Dynamic else .Static;
+        const default_link_mode: std.builtin.LinkMode = blk: {
+            if (must_dynamic_link) {
+                break :blk .Dynamic;
+            } else if (is_exe_or_dyn_lib and link_libc and
+                options.is_native_abi and options.target.abi.isMusl())
+            {
+                // If targeting the system's native ABI and the system's
+                // libc is musl, link dynamically by default.
+                break :blk .Dynamic;
+            } else {
+                break :blk .Static;
+            }
+        };
         const link_mode: std.builtin.LinkMode = if (options.link_mode) |lm| blk: {
             if (lm == .Static and must_dynamic_link) {
                 return error.UnableToStaticLink;
@@ -619,30 +606,17 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             options.libc_installation,
         );
 
-        const must_pie = target_util.requiresPIE(options.target);
-        const pie = if (options.want_pie) |explicit| pie: {
-            if (!explicit and must_pie) {
-                return error.TargetRequiresPIE;
-            }
-            break :pie explicit;
-        } else must_pie;
-
         const must_pic: bool = b: {
             if (target_util.requiresPIC(options.target, link_libc))
                 break :b true;
             break :b link_mode == .Dynamic;
         };
         const pic = if (options.want_pic) |explicit| pic: {
-            if (!explicit) {
-                if (must_pic) {
-                    return error.TargetRequiresPIC;
-                }
-                if (pie) {
-                    return error.PIERequiresPIC;
-                }
+            if (!explicit and must_pic) {
+                return error.TargetRequiresPIC;
             }
             break :pic explicit;
-        } else pie or must_pic;
+        } else must_pic;
 
         // Make a decision on whether to use Clang for translate-c and compiling C files.
         const use_clang = if (options.use_clang) |explicit| explicit else blk: {
@@ -725,7 +699,6 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
         cache.hash.add(options.target.abi);
         cache.hash.add(ofmt);
         cache.hash.add(pic);
-        cache.hash.add(pie);
         cache.hash.add(stack_check);
         cache.hash.add(link_mode);
         cache.hash.add(options.function_sections);
@@ -910,6 +883,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             .rpath_list = options.rpath_list,
             .strip = strip,
             .is_native_os = options.is_native_os,
+            .is_native_abi = options.is_native_abi,
             .function_sections = options.function_sections,
             .allow_shlib_undefined = options.linker_allow_shlib_undefined,
             .bind_global_refs_locally = options.linker_bind_global_refs_locally orelse false,
@@ -929,7 +903,6 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             .version = options.version,
             .libc_installation = libc_dirs.libc_installation,
             .pic = pic,
-            .pie = pie,
             .valgrind = valgrind,
             .stack_check = stack_check,
             .single_threaded = single_threaded,
@@ -1014,7 +987,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             try comp.addBuildingGLibCJobs();
         }
         if (comp.wantBuildMuslFromSource()) {
-            try comp.work_queue.ensureUnusedCapacity(6);
+            try comp.work_queue.ensureUnusedCapacity(5);
             if (target_util.libc_needs_crti_crtn(comp.getTarget())) {
                 comp.work_queue.writeAssumeCapacity(&[_]Job{
                     .{ .musl_crt_file = .crti_o },
@@ -1024,8 +997,10 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             comp.work_queue.writeAssumeCapacity(&[_]Job{
                 .{ .musl_crt_file = .crt1_o },
                 .{ .musl_crt_file = .scrt1_o },
-                .{ .musl_crt_file = .rcrt1_o },
-                .{ .musl_crt_file = .libc_a },
+                switch (comp.bin_file.options.link_mode) {
+                    .Static => .{ .musl_crt_file = .libc_a },
+                    .Dynamic => .{ .musl_crt_file = .libc_so },
+                },
             });
         }
         if (comp.wantBuildMinGWFromSource()) {
@@ -1193,15 +1168,11 @@ pub fn update(self: *Compilation) !void {
             // to force a refresh we unload now.
             if (module.root_scope.cast(Module.Scope.File)) |zig_file| {
                 zig_file.unload(module.gpa);
-                module.failed_root_src_file = null;
                 module.analyzeContainer(&zig_file.root_container) catch |err| switch (err) {
                     error.AnalysisFail => {
                         assert(self.totalErrorCount() != 0);
                     },
-                    error.OutOfMemory => return error.OutOfMemory,
-                    else => |e| {
-                        module.failed_root_src_file = e;
-                    },
+                    else => |e| return e,
                 };
             } else if (module.root_scope.cast(Module.Scope.ZIRModule)) |zir_module| {
                 zir_module.unload(module.gpa);
@@ -1279,8 +1250,7 @@ pub fn totalErrorCount(self: *Compilation) usize {
     if (self.bin_file.options.module) |module| {
         total += module.failed_decls.items().len +
             module.failed_exports.items().len +
-            module.failed_files.items().len +
-            @boolToInt(module.failed_root_src_file != null);
+            module.failed_files.items().len;
     }
 
     // The "no entry point found" error only counts if there are no other errors.
@@ -1322,22 +1292,21 @@ pub fn getAllErrorsAlloc(self: *Compilation) !AllErrors {
             const source = try decl.scope.getSource(module);
             try AllErrors.add(&arena, &errors, decl.scope.subFilePath(), source, err_msg.*);
         }
-        if (module.failed_root_src_file) |err| {
-            const file_path = try module.root_pkg.root_src_directory.join(&arena.allocator, &[_][]const u8{
-                module.root_pkg.root_src_path,
-            });
-            const msg = try std.fmt.allocPrint(&arena.allocator, "unable to read {s}: {s}", .{
-                file_path, @errorName(err),
-            });
-            try AllErrors.addPlain(&arena, &errors, msg);
-        }
     }
 
     if (errors.items.len == 0 and self.link_error_flags.no_entry_point_found) {
+        const global_err_src_path = blk: {
+            if (self.bin_file.options.module) |module| break :blk module.root_pkg.root_src_path;
+            if (self.c_source_files.len != 0) break :blk self.c_source_files[0].src_path;
+            if (self.bin_file.options.objects.len != 0) break :blk self.bin_file.options.objects[0];
+            break :blk "(no file)";
+        };
         try errors.append(.{
-            .plain = .{
-                .msg = try std.fmt.allocPrint(&arena.allocator, "no entry point found", .{}),
-            },
+            .src_path = global_err_src_path,
+            .line = 0,
+            .column = 0,
+            .byte_offset = 0,
+            .msg = try std.fmt.allocPrint(&arena.allocator, "no entry point found", .{}),
         });
     }
 
@@ -1762,7 +1731,7 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_comp_progress_node: *
     const o_basename_noext = if (direct_o)
         comp.bin_file.options.root_name
     else
-        mem.split(c_source_basename, ".").next().?;
+        c_source_basename[0 .. c_source_basename.len - std.fs.path.extension(c_source_basename).len];
     const o_basename = try std.fmt.allocPrint(arena, "{s}{s}", .{ o_basename_noext, comp.getTarget().oFileExt() });
 
     const digest = if (!comp.disable_c_depfile and try man.hit()) man.final() else blk: {
@@ -2344,7 +2313,9 @@ fn detectLibCIncludeDirs(
         return detectLibCFromLibCInstallation(arena, target, lci);
     }
 
-    if (target_util.canBuildLibC(target)) {
+    if (target_util.canBuildLibC(target)) outer: {
+        if (is_native_os and target.isDarwin()) break :outer; // If we're on Darwin, we want to use native since we only have headers.
+
         const generic_name = target_util.libCGenericName(target);
         // Some architectures are handled by the same set of headers.
         const arch_name = if (target.abi.isMusl()) target_util.archMuslName(target.cpu.arch) else @tagName(target.cpu.arch);
@@ -2642,7 +2613,6 @@ pub fn generateBuiltinZigSource(comp: *Compilation, allocator: *Allocator) ![]u8
         \\pub const have_error_return_tracing = {};
         \\pub const valgrind_support = {};
         \\pub const position_independent_code = {};
-        \\pub const position_independent_executable = {};
         \\pub const strip_debug_info = {};
         \\pub const code_model = CodeModel.{};
         \\
@@ -2654,7 +2624,6 @@ pub fn generateBuiltinZigSource(comp: *Compilation, allocator: *Allocator) ![]u8
         comp.bin_file.options.error_return_tracing,
         comp.bin_file.options.valgrind,
         comp.bin_file.options.pic,
-        comp.bin_file.options.pie,
         comp.bin_file.options.strip,
         @tagName(comp.bin_file.options.machine_code_model),
     });
@@ -2689,19 +2658,12 @@ pub fn updateSubCompilation(sub_compilation: *Compilation) !void {
 
     if (errors.list.len != 0) {
         for (errors.list) |full_err_msg| {
-            switch (full_err_msg) {
-                .src => |src| {
-                    log.err("{s}:{d}:{d}: {s}\n", .{
-                        src.src_path,
-                        src.line + 1,
-                        src.column + 1,
-                        src.msg,
-                    });
-                },
-                .plain => |plain| {
-                    log.err("{s}", .{plain.msg});
-                },
-            }
+            log.err("{}:{}:{}: {}\n", .{
+                full_err_msg.src_path,
+                full_err_msg.line + 1,
+                full_err_msg.column + 1,
+                full_err_msg.msg,
+            });
         }
         return error.BuildingLibCObjectFailed;
     }
@@ -2731,7 +2693,7 @@ fn buildOutputFromZig(
         },
         .root_src_path = src_basename,
     };
-    const root_name = mem.split(src_basename, ".").next().?;
+    const root_name = src_basename[0 .. src_basename.len - std.fs.path.extension(src_basename).len];
     const target = comp.getTarget();
     const fixed_output_mode = if (target.cpu.arch.isWasm()) .Obj else output_mode;
     const bin_basename = try std.zig.binNameAlloc(comp.gpa, .{
@@ -2771,10 +2733,10 @@ fn buildOutputFromZig(
         .want_stack_check = false,
         .want_valgrind = false,
         .want_pic = comp.bin_file.options.pic,
-        .want_pie = comp.bin_file.options.pie,
         .emit_h = null,
         .strip = comp.bin_file.options.strip,
         .is_native_os = comp.bin_file.options.is_native_os,
+        .is_native_abi = comp.bin_file.options.is_native_abi,
         .self_exe_path = comp.self_exe_path,
         .verbose_cc = comp.verbose_cc,
         .verbose_link = comp.bin_file.options.verbose_link,
@@ -2985,7 +2947,6 @@ fn updateStage1Module(comp: *Compilation, main_progress_node: *std.Progress.Node
         .subsystem = subsystem,
         .err_color = @enumToInt(comp.color),
         .pic = comp.bin_file.options.pic,
-        .pie = comp.bin_file.options.pie,
         .link_libc = comp.bin_file.options.link_libc,
         .link_libcpp = comp.bin_file.options.link_libcpp,
         .strip = comp.bin_file.options.strip,
@@ -3141,10 +3102,10 @@ pub fn build_crt_file(
         .want_stack_check = false,
         .want_valgrind = false,
         .want_pic = comp.bin_file.options.pic,
-        .want_pie = comp.bin_file.options.pie,
         .emit_h = null,
         .strip = comp.bin_file.options.strip,
         .is_native_os = comp.bin_file.options.is_native_os,
+        .is_native_abi = comp.bin_file.options.is_native_abi,
         .self_exe_path = comp.self_exe_path,
         .c_source_files = c_source_files,
         .verbose_cc = comp.verbose_cc,

@@ -71,8 +71,8 @@ pub const Options = struct {
     z_defs: bool,
     bind_global_refs_locally: bool,
     is_native_os: bool,
+    is_native_abi: bool,
     pic: bool,
-    pie: bool,
     valgrind: bool,
     stack_check: bool,
     single_threaded: bool,
@@ -238,38 +238,8 @@ pub const File = struct {
     }
 
     pub fn makeExecutable(base: *File) !void {
-        switch (base.options.output_mode) {
-            .Obj => return,
-            .Lib => switch (base.options.link_mode) {
-                .Static => return,
-                .Dynamic => {},
-            },
-            .Exe => {},
-        }
         switch (base.tag) {
-            .macho => if (base.file) |f| {
-                if (base.intermediary_basename != null) {
-                    // The file we have open is not the final file that we want to
-                    // make executable, so we don't have to close it.
-                    return;
-                }
-                if (comptime std.Target.current.isDarwin() and std.Target.current.cpu.arch == .aarch64) {
-                    if (base.options.target.cpu.arch != .aarch64) return; // If we're not targeting aarch64, nothing to do.
-                    // XNU starting with Big Sur running on arm64 is caching inodes of running binaries.
-                    // Any change to the binary will effectively invalidate the kernel's cache
-                    // resulting in a SIGKILL on each subsequent run. Since when doing incremental
-                    // linking we're modifying a binary in-place, this will end up with the kernel
-                    // killing it on every subsequent run. To circumvent it, we will copy the file
-                    // into a new inode, remove the original file, and rename the copy to match
-                    // the original file. This is super messy, but there doesn't seem any other
-                    // way to please the XNU.
-                    const emit = base.options.emit orelse return;
-                    try emit.directory.handle.copyFile(emit.sub_path, emit.directory.handle, emit.sub_path, .{});
-                }
-                f.close();
-                base.file = null;
-            },
-            .coff, .elf => if (base.file) |f| {
+            .coff, .elf, .macho => if (base.file) |f| {
                 if (base.intermediary_basename != null) {
                     // The file we have open is not the final file that we want to
                     // make executable, so we don't have to close it.
@@ -572,11 +542,11 @@ pub const File = struct {
 
         if (!base.options.disable_lld_caching) {
             Cache.writeSmallFile(directory.handle, id_symlink_basename, &digest) catch |err| {
-                log.warn("failed to save archive hash digest file: {}", .{@errorName(err)});
+                std.log.warn("failed to save archive hash digest file: {}", .{@errorName(err)});
             };
 
             man.writeManifest() catch |err| {
-                log.warn("failed to write cache manifest when archiving: {}", .{@errorName(err)});
+                std.log.warn("failed to write cache manifest when archiving: {}", .{@errorName(err)});
             };
 
             base.lock = man.toOwnedLock();

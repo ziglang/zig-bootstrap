@@ -9,7 +9,6 @@ const crypto = std.crypto;
 const debug = std.debug;
 const math = std.math;
 const mem = std.mem;
-const utils = std.crypto.utils;
 const Vector = std.meta.Vector;
 
 const Poly1305 = crypto.onetimeauth.Poly1305;
@@ -415,7 +414,7 @@ pub const XSalsa20Poly1305 = struct {
             acc |= computedTag[i] ^ tag[i];
         }
         if (acc != 0) {
-            utils.secureZero(u8, &computedTag);
+            mem.secureZero(u8, &computedTag);
             return error.AuthenticationFailed;
         }
         mem.copy(u8, m[0..mlen0], block0[32..][0..mlen0]);
@@ -533,7 +532,7 @@ pub const SealedBox = struct {
         const nonce = createNonce(ekp.public_key, public_key);
         mem.copy(u8, c[0..public_length], ekp.public_key[0..]);
         try Box.seal(c[Box.public_length..], m, nonce, public_key, ekp.secret_key);
-        utils.secureZero(u8, ekp.secret_key[0..]);
+        mem.secureZero(u8, ekp.secret_key[0..]);
     }
 
     /// Decrypt a message using a key pair.

@@ -26,9 +26,8 @@ pub fn addCases(ctx: *TestContext) !void {
         \\@9__anon_0 = str("entry")
         \\@unnamed$4 = str("entry")
         \\@unnamed$5 = export(@unnamed$4, "entry")
-        \\@11 = primitive(void_value)
-        \\@unnamed$7 = fntype([], @void, cc=C)
-        \\@entry = fn(@unnamed$7, {
+        \\@unnamed$6 = fntype([], @void, cc=C)
+        \\@entry = fn(@unnamed$6, {
         \\  %0 = returnvoid() ; deaths=0b1000000000000000
         \\})
         \\
@@ -84,7 +83,6 @@ pub fn addCases(ctx: *TestContext) !void {
         \\@9__anon_0 = str("entry")
         \\@unnamed$11 = str("entry")
         \\@unnamed$12 = export(@unnamed$11, "entry")
-        \\@11 = primitive(void_value)
         \\
     );
 
@@ -118,19 +116,18 @@ pub fn addCases(ctx: *TestContext) !void {
             \\@9__anon_0 = str("entry")
             \\@unnamed$4 = str("entry")
             \\@unnamed$5 = export(@unnamed$4, "entry")
-            \\@11 = primitive(void_value)
-            \\@unnamed$7 = fntype([], @void, cc=C)
-            \\@entry = fn(@unnamed$7, {
+            \\@unnamed$6 = fntype([], @void, cc=C)
+            \\@entry = fn(@unnamed$6, {
             \\  %0 = call(@a, [], modifier=auto) ; deaths=0b1000000000000001
             \\  %1 = returnvoid() ; deaths=0b1000000000000000
             \\})
-            \\@unnamed$9 = fntype([], @void, cc=C)
-            \\@a = fn(@unnamed$9, {
+            \\@unnamed$8 = fntype([], @void, cc=C)
+            \\@a = fn(@unnamed$8, {
             \\  %0 = call(@b, [], modifier=auto) ; deaths=0b1000000000000001
             \\  %1 = returnvoid() ; deaths=0b1000000000000000
             \\})
-            \\@unnamed$11 = fntype([], @void, cc=C)
-            \\@b = fn(@unnamed$11, {
+            \\@unnamed$10 = fntype([], @void, cc=C)
+            \\@b = fn(@unnamed$10, {
             \\  %0 = call(@a, [], modifier=auto) ; deaths=0b1000000000000001
             \\  %1 = returnvoid() ; deaths=0b1000000000000000
             \\})
@@ -195,9 +192,8 @@ pub fn addCases(ctx: *TestContext) !void {
             \\@9__anon_2 = str("entry")
             \\@unnamed$4 = str("entry")
             \\@unnamed$5 = export(@unnamed$4, "entry")
-            \\@11 = primitive(void_value)
-            \\@unnamed$7 = fntype([], @void, cc=C)
-            \\@entry = fn(@unnamed$7, {
+            \\@unnamed$6 = fntype([], @void, cc=C)
+            \\@entry = fn(@unnamed$6, {
             \\  %0 = returnvoid() ; deaths=0b1000000000000000
             \\})
             \\

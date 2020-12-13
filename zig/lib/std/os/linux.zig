@@ -50,7 +50,7 @@ pub fn getauxval(index: usize) usize {
 
 // Some architectures (and some syscalls) require 64bit parameters to be passed
 // in a even-aligned register pair.
-const require_aligned_register_pair =
+const require_aligned_register_pair = //
     std.Target.current.cpu.arch.isMIPS() or
     std.Target.current.cpu.arch.isARM() or
     std.Target.current.cpu.arch.isThumb();
@@ -112,9 +112,7 @@ pub fn execve(path: [*:0]const u8, argv: [*:null]const ?[*:0]const u8, envp: [*:
 }
 
 pub fn fork() usize {
-    if (comptime builtin.arch.isSPARC()) {
-        return syscall_fork();
-    } else if (@hasField(SYS, "fork")) {
+    if (@hasField(SYS, "fork")) {
         return syscall0(.fork);
     } else {
         return syscall2(.clone, SIGCHLD, 0);
@@ -280,7 +278,7 @@ pub fn poll(fds: [*]pollfd, n: nfds_t, timeout: i32) usize {
     if (@hasField(SYS, "poll")) {
         return syscall3(.poll, @ptrToInt(fds), n, @bitCast(u32, timeout));
     } else {
-        return syscall5(
+        return syscall6(
             .ppoll,
             @ptrToInt(fds),
             n,
@@ -292,13 +290,10 @@ pub fn poll(fds: [*]pollfd, n: nfds_t, timeout: i32) usize {
             else
                 null),
             0,
+            0,
             NSIG / 8,
         );
     }
-}
-
-pub fn ppoll(fds: [*]pollfd, n: nfds_t, timeout: ?*timespec, sigmask: ?*const sigset_t) usize {
-    return syscall5(.ppoll, @ptrToInt(fds), n, @ptrToInt(timeout), @ptrToInt(sigmask), NSIG / 8);
 }
 
 pub fn read(fd: i32, buf: [*]u8, count: usize) usize {
@@ -782,7 +777,7 @@ pub fn seteuid(euid: uid_t) usize {
     // The setresuid(2) man page says that if -1 is passed the corresponding
     // id will not be changed. Since uid_t is unsigned, this wraps around to the
     // max value in C.
-    comptime assert(@typeInfo(uid_t) == .Int and @typeInfo(uid_t).Int.signedness == .unsigned);
+    comptime assert(@typeInfo(uid_t) == .Int and !@typeInfo(uid_t).Int.is_signed);
     return setresuid(std.math.maxInt(uid_t), euid, std.math.maxInt(uid_t));
 }
 
@@ -793,7 +788,7 @@ pub fn setegid(egid: gid_t) usize {
     // The setresgid(2) man page says that if -1 is passed the corresponding
     // id will not be changed. Since gid_t is unsigned, this wraps around to the
     // max value in C.
-    comptime assert(@typeInfo(uid_t) == .Int and @typeInfo(uid_t).Int.signedness == .unsigned);
+    comptime assert(@typeInfo(uid_t) == .Int and !@typeInfo(uid_t).Int.is_signed);
     return setresgid(std.math.maxInt(gid_t), egid, std.math.maxInt(gid_t));
 }
 
@@ -1103,8 +1098,6 @@ pub fn lstat(pathname: [*:0]const u8, statbuf: *kernel_stat) usize {
 pub fn fstatat(dirfd: i32, path: [*:0]const u8, stat_buf: *kernel_stat, flags: u32) usize {
     if (@hasField(SYS, "fstatat64")) {
         return syscall4(.fstatat64, @bitCast(usize, @as(isize, dirfd)), @ptrToInt(path), @ptrToInt(stat_buf), flags);
-    } else if (@hasField(SYS, "newfstatat")) {
-        return syscall4(.newfstatat, @bitCast(usize, @as(isize, dirfd)), @ptrToInt(path), @ptrToInt(stat_buf), flags);
     } else {
         return syscall4(.fstatat, @bitCast(usize, @as(isize, dirfd)), @ptrToInt(path), @ptrToInt(stat_buf), flags);
     }
@@ -1199,7 +1192,7 @@ pub fn epoll_wait(epoll_fd: i32, events: [*]epoll_event, maxevents: u32, timeout
     return epoll_pwait(epoll_fd, events, maxevents, timeout, null);
 }
 
-pub fn epoll_pwait(epoll_fd: i32, events: [*]epoll_event, maxevents: u32, timeout: i32, sigmask: ?*const sigset_t) usize {
+pub fn epoll_pwait(epoll_fd: i32, events: [*]epoll_event, maxevents: u32, timeout: i32, sigmask: ?*sigset_t) usize {
     return syscall6(
         .epoll_pwait,
         @bitCast(usize, @as(isize, epoll_fd)),

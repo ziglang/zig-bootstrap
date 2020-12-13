@@ -53,7 +53,7 @@ fn _DllMainCRTStartup(
     hinstDLL: std.os.windows.HINSTANCE,
     fdwReason: std.os.windows.DWORD,
     lpReserved: std.os.windows.LPVOID,
-) callconv(std.os.windows.WINAPI) std.os.windows.BOOL {
+) callconv(.Stdcall) std.os.windows.BOOL {
     if (!builtin.single_threaded and !builtin.link_libc) {
         _ = @import("start_windows_tls.zig");
     }
@@ -162,7 +162,7 @@ fn _start() callconv(.Naked) noreturn {
     @call(.{ .modifier = .never_inline }, posixCallMainAndExit, .{});
 }
 
-fn WinStartup() callconv(std.os.windows.WINAPI) noreturn {
+fn WinStartup() callconv(.Stdcall) noreturn {
     @setAlignStack(16);
     if (!builtin.single_threaded) {
         _ = @import("start_windows_tls.zig");
@@ -173,7 +173,7 @@ fn WinStartup() callconv(std.os.windows.WINAPI) noreturn {
     std.os.windows.kernel32.ExitProcess(initEventLoopAndCallMain());
 }
 
-fn wWinMainCRTStartup() callconv(std.os.windows.WINAPI) noreturn {
+fn wWinMainCRTStartup() callconv(.Stdcall) noreturn {
     @setAlignStack(16);
     if (!builtin.single_threaded) {
         _ = @import("start_windows_tls.zig");
@@ -187,8 +187,9 @@ fn wWinMainCRTStartup() callconv(std.os.windows.WINAPI) noreturn {
 
 // TODO https://github.com/ziglang/zig/issues/265
 fn posixCallMainAndExit() noreturn {
-    @setAlignStack(16);
-
+    if (builtin.os.tag == .freebsd) {
+        @setAlignStack(16);
+    }
     const argc = argc_argv_ptr[0];
     const argv = @ptrCast([*][*:0]u8, argc_argv_ptr + 1);
 
@@ -201,19 +202,8 @@ fn posixCallMainAndExit() noreturn {
         // Find the beginning of the auxiliary vector
         const auxv = @ptrCast([*]std.elf.Auxv, @alignCast(@alignOf(usize), envp.ptr + envp_count + 1));
         std.os.linux.elf_aux_maybe = auxv;
-
-        // Do this as early as possible, the aux vector is needed
-        if (builtin.position_independent_executable) {
-            @import("os/linux/start_pie.zig").apply_relocations();
-        }
-
-        // Initialize the TLS area. We do a runtime check here to make sure
-        // this code is truly being statically executed and not inside a dynamic
-        // loader, otherwise this would clobber the thread ID register.
-        const is_dynamic = @import("dynamic_library.zig").get_DYNAMIC() != null;
-        if (!is_dynamic) {
-            std.os.linux.tls.initStaticTLS();
-        }
+        // Initialize the TLS area
+        std.os.linux.tls.initStaticTLS();
 
         // TODO This is disabled because what should we do when linking libc and this code
         // does not execute? And also it's causing a test failure in stack traces in release modes.
@@ -335,7 +325,7 @@ pub fn callMain() u8 {
             return 0;
         },
         .Int => |info| {
-            if (info.bits != 8 or info.signedness == .signed) {
+            if (info.bits != 8 or info.is_signed) {
                 @compileError(bad_main_ret);
             }
             return root.main();
@@ -351,7 +341,7 @@ pub fn callMain() u8 {
             switch (@typeInfo(@TypeOf(result))) {
                 .Void => return 0,
                 .Int => |info| {
-                    if (info.bits != 8 or info.signedness == .signed) {
+                    if (info.bits != 8 or info.is_signed) {
                         @compileError(bad_main_ret);
                     }
                     return result;
@@ -364,14 +354,13 @@ pub fn callMain() u8 {
 }
 
 pub fn call_wWinMain() std.os.windows.INT {
-    const MAIN_HINSTANCE = @typeInfo(@TypeOf(root.wWinMain)).Fn.args[0].arg_type.?;
-    const hInstance = @ptrCast(MAIN_HINSTANCE, std.os.windows.kernel32.GetModuleHandleW(null).?);
+    const hInstance = @ptrCast(std.os.windows.HINSTANCE, std.os.windows.kernel32.GetModuleHandleW(null).?);
+    const hPrevInstance: ?std.os.windows.HINSTANCE = null; // MSDN: "This parameter is always NULL"
     const lpCmdLine = std.os.windows.kernel32.GetCommandLineW();
 
     // There's no (documented) way to get the nCmdShow parameter, so we're
     // using this fairly standard default.
     const nCmdShow = std.os.windows.user32.SW_SHOW;
 
-    // second parameter hPrevInstance, MSDN: "This parameter is always NULL"
-    return root.wWinMain(hInstance, null, lpCmdLine, nCmdShow);
+    return root.wWinMain(hInstance, hPrevInstance, lpCmdLine, nCmdShow);
 }

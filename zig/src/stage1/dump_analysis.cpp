@@ -7,6 +7,7 @@
 
 #include "dump_analysis.hpp"
 #include "analyze.hpp"
+#include "config.h"
 #include "ir.hpp"
 #include "codegen.hpp"
 #include "os.hpp"
@@ -1236,7 +1237,7 @@ void zig_print_analysis_dump(CodeGen *g, FILE *f, const char *one_indent, const 
     jw_begin_object(jw);
     {
         jw_object_field(jw, "zigVersion");
-        jw_string(jw, stage2_version_string());
+        jw_string(jw, ZIG_VERSION_STRING);
 
         jw_object_field(jw, "builds");
         jw_begin_array(jw);

@@ -140,7 +140,7 @@ pub fn main() !void {
     if (builder.validateUserInputDidItFail())
         return usageAndErr(builder, true, stderr_stream);
 
-    builder.make(targets.items) catch |err| {
+    builder.make(targets.span()) catch |err| {
         switch (err) {
             error.InvalidStepName => {
                 return usageAndErr(builder, true, stderr_stream);
@@ -175,7 +175,7 @@ fn usage(builder: *Builder, already_ran_build: bool, out_stream: anytype) !void 
     , .{builder.zig_exe});
 
     const allocator = builder.allocator;
-    for (builder.top_level_steps.items) |top_level_step| {
+    for (builder.top_level_steps.span()) |top_level_step| {
         const name = if (&top_level_step.step == builder.default_step)
             try fmt.allocPrint(allocator, "{} (default)", .{top_level_step.step.name})
         else
@@ -199,7 +199,7 @@ fn usage(builder: *Builder, already_ran_build: bool, out_stream: anytype) !void 
     if (builder.available_options_list.items.len == 0) {
         try out_stream.print("  (none)\n", .{});
     } else {
-        for (builder.available_options_list.items) |option| {
+        for (builder.available_options_list.span()) |option| {
             const name = try fmt.allocPrint(allocator, "  -D{}=[{}]", .{
                 option.name,
                 Builder.typeIdName(option.type_id),

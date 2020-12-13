@@ -12,6 +12,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+#include "config.h"
 #include "util_base.hpp"
 #include "mem_type_info.hpp"
 

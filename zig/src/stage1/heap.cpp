@@ -8,6 +8,7 @@
 #include <new>
 #include <string.h>
 
+#include "config.h"
 #include "heap.hpp"
 
 namespace heap {

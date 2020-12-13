@@ -195,7 +195,7 @@ test "std.meta.trait.isPacked" {
 
 pub fn isUnsignedInt(comptime T: type) bool {
     return switch (@typeInfo(T)) {
-        .Int => |i| i.signedness == .unsigned,
+        .Int => |i| !i.is_signed,
         else => false,
     };
 }
@@ -210,7 +210,7 @@ test "isUnsignedInt" {
 pub fn isSignedInt(comptime T: type) bool {
     return switch (@typeInfo(T)) {
         .ComptimeInt => true,
-        .Int => |i| i.signedness == .signed,
+        .Int => |i| i.is_signed,
         else => false,
     };
 }
@@ -310,38 +310,6 @@ test "std.meta.trait.isNumber" {
     testing.expect(isNumber(@TypeOf(102.123)));
     testing.expect(!isNumber([]u8));
     testing.expect(!isNumber(NotANumber));
-}
-
-pub fn isIntegral(comptime T: type) bool {
-    return switch (@typeInfo(T)) {
-        .Int, .ComptimeInt => true,
-        else => false,
-    };
-}
-
-test "isIntegral" {
-    testing.expect(isIntegral(u32));
-    testing.expect(!isIntegral(f32));
-    testing.expect(isIntegral(@TypeOf(102)));
-    testing.expect(!isIntegral(@TypeOf(102.123)));
-    testing.expect(!isIntegral(*u8));
-    testing.expect(!isIntegral([]u8));
-}
-
-pub fn isFloat(comptime T: type) bool {
-    return switch (@typeInfo(T)) {
-        .Float, .ComptimeFloat => true,
-        else => false,
-    };
-}
-
-test "isFloat" {
-    testing.expect(!isFloat(u32));
-    testing.expect(isFloat(f32));
-    testing.expect(!isFloat(@TypeOf(102)));
-    testing.expect(isFloat(@TypeOf(102.123)));
-    testing.expect(!isFloat(*f64));
-    testing.expect(!isFloat([]f32));
 }
 
 pub fn isConstPtr(comptime T: type) bool {

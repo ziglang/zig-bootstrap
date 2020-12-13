@@ -8,7 +8,7 @@ const fs = std.fs;
 const elf = std.elf;
 const log = std.log.scoped(.link);
 const DW = std.dwarf;
-const leb128 = std.leb;
+const leb128 = std.debug.leb;
 
 const ir = @import("../ir.zig");
 const Module = @import("../Module.zig");
@@ -1431,7 +1431,7 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
         try argv.append("-shared");
     }
 
-    if (self.base.options.pie and self.base.options.output_mode == .Exe) {
+    if (target_util.requiresPIE(target) and self.base.options.output_mode == .Exe) {
         try argv.append("-pie");
     }
 
@@ -1450,11 +1450,7 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
                     break :o "crtbegin_static.o";
                 }
             } else if (self.base.options.link_mode == .Static) {
-                if (self.base.options.pie) {
-                    break :o "rcrt1.o";
-                } else {
-                    break :o "crt1.o";
-                }
+                break :o "crt1.o";
             } else {
                 break :o "Scrt1.o";
             }
@@ -1598,7 +1594,10 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
                 try argv.append(try comp.get_libc_crt_file(arena, "libc_nonshared.a"));
             } else if (target.isMusl()) {
                 try argv.append(comp.libunwind_static_lib.?.full_object_path);
-                try argv.append(try comp.get_libc_crt_file(arena, "libc.a"));
+                try argv.append(try comp.get_libc_crt_file(arena, switch (self.base.options.link_mode) {
+                    .Static => "libc.a",
+                    .Dynamic => "libc.so",
+                }));
             } else if (self.base.options.link_libcpp) {
                 try argv.append(comp.libunwind_static_lib.?.full_object_path);
             } else {
@@ -1684,7 +1683,7 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
         }
 
         if (stderr.len != 0) {
-            log.warn("unexpected LLD stderr:\n{s}", .{stderr});
+            std.log.warn("unexpected LLD stderr:\n{s}", .{stderr});
         }
     }
 
@@ -1692,11 +1691,11 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
         // Update the file with the digest. If it fails we can continue; it only
         // means that the next invocation will have an unnecessary cache miss.
         Cache.writeSmallFile(directory.handle, id_symlink_basename, &digest) catch |err| {
-            log.warn("failed to save linking hash digest file: {}", .{@errorName(err)});
+            std.log.warn("failed to save linking hash digest file: {}", .{@errorName(err)});
         };
         // Again failure here only means an unnecessary cache miss.
         man.writeManifest() catch |err| {
-            log.warn("failed to write cache manifest when linking: {}", .{@errorName(err)});
+            std.log.warn("failed to write cache manifest when linking: {}", .{@errorName(err)});
         };
         // We hang on to this lock so that the output file path can be used without
         // other processes clobbering it.
@@ -2462,10 +2461,7 @@ fn addDbgInfoType(self: *Elf, ty: Type, dbg_info_buffer: *std.ArrayList(u8)) !vo
             try dbg_info_buffer.ensureCapacity(dbg_info_buffer.items.len + 12);
             dbg_info_buffer.appendAssumeCapacity(abbrev_base_type);
             // DW.AT_encoding, DW.FORM_data1
-            dbg_info_buffer.appendAssumeCapacity(switch (info.signedness) {
-                .signed => DW.ATE_signed,
-                .unsigned => DW.ATE_unsigned,
-            });
+            dbg_info_buffer.appendAssumeCapacity(if (info.signed) DW.ATE_signed else DW.ATE_unsigned);
             // DW.AT_byte_size,  DW.FORM_data1
             dbg_info_buffer.appendAssumeCapacity(@intCast(u8, ty.abiSize(self.base.options.target)));
             // DW.AT_name,  DW.FORM_string

@@ -1020,8 +1020,6 @@ pub const OpenError = error{
 
     BadPathName,
     InvalidUtf8,
-
-    WouldBlock,
 } || UnexpectedError;
 
 /// Open and possibly create a file. Keeps trying if it gets interrupted.
@@ -1203,7 +1201,6 @@ pub fn openatZ(dir_fd: fd_t, file_path: [*:0]const u8, flags: u32, mode: mode_t)
             EEXIST => return error.PathAlreadyExists,
             EBUSY => return error.DeviceBusy,
             EOPNOTSUPP => return error.FileLocksNotSupported,
-            EWOULDBLOCK => return error.WouldBlock,
             else => |err| return unexpectedErrno(err),
         }
     }
@@ -1557,7 +1554,7 @@ pub fn getcwd(out_buffer: []u8) GetCwdError![]u8 {
         break :blk errno(system.getcwd(out_buffer.ptr, out_buffer.len));
     };
     switch (err) {
-        0 => return mem.spanZ(std.meta.assumeSentinel(out_buffer.ptr, 0)),
+        0 => return mem.spanZ(@ptrCast([*:0]u8, out_buffer.ptr)),
         EFAULT => unreachable,
         EINVAL => unreachable,
         ENOENT => return error.CurrentWorkingDirectoryUnlinked,
@@ -2300,10 +2297,6 @@ pub const ChangeCurDirError = error{
     FileNotFound,
     SystemResources,
     NotDir,
-    BadPathName,
-
-    /// On Windows, file paths must be valid Unicode.
-    InvalidUtf8,
 } || UnexpectedError;
 
 /// Changes the current working directory of the calling process.
@@ -2312,10 +2305,8 @@ pub fn chdir(dir_path: []const u8) ChangeCurDirError!void {
     if (builtin.os.tag == .wasi) {
         @compileError("chdir is not supported in WASI");
     } else if (builtin.os.tag == .windows) {
-        var utf16_dir_path: [windows.PATH_MAX_WIDE]u16 = undefined;
-        const len = try std.unicode.utf8ToUtf16Le(utf16_dir_path[0..], dir_path);
-        if (len > utf16_dir_path.len) return error.NameTooLong;
-        return chdirW(utf16_dir_path[0..len]);
+        const dir_path_w = try windows.sliceToPrefixedFileW(dir_path);
+        @compileError("TODO implement chdir for Windows");
     } else {
         const dir_path_c = try toPosixPath(dir_path);
         return chdirZ(&dir_path_c);
@@ -2327,10 +2318,8 @@ pub const chdirC = @compileError("deprecated: renamed to chdirZ");
 /// Same as `chdir` except the parameter is null-terminated.
 pub fn chdirZ(dir_path: [*:0]const u8) ChangeCurDirError!void {
     if (builtin.os.tag == .windows) {
-        var utf16_dir_path: [windows.PATH_MAX_WIDE]u16 = undefined;
-        const len = try std.unicode.utf8ToUtf16Le(utf16_dir_path[0..], dir_path);
-        if (len > utf16_dir_path.len) return error.NameTooLong;
-        return chdirW(utf16_dir_path[0..len]);
+        const dir_path_w = try windows.cStrToPrefixedFileW(dir_path);
+        @compileError("TODO implement chdir for Windows");
     }
     switch (errno(system.chdir(dir_path))) {
         0 => return,
@@ -2344,14 +2333,6 @@ pub fn chdirZ(dir_path: [*:0]const u8) ChangeCurDirError!void {
         ENOTDIR => return error.NotDir,
         else => |err| return unexpectedErrno(err),
     }
-}
-
-/// Windows-only. Same as `chdir` except the paramter is WTF16 encoded.
-pub fn chdirW(dir_path: []const u16) ChangeCurDirError!void {
-    windows.SetCurrentDirectory(dir_path) catch |err| switch (err) {
-        error.NoDevice => return error.FileSystem,
-        else => |e| return e,
-    };
 }
 
 pub const FchdirError = error{
@@ -2706,60 +2687,6 @@ pub fn socket(domain: u32, socket_type: u32, protocol: u32) SocketError!socket_t
     }
 }
 
-pub const ShutdownError = error{
-    ConnectionAborted,
-
-    /// Connection was reset by peer, application should close socket as it is no longer usable.
-    ConnectionResetByPeer,
-    BlockingOperationInProgress,
-
-    /// The network subsystem has failed.
-    NetworkSubsystemFailed,
-
-    /// The socket is not connected (connection-oriented sockets only).
-    SocketNotConnected,
-    SystemResources,
-} || UnexpectedError;
-
-pub const ShutdownHow = enum { recv, send, both };
-
-/// Shutdown socket send/receive operations
-pub fn shutdown(sock: socket_t, how: ShutdownHow) ShutdownError!void {
-    if (builtin.os.tag == .windows) {
-        const result = windows.ws2_32.shutdown(sock, switch (how) {
-            .recv => windows.SD_RECEIVE,
-            .send => windows.SD_SEND,
-            .both => windows.SD_BOTH,
-        });
-        if (0 != result) switch (windows.ws2_32.WSAGetLastError()) {
-            .WSAECONNABORTED => return error.ConnectionAborted,
-            .WSAECONNRESET => return error.ConnectionResetByPeer,
-            .WSAEINPROGRESS => return error.BlockingOperationInProgress,
-            .WSAEINVAL => unreachable,
-            .WSAENETDOWN => return error.NetworkSubsystemFailed,
-            .WSAENOTCONN => return error.SocketNotConnected,
-            .WSAENOTSOCK => unreachable,
-            .WSANOTINITIALISED => unreachable,
-            else => |err| return windows.unexpectedWSAError(err),
-        };
-    } else {
-        const rc = system.shutdown(sock, switch (how) {
-            .recv => SHUT_RD,
-            .send => SHUT_WR,
-            .both => SHUT_RDWR,
-        });
-        switch (errno(rc)) {
-            0 => return,
-            EBADF => unreachable,
-            EINVAL => unreachable,
-            ENOTCONN => return error.SocketNotConnected,
-            ENOTSOCK => unreachable,
-            ENOBUFS => return error.SystemResources,
-            else => |err| return unexpectedErrno(err),
-        }
-    }
-}
-
 pub fn closeSocket(sock: socket_t) void {
     if (builtin.os.tag == .windows) {
         windows.closesocket(sock) catch unreachable;
@@ -2939,6 +2866,10 @@ pub const AcceptError = error{
     /// This error occurs when no global event loop is configured,
     /// and accepting from the socket would block.
     WouldBlock,
+
+    /// Permission to create a socket of the specified type and/or
+    /// protocol is denied.
+    PermissionDenied,
 
     /// An incoming connection was indicated, but was subsequently terminated by the
     /// remote peer prior to accepting the call.
@@ -4124,14 +4055,12 @@ fn setSockFlags(sock: socket_t, flags: u32) !void {
             var fd_flags = fcntl(sock, F_GETFD, 0) catch |err| switch (err) {
                 error.FileBusy => unreachable,
                 error.Locked => unreachable,
-                error.PermissionDenied => unreachable,
                 else => |e| return e,
             };
             fd_flags |= FD_CLOEXEC;
             _ = fcntl(sock, F_SETFD, fd_flags) catch |err| switch (err) {
                 error.FileBusy => unreachable,
                 error.Locked => unreachable,
-                error.PermissionDenied => unreachable,
                 else => |e| return e,
             };
         }
@@ -4152,14 +4081,12 @@ fn setSockFlags(sock: socket_t, flags: u32) !void {
             var fl_flags = fcntl(sock, F_GETFL, 0) catch |err| switch (err) {
                 error.FileBusy => unreachable,
                 error.Locked => unreachable,
-                error.PermissionDenied => unreachable,
                 else => |e| return e,
             };
             fl_flags |= O_NONBLOCK;
             _ = fcntl(sock, F_SETFL, fl_flags) catch |err| switch (err) {
                 error.FileBusy => unreachable,
                 error.Locked => unreachable,
-                error.PermissionDenied => unreachable,
                 else => |e| return e,
             };
         }
@@ -4245,7 +4172,6 @@ pub fn realpathZ(pathname: [*:0]const u8, out_buffer: *[MAX_PATH_BYTES]u8) RealP
         const flags = if (builtin.os.tag == .linux) O_PATH | O_NONBLOCK | O_CLOEXEC else O_NONBLOCK | O_CLOEXEC;
         const fd = openZ(pathname, flags, 0) catch |err| switch (err) {
             error.FileLocksNotSupported => unreachable,
-            error.WouldBlock => unreachable,
             else => |e| return e,
         };
         defer close(fd);
@@ -4337,7 +4263,7 @@ pub fn getFdPath(fd: fd_t, out_buffer: *[MAX_PATH_BYTES]u8) RealPathError![]u8 {
             var procfs_buf: ["/proc/self/fd/-2147483648".len:0]u8 = undefined;
             const proc_path = std.fmt.bufPrint(procfs_buf[0..], "/proc/self/fd/{}\x00", .{fd}) catch unreachable;
 
-            const target = readlinkZ(std.meta.assumeSentinel(proc_path.ptr, 0), out_buffer) catch |err| {
+            const target = readlinkZ(@ptrCast([*:0]const u8, proc_path.ptr), out_buffer) catch |err| {
                 switch (err) {
                     error.UnsupportedReparsePointType => unreachable, // Windows only,
                     else => |e| return e,
@@ -4399,7 +4325,7 @@ pub fn dl_iterate_phdr(
 
     const elf_base = std.process.getBaseAddress();
     const ehdr = @intToPtr(*elf.Ehdr, elf_base);
-    // Make sure the base address points to an ELF image.
+    // Make sure the base address points to an ELF image
     assert(mem.eql(u8, ehdr.e_ident[0..4], "\x7fELF"));
     const n_phdr = ehdr.e_phnum;
     const phdrs = (@intToPtr([*]elf.Phdr, elf_base + ehdr.e_phoff))[0..n_phdr];
@@ -4407,21 +4333,10 @@ pub fn dl_iterate_phdr(
     var it = dl.linkmap_iterator(phdrs) catch unreachable;
 
     // The executable has no dynamic link segment, create a single entry for
-    // the whole ELF image.
+    // the whole ELF image
     if (it.end()) {
-        // Find the base address for the ELF image, if this is a PIE the value
-        // is non-zero.
-        const base_address = for (phdrs) |*phdr| {
-            if (phdr.p_type == elf.PT_PHDR) {
-                break @ptrToInt(phdrs.ptr) - phdr.p_vaddr;
-                // We could try computing the difference between _DYNAMIC and
-                // the p_vaddr of the PT_DYNAMIC section, but using the phdr is
-                // good enough (Is it?).
-            }
-        } else unreachable;
-
         var info = dl_phdr_info{
-            .dlpi_addr = base_address,
+            .dlpi_addr = 0,
             .dlpi_name = "/proc/self/exe",
             .dlpi_phdr = phdrs.ptr,
             .dlpi_phnum = ehdr.e_phnum,
@@ -4430,7 +4345,7 @@ pub fn dl_iterate_phdr(
         return callback(&info, @sizeOf(dl_phdr_info), context);
     }
 
-    // Last return value from the callback function.
+    // Last return value from the callback function
     while (it.next()) |entry| {
         var dlpi_phdr: [*]elf.Phdr = undefined;
         var dlpi_phnum: u16 = undefined;
@@ -4539,11 +4454,11 @@ pub fn sched_getaffinity(pid: pid_t) SchedGetAffinityError!cpu_set_t {
 
 /// Used to convert a slice to a null terminated slice on the stack.
 /// TODO https://github.com/ziglang/zig/issues/287
-pub fn toPosixPath(file_path: []const u8) ![MAX_PATH_BYTES - 1:0]u8 {
+pub fn toPosixPath(file_path: []const u8) ![PATH_MAX - 1:0]u8 {
     if (std.debug.runtime_safety) assert(std.mem.indexOfScalar(u8, file_path, 0) == null);
-    var path_with_null: [MAX_PATH_BYTES - 1:0]u8 = undefined;
+    var path_with_null: [PATH_MAX - 1:0]u8 = undefined;
     // >= rather than > to make room for the null byte
-    if (file_path.len >= MAX_PATH_BYTES) return error.NameTooLong;
+    if (file_path.len >= PATH_MAX) return error.NameTooLong;
     mem.copy(u8, &path_with_null, file_path);
     path_with_null[file_path.len] = 0;
     return path_with_null;
@@ -4661,7 +4576,7 @@ pub const GetHostNameError = error{PermissionDenied} || UnexpectedError;
 pub fn gethostname(name_buffer: *[HOST_NAME_MAX]u8) GetHostNameError![]u8 {
     if (builtin.link_libc) {
         switch (errno(system.gethostname(name_buffer, name_buffer.len))) {
-            0 => return mem.spanZ(std.meta.assumeSentinel(name_buffer, 0)),
+            0 => return mem.spanZ(@ptrCast([*:0]u8, name_buffer)),
             EFAULT => unreachable,
             ENAMETOOLONG => unreachable, // HOST_NAME_MAX prevents this
             EPERM => return error.PermissionDenied,
@@ -4670,7 +4585,7 @@ pub fn gethostname(name_buffer: *[HOST_NAME_MAX]u8) GetHostNameError![]u8 {
     }
     if (builtin.os.tag == .linux) {
         const uts = uname();
-        const hostname = mem.spanZ(std.meta.assumeSentinel(&uts.nodename, 0));
+        const hostname = mem.spanZ(@ptrCast([*:0]const u8, &uts.nodename));
         mem.copy(u8, name_buffer, hostname);
         return name_buffer[0..hostname.len];
     }
@@ -4774,7 +4689,6 @@ pub const SendError = error{
     BrokenPipe,
 
     FileDescriptorNotASocket,
-    AddressFamilyNotSupported,
 } || UnexpectedError;
 
 /// Transmit a message to another socket.
@@ -4821,7 +4735,6 @@ pub fn sendto(
                     .WSAEMSGSIZE => return error.MessageTooBig,
                     .WSAENOBUFS => return error.SystemResources,
                     .WSAENOTSOCK => return error.FileDescriptorNotASocket,
-                    .WSAEAFNOSUPPORT => return error.AddressFamilyNotSupported,
                     // TODO: handle more errors
                     else => |err| return windows.unexpectedWSAError(err),
                 }
@@ -4849,7 +4762,6 @@ pub fn sendto(
                 ENOTSOCK => unreachable, // The file descriptor sockfd does not refer to a socket.
                 EOPNOTSUPP => unreachable, // Some bit in the flags argument is inappropriate for the socket type.
                 EPIPE => return error.BrokenPipe,
-                EAFNOSUPPORT => return error.AddressFamilyNotSupported,
                 else => |err| return unexpectedErrno(err),
             }
         }
@@ -4941,7 +4853,12 @@ pub fn sendfile(
     var total_written: usize = 0;
 
     // Prevents EOVERFLOW.
-    const size_t = std.meta.Int(.unsigned, @typeInfo(usize).Int.bits - 1);
+    const size_t = @Type(std.builtin.TypeInfo{
+        .Int = .{
+            .is_signed = false,
+            .bits = @typeInfo(usize).Int.bits - 1,
+        },
+    });
     const max_count = switch (std.Target.current.os.tag) {
         .linux => 0x7ffff000,
         .macos, .ios, .watchos, .tvos => math.maxInt(i32),
@@ -5214,7 +5131,7 @@ pub const CopyFileRangeError = error{
 
 var has_copy_file_range_syscall = init: {
     const kernel_has_syscall = std.Target.current.os.isAtLeast(.linux, .{ .major = 4, .minor = 5 }) orelse true;
-    break :init std.atomic.Bool.init(kernel_has_syscall);
+    break :init std.atomic.Int(bool).init(kernel_has_syscall);
 };
 
 /// Transfer data between file descriptors at specified offsets.
@@ -5246,7 +5163,7 @@ pub fn copy_file_range(fd_in: fd_t, off_in: u64, fd_out: fd_t, off_out: u64, len
     const use_c = std.c.versionCheck(.{ .major = 2, .minor = 27, .patch = 0 }).ok;
 
     if (std.Target.current.os.tag == .linux and
-        (use_c or has_copy_file_range_syscall.load(.Monotonic)))
+        (use_c or has_copy_file_range_syscall.get()))
     {
         const sys = if (use_c) std.c else linux;
 
@@ -5271,7 +5188,7 @@ pub fn copy_file_range(fd_in: fd_t, off_in: u64, fd_out: fd_t, off_out: u64, len
             EXDEV => {},
             // syscall added in Linux 4.5, use fallback
             ENOSYS => {
-                has_copy_file_range_syscall.store(true, .Monotonic);
+                has_copy_file_range_syscall.set(false);
             },
             else => |err| return unexpectedErrno(err),
         }
@@ -5320,32 +5237,6 @@ pub fn poll(fds: []pollfd, timeout: i32) PollError!usize {
             }
         }
         unreachable;
-    }
-}
-
-pub const PPollError = error{
-    /// The operation was interrupted by a delivery of a signal before it could complete.
-    SignalInterrupt,
-
-    /// The kernel had no space to allocate file descriptor tables.
-    SystemResources,
-} || UnexpectedError;
-
-pub fn ppoll(fds: []pollfd, timeout: ?*const timespec, mask: ?*const sigset_t) PPollError!usize {
-    var ts: timespec = undefined;
-    var ts_ptr: ?*timespec = null;
-    if (timeout) |timeout_ns| {
-        ts_ptr = &ts;
-        ts = timeout_ns.*;
-    }
-    const rc = system.ppoll(fds.ptr, fds.len, ts_ptr, mask);
-    switch (errno(rc)) {
-        0 => return @intCast(usize, rc),
-        EFAULT => unreachable,
-        EINTR => return error.SignalInterrupt,
-        EINVAL => unreachable,
-        ENOMEM => return error.SystemResources,
-        else => |err| return unexpectedErrno(err),
     }
 }
 
@@ -5664,7 +5555,7 @@ pub fn signalfd(fd: fd_t, mask: *const sigset_t, flags: u32) !fd_t {
         EMFILE => return error.ProcessResources,
         ENODEV => return error.InodeMountFail,
         ENOSYS => return error.SystemOutdated,
-        else => |err| return unexpectedErrno(err),
+        else => |err| return std.os.unexpectedErrno(err),
     }
 }
 
@@ -5689,7 +5580,7 @@ pub fn syncfs(fd: fd_t) SyncError!void {
         EIO => return error.InputOutput,
         ENOSPC => return error.NoSpaceLeft,
         EDQUOT => return error.DiskQuota,
-        else => |err| return unexpectedErrno(err),
+        else => |err| return std.os.unexpectedErrno(err),
     }
 }
 
@@ -5713,7 +5604,7 @@ pub fn fsync(fd: fd_t) SyncError!void {
         EIO => return error.InputOutput,
         ENOSPC => return error.NoSpaceLeft,
         EDQUOT => return error.DiskQuota,
-        else => |err| return unexpectedErrno(err),
+        else => |err| return std.os.unexpectedErrno(err),
     }
 }
 
@@ -5732,7 +5623,7 @@ pub fn fdatasync(fd: fd_t) SyncError!void {
         EIO => return error.InputOutput,
         ENOSPC => return error.NoSpaceLeft,
         EDQUOT => return error.DiskQuota,
-        else => |err| return unexpectedErrno(err),
+        else => |err| return std.os.unexpectedErrno(err),
     }
 }
 
@@ -5774,7 +5665,7 @@ pub fn prctl(option: PR, args: anytype) PrctlError!u31 {
         EOPNOTSUPP => return error.OperationNotSupported,
         EPERM, EBUSY => return error.PermissionDenied,
         ERANGE => unreachable,
-        else => |err| return unexpectedErrno(err),
+        else => |err| return std.os.unexpectedErrno(err),
     }
 }
 
@@ -5787,7 +5678,7 @@ pub fn getrlimit(resource: rlimit_resource) GetrlimitError!rlimit {
         0 => return limits,
         EFAULT => unreachable, // bogus pointer
         EINVAL => unreachable,
-        else => |err| return unexpectedErrno(err),
+        else => |err| return std.os.unexpectedErrno(err),
     }
 }
 
@@ -5800,6 +5691,6 @@ pub fn setrlimit(resource: rlimit_resource, limits: rlimit) SetrlimitError!void 
         EFAULT => unreachable, // bogus pointer
         EINVAL => unreachable,
         EPERM => return error.PermissionDenied,
-        else => |err| return unexpectedErrno(err),
+        else => |err| return std.os.unexpectedErrno(err),
     }
 }

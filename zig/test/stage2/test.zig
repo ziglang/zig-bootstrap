@@ -31,12 +31,11 @@ pub fn addCases(ctx: *TestContext) !void {
     try @import("cbe.zig").addCases(ctx);
     try @import("spu-ii.zig").addCases(ctx);
     try @import("arm.zig").addCases(ctx);
-    try @import("aarch64.zig").addCases(ctx);
 
     {
         var case = ctx.exe("hello world with updates", linux_x64);
 
-        case.addError("", &[_][]const u8{"no entry point found"});
+        case.addError("", &[_][]const u8{":1:1: error: no entry point found"});
 
         // Incorrect return type
         case.addError(
@@ -147,7 +146,7 @@ pub fn addCases(ctx: *TestContext) !void {
 
     {
         var case = ctx.exe("hello world with updates", macosx_x64);
-        case.addError("", &[_][]const u8{"no entry point found"});
+        case.addError("", &[_][]const u8{":1:1: error: no entry point found"});
 
         // Incorrect return type
         case.addError(
@@ -830,7 +829,7 @@ pub fn addCases(ctx: *TestContext) !void {
         // Character literals and multiline strings.
         case.addCompareOutput(
             \\export fn _start() noreturn {
-            \\    const ignore =
+            \\    const ignore = 
             \\        \\ cool thx
             \\        \\
             \\    ;
@@ -1112,24 +1111,6 @@ pub fn addCases(ctx: *TestContext) !void {
         \\fn entry() void {}
         \\fn entry() void {}
     , &[_][]const u8{":2:4: error: redefinition of 'entry'"});
-
-    {
-        var case = ctx.obj("variable shadowing", linux_x64);
-        case.addError(
-            \\export fn _start() noreturn {
-            \\    var i: u32 = 10;
-            \\    var i: u32 = 10;
-            \\    unreachable;
-            \\}
-        , &[_][]const u8{":3:9: error: redefinition of 'i'"});
-        case.addError(
-            \\var testing: i64 = 10;
-            \\export fn _start() noreturn {
-            \\    var testing: i64 = 20;
-            \\    unreachable;
-            \\}
-        , &[_][]const u8{":3:9: error: redefinition of 'testing'"});
-    }
 
     {
         var case = ctx.obj("extern variable has no type", linux_x64);

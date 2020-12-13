@@ -59,7 +59,13 @@ pub fn ArrayListAligned(comptime T: type, comptime alignment: ?u29) type {
             self.allocator.free(self.allocatedSlice());
         }
 
-        pub const span = @compileError("deprecated: use `items` field directly");
+        /// Deprecated: use `items` field directly.
+        /// Return contents as a slice. Only valid while the list
+        /// doesn't change size.
+        pub fn span(self: anytype) @TypeOf(self.items) {
+            return self.items;
+        }
+
         pub const toSlice = @compileError("deprecated: use `items` field directly");
         pub const toSliceConst = @compileError("deprecated: use `items` field directly");
         pub const at = @compileError("deprecated: use `list.items[i]`");
@@ -1055,7 +1061,7 @@ test "std.ArrayList(u8) implements outStream" {
     const y: i32 = 1234;
     try buffer.outStream().print("x: {}\ny: {}\n", .{ x, y });
 
-    testing.expectEqualSlices(u8, "x: 42\ny: 1234\n", buffer.items);
+    testing.expectEqualSlices(u8, "x: 42\ny: 1234\n", buffer.span());
 }
 
 test "std.ArrayList/ArrayListUnmanaged.shrink still sets length on error.OutOfMemory" {

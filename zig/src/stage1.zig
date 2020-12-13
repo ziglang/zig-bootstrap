@@ -108,7 +108,6 @@ pub const Module = extern struct {
     subsystem: TargetSubsystem,
     err_color: ErrColor,
     pic: bool,
-    pie: bool,
     link_libc: bool,
     link_libcpp: bool,
     strip: bool,
@@ -250,20 +249,6 @@ const Error = extern enum {
     FileBusy,
     Locked,
 };
-
-// ABI warning
-export fn stage2_version_string() [*:0]const u8 {
-    return build_options.version;
-}
-
-// ABI warning
-export fn stage2_version() Stage2SemVer {
-    return .{
-        .major = build_options.semver.major,
-        .minor = build_options.semver.minor,
-        .patch = build_options.semver.patch,
-    };
-}
 
 // ABI warning
 export fn stage2_attach_segfault_handler() void {

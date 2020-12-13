@@ -5,6 +5,7 @@
  * See http://opensource.org/licenses/MIT
  */
 
+#include "config.h"
 #include "mem.hpp"
 #include "heap.hpp"
 

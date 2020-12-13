@@ -5,7 +5,7 @@ const mem = std.mem;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const fs = std.fs;
-const leb = std.leb;
+const leb = std.debug.leb;
 const log = std.log.scoped(.link);
 
 const Module = @import("../Module.zig");
@@ -455,7 +455,7 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
         }
 
         if (stderr.len != 0) {
-            log.warn("unexpected LLD stderr:\n{s}", .{stderr});
+            std.log.warn("unexpected LLD stderr:\n{s}", .{stderr});
         }
     }
 
@@ -463,11 +463,11 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
         // Update the file with the digest. If it fails we can continue; it only
         // means that the next invocation will have an unnecessary cache miss.
         Cache.writeSmallFile(directory.handle, id_symlink_basename, &digest) catch |err| {
-            log.warn("failed to save linking hash digest symlink: {}", .{@errorName(err)});
+            std.log.warn("failed to save linking hash digest symlink: {}", .{@errorName(err)});
         };
         // Again failure here only means an unnecessary cache miss.
         man.writeManifest() catch |err| {
-            log.warn("failed to write cache manifest when linking: {}", .{@errorName(err)});
+            std.log.warn("failed to write cache manifest when linking: {}", .{@errorName(err)});
         };
         // We hang on to this lock so that the output file path can be used without
         // other processes clobbering it.

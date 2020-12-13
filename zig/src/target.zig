@@ -58,11 +58,8 @@ pub const available_libcs = [_]ArchOsAbi{
 };
 
 pub fn libCGenericName(target: std.Target) [:0]const u8 {
-    switch (target.os.tag) {
-        .windows => return "mingw",
-        .macos, .ios, .tvos, .watchos => return "darwin",
-        else => {},
-    }
+    if (target.os.tag == .windows)
+        return "mingw";
     switch (target.abi) {
         .gnu,
         .gnuabin32,

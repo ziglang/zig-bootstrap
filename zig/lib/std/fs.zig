@@ -352,7 +352,7 @@ pub const Dir = struct {
 
                     const name = @ptrCast([*]u8, &darwin_entry.d_name)[0..darwin_entry.d_namlen];
 
-                    if (mem.eql(u8, name, ".") or mem.eql(u8, name, "..") or (darwin_entry.d_ino == 0)) {
+                    if (mem.eql(u8, name, ".") or mem.eql(u8, name, "..")) {
                         continue :start_over;
                     }
 
@@ -393,24 +393,17 @@ pub const Dir = struct {
                         self.index = 0;
                         self.end_index = @intCast(usize, rc);
                     }
-                    const bsd_entry = @ptrCast(*align(1) os.dirent, &self.buf[self.index]);
-                    const next_index = self.index + bsd_entry.reclen();
+                    const freebsd_entry = @ptrCast(*align(1) os.dirent, &self.buf[self.index]);
+                    const next_index = self.index + freebsd_entry.reclen();
                     self.index = next_index;
 
-                    const name = @ptrCast([*]u8, &bsd_entry.d_name)[0..bsd_entry.d_namlen];
+                    const name = @ptrCast([*]u8, &freebsd_entry.d_name)[0..freebsd_entry.d_namlen];
 
-                    const skip_zero_fileno = switch (builtin.os.tag) {
-                        // d_fileno=0 is used to mark invalid entries or deleted files.
-                        .openbsd, .netbsd => true,
-                        else => false,
-                    };
-                    if (mem.eql(u8, name, ".") or mem.eql(u8, name, "..") or
-                        (skip_zero_fileno and bsd_entry.d_fileno == 0))
-                    {
+                    if (mem.eql(u8, name, ".") or mem.eql(u8, name, "..")) {
                         continue :start_over;
                     }
 
-                    const entry_kind = switch (bsd_entry.d_type) {
+                    const entry_kind = switch (freebsd_entry.d_type) {
                         os.DT_BLK => Entry.Kind.BlockDevice,
                         os.DT_CHR => Entry.Kind.CharacterDevice,
                         os.DT_DIR => Entry.Kind.Directory,
@@ -729,16 +722,14 @@ pub const Dir = struct {
         }
 
         var os_flags: u32 = os.O_CLOEXEC;
-        // Use the O_ locking flags if the os supports them to acquire the lock
-        // atomically.
-        const has_flock_open_flags = @hasDecl(os, "O_EXLOCK");
+        // Use the O_ locking flags if the os supports them
+        // (Or if it's darwin, as darwin's `open` doesn't support the O_SYNC flag)
+        const has_flock_open_flags = @hasDecl(os, "O_EXLOCK") and !is_darwin;
         if (has_flock_open_flags) {
-            // Note that the O_NONBLOCK flag is removed after the openat() call
-            // is successful.
-            const nonblocking_lock_flag: u32 = if (flags.lock_nonblocking)
-                os.O_NONBLOCK
+            const nonblocking_lock_flag = if (flags.lock_nonblocking)
+                os.O_NONBLOCK | os.O_SYNC
             else
-                0;
+                @as(u32, 0);
             os_flags |= switch (flags.lock) {
                 .None => @as(u32, 0),
                 .Shared => os.O_SHLOCK | nonblocking_lock_flag,
@@ -771,22 +762,6 @@ pub const Dir = struct {
                 .Shared => os.LOCK_SH | lock_nonblocking,
                 .Exclusive => os.LOCK_EX | lock_nonblocking,
             });
-        }
-
-        if (has_flock_open_flags and flags.lock_nonblocking) {
-            var fl_flags = os.fcntl(fd, os.F_GETFL, 0) catch |err| switch (err) {
-                error.FileBusy => unreachable,
-                error.Locked => unreachable,
-                error.PermissionDenied => unreachable,
-                else => |e| return e,
-            };
-            fl_flags &= ~@as(usize, os.O_NONBLOCK);
-            _ = os.fcntl(fd, os.F_SETFL, fl_flags) catch |err| switch (err) {
-                error.FileBusy => unreachable,
-                error.Locked => unreachable,
-                error.PermissionDenied => unreachable,
-                else => |e| return e,
-            };
         }
 
         return File{
@@ -872,19 +847,17 @@ pub const Dir = struct {
             return self.createFileW(path_w.span(), flags);
         }
 
-        // Use the O_ locking flags if the os supports them to acquire the lock
-        // atomically.
-        const has_flock_open_flags = @hasDecl(os, "O_EXLOCK");
-        // Note that the O_NONBLOCK flag is removed after the openat() call
-        // is successful.
+        // Use the O_ locking flags if the os supports them
+        // (Or if it's darwin, as darwin's `open` doesn't support the O_SYNC flag)
+        const has_flock_open_flags = @hasDecl(os, "O_EXLOCK") and !is_darwin;
         const nonblocking_lock_flag: u32 = if (has_flock_open_flags and flags.lock_nonblocking)
-            os.O_NONBLOCK
+            os.O_NONBLOCK | os.O_SYNC
         else
             0;
         const lock_flag: u32 = if (has_flock_open_flags) switch (flags.lock) {
             .None => @as(u32, 0),
-            .Shared => os.O_SHLOCK | nonblocking_lock_flag,
-            .Exclusive => os.O_EXLOCK | nonblocking_lock_flag,
+            .Shared => os.O_SHLOCK,
+            .Exclusive => os.O_EXLOCK,
         } else 0;
 
         const O_LARGEFILE = if (@hasDecl(os, "O_LARGEFILE")) os.O_LARGEFILE else 0;
@@ -896,7 +869,6 @@ pub const Dir = struct {
             try std.event.Loop.instance.?.openatZ(self.fd, sub_path_c, os_flags, flags.mode)
         else
             try os.openatZ(self.fd, sub_path_c, os_flags, flags.mode);
-        errdefer os.close(fd);
 
         if (!has_flock_open_flags and flags.lock != .None) {
             // TODO: integrate async I/O
@@ -906,22 +878,6 @@ pub const Dir = struct {
                 .Shared => os.LOCK_SH | lock_nonblocking,
                 .Exclusive => os.LOCK_EX | lock_nonblocking,
             });
-        }
-
-        if (has_flock_open_flags and flags.lock_nonblocking) {
-            var fl_flags = os.fcntl(fd, os.F_GETFL, 0) catch |err| switch (err) {
-                error.FileBusy => unreachable,
-                error.Locked => unreachable,
-                error.PermissionDenied => unreachable,
-                else => |e| return e,
-            };
-            fl_flags &= ~@as(usize, os.O_NONBLOCK);
-            _ = os.fcntl(fd, os.F_SETFL, fl_flags) catch |err| switch (err) {
-                error.FileBusy => unreachable,
-                error.Locked => unreachable,
-                error.PermissionDenied => unreachable,
-                else => |e| return e,
-            };
         }
 
         return File{
@@ -1215,7 +1171,6 @@ pub const Dir = struct {
             error.NoSpaceLeft => unreachable, // not providing O_CREAT
             error.PathAlreadyExists => unreachable, // not providing O_CREAT
             error.FileLocksNotSupported => unreachable, // locking folders is not supported
-            error.WouldBlock => unreachable, // can't happen for directories
             else => |e| return e,
         };
         return Dir{ .fd = fd };
@@ -1259,7 +1214,6 @@ pub const Dir = struct {
             error.NoSpaceLeft => unreachable, // not providing O_CREAT
             error.PathAlreadyExists => unreachable, // not providing O_CREAT
             error.FileLocksNotSupported => unreachable, // locking folders is not supported
-            error.WouldBlock => unreachable, // can't happen for directories
             else => |e| return e,
         };
         return Dir{ .fd = fd };
@@ -1929,41 +1883,11 @@ pub fn cwd() Dir {
     }
 }
 
-/// Opens a directory at the given path. The directory is a system resource that remains
-/// open until `close` is called on the result.
-/// See `openDirAbsoluteZ` for a function that accepts a null-terminated path.
-///
-/// Asserts that the path parameter has no null bytes.
-pub fn openDirAbsolute(absolute_path: []const u8, flags: Dir.OpenDirOptions) File.OpenError!Dir {
-    if (builtin.os.tag == .wasi) {
-        @compileError("WASI doesn't have the concept of an absolute directory; use openDir instead for WASI.");
-    }
-    assert(path.isAbsolute(absolute_path));
-    return cwd().openDir(absolute_path, flags);
-}
-
-/// Same as `openDirAbsolute` but the path parameter is null-terminated.
-pub fn openDirAbsoluteZ(absolute_path_c: [*:0]const u8, flags: Dir.OpenDirOptions) File.OpenError!Dir {
-    if (builtin.os.tag == .wasi) {
-        @compileError("WASI doesn't have the concept of an absolute directory; use openDir instead for WASI.");
-    }
-    assert(path.isAbsoluteZ(absolute_path_c));
-    return cwd().openDirZ(absolute_path_c, flags);
-}
-/// Same as `openDirAbsolute` but the path parameter is null-terminated.
-pub fn openDirAbsoluteW(absolute_path_c: [*:0]const u16, flags: Dir.OpenDirOptions) File.OpenError!Dir {
-    if (builtin.os.tag == .wasi) {
-        @compileError("WASI doesn't have the concept of an absolute directory; use openDir instead for WASI.");
-    }
-    assert(path.isAbsoluteWindowsW(absolute_path_c));
-    return cwd().openDirW(absolute_path_c, flags);
-}
-
 /// Opens a file for reading or writing, without attempting to create a new file, based on an absolute path.
 /// Call `File.close` to release the resource.
 /// Asserts that the path is absolute. See `Dir.openFile` for a function that
 /// operates on both absolute and relative paths.
-/// Asserts that the path parameter has no null bytes. See `openFileAbsoluteZ` for a function
+/// Asserts that the path parameter has no null bytes. See `openFileAbsoluteC` for a function
 /// that accepts a null-terminated path.
 pub fn openFileAbsolute(absolute_path: []const u8, flags: File.OpenFlags) File.OpenError!File {
     assert(path.isAbsolute(absolute_path));
@@ -1982,36 +1906,6 @@ pub fn openFileAbsoluteZ(absolute_path_c: [*:0]const u8, flags: File.OpenFlags) 
 pub fn openFileAbsoluteW(absolute_path_w: []const u16, flags: File.OpenFlags) File.OpenError!File {
     assert(path.isAbsoluteWindowsWTF16(absolute_path_w));
     return cwd().openFileW(absolute_path_w, flags);
-}
-
-/// Test accessing `path`.
-/// `path` is UTF8-encoded.
-/// Be careful of Time-Of-Check-Time-Of-Use race conditions when using this function.
-/// For example, instead of testing if a file exists and then opening it, just
-/// open it and handle the error for file not found.
-/// See `accessAbsoluteZ` for a function that accepts a null-terminated path.
-pub fn accessAbsolute(absolute_path: []const u8, flags: File.OpenFlags) Dir.AccessError!void {
-    if (builtin.os.tag == .wasi) {
-        @compileError("WASI doesn't have the concept of an absolute path; use access instead for WASI.");
-    }
-    assert(path.isAbsolute(absolute_path));
-    try cwd().access(absolute_path, flags);
-}
-/// Same as `accessAbsolute` but the path parameter is null-terminated.
-pub fn accessAbsoluteZ(absolute_path: [*:0]const u8, flags: File.OpenFlags) Dir.AccessError!void {
-    if (builtin.os.tag == .wasi) {
-        @compileError("WASI doesn't have the concept of an absolute path; use access instead for WASI.");
-    }
-    assert(path.isAbsoluteZ(absolute_path));
-    try cwd().accessZ(absolute_path, flags);
-}
-/// Same as `accessAbsolute` but the path parameter is WTF-16 encoded.
-pub fn accessAbsoluteW(absolute_path: [*:0]const 16, flags: File.OpenFlags) Dir.AccessError!void {
-    if (builtin.os.tag == .wasi) {
-        @compileError("WASI doesn't have the concept of an absolute path; use access instead for WASI.");
-    }
-    assert(path.isAbsoluteWindowsW(absolute_path));
-    try cwd().accessW(absolute_path, flags);
 }
 
 /// Creates, opens, or overwrites a file with write access, based on an absolute path.
@@ -2184,7 +2078,7 @@ pub const Walker = struct {
         while (true) {
             if (self.stack.items.len == 0) return null;
             // `top` becomes invalid after appending to `self.stack`.
-            const top = &self.stack.items[self.stack.items.len - 1];
+            const top = &self.stack.span()[self.stack.items.len - 1];
             const dirname_len = top.dirname_len;
             if (try top.dir_it.next()) |base| {
                 self.name_buffer.shrink(dirname_len);
@@ -2205,8 +2099,8 @@ pub const Walker = struct {
                 }
                 return Entry{
                     .dir = top.dir_it.dir,
-                    .basename = self.name_buffer.items[dirname_len + 1 ..],
-                    .path = self.name_buffer.items,
+                    .basename = self.name_buffer.span()[dirname_len + 1 ..],
+                    .path = self.name_buffer.span(),
                     .kind = base.kind,
                 };
             } else {
@@ -2330,14 +2224,14 @@ pub fn selfExePath(out_buffer: []u8) SelfExePathError![]u8 {
             var out_len: usize = out_buffer.len;
             try os.sysctl(&mib, out_buffer.ptr, &out_len, null, 0);
             // TODO could this slice from 0 to out_len instead?
-            return mem.spanZ(std.meta.assumeSentinel(out_buffer.ptr, 0));
+            return mem.spanZ(@ptrCast([*:0]u8, out_buffer));
         },
         .netbsd => {
             var mib = [4]c_int{ os.CTL_KERN, os.KERN_PROC_ARGS, -1, os.KERN_PROC_PATHNAME };
             var out_len: usize = out_buffer.len;
             try os.sysctl(&mib, out_buffer.ptr, &out_len, null, 0);
             // TODO could this slice from 0 to out_len instead?
-            return mem.spanZ(std.meta.assumeSentinel(out_buffer.ptr, 0));
+            return mem.spanZ(@ptrCast([*:0]u8, out_buffer));
         },
         .openbsd => {
             // OpenBSD doesn't support getting the path of a running process, so try to guess it
@@ -2358,7 +2252,7 @@ pub fn selfExePath(out_buffer: []u8) SelfExePathError![]u8 {
                 const PATH = std.os.getenvZ("PATH") orelse return error.FileNotFound;
                 var path_it = mem.tokenize(PATH, &[_]u8{path.delimiter});
                 while (path_it.next()) |a_path| {
-                    var resolved_path_buf: [MAX_PATH_BYTES - 1:0]u8 = undefined;
+                    var resolved_path_buf: [MAX_PATH_BYTES-1:0]u8 = undefined;
                     const resolved_path = std.fmt.bufPrintZ(&resolved_path_buf, "{s}/{s}", .{
                         a_path,
                         os.argv[0],
@@ -2389,7 +2283,7 @@ pub fn selfExePath(out_buffer: []u8) SelfExePathError![]u8 {
 /// The result is UTF16LE-encoded.
 pub fn selfExePathW() [:0]const u16 {
     const image_path_name = &os.windows.peb().ProcessParameters.ImagePathName;
-    return mem.spanZ(std.meta.assumeSentinel(image_path_name.Buffer, 0));
+    return mem.spanZ(@ptrCast([*:0]const u16, image_path_name.Buffer));
 }
 
 /// `selfExeDirPath` except allocates the result on the heap.

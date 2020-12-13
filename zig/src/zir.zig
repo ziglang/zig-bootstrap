@@ -1952,9 +1952,10 @@ const EmitZIR = struct {
                     };
                     _ = try self.emitUnnamedDecl(&export_inst.base);
                 }
+            } else {
+                const new_decl = try self.emitTypedValue(ir_decl.src(), ir_decl.typed_value.most_recent.typed_value);
+                new_decl.name = try self.arena.allocator.dupe(u8, mem.spanZ(ir_decl.name));
             }
-            const new_decl = try self.emitTypedValue(ir_decl.src(), ir_decl.typed_value.most_recent.typed_value);
-            new_decl.name = try self.arena.allocator.dupe(u8, mem.spanZ(ir_decl.name));
         }
     }
 
@@ -2686,10 +2687,7 @@ const EmitZIR = struct {
                 },
                 .Int => {
                     const info = ty.intInfo(self.old_module.getTarget());
-                    const signed = try self.emitPrimitive(src, switch (info.signedness) {
-                        .signed => .@"true",
-                        .unsigned => .@"false",
-                    });
+                    const signed = try self.emitPrimitive(src, if (info.signed) .@"true" else .@"false");
                     const bits_payload = try self.arena.allocator.create(Value.Payload.Int_u64);
                     bits_payload.* = .{ .int = info.bits };
                     const bits = try self.emitComptimeIntVal(src, Value.initPayload(&bits_payload.base));

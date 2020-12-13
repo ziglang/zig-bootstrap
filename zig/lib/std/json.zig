@@ -1270,7 +1270,7 @@ pub const Value = union(enum) {
             .Integer => |inner| try stringify(inner, options, out_stream),
             .Float => |inner| try stringify(inner, options, out_stream),
             .String => |inner| try stringify(inner, options, out_stream),
-            .Array => |inner| try stringify(inner.items, options, out_stream),
+            .Array => |inner| try stringify(inner.span(), options, out_stream),
             .Object => |inner| {
                 try out_stream.writeByte('{');
                 var field_output = false;
@@ -2057,7 +2057,7 @@ pub const Parser = struct {
     }
 
     fn pushToParent(p: *Parser, value: *const Value) !void {
-        switch (p.stack.items[p.stack.items.len - 1]) {
+        switch (p.stack.span()[p.stack.items.len - 1]) {
             // Object Parent -> [ ..., object, <key>, value ]
             Value.String => |key| {
                 _ = p.stack.pop();
@@ -2147,8 +2147,8 @@ pub fn unescapeString(output: []u8, input: []const u8) !void {
                 const secondCodeUnit = std.fmt.parseInt(u16, input[inIndex + 8 .. inIndex + 12], 16) catch unreachable;
 
                 const utf16le_seq = [2]u16{
-                    mem.nativeToLittle(u16, firstCodeUnit),
-                    mem.nativeToLittle(u16, secondCodeUnit),
+                    mem.littleToNative(u16, firstCodeUnit),
+                    mem.littleToNative(u16, secondCodeUnit),
                 };
                 if (std.unicode.utf16leToUtf8(output[outIndex..], &utf16le_seq)) |byteCount| {
                     outIndex += byteCount;

@@ -59,42 +59,48 @@ const RDebug = extern struct {
     r_ldbase: usize,
 };
 
-/// TODO make it possible to reference this same external symbol 2x so we don't need this
-/// helper function.
-pub fn get_DYNAMIC() ?[*]elf.Dyn {
-    return @extern([*]elf.Dyn, .{ .name = "_DYNAMIC", .linkage = .Weak });
+fn elf_get_va_offset(phdrs: []elf.Phdr) !usize {
+    for (phdrs) |*phdr| {
+        if (phdr.p_type == elf.PT_LOAD) {
+            return @ptrToInt(phdr) - phdr.p_vaddr;
+        }
+    }
+    return error.InvalidExe;
 }
 
 pub fn linkmap_iterator(phdrs: []elf.Phdr) !LinkMap.Iterator {
-    const _DYNAMIC = get_DYNAMIC() orelse {
+    const va_offset = try elf_get_va_offset(phdrs);
+
+    const dyn_table = init: {
+        for (phdrs) |*phdr| {
+            if (phdr.p_type == elf.PT_DYNAMIC) {
+                const ptr = @intToPtr([*]elf.Dyn, va_offset + phdr.p_vaddr);
+                break :init ptr[0 .. phdr.p_memsz / @sizeOf(elf.Dyn)];
+            }
+        }
         // No PT_DYNAMIC means this is either a statically-linked program or a
-        // badly corrupted dynamically-linked one.
+        // badly corrupted one
         return LinkMap.Iterator{ .current = null };
     };
 
     const link_map_ptr = init: {
-        var i: usize = 0;
-        while (_DYNAMIC[i].d_tag != elf.DT_NULL) : (i += 1) {
-            switch (_DYNAMIC[i].d_tag) {
+        for (dyn_table) |*dyn| {
+            switch (dyn.d_tag) {
                 elf.DT_DEBUG => {
-                    const ptr = @intToPtr(?*RDebug, _DYNAMIC[i].d_val);
-                    if (ptr) |r_debug| {
-                        if (r_debug.r_version != 1) return error.InvalidExe;
-                        break :init r_debug.r_map;
-                    }
+                    const r_debug = @intToPtr(*RDebug, dyn.d_val);
+                    if (r_debug.r_version != 1) return error.InvalidExe;
+                    break :init r_debug.r_map;
                 },
                 elf.DT_PLTGOT => {
-                    const ptr = @intToPtr(?[*]usize, _DYNAMIC[i].d_val);
-                    if (ptr) |got_table| {
-                        // The address to the link_map structure is stored in
-                        // the second slot
-                        break :init @intToPtr(?*LinkMap, got_table[1]);
-                    }
+                    const got_table = @intToPtr([*]usize, dyn.d_val);
+                    // The address to the link_map structure is stored in the
+                    // second slot
+                    break :init @intToPtr(?*LinkMap, got_table[1]);
                 },
                 else => {},
             }
         }
-        return LinkMap.Iterator{ .current = null };
+        return error.InvalidExe;
     };
 
     return LinkMap.Iterator{ .current = link_map_ptr };

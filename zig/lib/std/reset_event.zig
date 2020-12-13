@@ -109,12 +109,9 @@ const PosixEvent = struct {
     }
 
     fn deinit(self: *PosixEvent) void {
-        // on dragonfly or openbsd, *destroy() functions can return EINVAL
+        // on dragonfly, *destroy() functions can return EINVAL
         // for statically initialized pthread structures
-        const err = if (builtin.os.tag == .dragonfly or builtin.os.tag == .openbsd)
-            os.EINVAL
-        else
-            0;
+        const err = if (builtin.os.tag == .dragonfly) os.EINVAL else 0;
 
         const retm = c.pthread_mutex_destroy(&self.mutex);
         assert(retm == 0 or retm == err);
@@ -363,6 +360,11 @@ const AtomicEvent = struct {
 };
 
 test "ResetEvent" {
+    if (std.Target.current.os.tag == .macos or std.Target.current.os.tag == .windows) {
+        // https://github.com/ziglang/zig/issues/7009
+        return error.SkipZigTest;
+    }
+
     var event = ResetEvent.init();
     defer event.deinit();
 
@@ -445,7 +447,7 @@ test "ResetEvent" {
         fn timedWaiter(self: *Self) !void {
             self.in.wait();
             testing.expectError(error.TimedOut, self.out.timedWait(time.ns_per_us));
-            try self.out.timedWait(time.ns_per_ms * 100);
+            try self.out.timedWait(time.ns_per_ms * 10);
             testing.expect(self.value == 5);
         }
     };
@@ -456,13 +458,9 @@ test "ResetEvent" {
     defer receiver.wait();
     context.sender();
 
-    if (false) {
-        // I have now observed this fail on macOS, Windows, and Linux.
-        // https://github.com/ziglang/zig/issues/7009
-        var timed = Context.init();
-        defer timed.deinit();
-        const sleeper = try std.Thread.spawn(&timed, Context.sleeper);
-        defer sleeper.wait();
-        try timed.timedWaiter();
-    }
+    var timed = Context.init();
+    defer timed.deinit();
+    const sleeper = try std.Thread.spawn(&timed, Context.sleeper);
+    defer sleeper.wait();
+    try timed.timedWaiter();
 }

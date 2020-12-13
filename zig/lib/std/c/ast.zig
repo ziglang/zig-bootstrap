@@ -4,22 +4,29 @@
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
 const std = @import("std");
-const ArrayList = std.ArrayList;
+const SegmentedList = std.SegmentedList;
 const Token = std.c.Token;
 const Source = std.c.tokenizer.Source;
 
 pub const TokenIndex = usize;
 
 pub const Tree = struct {
-    tokens: []Token,
-    sources: []Source,
+    tokens: TokenList,
+    sources: SourceList,
     root_node: *Node.Root,
-    arena_state: std.heap.ArenaAllocator.State,
-    gpa: *mem.Allocator,
-    msgs: []Msg,
+    arena_allocator: std.heap.ArenaAllocator,
+    msgs: MsgList,
+
+    pub const SourceList = SegmentedList(Source, 4);
+    pub const TokenList = Source.TokenList;
+    pub const MsgList = SegmentedList(Msg, 0);
 
     pub fn deinit(self: *Tree) void {
-        self.arena_state.promote(self.gpa).deinit();
+        // Here we copy the arena allocator into stack memory, because
+        // otherwise it would destroy itself while it was still working.
+        var arena_allocator = self.arena_allocator;
+        arena_allocator.deinit();
+        // self is destroyed
     }
 
     pub fn tokenSlice(tree: *Tree, token: TokenIndex) []const u8 {
@@ -169,8 +176,7 @@ pub const Error = union(enum) {
 };
 
 pub const Type = struct {
-    pub const TypeList = ArrayList(*Type);
-
+    pub const TypeList = std.SegmentedList(*Type, 4);
     @"const": bool = false,
     atomic: bool = false,
     @"volatile": bool = false,
@@ -243,7 +249,7 @@ pub const Node = struct {
         decls: DeclList,
         eof: TokenIndex,
 
-        pub const DeclList = ArrayList(*Node);
+        pub const DeclList = SegmentedList(*Node, 4);
     };
 
     pub const DeclSpec = struct {
@@ -562,8 +568,8 @@ pub const Node = struct {
             Array: Arrays,
         },
 
-        pub const Arrays = ArrayList(*Array);
-        pub const Params = ArrayList(*Param);
+        pub const Arrays = std.SegmentedList(*Array, 2);
+        pub const Params = std.SegmentedList(*Param, 4);
     };
 
     pub const Array = struct {
@@ -606,7 +612,7 @@ pub const Node = struct {
         old_decls: OldDeclList,
         body: ?*CompoundStmt,
 
-        pub const OldDeclList = ArrayList(*Node);
+        pub const OldDeclList = SegmentedList(*Node, 0);
     };
 
     pub const Typedef = struct {
@@ -636,12 +642,11 @@ pub const Node = struct {
 
     pub const Initializer = union(enum) {
         list: struct {
-            initializers: List,
+            initializers: InitializerList,
             rbrace: TokenIndex,
         },
         expr: *Expr,
-
-        pub const List = ArrayList(*Initializer);
+        pub const InitializerList = std.SegmentedList(*Initializer, 4);
     };
 
     pub const Macro = struct {

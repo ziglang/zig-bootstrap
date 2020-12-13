@@ -17,9 +17,7 @@
 #include <intrin.h>  
 #endif
 
-#define ZIG_Q(x) #x
-#define ZIG_QUOTE(x) ZIG_Q(x)
-
+#include "config.h"
 #include "util_base.hpp"
 #include "heap.hpp"
 #include "mem.hpp"

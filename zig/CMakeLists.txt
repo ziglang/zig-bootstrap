@@ -63,6 +63,9 @@ endif()
 
 if(ZIG_STATIC)
     set(ZIG_STATIC_LLVM "on")
+    set(ZIG_LINK_MODE "Static")
+else()
+    set(ZIG_LINK_MODE "Dynamic")
 endif()
 
 string(REGEX REPLACE "\\\\" "\\\\\\\\" ZIG_LIBC_LIB_DIR_ESCAPED "${ZIG_LIBC_LIB_DIR}")
@@ -315,7 +318,6 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/array_list.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/ascii.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/atomic.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/atomic/bool.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/atomic/int.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/atomic/queue.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/atomic/stack.zig"
@@ -333,6 +335,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/crypto/blake3.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/crypto/siphash.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/debug.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/debug/leb128.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/dwarf.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/dwarf_bits.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/elf.zig"
@@ -368,7 +371,6 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/io/writer.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/json.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/json/write_stream.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/leb128.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/linked_list.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/log.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/macho.zig"
@@ -519,7 +521,6 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/clang_options.zig"
     "${CMAKE_SOURCE_DIR}/src/clang_options_data.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen.zig"
-    "${CMAKE_SOURCE_DIR}/src/codegen/aarch64.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen/arm.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen/c.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen/llvm.zig"
@@ -590,12 +591,6 @@ if(MSVC)
 else(MSVC)
   set(EXE_CFLAGS "-std=c++14")
 endif(MSVC)
-
-if(ZIG_STATIC)
-    set(EXE_CFLAGS "${EXE_CFLAGS} -DZIG_LINK_MODE=Static")
-else()
-    set(EXE_CFLAGS "${EXE_CFLAGS} -DZIG_LINK_MODE=Dynamic")
-endif()
 
 if("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
     if(MSVC)

@@ -8,6 +8,8 @@
 #ifndef ZIG_MEM_TYPE_INFO_HPP
 #define ZIG_MEM_TYPE_INFO_HPP
 
+#include "config.h"
+
 namespace mem {
 
 struct TypeInfo {

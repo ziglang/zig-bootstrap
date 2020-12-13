@@ -209,7 +209,7 @@ pub const TypeInfo = union(enum) {
     /// This data structure is used by the Zig language code generation and
     /// therefore must be kept in sync with the compiler implementation.
     pub const Int = struct {
-        signedness: Signedness,
+        is_signed: bool,
         bits: comptime_int,
     };
 
@@ -440,13 +440,6 @@ pub const Endian = enum {
 
 /// This data structure is used by the Zig language code generation and
 /// therefore must be kept in sync with the compiler implementation.
-pub const Signedness = enum {
-    signed,
-    unsigned,
-};
-
-/// This data structure is used by the Zig language code generation and
-/// therefore must be kept in sync with the compiler implementation.
 pub const OutputMode = enum {
     Exe,
     Lib,
@@ -641,15 +634,6 @@ pub const ExportOptions = struct {
     name: []const u8,
     linkage: GlobalLinkage = .Strong,
     section: ?[]const u8 = null,
-};
-
-/// This data structure is used by the Zig language code generation and
-/// therefore must be kept in sync with the compiler implementation.
-pub const ExternOptions = struct {
-    name: []const u8,
-    library_name: ?[]const u8 = null,
-    linkage: GlobalLinkage = .Strong,
-    is_thread_local: bool = false,
 };
 
 /// This function type is used by the Zig language code generation and

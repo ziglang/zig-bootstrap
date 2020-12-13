@@ -4191,7 +4191,7 @@ test "noreturn" {
       <p>Another use case for {#syntax#}noreturn{#endsyntax#} is the {#syntax#}exit{#endsyntax#} function:</p>
       {#code_begin|test#}
       {#target_windows#}
-pub extern "kernel32" fn ExitProcess(exit_code: c_uint) callconv(if (@import("builtin").arch == .i386) .Stdcall else .C) noreturn;
+pub extern "kernel32" fn ExitProcess(exit_code: c_uint) callconv(.Stdcall) noreturn;
 
 test "foo" {
     const value = bar() catch ExitProcess(1);
@@ -4226,7 +4226,7 @@ export fn sub(a: i8, b: i8) i8 { return a - b; }
 // at link time, when linking statically, or at runtime, when linking
 // dynamically.
 // The callconv specifier changes the calling convention of the function.
-extern "kernel32" fn ExitProcess(exit_code: u32) callconv(if (@import("builtin").arch == .i386) .Stdcall else .C) noreturn;
+extern "kernel32" fn ExitProcess(exit_code: u32) callconv(.Stdcall) noreturn;
 extern "c" fn atan2(a: f64, b: f64) f64;
 
 // The @setCold builtin tells the optimizer that a function is rarely called.
@@ -7460,7 +7460,7 @@ test "main" {
       {#header_close#}
 
       {#header_open|@errorToInt#}
-      <pre>{#syntax#}@errorToInt(err: anytype) std.meta.Int(.unsigned, @sizeOf(anyerror) * 8){#endsyntax#}</pre>
+      <pre>{#syntax#}@errorToInt(err: anytype) std.meta.IntType(false, @sizeOf(anyerror) * 8){#endsyntax#}</pre>
       <p>
       Supports the following types:
       </p>
@@ -7752,7 +7752,7 @@ test "@hasDecl" {
       {#header_close#}
 
       {#header_open|@intToError#}
-      <pre>{#syntax#}@intToError(value: std.meta.Int(.unsigned, @sizeOf(anyerror) * 8)) anyerror{#endsyntax#}</pre>
+      <pre>{#syntax#}@intToError(value: std.meta.IntType(false, @sizeOf(anyerror) * 8)) anyerror{#endsyntax#}</pre>
       <p>
       Converts from the integer representation of an error into {#link|The Global Error Set#} type.
       </p>
@@ -11042,15 +11042,15 @@ TestDecl &lt;- KEYWORD_test STRINGLITERALSINGLE Block
 TopLevelComptime &lt;- KEYWORD_comptime BlockExpr
 
 TopLevelDecl
-    &lt;- (KEYWORD_export / KEYWORD_extern STRINGLITERALSINGLE? / (KEYWORD_inline / KEYWORD_noinline))? FnProto (SEMICOLON / Block)
+    &lt;- (KEYWORD_export / KEYWORD_extern STRINGLITERALSINGLE? / KEYWORD_inline)? FnProto (SEMICOLON / Block)
      / (KEYWORD_export / KEYWORD_extern STRINGLITERALSINGLE?)? KEYWORD_threadlocal? VarDecl
      / KEYWORD_usingnamespace Expr SEMICOLON
 
-FnProto &lt;- KEYWORD_fn IDENTIFIER? LPAREN ParamDeclList RPAREN ByteAlign? LinkSection? CallConv? EXCLAMATIONMARK? (KEYWORD_anytype / TypeExpr)
+FnProto &lt;- KEYWORD_fn IDENTIFIER? LPAREN ParamDeclList RPAREN ByteAlign? LinkSection? EXCLAMATIONMARK? (KEYWORD_anytype / TypeExpr)
 
 VarDecl &lt;- (KEYWORD_const / KEYWORD_var) IDENTIFIER (COLON TypeExpr)? ByteAlign? LinkSection? (EQUAL Expr)? SEMICOLON
 
-ContainerField &lt;- KEYWORD_comptime? IDENTIFIER (COLON TypeExpr ByteAlign?)? (EQUAL Expr)?
+ContainerField &lt;- KEYWORD_comptime? IDENTIFIER (COLON TypeExpr)? (EQUAL Expr)?
 
 # *** Block Level ***
 Statement
@@ -11090,7 +11090,7 @@ BlockExpr &lt;- BlockLabel? Block
 # *** Expression Level ***
 AssignExpr &lt;- Expr (AssignOp Expr)?
 
-Expr &lt;- BoolOrExpr
+Expr &lt;- KEYWORD_try* BoolOrExpr
 
 BoolOrExpr &lt;- BoolAndExpr (KEYWORD_or BoolAndExpr)*
 
@@ -11215,8 +11215,6 @@ WhileContinueExpr &lt;- COLON LPAREN AssignExpr RPAREN
 
 LinkSection &lt;- KEYWORD_linksection LPAREN Expr RPAREN
 
-CallConv &lt;- KEYWORD_callconv LPAREN Expr RPAREN
-
 ParamDecl &lt;- (KEYWORD_noalias / KEYWORD_comptime)? (IDENTIFIER COLON)? ParamType
 
 ParamType
@@ -11323,20 +11321,19 @@ SuffixOp
 FnCallArguments &lt;- LPAREN ExprList RPAREN
 
 # Ptr specific
-ArrayTypeStart &lt;- LBRACKET Expr? (COLON Expr)? RBRACKET
+ArrayTypeStart &lt;- LBRACKET Expr? RBRACKET
 
 PtrTypeStart
     &lt;- ASTERISK
      / ASTERISK2
-     / LBRACKET ASTERISK (LETTERC / COLON Expr)? RBRACKET
+     / PTRUNKNOWN
+     / PTRC
 
 # ContainerDecl specific
 ContainerDeclAuto &lt;- ContainerDeclType LBRACE ContainerMembers RBRACE
 
 ContainerDeclType
-    &lt;- KEYWORD_struct
-     / KEYWORD_opaque
-     / KEYWORD_enum (LPAREN Expr RPAREN)?
+    &lt;- (KEYWORD_struct / KEYWORD_enum / KEYWORD_opaque) (LPAREN Expr RPAREN)?
      / KEYWORD_union (LPAREN (KEYWORD_enum (LPAREN Expr RPAREN)? / Expr) RPAREN)?
 
 # Alignment
@@ -11360,51 +11357,44 @@ ExprList &lt;- (Expr COMMA)* Expr?
 # *** Tokens ***
 eof &lt;- !.
 hex &lt;- [0-9a-fA-F]
-hex_ &lt;- ('_'/hex)
-dec &lt;- [0-9]
-dec_ &lt;- ('_'/dec)
-
-dec_int &lt;- dec (dec_* dec)?
-hex_int &lt;- hex (hex_* dec)?
-
 char_escape
-    &lt;- &quot;\\x&quot; hex hex
-     / &quot;\\u{&quot; hex+ &quot;}&quot;
-     / &quot;\\&quot; [nr\\t'&quot;]
+    &lt;- "\\x" hex hex
+     / "\\u{" hex+ "}"
+     / "\\" [nr\\t'"]
 char_char
     &lt;- char_escape
      / [^\\'\n]
 string_char
     &lt;- char_escape
-     / [^\\&quot;\n]
+     / [^\\"\n]
 
 line_comment &lt;- '//'[^\n]*
-line_string &lt;- (&quot;\\\\&quot; [^\n]* [ \n]*)+
+line_string &lt;- ("\\\\" [^\n]* [ \n]*)+
 skip &lt;- ([ \n] / line_comment)*
 
-CHAR_LITERAL &lt;- &quot;'&quot; char_char &quot;'&quot; skip
+CHAR_LITERAL &lt;- "'" char_char "'" skip
 FLOAT
-    &lt;- &quot;0x&quot; hex_* hex &quot;.&quot; hex_int ([pP] [-+]? hex_int)? skip
-     /      dec_int   &quot;.&quot; dec_int ([eE] [-+]? dec_int)? skip
-     / &quot;0x&quot; hex_* hex &quot;.&quot;? [pP] [-+]? hex_int skip
-     /      dec_int   &quot;.&quot;? [eE] [-+]? dec_int skip
+    &lt;- "0x" hex+   "." hex+   ([pP] [-+]? hex+)?   skip
+     /      [0-9]+ "." [0-9]+ ([eE] [-+]? [0-9]+)? skip
+     / "0x" hex+   "."? [pP] [-+]? hex+   skip
+     /      [0-9]+ "."? [eE] [-+]? [0-9]+ skip
 INTEGER
-    &lt;- &quot;0b&quot; [_01]*  [01]  skip
-     / &quot;0o&quot; [_0-7]* [0-7] skip
-     / &quot;0x&quot; hex_* hex skip
-     /      dec_int   skip
-STRINGLITERALSINGLE &lt;- &quot;\&quot;&quot; string_char* &quot;\&quot;&quot; skip
+    &lt;- "0b" [01]+  skip
+     / "0o" [0-7]+ skip
+     / "0x" hex+   skip
+     /      [0-9]+ skip
+STRINGLITERALSINGLE &lt;- "\"" string_char* "\"" skip
 STRINGLITERAL
     &lt;- STRINGLITERALSINGLE
      / line_string                 skip
 IDENTIFIER
     &lt;- !keyword [A-Za-z_] [A-Za-z0-9_]* skip
-     / &quot;@\&quot;&quot; string_char* &quot;\&quot;&quot;                            skip
-BUILTINIDENTIFIER &lt;- &quot;@&quot;[A-Za-z_][A-Za-z0-9_]* skip
+     / "@\"" string_char* "\""                            skip
+BUILTINIDENTIFIER &lt;- "@"[A-Za-z_][A-Za-z0-9_]* skip
 
 
-AMPERSAND            &lt;- '&amp;'      ![=]      skip
-AMPERSANDEQUAL       &lt;- '&amp;='               skip
+AMPERSAND            &lt;- '&'      ![=]      skip
+AMPERSANDEQUAL       &lt;- '&='               skip
 ASTERISK             &lt;- '*'      ![*%=]    skip
 ASTERISK2            &lt;- '**'               skip
 ASTERISKEQUAL        &lt;- '*='               skip
@@ -11429,7 +11419,7 @@ LARROW2              &lt;- '&lt;&lt;'     ![=]      skip
 LARROW2EQUAL         &lt;- '&lt;&lt;='              skip
 LARROWEQUAL          &lt;- '&lt;='               skip
 LBRACE               &lt;- '{'                skip
-LBRACKET             &lt;- '['                skip
+LBRACKET             &lt;- '['      ![*]      skip
 LPAREN               &lt;- '('                skip
 MINUS                &lt;- '-'      ![%=&gt;]    skip
 MINUSEQUAL           &lt;- '-='               skip
@@ -11446,7 +11436,8 @@ PLUS2                &lt;- '++'               skip
 PLUSEQUAL            &lt;- '+='               skip
 PLUSPERCENT          &lt;- '+%'     ![=]      skip
 PLUSPERCENTEQUAL     &lt;- '+%='              skip
-LETTERC              &lt;- 'c'                skip
+PTRC                 &lt;- '[*c]'             skip
+PTRUNKNOWN           &lt;- '[*]'              skip
 QUESTIONMARK         &lt;- '?'                skip
 RARROW               &lt;- '&gt;'      ![&gt;=]     skip
 RARROW2              &lt;- '&gt;&gt;'     ![=]      skip
@@ -11470,7 +11461,6 @@ KEYWORD_asm         &lt;- 'asm'         end_of_word
 KEYWORD_async       &lt;- 'async'       end_of_word
 KEYWORD_await       &lt;- 'await'       end_of_word
 KEYWORD_break       &lt;- 'break'       end_of_word
-KEYWORD_callconv    &lt;- 'callconv'    end_of_word
 KEYWORD_catch       &lt;- 'catch'       end_of_word
 KEYWORD_comptime    &lt;- 'comptime'    end_of_word
 KEYWORD_const       &lt;- 'const'       end_of_word
@@ -11489,7 +11479,6 @@ KEYWORD_if          &lt;- 'if'          end_of_word
 KEYWORD_inline      &lt;- 'inline'      end_of_word
 KEYWORD_noalias     &lt;- 'noalias'     end_of_word
 KEYWORD_nosuspend   &lt;- 'nosuspend'   end_of_word
-KEYWORD_noinline    &lt;- 'noinline'    end_of_word
 KEYWORD_null        &lt;- 'null'        end_of_word
 KEYWORD_opaque      &lt;- 'opaque'      end_of_word
 KEYWORD_or          &lt;- 'or'          end_of_word
@@ -11514,20 +11503,19 @@ KEYWORD_var         &lt;- 'var'         end_of_word
 KEYWORD_volatile    &lt;- 'volatile'    end_of_word
 KEYWORD_while       &lt;- 'while'       end_of_word
 
-keyword &lt;- KEYWORD_align / KEYWORD_allowzero / KEYWORD_and / KEYWORD_anyframe
-         / KEYWORD_anytype / KEYWORD_asm / KEYWORD_async / KEYWORD_await
-         / KEYWORD_break / KEYWORD_callconv / KEYWORD_catch / KEYWORD_comptime
-         / KEYWORD_const / KEYWORD_continue / KEYWORD_defer / KEYWORD_else
-         / KEYWORD_enum / KEYWORD_errdefer / KEYWORD_error / KEYWORD_export
-         / KEYWORD_extern / KEYWORD_false / KEYWORD_fn / KEYWORD_for / KEYWORD_if
-         / KEYWORD_inline / KEYWORD_noalias / KEYWORD_nosuspend / KEYWORD_noinline
-         / KEYWORD_null / KEYWORD_opaque / KEYWORD_or / KEYWORD_orelse / KEYWORD_packed
-         / KEYWORD_pub / KEYWORD_resume / KEYWORD_return / KEYWORD_linksection
-         / KEYWORD_struct / KEYWORD_suspend / KEYWORD_switch
-         / KEYWORD_test / KEYWORD_threadlocal / KEYWORD_true / KEYWORD_try
+keyword &lt;- KEYWORD_align / KEYWORD_and / KEYWORD_anyframe / KEYWORD_anytype
+         / KEYWORD_allowzero / KEYWORD_asm / KEYWORD_async / KEYWORD_await / KEYWORD_break
+         / KEYWORD_catch / KEYWORD_comptime / KEYWORD_const / KEYWORD_continue
+         / KEYWORD_defer / KEYWORD_else / KEYWORD_enum / KEYWORD_errdefer
+         / KEYWORD_error / KEYWORD_export / KEYWORD_extern / KEYWORD_false
+         / KEYWORD_fn / KEYWORD_for / KEYWORD_if / KEYWORD_inline
+         / KEYWORD_noalias / KEYWORD_null / KEYWORD_opaque / KEYWORD_or
+         / KEYWORD_orelse / KEYWORD_packed / KEYWORD_pub
+         / KEYWORD_resume / KEYWORD_return / KEYWORD_linksection
+         / KEYWORD_struct / KEYWORD_suspend
+         / KEYWORD_switch / KEYWORD_test / KEYWORD_threadlocal / KEYWORD_true / KEYWORD_try
          / KEYWORD_undefined / KEYWORD_union / KEYWORD_unreachable
-         / KEYWORD_usingnamespace / KEYWORD_var / KEYWORD_volatile / KEYWORD_while
-</code></pre>
+         / KEYWORD_usingnamespace / KEYWORD_var / KEYWORD_volatile / KEYWORD_while</code></pre>
       {#header_close#}
       {#header_open|Zen#}
       <ul>

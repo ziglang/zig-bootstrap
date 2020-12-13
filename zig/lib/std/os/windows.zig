@@ -555,43 +555,6 @@ pub fn WriteFile(
     }
 }
 
-pub const SetCurrentDirectoryError = error{
-    NameTooLong,
-    InvalidUtf8,
-    FileNotFound,
-    NotDir,
-    AccessDenied,
-    NoDevice,
-    BadPathName,
-    Unexpected,
-};
-
-pub fn SetCurrentDirectory(path_name: []const u16) SetCurrentDirectoryError!void {
-    const path_len_bytes = math.cast(u16, path_name.len * 2) catch |err| switch (err) {
-        error.Overflow => return error.NameTooLong,
-    };
-
-    var nt_name = UNICODE_STRING{
-        .Length = path_len_bytes,
-        .MaximumLength = path_len_bytes,
-        .Buffer = @intToPtr([*]u16, @ptrToInt(path_name.ptr)),
-    };
-
-    const rc = ntdll.RtlSetCurrentDirectory_U(&nt_name);
-    switch (rc) {
-        .SUCCESS => {},
-        .OBJECT_NAME_INVALID => return error.BadPathName,
-        .OBJECT_NAME_NOT_FOUND => return error.FileNotFound,
-        .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
-        .NO_MEDIA_IN_DEVICE => return error.NoDevice,
-        .INVALID_PARAMETER => unreachable,
-        .ACCESS_DENIED => return error.AccessDenied,
-        .OBJECT_PATH_SYNTAX_BAD => unreachable,
-        .NOT_A_DIRECTORY => return error.NotDir,
-        else => return unexpectedStatus(rc),
-    }
-}
-
 pub const GetCurrentDirectoryError = error{
     NameTooLong,
     Unexpected,

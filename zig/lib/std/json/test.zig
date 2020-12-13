@@ -9,47 +9,60 @@
 // Read also http://seriot.ch/parsing_json.php for a good overview.
 
 const std = @import("../std.zig");
-const json = std.json;
-const testing = std.testing;
 
-fn testNonStreaming(comptime s: []const u8) !void {
-    var p = json.Parser.init(testing.allocator, false);
+fn ok(comptime s: []const u8) void {
+    std.testing.expect(std.json.validate(s));
+
+    var p = std.json.Parser.init(std.testing.allocator, false);
     defer p.deinit();
 
-    var tree = try p.parse(s);
+    var tree = p.parse(s) catch unreachable;
     defer tree.deinit();
 }
 
-fn ok(comptime s: []const u8) void {
-    testing.expect(json.validate(s));
-
-    testNonStreaming(s) catch testing.expect(false);
-}
-
 fn err(comptime s: []const u8) void {
-    testing.expect(!json.validate(s));
+    std.testing.expect(!std.json.validate(s));
 
-    testNonStreaming(s) catch return;
-    testing.expect(false);
+    var p = std.json.Parser.init(std.testing.allocator, false);
+    defer p.deinit();
+
+    if (p.parse(s)) |_| {
+        unreachable;
+    } else |_| {}
 }
 
 fn utf8Error(comptime s: []const u8) void {
-    testing.expect(!json.validate(s));
+    std.testing.expect(!std.json.validate(s));
 
-    testing.expectError(error.InvalidUtf8Byte, testNonStreaming(s));
+    var p = std.json.Parser.init(std.testing.allocator, false);
+    defer p.deinit();
+
+    if (p.parse(s)) |_| {
+        unreachable;
+    } else |e| {
+        std.testing.expect(e == error.InvalidUtf8Byte);
+    }
 }
 
 fn any(comptime s: []const u8) void {
-    _ = json.validate(s);
+    _ = std.json.validate(s);
 
-    testNonStreaming(s) catch {};
+    var p = std.json.Parser.init(std.testing.allocator, false);
+    defer p.deinit();
+
+    var tree = p.parse(s) catch return;
+    defer tree.deinit();
 }
 
 fn anyStreamingErrNonStreaming(comptime s: []const u8) void {
-    _ = json.validate(s);
+    _ = std.json.validate(s);
 
-    testNonStreaming(s) catch return;
-    testing.expect(false);
+    var p = std.json.Parser.init(std.testing.allocator, false);
+    defer p.deinit();
+
+    if (p.parse(s)) |_| {
+        unreachable;
+    } else |_| {}
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////

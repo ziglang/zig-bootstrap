@@ -177,7 +177,6 @@ struct ZigStage1 {
     enum ErrColor err_color;
 
     bool pic;
-    bool pie;
     bool link_libc;
     bool link_libcpp;
     bool strip;

@@ -55,14 +55,6 @@ const known_options = [_]KnownOpt{
         .ident = "no_pic",
     },
     .{
-        .name = "fPIE",
-        .ident = "pie",
-    },
-    .{
-        .name = "fno-PIE",
-        .ident = "no_pie",
-    },
-    .{
         .name = "nolibc",
         .ident = "nostdlib",
     },
@@ -222,11 +214,7 @@ const known_options = [_]KnownOpt{
     },
     .{
         .name = "###",
-        .ident = "dry_run",
-    },
-    .{
-        .name = "v",
-        .ident = "verbose",
+        .ident = "verbose_cmds",
     },
     .{
         .name = "L",
@@ -386,7 +374,7 @@ pub fn main() anyerror!void {
     }
     // Some options have multiple matches. As an example, "-Wl,foo" matches both
     // "W" and "Wl,". So we sort this list in order of descending priority.
-    std.sort.sort(*json.ObjectMap, all_objects.items, {}, objectLessThan);
+    std.sort.sort(*json.ObjectMap, all_objects.span(), {}, objectLessThan);
 
     var stdout_bos = std.io.bufferedOutStream(std.io.getStdOut().outStream());
     const stdout = stdout_bos.outStream();
@@ -398,12 +386,12 @@ pub fn main() anyerror!void {
         \\
     );
 
-    for (all_objects.items) |obj| {
+    for (all_objects.span()) |obj| {
         const name = obj.get("Name").?.String;
         var pd1 = false;
         var pd2 = false;
         var pslash = false;
-        for (obj.get("Prefixes").?.Array.items) |prefix_json| {
+        for (obj.get("Prefixes").?.Array.span()) |prefix_json| {
             const prefix = prefix_json.String;
             if (std.mem.eql(u8, prefix, "-")) {
                 pd1 = true;
@@ -514,7 +502,7 @@ const Syntax = union(enum) {
 
 fn objSyntax(obj: *json.ObjectMap) Syntax {
     const num_args = @intCast(u8, obj.get("NumArgs").?.Integer);
-    for (obj.get("!superclasses").?.Array.items) |superclass_json| {
+    for (obj.get("!superclasses").?.Array.span()) |superclass_json| {
         const superclass = superclass_json.String;
         if (std.mem.eql(u8, superclass, "Joined")) {
             return .joined;
@@ -560,7 +548,7 @@ fn objSyntax(obj: *json.ObjectMap) Syntax {
     }
     const key = obj.get("!name").?.String;
     std.debug.warn("{} (key {}) has unrecognized superclasses:\n", .{ name, key });
-    for (obj.get("!superclasses").?.Array.items) |superclass_json| {
+    for (obj.get("!superclasses").?.Array.span()) |superclass_json| {
         std.debug.warn(" {}\n", .{superclass_json.String});
     }
     std.process.exit(1);
