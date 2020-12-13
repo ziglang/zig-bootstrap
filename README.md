@@ -11,8 +11,7 @@ some unused files.
  * LLVM release/11.x branch
  * Clang release/11.x branch
  * LLD release/11.x branch
- * Zig master branch (check the build script for the specific revision. It will
-   will be zig 0.8.0 when the release is tagged)
+ * Zig 0.7.x branch
 
 For other versions, check the git tags of this repository.
 
