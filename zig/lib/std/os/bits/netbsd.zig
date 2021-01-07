@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -22,6 +22,7 @@ pub const socklen_t = u32;
 pub const time_t = i64;
 pub const uid_t = u32;
 pub const lwpid_t = i32;
+pub const suseconds_t = c_int;
 
 /// Renamed from `kevent` to `Kevent` to avoid conflict with function name.
 pub const Kevent = extern struct {
@@ -188,6 +189,13 @@ pub const libc_stat = extern struct {
 pub const timespec = extern struct {
     tv_sec: i64,
     tv_nsec: isize,
+};
+
+pub const timeval = extern struct {
+    /// seconds
+    tv_sec: time_t,
+    /// microseconds
+    tv_usec: suseconds_t,
 };
 
 pub const MAXNAMLEN = 511;
@@ -716,13 +724,18 @@ pub const SIG_IGN = @intToPtr(?Sigaction.sigaction_fn, 1);
 
 /// Renamed from `sigaction` to `Sigaction` to avoid conflict with the syscall.
 pub const Sigaction = extern struct {
-    pub const sigaction_fn = fn (i32, *siginfo_t, ?*c_void) callconv(.C) void;
+    pub const handler_fn = fn (c_int) callconv(.C) void;
+    pub const sigaction_fn = fn (c_int, *const siginfo_t, ?*const c_void) callconv(.C) void;
+
     /// signal handler
-    sigaction: ?sigaction_fn,
+    handler: extern union {
+        handler: ?handler_fn,
+        sigaction: ?sigaction_fn,
+    },
     /// signal mask to apply
     mask: sigset_t,
     /// signal options
-    flags: u32,
+    flags: c_uint,
 };
 
 pub const sigval_t = extern union {
@@ -799,6 +812,10 @@ pub inline fn _SIG_VALID(sig: usize) usize {
 pub const sigset_t = extern struct {
     __bits: [_SIG_WORDS]u32,
 };
+
+pub const SIG_ERR = @intToPtr(?Sigaction.sigaction_fn, maxInt(usize));
+pub const SIG_DFL = @intToPtr(?Sigaction.sigaction_fn, 0);
+pub const SIG_IGN = @intToPtr(?Sigaction.sigaction_fn, 1);
 
 pub const empty_sigset = sigset_t{ .__bits = [_]u32{0} ** _SIG_WORDS };
 

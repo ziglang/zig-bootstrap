@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -82,8 +82,8 @@ pub fn atomicSymLink(allocator: *Allocator, existing_path: []const u8, new_path:
     mem.copy(u8, tmp_path[0..], dirname);
     tmp_path[dirname.len] = path.sep;
     while (true) {
-        try crypto.randomBytes(rand_buf[0..]);
-        base64_encoder.encode(tmp_path[dirname.len + 1 ..], &rand_buf);
+        crypto.random.bytes(rand_buf[0..]);
+        _ = base64_encoder.encode(tmp_path[dirname.len + 1 ..], &rand_buf);
 
         if (cwd().symLink(existing_path, tmp_path, .{})) {
             return cwd().rename(tmp_path, new_path);
@@ -153,15 +153,14 @@ pub const AtomicFile = struct {
     ) InitError!AtomicFile {
         var rand_buf: [RANDOM_BYTES]u8 = undefined;
         var tmp_path_buf: [TMP_PATH_LEN:0]u8 = undefined;
-        // TODO: should be able to use TMP_PATH_LEN here.
-        tmp_path_buf[base64.Base64Encoder.calcSize(RANDOM_BYTES)] = 0;
 
         while (true) {
-            try crypto.randomBytes(rand_buf[0..]);
-            base64_encoder.encode(&tmp_path_buf, &rand_buf);
+            crypto.random.bytes(rand_buf[0..]);
+            const tmp_path = base64_encoder.encode(&tmp_path_buf, &rand_buf);
+            tmp_path_buf[tmp_path.len] = 0;
 
             const file = dir.createFile(
-                &tmp_path_buf,
+                tmp_path,
                 .{ .mode = mode, .exclusive = true },
             ) catch |err| switch (err) {
                 error.PathAlreadyExists => continue,
@@ -2184,10 +2183,10 @@ pub const Walker = struct {
         while (true) {
             if (self.stack.items.len == 0) return null;
             // `top` becomes invalid after appending to `self.stack`.
-            const top = &self.stack.items[self.stack.items.len - 1];
+            var top = &self.stack.items[self.stack.items.len - 1];
             const dirname_len = top.dirname_len;
             if (try top.dir_it.next()) |base| {
-                self.name_buffer.shrink(dirname_len);
+                self.name_buffer.shrinkAndFree(dirname_len);
                 try self.name_buffer.append(path.sep);
                 try self.name_buffer.appendSlice(base.name);
                 if (base.kind == .Directory) {
@@ -2201,6 +2200,7 @@ pub const Walker = struct {
                             .dir_it = new_dir.iterate(),
                             .dirname_len = self.name_buffer.items.len,
                         });
+                        top = &self.stack.items[self.stack.items.len - 1];
                     }
                 }
                 return Entry{

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -186,7 +186,7 @@ pub const Thread = struct {
                                 @compileError(bad_startfn_ret);
                             }
                             startFn(arg) catch |err| {
-                                std.debug.warn("error: {}\n", .{@errorName(err)});
+                                std.debug.warn("error: {s}\n", .{@errorName(err)});
                                 if (@errorReturnTrace()) |trace| {
                                     std.debug.dumpStackTrace(trace.*);
                                 }
@@ -247,7 +247,7 @@ pub const Thread = struct {
                             @compileError(bad_startfn_ret);
                         }
                         startFn(arg) catch |err| {
-                            std.debug.warn("error: {}\n", .{@errorName(err)});
+                            std.debug.warn("error: {s}\n", .{@errorName(err)});
                             if (@errorReturnTrace()) |trace| {
                                 std.debug.dumpStackTrace(trace.*);
                             }
@@ -281,7 +281,7 @@ pub const Thread = struct {
                             @compileError(bad_startfn_ret);
                         }
                         startFn(arg) catch |err| {
-                            std.debug.warn("error: {}\n", .{@errorName(err)});
+                            std.debug.warn("error: {s}\n", .{@errorName(err)});
                             if (@errorReturnTrace()) |trace| {
                                 std.debug.dumpStackTrace(trace.*);
                             }
@@ -492,5 +492,35 @@ pub const Thread = struct {
             else => |e| return e,
         };
         return @intCast(usize, count);
+    }
+
+    pub fn getCurrentThreadId() u64 {
+        switch (std.Target.current.os.tag) {
+            .linux => {
+                // Use the syscall directly as musl doesn't provide a wrapper.
+                return @bitCast(u32, os.linux.gettid());
+            },
+            .windows => {
+                return os.windows.kernel32.GetCurrentThreadId();
+            },
+            .macos, .ios, .watchos, .tvos => {
+                var thread_id: u64 = undefined;
+                // Pass thread=null to get the current thread ID.
+                assert(c.pthread_threadid_np(null, &thread_id) == 0);
+                return thread_id;
+            },
+            .netbsd => {
+                return @bitCast(u32, c._lwp_self());
+            },
+            .freebsd => {
+                return @bitCast(u32, c.pthread_getthreadid_np());
+            },
+            .openbsd => {
+                return @bitCast(u32, c.getthrid());
+            },
+            else => {
+                @compileError("getCurrentThreadId not implemented for this platform");
+            },
+        }
     }
 };

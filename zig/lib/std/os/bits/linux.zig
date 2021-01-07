@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -864,27 +864,38 @@ pub const sigset_t = [1024 / 32]u32;
 pub const all_mask: sigset_t = [_]u32{0xffffffff} ** sigset_t.len;
 pub const app_mask: sigset_t = [2]u32{ 0xfffffffc, 0x7fffffff } ++ [_]u32{0xffffffff} ** 30;
 
-pub const k_sigaction = if (is_mips)
-    extern struct {
-        flags: usize,
-        sigaction: ?fn (i32, *siginfo_t, ?*c_void) callconv(.C) void,
-        mask: [4]u32,
+pub const k_sigaction = switch (builtin.arch) {
+    .mips, .mipsel => extern struct {
+        flags: c_uint,
+        handler: ?fn (c_int) callconv(.C) void,
+        mask: [4]c_ulong,
         restorer: fn () callconv(.C) void,
-    }
-else
-    extern struct {
-        sigaction: ?fn (i32, *siginfo_t, ?*c_void) callconv(.C) void,
-        flags: usize,
+    },
+    .mips64, .mips64el => extern struct {
+        flags: c_uint,
+        handler: ?fn (c_int) callconv(.C) void,
+        mask: [2]c_ulong,
         restorer: fn () callconv(.C) void,
-        mask: [2]u32,
-    };
+    },
+    else => extern struct {
+        handler: ?fn (c_int) callconv(.C) void,
+        flags: c_ulong,
+        restorer: fn () callconv(.C) void,
+        mask: [2]c_uint,
+    },
+};
 
 /// Renamed from `sigaction` to `Sigaction` to avoid conflict with the syscall.
 pub const Sigaction = extern struct {
-    pub const sigaction_fn = fn (i32, *siginfo_t, ?*c_void) callconv(.C) void;
-    sigaction: ?sigaction_fn,
+    pub const handler_fn = fn (c_int) callconv(.C) void;
+    pub const sigaction_fn = fn (c_int, *const siginfo_t, ?*const c_void) callconv(.C) void;
+
+    handler: extern union {
+        handler: ?handler_fn,
+        sigaction: ?sigaction_fn,
+    },
     mask: sigset_t,
-    flags: u32,
+    flags: c_uint,
     restorer: ?fn () callconv(.C) void = null,
 };
 
@@ -1273,6 +1284,9 @@ pub const IORING_SETUP_CLAMP = 1 << 4;
 /// attach to existing wq
 pub const IORING_SETUP_ATTACH_WQ = 1 << 5;
 
+/// start with ring disabled
+pub const IORING_SETUP_R_DISABLED = 1 << 6;
+
 pub const io_sqring_offsets = extern struct {
     /// offset of ring head
     head: u32,
@@ -1419,6 +1433,11 @@ pub const io_uring_cqe = extern struct {
     flags: u32,
 };
 
+// io_uring_cqe.flags
+
+/// If set, the upper 16 bits are the buffer ID
+pub const IORING_CQE_F_BUFFER = 1 << 0;
+
 pub const IORING_OFF_SQ_RING = 0;
 pub const IORING_OFF_CQ_RING = 0x8000000;
 pub const IORING_OFF_SQES = 0x10000000;
@@ -1428,7 +1447,7 @@ pub const IORING_ENTER_GETEVENTS = 1 << 0;
 pub const IORING_ENTER_SQ_WAKEUP = 1 << 1;
 
 // io_uring_register opcodes and arguments
-pub const IORING_REGISTER = extern enum(u32) {
+pub const IORING_REGISTER = extern enum(u8) {
     REGISTER_BUFFERS,
     UNREGISTER_BUFFERS,
     REGISTER_FILES,
@@ -1440,11 +1459,13 @@ pub const IORING_REGISTER = extern enum(u32) {
     REGISTER_PROBE,
     REGISTER_PERSONALITY,
     UNREGISTER_PERSONALITY,
+    REGISTER_RESTRICTIONS,
+    REGISTER_ENABLE_RINGS,
 
     _,
 };
 
-pub const io_uring_files_update = struct {
+pub const io_uring_files_update = extern struct {
     offset: u32,
     resv: u32,
     fds: u64,
@@ -1452,7 +1473,7 @@ pub const io_uring_files_update = struct {
 
 pub const IO_URING_OP_SUPPORTED = 1 << 0;
 
-pub const io_uring_probe_op = struct {
+pub const io_uring_probe_op = extern struct {
     op: IORING_OP,
 
     resv: u8,
@@ -1463,7 +1484,7 @@ pub const io_uring_probe_op = struct {
     resv2: u32,
 };
 
-pub const io_uring_probe = struct {
+pub const io_uring_probe = extern struct {
     /// last opcode supported
     last_op: IORING_OP,
 
@@ -1474,6 +1495,39 @@ pub const io_uring_probe = struct {
     resv2: u32[3],
 
     // Followed by up to `ops_len` io_uring_probe_op structures
+};
+
+pub const io_uring_restriction = extern struct {
+    opcode: u16,
+    arg: extern union {
+        /// IORING_RESTRICTION_REGISTER_OP
+        register_op: IORING_REGISTER,
+
+        /// IORING_RESTRICTION_SQE_OP
+        sqe_op: IORING_OP,
+
+        /// IORING_RESTRICTION_SQE_FLAGS_*
+        sqe_flags: u8,
+    },
+    resv: u8,
+    resv2: u32[3],
+};
+
+/// io_uring_restriction->opcode values
+pub const IORING_RESTRICTION = extern enum(u8) {
+    /// Allow an io_uring_register(2) opcode
+    REGISTER_OP = 0,
+
+    /// Allow an sqe opcode
+    SQE_OP = 1,
+
+    /// Allow sqe flags
+    SQE_FLAGS_ALLOWED = 2,
+
+    /// Require sqe flags (these flags must be set on each submission)
+    SQE_FLAGS_REQUIRED = 3,
+
+    _,
 };
 
 pub const utsname = extern struct {
@@ -1826,6 +1880,39 @@ pub const tcflag_t = u32;
 
 pub const NCCS = 32;
 
+pub const B0 = 0o0000000;
+pub const B50 = 0o0000001;
+pub const B75 = 0o0000002;
+pub const B110 = 0o0000003;
+pub const B134 = 0o0000004;
+pub const B150 = 0o0000005;
+pub const B200 = 0o0000006;
+pub const B300 = 0o0000007;
+pub const B600 = 0o0000010;
+pub const B1200 = 0o0000011;
+pub const B1800 = 0o0000012;
+pub const B2400 = 0o0000013;
+pub const B4800 = 0o0000014;
+pub const B9600 = 0o0000015;
+pub const B19200 = 0o0000016;
+pub const B38400 = 0o0000017;
+pub const BOTHER = 0o0010000;
+pub const B57600 = 0o0010001;
+pub const B115200 = 0o0010002;
+pub const B230400 = 0o0010003;
+pub const B460800 = 0o0010004;
+pub const B500000 = 0o0010005;
+pub const B576000 = 0o0010006;
+pub const B921600 = 0o0010007;
+pub const B1000000 = 0o0010010;
+pub const B1152000 = 0o0010011;
+pub const B1500000 = 0o0010012;
+pub const B2000000 = 0o0010013;
+pub const B2500000 = 0o0010014;
+pub const B3000000 = 0o0010015;
+pub const B3500000 = 0o0010016;
+pub const B4000000 = 0o0010017;
+
 pub const IGNBRK = 1;
 pub const BRKINT = 2;
 pub const IGNPAR = 4;
@@ -2001,3 +2088,25 @@ pub const rlimit = extern struct {
     /// Hard limit
     max: rlim_t,
 };
+
+pub const MADV_NORMAL = 0;
+pub const MADV_RANDOM = 1;
+pub const MADV_SEQUENTIAL = 2;
+pub const MADV_WILLNEED = 3;
+pub const MADV_DONTNEED = 4;
+pub const MADV_FREE = 8;
+pub const MADV_REMOVE = 9;
+pub const MADV_DONTFORK = 10;
+pub const MADV_DOFORK = 11;
+pub const MADV_MERGEABLE = 12;
+pub const MADV_UNMERGEABLE = 13;
+pub const MADV_HUGEPAGE = 14;
+pub const MADV_NOHUGEPAGE = 15;
+pub const MADV_DONTDUMP = 16;
+pub const MADV_DODUMP = 17;
+pub const MADV_WIPEONFORK = 18;
+pub const MADV_KEEPONFORK = 19;
+pub const MADV_COLD = 20;
+pub const MADV_PAGEOUT = 21;
+pub const MADV_HWPOISON = 100;
+pub const MADV_SOFT_OFFLINE = 101;

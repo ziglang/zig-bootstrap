@@ -3,6 +3,15 @@ const std = @import("std");
 const CrossTarget = std.zig.CrossTarget;
 
 pub fn addCases(cases: *tests.TranslateCContext) void {
+    cases.add("variadic function demoted to prototype",
+        \\int foo(int bar, ...) {
+        \\    return 1;
+        \\}
+    , &[_][]const u8{
+        \\warning: TODO unable to translate variadic function, demoted to declaration
+        \\pub extern fn foo(bar: c_int, ...) c_int;
+    });
+
     cases.add("pointer to opaque demoted struct",
         \\typedef struct {
         \\    _Atomic int foo;
@@ -1366,11 +1375,19 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\void b(void) {}
         \\void c();
         \\void d(void);
+        \\static void e() {}
+        \\static void f(void) {}
+        \\static void g();
+        \\static void h(void);
     , &[_][]const u8{
         \\pub export fn a() void {}
         \\pub export fn b() void {}
         \\pub extern fn c(...) void;
         \\pub extern fn d() void;
+        \\pub fn e() callconv(.C) void {}
+        \\pub fn f() callconv(.C) void {}
+        \\pub extern fn g() void;
+        \\pub extern fn h() void;
     });
 
     cases.add("variable declarations",
@@ -2929,7 +2946,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\pub fn a() callconv(.C) void {}
         \\pub fn b() callconv(.C) void {}
         \\pub export fn c() void {}
-        \\pub fn foo(...) callconv(.C) void {}
+        \\pub fn foo() callconv(.C) void {}
     });
 
     cases.add("casting away const and volatile",
@@ -2964,10 +2981,10 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
     , &[_][]const u8{
         \\pub export fn foo(arg_x: bool) bool {
         \\    var x = arg_x;
-        \\    var a: bool = (@intCast(c_int, @bitCast(i1, @intCast(u1, @boolToInt(x)))) != @as(c_int, 1));
-        \\    var b: bool = (@intCast(c_int, @bitCast(i1, @intCast(u1, @boolToInt(a)))) != @as(c_int, 0));
+        \\    var a: bool = (@as(c_int, @boolToInt(x)) != @as(c_int, 1));
+        \\    var b: bool = (@as(c_int, @boolToInt(a)) != @as(c_int, 0));
         \\    var c: bool = @ptrToInt(foo) != 0;
-        \\    return foo((@intCast(c_int, @bitCast(i1, @intCast(u1, @boolToInt(c)))) != @intCast(c_int, @bitCast(i1, @intCast(u1, @boolToInt(b))))));
+        \\    return foo((@as(c_int, @boolToInt(c)) != @as(c_int, @boolToInt(b))));
         \\}
     });
 

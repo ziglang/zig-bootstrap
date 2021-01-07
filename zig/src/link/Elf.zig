@@ -24,6 +24,7 @@ const build_options = @import("build_options");
 const target_util = @import("../target.zig");
 const glibc = @import("../glibc.zig");
 const Cache = @import("../Cache.zig");
+const llvm_backend = @import("../codegen/llvm.zig");
 
 const default_entry_addr = 0x8000000;
 
@@ -32,6 +33,9 @@ pub const base_tag: File.Tag = .elf;
 base: File,
 
 ptr_width: PtrWidth,
+
+/// If this is not null, an object file is created by LLVM and linked with LLD afterwards.
+llvm_ir_module: ?*llvm_backend.LLVMIRModule = null,
 
 /// Stored in native-endian format, depending on target endianness needs to be bswapped on read/write.
 /// Same order as in the file.
@@ -224,7 +228,13 @@ pub const SrcFn = struct {
 pub fn openPath(allocator: *Allocator, sub_path: []const u8, options: link.Options) !*Elf {
     assert(options.object_format == .elf);
 
-    if (options.use_llvm) return error.LLVMBackendUnimplementedForELF; // TODO
+    if (build_options.have_llvm and options.use_llvm) {
+        const self = try createEmpty(allocator, options);
+        errdefer self.base.destroy();
+
+        self.llvm_ir_module = try llvm_backend.LLVMIRModule.create(allocator, sub_path, options);
+        return self;
+    }
 
     const file = try options.emit.?.directory.handle.createFile(sub_path, .{
         .truncate = false,
@@ -288,6 +298,10 @@ pub fn createEmpty(gpa: *Allocator, options: link.Options) !*Elf {
 }
 
 pub fn deinit(self: *Elf) void {
+    if (build_options.have_llvm)
+        if (self.llvm_ir_module) |ir_module|
+            ir_module.deinit(self.base.allocator);
+
     self.sections.deinit(self.base.allocator);
     self.program_headers.deinit(self.base.allocator);
     self.shstrtab.deinit(self.base.allocator);
@@ -304,6 +318,7 @@ pub fn deinit(self: *Elf) void {
 }
 
 pub fn getDeclVAddr(self: *Elf, decl: *const Module.Decl) u64 {
+    assert(self.llvm_ir_module == null);
     assert(decl.link.elf.local_sym_index != 0);
     return self.local_symbols.items[decl.link.elf.local_sym_index].st_value;
 }
@@ -423,6 +438,8 @@ fn updateString(self: *Elf, old_str_off: u32, new_name: []const u8) !u32 {
 }
 
 pub fn populateMissingMetadata(self: *Elf) !void {
+    assert(self.llvm_ir_module == null);
+
     const small_ptr = switch (self.ptr_width) {
         .p32 => true,
         .p64 => false,
@@ -726,6 +743,9 @@ pub fn flush(self: *Elf, comp: *Compilation) !void {
 pub fn flushModule(self: *Elf, comp: *Compilation) !void {
     const tracy = trace(@src());
     defer tracy.end();
+
+    if (build_options.have_llvm)
+        if (self.llvm_ir_module) |llvm_ir_module| return try llvm_ir_module.flushModule(comp);
 
     // TODO This linker code currently assumes there is only 1 compilation unit and it corresponds to the
     // Zig source code.
@@ -1231,8 +1251,11 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
     // If there is no Zig code to compile, then we should skip flushing the output file because it
     // will not be part of the linker line anyway.
     const module_obj_path: ?[]const u8 = if (self.base.options.module) |module| blk: {
-        const use_stage1 = build_options.is_stage1 and self.base.options.use_llvm;
-        if (use_stage1) {
+        // Both stage1 and stage2 LLVM backend put the object file in the cache directory.
+        if (self.base.options.use_llvm) {
+            // Stage2 has to call flushModule since that outputs the LLVM object file.
+            if (!build_options.is_stage1) try self.flushModule(comp);
+
             const obj_basename = try std.zig.binNameAlloc(arena, .{
                 .root_name = self.base.options.root_name,
                 .target = self.base.options.target,
@@ -1261,6 +1284,9 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
     const stack_size = self.base.options.stack_size_override orelse 16777216;
     const allow_shlib_undefined = self.base.options.allow_shlib_undefined orelse !self.base.options.is_native_os;
     const compiler_rt_path: ?[]const u8 = if (self.base.options.include_compiler_rt) blk: {
+        // TODO: remove when stage2 can build compiler_rt.zig
+        if (!build_options.is_stage1) break :blk null;
+
         if (is_exe_or_dyn_lib) {
             break :blk comp.compiler_rt_static_lib.?.full_object_path;
         } else {
@@ -1310,7 +1336,7 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
         man.hash.addListOfBytes(self.base.options.lib_dirs);
         man.hash.addListOfBytes(self.base.options.rpath_list);
         man.hash.add(self.base.options.each_lib_rpath);
-        man.hash.add(self.base.options.is_compiler_rt_or_libc);
+        man.hash.add(self.base.options.skip_linker_dependencies);
         man.hash.add(self.base.options.z_nodelete);
         man.hash.add(self.base.options.z_defs);
         if (self.base.options.link_libc) {
@@ -1327,6 +1353,7 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
         man.hash.addStringSet(self.base.options.system_libs);
         man.hash.add(allow_shlib_undefined);
         man.hash.add(self.base.options.bind_global_refs_locally);
+        man.hash.add(self.base.options.tsan);
 
         // We don't actually care whether it's a cache hit or miss; we just need the digest and the lock.
         _ = try man.hit();
@@ -1338,7 +1365,7 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
             id_symlink_basename,
             &prev_digest_buf,
         ) catch |err| blk: {
-            log.debug("ELF LLD new_digest={} error: {}", .{ digest, @errorName(err) });
+            log.debug("ELF LLD new_digest={} error: {s}", .{ digest, @errorName(err) });
             // Handle this as a cache miss.
             break :blk prev_digest_buf[0..0];
         };
@@ -1372,7 +1399,7 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
 
     if (self.base.options.output_mode == .Exe) {
         try argv.append("-z");
-        try argv.append(try std.fmt.allocPrint(arena, "stack-size={}", .{stack_size}));
+        try argv.append(try std.fmt.allocPrint(arena, "stack-size={d}", .{stack_size}));
     }
 
     if (self.base.options.image_base_override) |image_base| {
@@ -1414,7 +1441,7 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
     if (getLDMOption(target)) |ldm| {
         // Any target ELF will use the freebsd osabi if suffixed with "_fbsd".
         const arg = if (target.os.tag == .freebsd)
-            try std.fmt.allocPrint(arena, "{}_fbsd", .{ldm})
+            try std.fmt.allocPrint(arena, "{s}_fbsd", .{ldm})
         else
             ldm;
         try argv.append("-m");
@@ -1441,8 +1468,14 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
 
     if (link_in_crt) {
         const crt1o: []const u8 = o: {
-            if (target.os.tag == .netbsd or target.os.tag == .openbsd) {
+            if (target.os.tag == .netbsd) {
                 break :o "crt0.o";
+            } else if (target.os.tag == .openbsd) {
+                if (self.base.options.link_mode == .Static) {
+                    break :o "rcrt0.o";
+                } else {
+                    break :o "crt0.o";
+                }
             } else if (target.isAndroid()) {
                 if (self.base.options.link_mode == .Dynamic) {
                     break :o "crtbegin_dynamic.o";
@@ -1539,8 +1572,18 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
         try argv.append(p);
     }
 
+    // TSAN
+    if (self.base.options.tsan) {
+        try argv.append(comp.tsan_static_lib.?.full_object_path);
+    }
+
     // libc
-    if (is_exe_or_dyn_lib and !self.base.options.is_compiler_rt_or_libc and !self.base.options.link_libc) {
+    // TODO: enable when stage2 can build c.zig
+    if (is_exe_or_dyn_lib and
+        !self.base.options.skip_linker_dependencies and
+        !self.base.options.link_libc and
+        build_options.is_stage1)
+    {
         try argv.append(comp.libc_static_lib.?.full_object_path);
     }
 
@@ -1559,12 +1602,10 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
             // (the check for that needs to be earlier), but they could be full paths to .so files, in which
             // case we want to avoid prepending "-l".
             const ext = Compilation.classifyFileExt(link_lib);
-            const arg = if (ext == .shared_library) link_lib else try std.fmt.allocPrint(arena, "-l{}", .{link_lib});
+            const arg = if (ext == .shared_library) link_lib else try std.fmt.allocPrint(arena, "-l{s}", .{link_lib});
             argv.appendAssumeCapacity(arg);
         }
-    }
 
-    if (!is_obj) {
         // libc++ dep
         if (self.base.options.link_libcpp) {
             try argv.append(comp.libcxxabi_static_lib.?.full_object_path);
@@ -1584,7 +1625,7 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
                     try argv.append("-lm");
                 }
 
-                if (target.os.tag == .freebsd or target.os.tag == .netbsd) {
+                if (target.os.tag == .freebsd or target.os.tag == .netbsd or target.os.tag == .openbsd) {
                     try argv.append("-lpthread");
                 }
             } else if (target.isGnuLibC()) {
@@ -1598,7 +1639,10 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
                 try argv.append(try comp.get_libc_crt_file(arena, "libc_nonshared.a"));
             } else if (target.isMusl()) {
                 try argv.append(comp.libunwind_static_lib.?.full_object_path);
-                try argv.append(try comp.get_libc_crt_file(arena, "libc.a"));
+                try argv.append(try comp.get_libc_crt_file(arena, switch (self.base.options.link_mode) {
+                    .Static => "libc.a",
+                    .Dynamic => "libc.so",
+                }));
             } else if (self.base.options.link_libcpp) {
                 try argv.append(comp.libunwind_static_lib.?.full_object_path);
             } else {
@@ -1692,11 +1736,11 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
         // Update the file with the digest. If it fails we can continue; it only
         // means that the next invocation will have an unnecessary cache miss.
         Cache.writeSmallFile(directory.handle, id_symlink_basename, &digest) catch |err| {
-            log.warn("failed to save linking hash digest file: {}", .{@errorName(err)});
+            log.warn("failed to save linking hash digest file: {s}", .{@errorName(err)});
         };
         // Again failure here only means an unnecessary cache miss.
         man.writeManifest() catch |err| {
-            log.warn("failed to write cache manifest when linking: {}", .{@errorName(err)});
+            log.warn("failed to write cache manifest when linking: {s}", .{@errorName(err)});
         };
         // We hang on to this lock so that the output file path can be used without
         // other processes clobbering it.
@@ -2033,16 +2077,18 @@ fn allocateTextBlock(self: *Elf, text_block: *TextBlock, new_block_size: u64, al
 }
 
 pub fn allocateDeclIndexes(self: *Elf, decl: *Module.Decl) !void {
+    if (self.llvm_ir_module) |_| return;
+
     if (decl.link.elf.local_sym_index != 0) return;
 
     try self.local_symbols.ensureCapacity(self.base.allocator, self.local_symbols.items.len + 1);
     try self.offset_table.ensureCapacity(self.base.allocator, self.offset_table.items.len + 1);
 
     if (self.local_symbol_free_list.popOrNull()) |i| {
-        log.debug("reusing symbol index {} for {}\n", .{ i, decl.name });
+        log.debug("reusing symbol index {d} for {s}\n", .{ i, decl.name });
         decl.link.elf.local_sym_index = i;
     } else {
-        log.debug("allocating symbol index {} for {}\n", .{ self.local_symbols.items.len, decl.name });
+        log.debug("allocating symbol index {d} for {s}\n", .{ self.local_symbols.items.len, decl.name });
         decl.link.elf.local_sym_index = @intCast(u32, self.local_symbols.items.len);
         _ = self.local_symbols.addOneAssumeCapacity();
     }
@@ -2069,6 +2115,8 @@ pub fn allocateDeclIndexes(self: *Elf, decl: *Module.Decl) !void {
 }
 
 pub fn freeDecl(self: *Elf, decl: *Module.Decl) void {
+    if (self.llvm_ir_module) |_| return;
+
     // Appending to free lists is allowed to fail because the free lists are heuristics based anyway.
     self.freeTextBlock(&decl.link.elf);
     if (decl.link.elf.local_sym_index != 0) {
@@ -2106,6 +2154,9 @@ pub fn updateDecl(self: *Elf, module: *Module, decl: *Module.Decl) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    if (build_options.have_llvm)
+        if (self.llvm_ir_module) |llvm_ir_module| return try llvm_ir_module.updateDecl(module, decl);
+
     var code_buffer = std.ArrayList(u8).init(self.base.allocator);
     defer code_buffer.deinit();
 
@@ -2130,16 +2181,6 @@ pub fn updateDecl(self: *Elf, module: *Module, decl: *Module.Decl) !void {
         else => false,
     };
     if (is_fn) {
-        const zir_dumps = if (std.builtin.is_test) &[0][]const u8{} else build_options.zir_dumps;
-        if (zir_dumps.len != 0) {
-            for (zir_dumps) |fn_name| {
-                if (mem.eql(u8, mem.spanZ(decl.name), fn_name)) {
-                    std.debug.print("\n{}\n", .{decl.name});
-                    typed_value.val.cast(Value.Payload.Function).?.func.dump(module.*);
-                }
-            }
-        }
-
         // For functions we need to add a prologue to the debug line program.
         try dbg_line_buffer.ensureCapacity(26);
 
@@ -2252,7 +2293,7 @@ pub fn updateDecl(self: *Elf, module: *Module, decl: *Module.Decl) !void {
             !mem.isAlignedGeneric(u64, local_sym.st_value, required_alignment);
         if (need_realloc) {
             const vaddr = try self.growTextBlock(&decl.link.elf, code.len, required_alignment);
-            log.debug("growing {} from 0x{x} to 0x{x}\n", .{ decl.name, local_sym.st_value, vaddr });
+            log.debug("growing {s} from 0x{x} to 0x{x}\n", .{ decl.name, local_sym.st_value, vaddr });
             if (vaddr != local_sym.st_value) {
                 local_sym.st_value = vaddr;
 
@@ -2274,7 +2315,7 @@ pub fn updateDecl(self: *Elf, module: *Module, decl: *Module.Decl) !void {
         const decl_name = mem.spanZ(decl.name);
         const name_str_index = try self.makeString(decl_name);
         const vaddr = try self.allocateTextBlock(&decl.link.elf, code.len, required_alignment);
-        log.debug("allocated text block for {} at 0x{x}\n", .{ decl_name, vaddr });
+        log.debug("allocated text block for {s} at 0x{x}\n", .{ decl_name, vaddr });
         errdefer self.freeTextBlock(&decl.link.elf);
 
         local_sym.* = .{
@@ -2384,7 +2425,7 @@ pub fn updateDecl(self: *Elf, module: *Module, decl: *Module.Decl) !void {
             if (needed_size > self.allocatedSize(debug_line_sect.sh_offset)) {
                 const new_offset = self.findFreeSpace(needed_size, 1);
                 const existing_size = last_src_fn.off;
-                log.debug("moving .debug_line section: {} bytes from 0x{x} to 0x{x}\n", .{
+                log.debug("moving .debug_line section: {d} bytes from 0x{x} to 0x{x}\n", .{
                     existing_size,
                     debug_line_sect.sh_offset,
                     new_offset,
@@ -2581,6 +2622,8 @@ pub fn updateDeclExports(
     decl: *const Module.Decl,
     exports: []const *Module.Export,
 ) !void {
+    if (self.llvm_ir_module) |_| return;
+
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -2654,6 +2697,8 @@ pub fn updateDeclLineNumber(self: *Elf, module: *Module, decl: *const Module.Dec
     const tracy = trace(@src());
     defer tracy.end();
 
+    if (self.llvm_ir_module) |_| return;
+
     const container_scope = decl.scope.cast(Module.Scope.Container).?;
     const tree = container_scope.file_scope.contents.tree;
     const file_ast_decls = tree.root_node.decls();
@@ -2672,6 +2717,8 @@ pub fn updateDeclLineNumber(self: *Elf, module: *Module, decl: *const Module.Dec
 }
 
 pub fn deleteExport(self: *Elf, exp: Export) void {
+    if (self.llvm_ir_module) |_| return;
+
     const sym_index = exp.sym_index orelse return;
     self.global_symbol_free_list.append(self.base.allocator, sym_index) catch {};
     self.global_symbols.items[sym_index].st_info = 0;

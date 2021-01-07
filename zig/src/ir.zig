@@ -56,7 +56,9 @@ pub const Inst = struct {
         alloc,
         arg,
         assembly,
+        bitand,
         bitcast,
+        bitor,
         block,
         br,
         breakpoint,
@@ -93,6 +95,7 @@ pub const Inst = struct {
         intcast,
         unwrap_optional,
         wrap_optional,
+        xor,
         switchbr,
 
         pub fn Type(tag: Tag) type {
@@ -130,6 +133,9 @@ pub const Inst = struct {
                 .store,
                 .booland,
                 .boolor,
+                .bitand,
+                .bitor,
+                .xor,
                 => BinOp,
 
                 .arg => Arg,
@@ -183,14 +189,14 @@ pub const Inst = struct {
     }
 
     pub fn Args(comptime T: type) type {
-        return std.meta.fieldInfo(T, "args").field_type;
+        return std.meta.fieldInfo(T, .args).field_type;
     }
 
     /// Returns `null` if runtime-known.
     pub fn value(base: *Inst) ?Value {
         if (base.ty.onePossibleValue()) |opv| return opv;
 
-        const inst = base.cast(Constant) orelse return null;
+        const inst = base.castTag(.constant) orelse return null;
         return inst.val;
     }
 

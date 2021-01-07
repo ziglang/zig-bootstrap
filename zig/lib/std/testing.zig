@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -21,14 +21,18 @@ pub var base_allocator_instance = std.heap.FixedBufferAllocator.init("");
 /// TODO https://github.com/ziglang/zig/issues/5738
 pub var log_level = std.log.Level.warn;
 
+/// This is available to any test that wants to execute Zig in a child process.
+/// It will be the same executable that is running `zig test`.
+pub var zig_exe_path: []const u8 = undefined;
+
 /// This function is intended to be used only in tests. It prints diagnostics to stderr
 /// and then aborts when actual_error_union is not expected_error.
 pub fn expectError(expected_error: anyerror, actual_error_union: anytype) void {
     if (actual_error_union) |actual_payload| {
-        std.debug.panic("expected error.{}, found {}", .{ @errorName(expected_error), actual_payload });
+        std.debug.panic("expected error.{s}, found {}", .{ @errorName(expected_error), actual_payload });
     } else |actual_error| {
         if (expected_error != actual_error) {
-            std.debug.panic("expected error.{}, found error.{}", .{
+            std.debug.panic("expected error.{s}, found error.{s}", .{
                 @errorName(expected_error),
                 @errorName(actual_error),
             });
@@ -56,7 +60,7 @@ pub fn expectEqual(expected: anytype, actual: @TypeOf(expected)) void {
 
         .Type => {
             if (actual != expected) {
-                std.debug.panic("expected type {}, found type {}", .{ @typeName(expected), @typeName(actual) });
+                std.debug.panic("expected type {s}, found type {s}", .{ @typeName(expected), @typeName(actual) });
             }
         },
 
@@ -254,7 +258,7 @@ pub fn expectEqualSlices(comptime T: type, expected: []const T, actual: []const 
     // If the child type is u8 and no weird bytes, we could print it as strings
     // Even for the length difference, it would be useful to see the values of the slices probably.
     if (expected.len != actual.len) {
-        std.debug.panic("slice lengths differ. expected {}, found {}", .{ expected.len, actual.len });
+        std.debug.panic("slice lengths differ. expected {d}, found {d}", .{ expected.len, actual.len });
     }
     var i: usize = 0;
     while (i < expected.len) : (i += 1) {
@@ -303,10 +307,9 @@ fn getCwdOrWasiPreopen() std.fs.Dir {
 
 pub fn tmpDir(opts: std.fs.Dir.OpenDirOptions) TmpDir {
     var random_bytes: [TmpDir.random_bytes_count]u8 = undefined;
-    std.crypto.randomBytes(&random_bytes) catch
-        @panic("unable to make tmp dir for testing: unable to get random bytes");
+    std.crypto.random.bytes(&random_bytes);
     var sub_path: [TmpDir.sub_path_len]u8 = undefined;
-    std.fs.base64_encoder.encode(&sub_path, &random_bytes);
+    _ = std.fs.base64_encoder.encode(&sub_path, &random_bytes);
 
     var cwd = getCwdOrWasiPreopen();
     var cache_dir = cwd.makeOpenPath("zig-cache", .{}) catch
@@ -357,7 +360,7 @@ pub fn expectEqualStrings(expected: []const u8, actual: []const u8) void {
         for (expected[0..diff_index]) |value| {
             if (value == '\n') diff_line_number += 1;
         }
-        print("First difference occurs on line {}:\n", .{diff_line_number});
+        print("First difference occurs on line {d}:\n", .{diff_line_number});
 
         print("expected:\n", .{});
         printIndicatorLine(expected, diff_index);
@@ -413,15 +416,15 @@ fn printWithVisibleNewlines(source: []const u8) void {
     while (std.mem.indexOf(u8, source[i..], "\n")) |nl| : (i += nl + 1) {
         printLine(source[i .. i + nl]);
     }
-    print("{}␃\n", .{source[i..]}); // End of Text symbol (ETX)
+    print("{s}␃\n", .{source[i..]}); // End of Text symbol (ETX)
 }
 
 fn printLine(line: []const u8) void {
     if (line.len != 0) switch (line[line.len - 1]) {
-        ' ', '\t' => print("{}⏎\n", .{line}), // Carriage return symbol,
+        ' ', '\t' => print("{s}⏎\n", .{line}), // Carriage return symbol,
         else => {},
     };
-    print("{}\n", .{line});
+    print("{s}\n", .{line});
 }
 
 test "" {

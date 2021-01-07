@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -84,8 +84,8 @@ pub const HLOCAL = HANDLE;
 pub const LANGID = c_ushort;
 
 pub const WPARAM = usize;
-pub const LPARAM = ?*c_void;
-pub const LRESULT = ?*c_void;
+pub const LPARAM = LONG_PTR;
+pub const LRESULT = LONG_PTR;
 
 pub const va_list = *opaque {};
 

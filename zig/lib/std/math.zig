@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -1169,7 +1169,7 @@ pub const Order = enum {
         return switch (self) {
             .lt => .gt,
             .eq => .eq,
-            .gt => .gt,
+            .gt => .lt,
         };
     }
 
@@ -1264,6 +1264,29 @@ test "compare between signed and unsigned" {
     testing.expect(@bitCast(u8, @as(i8, -1)) == @as(u8, 255));
     testing.expect(!compare(@as(u8, 255), .eq, @as(i8, -1)));
     testing.expect(compare(@as(u8, 1), .eq, @as(u8, 1)));
+}
+
+test "order" {
+    testing.expect(order(0, 0) == .eq);
+    testing.expect(order(1, 0) == .gt);
+    testing.expect(order(-1, 0) == .lt);
+}
+
+test "order.invert" {
+    testing.expect(Order.invert(order(0, 0)) == .eq);
+    testing.expect(Order.invert(order(1, 0)) == .lt);
+    testing.expect(Order.invert(order(-1, 0)) == .gt);
+}
+
+test "order.compare" {
+    testing.expect(order(-1, 0).compare(.lt));
+    testing.expect(order(-1, 0).compare(.lte));
+    testing.expect(order(0, 0).compare(.lte));
+    testing.expect(order(0, 0).compare(.eq));
+    testing.expect(order(0, 0).compare(.gte));
+    testing.expect(order(1, 0).compare(.gte));
+    testing.expect(order(1, 0).compare(.gt));
+    testing.expect(order(1, 0).compare(.neq));
 }
 
 test "math.comptime" {

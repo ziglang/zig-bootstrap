@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -8,7 +8,6 @@ pub const ArrayHashMapUnmanaged = array_hash_map.ArrayHashMapUnmanaged;
 pub const ArrayList = @import("array_list.zig").ArrayList;
 pub const ArrayListAligned = @import("array_list.zig").ArrayListAligned;
 pub const ArrayListAlignedUnmanaged = @import("array_list.zig").ArrayListAlignedUnmanaged;
-pub const ArrayListSentineled = @import("array_list_sentineled.zig").ArrayListSentineled;
 pub const ArrayListUnmanaged = @import("array_list.zig").ArrayListUnmanaged;
 pub const AutoArrayHashMap = array_hash_map.AutoArrayHashMap;
 pub const AutoArrayHashMapUnmanaged = array_hash_map.AutoArrayHashMapUnmanaged;
@@ -29,11 +28,12 @@ pub const PackedIntArrayEndian = @import("packed_int_array.zig").PackedIntArrayE
 pub const PackedIntSlice = @import("packed_int_array.zig").PackedIntSlice;
 pub const PackedIntSliceEndian = @import("packed_int_array.zig").PackedIntSliceEndian;
 pub const PriorityQueue = @import("priority_queue.zig").PriorityQueue;
-pub const Progress = @import("progress.zig").Progress;
-pub const ResetEvent = @import("reset_event.zig").ResetEvent;
+pub const Progress = @import("Progress.zig");
+pub const ResetEvent = @import("ResetEvent.zig");
 pub const SemanticVersion = @import("SemanticVersion.zig");
 pub const SinglyLinkedList = @import("linked_list.zig").SinglyLinkedList;
-pub const SpinLock = @import("spinlock.zig").SpinLock;
+pub const SpinLock = @import("SpinLock.zig");
+pub const StaticResetEvent = @import("StaticResetEvent.zig");
 pub const StringHashMap = hash_map.StringHashMap;
 pub const StringHashMapUnmanaged = hash_map.StringHashMapUnmanaged;
 pub const StringArrayHashMap = array_hash_map.StringArrayHashMap;
@@ -93,5 +93,41 @@ comptime {
 }
 
 test "" {
-    testing.refAllDecls(@This());
+    if (builtin.os.tag == .windows) {
+        // We only test the Windows-relevant stuff to save memory because the CI
+        // server is hitting OOM. TODO revert this after stage2 arrives.
+        _ = ChildProcess;
+        _ = DynLib;
+        _ = mutex;
+        _ = Mutex;
+        _ = Progress;
+        _ = ResetEvent;
+        _ = SpinLock;
+        _ = StaticResetEvent;
+        _ = Target;
+        _ = Thread;
+
+        _ = atomic;
+        _ = build;
+        _ = builtin;
+        _ = debug;
+        _ = event;
+        _ = fs;
+        _ = heap;
+        _ = io;
+        _ = log;
+        _ = macho;
+        _ = net;
+        _ = os;
+        _ = once;
+        _ = pdb;
+        _ = process;
+        _ = testing;
+        _ = time;
+        _ = unicode;
+        _ = zig;
+        _ = start;
+    } else {
+        testing.refAllDecls(@This());
+    }
 }

@@ -178,6 +178,9 @@ pub const Manifest = struct {
     manifest_dirty: bool,
     files: std.ArrayListUnmanaged(File) = .{},
     hex_digest: [hex_digest_len]u8,
+    /// Populated when hit() returns an error because of one
+    /// of the files listed in the manifest.
+    failed_file_index: ?usize = null,
 
     /// Add a file as a dependency of process being cached. When `hit` is
     /// called, the file's contents will be checked to ensure that it matches
@@ -238,6 +241,8 @@ pub const Manifest = struct {
     /// the lock. `deinit` is safe to call whether or not `toOwnedLock` has been called.
     pub fn hit(self: *Manifest) !bool {
         assert(self.manifest_file == null);
+
+        self.failed_file_index = null;
 
         const ext = ".txt";
         var manifest_file_path: [self.hex_digest.len + ext.len]u8 = undefined;
@@ -333,7 +338,10 @@ pub const Manifest = struct {
             };
             defer this_file.close();
 
-            const actual_stat = try this_file.stat();
+            const actual_stat = this_file.stat() catch |err| {
+                self.failed_file_index = idx;
+                return err;
+            };
             const size_match = actual_stat.size == cache_hash_file.stat.size;
             const mtime_match = actual_stat.mtime == cache_hash_file.stat.mtime;
             const inode_match = actual_stat.inode == cache_hash_file.stat.inode;
@@ -349,7 +357,10 @@ pub const Manifest = struct {
                 }
 
                 var actual_digest: BinDigest = undefined;
-                try hashFile(this_file, &actual_digest);
+                hashFile(this_file, &actual_digest) catch |err| {
+                    self.failed_file_index = idx;
+                    return err;
+                };
 
                 if (!mem.eql(u8, &cache_hash_file.bin_digest, &actual_digest)) {
                     cache_hash_file.bin_digest = actual_digest;
@@ -374,7 +385,10 @@ pub const Manifest = struct {
             self.manifest_dirty = true;
             while (idx < input_file_count) : (idx += 1) {
                 const ch_file = &self.files.items[idx];
-                try self.populateFileHash(ch_file);
+                self.populateFileHash(ch_file) catch |err| {
+                    self.failed_file_index = idx;
+                    return err;
+                };
             }
             return false;
         }
@@ -502,7 +516,7 @@ pub const Manifest = struct {
             .target, .target_must_resolve, .prereq => {},
             else => |err| {
                 try err.printError(error_buf.writer());
-                std.log.err("failed parsing {}: {}", .{ dep_file_basename, error_buf.items });
+                std.log.err("failed parsing {s}: {s}", .{ dep_file_basename, error_buf.items });
                 return error.InvalidDepFile;
             },
         }
@@ -514,7 +528,7 @@ pub const Manifest = struct {
                 .prereq => |bytes| try self.addFilePost(bytes),
                 else => |err| {
                     try err.printError(error_buf.writer());
-                    std.log.err("failed parsing {}: {}", .{ dep_file_basename, error_buf.items });
+                    std.log.err("failed parsing {s}: {s}", .{ dep_file_basename, error_buf.items });
                     return error.InvalidDepFile;
                 },
             }
@@ -570,9 +584,11 @@ pub const Manifest = struct {
     /// The `Manifest` remains safe to deinit.
     /// Don't forget to call `writeManifest` before this!
     pub fn toOwnedLock(self: *Manifest) Lock {
-        const manifest_file = self.manifest_file.?;
+        const lock: Lock = .{
+            .manifest_file = self.manifest_file.?,
+        };
         self.manifest_file = null;
-        return Lock{ .manifest_file = manifest_file };
+        return lock;
     }
 
     /// Releases the manifest file and frees any memory the Manifest was using.
@@ -662,6 +678,7 @@ test "cache file and then recall it" {
         // https://github.com/ziglang/zig/issues/5437
         return error.SkipZigTest;
     }
+
     const cwd = fs.cwd();
 
     const temp_file = "test.txt";

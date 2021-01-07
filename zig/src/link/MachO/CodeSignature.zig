@@ -84,7 +84,7 @@ pub fn calcAdhocSignature(
             .identOffset = 0,
             .nSpecialSlots = 0,
             .nCodeSlots = 0,
-            .codeLimit = @intCast(u32, file_size),
+            .codeLimit = file_size,
             .hashSize = hash_size,
             .hashType = macho.CS_HASHTYPE_SHA256,
             .platform = 0,
@@ -126,7 +126,7 @@ pub fn calcAdhocSignature(
 
         Sha256.hash(buffer[0..fsize], &hash, .{});
 
-        cdir.data.appendSliceAssumeCapacity(hash[0..]);
+        cdir.data.appendSliceAssumeCapacity(&hash);
         cdir.inner.nCodeSlots += 1;
     }
 
@@ -174,10 +174,10 @@ test "CodeSignature header" {
     defer code_sig.deinit();
 
     var buffer: [@sizeOf(macho.SuperBlob)]u8 = undefined;
-    code_sig.writeHeader(buffer[0..]);
+    code_sig.writeHeader(&buffer);
 
     const expected = &[_]u8{ 0xfa, 0xde, 0x0c, 0xc0, 0x0, 0x0, 0x0, 0xc, 0x0, 0x0, 0x0, 0x0 };
-    testing.expect(mem.eql(u8, expected[0..], buffer[0..]));
+    testing.expect(mem.eql(u8, expected, &buffer));
 }
 
 pub fn calcCodeSignaturePadding(id: []const u8, file_size: u64) u32 {

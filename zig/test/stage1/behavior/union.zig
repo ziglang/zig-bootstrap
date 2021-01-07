@@ -734,3 +734,45 @@ test "containers with single-field enums" {
     S.doTheTest();
     comptime S.doTheTest();
 }
+
+test "@unionInit on union w/ tag but no fields" {
+    const S = struct {
+        const Type = enum(u8) { no_op = 105 };
+
+        const Data = union(Type) {
+            no_op: void,
+
+            pub fn decode(buf: []const u8) Data {
+                return @unionInit(Data, "no_op", {});
+            }
+        };
+
+        comptime {
+            expect(@sizeOf(Data) != 0);
+        }
+
+        fn doTheTest() void {
+            var data: Data = .{ .no_op = .{} };
+            var o = Data.decode(&[_]u8{});
+            expectEqual(Type.no_op, o);
+        }
+    };
+
+    S.doTheTest();
+    comptime S.doTheTest();
+}
+
+test "union enum type gets a separate scope" {
+    const S = struct {
+        const U = union(enum) {
+            a: u8,
+            const foo = 1;
+        };
+
+        fn doTheTest() void {
+            expect(!@hasDecl(@TagType(U), "foo"));
+        }
+    };
+
+    S.doTheTest();
+}

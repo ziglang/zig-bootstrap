@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -45,9 +45,9 @@ pub const CheckFileStep = struct {
                 warn(
                     \\
                     \\========= Expected to find: ===================
-                    \\{}
+                    \\{s}
                     \\========= But file does not contain it: =======
-                    \\{}
+                    \\{s}
                     \\
                 , .{ expected_match, contents });
                 return error.TestFailed;

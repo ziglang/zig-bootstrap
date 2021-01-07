@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -1618,7 +1618,7 @@ pub fn unexpectedError(err: Win32Error) std.os.UnexpectedError {
             null,
         );
         _ = std.unicode.utf16leToUtf8(&buf_u8, buf_u16[0..len]) catch unreachable;
-        std.debug.warn("error.Unexpected: GetLastError({}): {}\n", .{ @enumToInt(err), buf_u8[0..len] });
+        std.debug.warn("error.Unexpected: GetLastError({}): {s}\n", .{ @enumToInt(err), buf_u8[0..len] });
         std.debug.dumpCurrentStackTrace(null);
     }
     return error.Unexpected;

@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -607,7 +607,7 @@ pub const Mutable = struct {
     /// it will have the same length as it had when the function was called.
     pub fn gcd(rma: *Mutable, x: Const, y: Const, limbs_buffer: *std.ArrayList(Limb)) !void {
         const prev_len = limbs_buffer.items.len;
-        defer limbs_buffer.shrink(prev_len);
+        defer limbs_buffer.shrinkAndFree(prev_len);
         const x_copy = if (rma.limbs.ptr == x.limbs.ptr) blk: {
             const start = limbs_buffer.items.len;
             try limbs_buffer.appendSlice(x.limbs);

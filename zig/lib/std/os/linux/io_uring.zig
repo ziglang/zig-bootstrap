@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -28,7 +28,7 @@ pub const IO_Uring = struct {
     /// call on how many entries the submission and completion queues will ultimately have,
     /// see https://github.com/torvalds/linux/blob/v5.8/fs/io_uring.c#L8027-L8050.
     /// Matches the interface of io_uring_queue_init() in liburing.
-    pub fn init(entries: u12, flags: u32) !IO_Uring {
+    pub fn init(entries: u13, flags: u32) !IO_Uring {
         var params = mem.zeroInit(io_uring_params, .{
             .flags = flags,
             .sq_thread_idle = 1000,
@@ -39,17 +39,15 @@ pub const IO_Uring = struct {
     /// A powerful way to setup an io_uring, if you want to tweak io_uring_params such as submission
     /// queue thread cpu affinity or thread idle timeout (the kernel and our default is 1 second).
     /// `params` is passed by reference because the kernel needs to modify the parameters.
-    /// You may only set the `flags`, `sq_thread_cpu` and `sq_thread_idle` parameters.
-    /// Every other parameter belongs to the kernel and must be zeroed.
     /// Matches the interface of io_uring_queue_init_params() in liburing.
-    pub fn init_params(entries: u12, p: *io_uring_params) !IO_Uring {
+    pub fn init_params(entries: u13, p: *io_uring_params) !IO_Uring {
         if (entries == 0) return error.EntriesZero;
         if (!std.math.isPowerOfTwo(entries)) return error.EntriesNotPowerOfTwo;
 
         assert(p.sq_entries == 0);
-        assert(p.cq_entries == 0);
+        assert(p.cq_entries == 0 or p.flags & linux.IORING_SETUP_CQSIZE != 0);
         assert(p.features == 0);
-        assert(p.wq_fd == 0);
+        assert(p.wq_fd == 0 or p.flags & linux.IORING_SETUP_ATTACH_WQ != 0);
         assert(p.resv[0] == 0);
         assert(p.resv[1] == 0);
         assert(p.resv[2] == 0);
@@ -1378,11 +1376,10 @@ test "timeout_remove" {
     // Timeout remove operations set the fd to -1, which results in EBADF before EINVAL.
     // We use IORING_FEAT_RW_CUR_POS as a safety check here to make sure we are at least pre-5.6.
     // We don't want to skip this test for newer kernels.
-    if (
-        cqe_timeout.user_data == 0x99999999 and
+    if (cqe_timeout.user_data == 0x99999999 and
         cqe_timeout.res == -linux.EBADF and
-        (ring.features & linux.IORING_FEAT_RW_CUR_POS) == 0
-    ) {
+        (ring.features & linux.IORING_FEAT_RW_CUR_POS) == 0)
+    {
         return error.SkipZigTest;
     }
     testing.expectEqual(linux.io_uring_cqe{

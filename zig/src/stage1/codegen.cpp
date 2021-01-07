@@ -472,6 +472,10 @@ static LLVMValueRef make_fn_llvm_value(CodeGen *g, ZigFn *fn) {
         ZigLLVMFunctionSetCallingConv(llvm_fn, get_llvm_cc(g, cc));
     }
 
+    if (g->tsan_enabled) {
+        addLLVMFnAttr(llvm_fn, "sanitize_thread");
+    }
+
     bool want_cold = fn->is_cold;
     if (want_cold) {
         ZigLLVMAddFunctionAttrCold(llvm_fn);
@@ -7851,9 +7855,9 @@ static LLVMValueRef gen_const_val(CodeGen *g, ZigValue *const_val, const char *n
         case ZigTypeIdOpaque:
             zig_unreachable();
         case ZigTypeIdFnFrame:
-            zig_panic("TODO");
+            zig_panic("TODO: gen_const_val ZigTypeIdFnFrame");
         case ZigTypeIdAnyFrame:
-            zig_panic("TODO");
+            zig_panic("TODO: gen_const_val ZigTypeIdAnyFrame");
     }
     zig_unreachable();
 }
@@ -8391,7 +8395,7 @@ static void do_code_gen(CodeGen *g) {
     assert(!g->errors.length);
 
     if (buf_len(&g->global_asm) != 0) {
-        LLVMSetModuleInlineAsm(g->module, buf_ptr(&g->global_asm));
+        LLVMSetModuleInlineAsm2(g->module, buf_ptr(&g->global_asm), buf_len(&g->global_asm));
     }
 
     while (g->type_resolve_stack.length != 0) {
@@ -8432,7 +8436,7 @@ static void zig_llvm_emit_output(CodeGen *g) {
     // pipeline multiple times if this is requested.
     if (asm_filename != nullptr && bin_filename != nullptr) {
         if (ZigLLVMTargetMachineEmitToFile(g->target_machine, g->module, &err_msg, g->build_mode == BuildModeDebug,
-            is_small, g->enable_time_report, nullptr, bin_filename, llvm_ir_filename))
+            is_small, g->enable_time_report, g->tsan_enabled, nullptr, bin_filename, llvm_ir_filename))
         {
             fprintf(stderr, "LLVM failed to emit file: %s\n", err_msg);
             exit(1);
@@ -8442,7 +8446,7 @@ static void zig_llvm_emit_output(CodeGen *g) {
     }
 
     if (ZigLLVMTargetMachineEmitToFile(g->target_machine, g->module, &err_msg, g->build_mode == BuildModeDebug,
-        is_small, g->enable_time_report, asm_filename, bin_filename, llvm_ir_filename))
+        is_small, g->enable_time_report, g->tsan_enabled, asm_filename, bin_filename, llvm_ir_filename))
     {
         fprintf(stderr, "LLVM failed to emit file: %s\n", err_msg);
         exit(1);
@@ -8658,6 +8662,10 @@ static void define_builtin_types(CodeGen *g) {
             add_fp_entry(g, "c_longdouble", 64, LLVMDoubleType(), &g->builtin_types.entry_c_longdouble);
             break;
         case ZigLLVM_msp430:
+            add_fp_entry(g, "c_longdouble", 64, LLVMDoubleType(), &g->builtin_types.entry_c_longdouble);
+            break;
+        case ZigLLVM_bpfel:
+        case ZigLLVM_bpfeb:
             add_fp_entry(g, "c_longdouble", 64, LLVMDoubleType(), &g->builtin_types.entry_c_longdouble);
             break;
         default:

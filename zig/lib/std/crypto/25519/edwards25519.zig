@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -484,8 +484,8 @@ test "edwards25519 packing/unpacking" {
 test "edwards25519 point addition/substraction" {
     var s1: [32]u8 = undefined;
     var s2: [32]u8 = undefined;
-    try std.crypto.randomBytes(&s1);
-    try std.crypto.randomBytes(&s2);
+    std.crypto.random.bytes(&s1);
+    std.crypto.random.bytes(&s2);
     const p = try Edwards25519.basePoint.clampedMul(s1);
     const q = try Edwards25519.basePoint.clampedMul(s2);
     const r = p.add(q).add(q).sub(q).sub(q);

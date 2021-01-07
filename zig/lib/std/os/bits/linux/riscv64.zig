@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -305,8 +305,11 @@ pub const SYS = extern enum(usize) {
     fspick = 433,
     pidfd_open = 434,
     clone3 = 435,
+    close_range = 436,
     openat2 = 437,
     pidfd_getfd = 438,
+    faccessat2 = 439,
+    process_madvise = 440,
 
     _,
 };

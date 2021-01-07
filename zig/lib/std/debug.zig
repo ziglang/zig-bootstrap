@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2020 Zig Contributors
+// Copyright (c) 2015-2021 Zig Contributors
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
@@ -108,11 +108,11 @@ pub fn dumpCurrentStackTrace(start_addr: ?usize) void {
             return;
         }
         const debug_info = getSelfDebugInfo() catch |err| {
-            stderr.print("Unable to dump stack trace: Unable to open debug info: {}\n", .{@errorName(err)}) catch return;
+            stderr.print("Unable to dump stack trace: Unable to open debug info: {s}\n", .{@errorName(err)}) catch return;
             return;
         };
         writeCurrentStackTrace(stderr, debug_info, detectTTYConfig(), start_addr) catch |err| {
-            stderr.print("Unable to dump stack trace: {}\n", .{@errorName(err)}) catch return;
+            stderr.print("Unable to dump stack trace: {s}\n", .{@errorName(err)}) catch return;
             return;
         };
     }
@@ -129,7 +129,7 @@ pub fn dumpStackTraceFromBase(bp: usize, ip: usize) void {
             return;
         }
         const debug_info = getSelfDebugInfo() catch |err| {
-            stderr.print("Unable to dump stack trace: Unable to open debug info: {}\n", .{@errorName(err)}) catch return;
+            stderr.print("Unable to dump stack trace: Unable to open debug info: {s}\n", .{@errorName(err)}) catch return;
             return;
         };
         const tty_config = detectTTYConfig();
@@ -199,11 +199,11 @@ pub fn dumpStackTrace(stack_trace: builtin.StackTrace) void {
             return;
         }
         const debug_info = getSelfDebugInfo() catch |err| {
-            stderr.print("Unable to dump stack trace: Unable to open debug info: {}\n", .{@errorName(err)}) catch return;
+            stderr.print("Unable to dump stack trace: Unable to open debug info: {s}\n", .{@errorName(err)}) catch return;
             return;
         };
         writeStackTrace(stack_trace, stderr, getDebugInfoAllocator(), debug_info, detectTTYConfig()) catch |err| {
-            stderr.print("Unable to dump stack trace: {}\n", .{@errorName(err)}) catch return;
+            stderr.print("Unable to dump stack trace: {s}\n", .{@errorName(err)}) catch return;
             return;
         };
     }
@@ -262,6 +262,12 @@ pub fn panicExtra(trace: ?*const builtin.StackTrace, first_trace_addr: ?usize, c
                 defer held.release();
 
                 const stderr = io.getStdErr().writer();
+                if (builtin.single_threaded) {
+                    stderr.print("panic: ", .{}) catch os.abort();
+                } else {
+                    const current_thread_id = std.Thread.getCurrentThreadId();
+                    stderr.print("thread {d} panic: ", .{current_thread_id}) catch os.abort();
+                }
                 stderr.print(format ++ "\n", args) catch os.abort();
                 if (trace) |t| {
                     dumpStackTrace(t.*);
@@ -274,9 +280,8 @@ pub fn panicExtra(trace: ?*const builtin.StackTrace, first_trace_addr: ?usize, c
                 // and call abort()
 
                 // Sleep forever without hammering the CPU
-                var event = std.ResetEvent.init();
+                var event: std.StaticResetEvent = .{};
                 event.wait();
-
                 unreachable;
             }
         },
@@ -606,7 +611,7 @@ fn printLineInfo(
         tty_config.setColor(out_stream, .White);
 
         if (line_info) |*li| {
-            try out_stream.print("{}:{}:{}", .{ li.file_name, li.line, li.column });
+            try out_stream.print("{s}:{d}:{d}", .{ li.file_name, li.line, li.column });
         } else {
             try out_stream.writeAll("???:?:?");
         }
@@ -614,7 +619,7 @@ fn printLineInfo(
         tty_config.setColor(out_stream, .Reset);
         try out_stream.writeAll(": ");
         tty_config.setColor(out_stream, .Dim);
-        try out_stream.print("0x{x} in {} ({})", .{ address, symbol_name, compile_unit_name });
+        try out_stream.print("0x{x} in {s} ({s})", .{ address, symbol_name, compile_unit_name });
         tty_config.setColor(out_stream, .Reset);
         try out_stream.writeAll("\n");
 
@@ -1696,6 +1701,7 @@ fn getDebugInfoAllocator() *mem.Allocator {
 pub const have_segfault_handling_support = switch (builtin.os.tag) {
     .linux, .netbsd => true,
     .windows => true,
+    .freebsd, .openbsd => @hasDecl(os, "ucontext_t"),
     else => false,
 };
 pub const enable_segfault_handler: bool = if (@hasDecl(root, "enable_segfault_handler"))
@@ -1721,7 +1727,7 @@ pub fn attachSegfaultHandler() void {
         return;
     }
     var act = os.Sigaction{
-        .sigaction = handleSegfaultLinux,
+        .handler = .{ .sigaction = handleSegfaultLinux },
         .mask = os.empty_sigset,
         .flags = (os.SA_SIGINFO | os.SA_RESTART | os.SA_RESETHAND),
     };
@@ -1740,7 +1746,7 @@ fn resetSegfaultHandler() void {
         return;
     }
     var act = os.Sigaction{
-        .sigaction = os.SIG_DFL,
+        .handler = .{ .sigaction = os.SIG_DFL },
         .mask = os.empty_sigset,
         .flags = 0,
     };
@@ -1757,7 +1763,9 @@ fn handleSegfaultLinux(sig: i32, info: *const os.siginfo_t, ctx_ptr: ?*const c_v
 
     const addr = switch (builtin.os.tag) {
         .linux => @ptrToInt(info.fields.sigfault.addr),
+        .freebsd => @ptrToInt(info.addr),
         .netbsd => @ptrToInt(info.info.reason.fault.addr),
+        .openbsd => @ptrToInt(info.data.fault.addr),
         else => unreachable,
     };
 
@@ -1781,8 +1789,18 @@ fn handleSegfaultLinux(sig: i32, info: *const os.siginfo_t, ctx_ptr: ?*const c_v
         },
         .x86_64 => {
             const ctx = @ptrCast(*const os.ucontext_t, @alignCast(@alignOf(os.ucontext_t), ctx_ptr));
-            const ip = @intCast(usize, ctx.mcontext.gregs[os.REG_RIP]);
-            const bp = @intCast(usize, ctx.mcontext.gregs[os.REG_RBP]);
+            const ip = switch (builtin.os.tag) {
+                .linux, .netbsd => @intCast(usize, ctx.mcontext.gregs[os.REG_RIP]),
+                .freebsd => @intCast(usize, ctx.mcontext.rip),
+                .openbsd => @intCast(usize, ctx.sc_rip),
+                else => unreachable,
+            };
+            const bp = switch (builtin.os.tag) {
+                .linux, .netbsd => @intCast(usize, ctx.mcontext.gregs[os.REG_RBP]),
+                .openbsd => @intCast(usize, ctx.sc_rbp),
+                .freebsd => @intCast(usize, ctx.mcontext.rbp),
+                else => unreachable,
+            };
             dumpStackTraceFromBase(bp, ip);
         },
         .arm => {

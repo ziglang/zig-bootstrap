@@ -2,6 +2,16 @@ const tests = @import("tests.zig");
 const std = @import("std");
 
 pub fn addCases(cases: *tests.CompileErrorContext) void {
+    cases.add("lazy pointer with undefined element type",
+        \\export fn foo() void {
+        \\    comptime var T: type = undefined;
+        \\    const S = struct { x: *T };
+        \\    const I = @typeInfo(S);
+        \\}
+    , &[_][]const u8{
+        "tmp.zig:3:28: error: use of undefined value here causes undefined behavior",
+    });
+
     cases.add("pointer arithmetic on pointer-to-array",
         \\export fn foo() void {
         \\    var x: [10]u8 = undefined;
@@ -2376,8 +2386,13 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\export fn entry() void {
         \\    const x = [_]u8;
         \\}
+        \\export fn entry2() void {
+        \\    const S = struct { a: *const [_]u8 };
+        \\    var a = .{ S{} };
+        \\}
     , &[_][]const u8{
         "tmp.zig:2:15: error: inferred array size invalid here",
+        "tmp.zig:5:34: error: inferred array size invalid here",
     });
 
     cases.add("initializing array with struct syntax",
