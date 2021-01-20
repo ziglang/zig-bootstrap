@@ -18,9 +18,7 @@ const link = @import("../../link.zig");
 const MachO = @import("../MachO.zig");
 const SrcFn = MachO.SrcFn;
 const TextBlock = MachO.TextBlock;
-const satMul = MachO.satMul;
-const alloc_num = MachO.alloc_num;
-const alloc_den = MachO.alloc_den;
+const padToIdeal = MachO.padToIdeal;
 const makeStaticString = MachO.makeStaticString;
 
 usingnamespace @import("commands.zig");
@@ -39,6 +37,8 @@ load_commands: std.ArrayListUnmanaged(LoadCommand) = .{},
 pagezero_segment_cmd_index: ?u16 = null,
 /// __TEXT segment
 text_segment_cmd_index: ?u16 = null,
+/// __DATA_CONST segment
+data_const_segment_cmd_index: ?u16 = null,
 /// __DATA segment
 data_segment_cmd_index: ?u16 = null,
 /// __LINKEDIT segment
@@ -171,6 +171,15 @@ pub fn populateMissingMetadata(self: *DebugSymbols, allocator: *Allocator) !void
         self.header_dirty = true;
         self.load_commands_dirty = true;
     }
+    if (self.data_const_segment_cmd_index == null) outer: {
+        if (self.base.data_const_segment_cmd_index == null) break :outer; // __DATA_CONST is optional
+        self.data_const_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
+        const base_cmd = self.base.load_commands.items[self.base.data_const_segment_cmd_index.?].Segment;
+        const cmd = try self.copySegmentCommand(allocator, base_cmd);
+        try self.load_commands.append(allocator, .{ .Segment = cmd });
+        self.header_dirty = true;
+        self.load_commands_dirty = true;
+    }
     if (self.data_segment_cmd_index == null) outer: {
         if (self.base.data_segment_cmd_index == null) break :outer; // __DATA is optional
         self.data_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
@@ -196,7 +205,7 @@ pub fn populateMissingMetadata(self: *DebugSymbols, allocator: *Allocator) !void
 
         const linkedit = self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
         const ideal_size: u16 = 200 + 128 + 160 + 250;
-        const needed_size = mem.alignForwardGeneric(u64, satMul(ideal_size, alloc_num) / alloc_den, page_size);
+        const needed_size = mem.alignForwardGeneric(u64, padToIdeal(ideal_size), page_size);
         const off = linkedit.inner.fileoff + linkedit.inner.filesize;
         const vmaddr = linkedit.inner.vmaddr + linkedit.inner.vmsize;
 
@@ -793,7 +802,7 @@ fn allocatedSizeLinkedit(self: *DebugSymbols, start: u64) u64 {
 }
 
 fn detectAllocCollisionLinkedit(self: *DebugSymbols, start: u64, size: u64) ?u64 {
-    const end = start + satMul(size, alloc_num) / alloc_den;
+    const end = start + padToIdeal(size);
 
     if (self.symtab_cmd_index) |idx| outer: {
         if (self.load_commands.items.len == idx) break :outer;
@@ -801,7 +810,7 @@ fn detectAllocCollisionLinkedit(self: *DebugSymbols, start: u64, size: u64) ?u64
         {
             // Symbol table
             const symsize = symtab.nsyms * @sizeOf(macho.nlist_64);
-            const increased_size = satMul(symsize, alloc_num) / alloc_den;
+            const increased_size = padToIdeal(symsize);
             const test_end = symtab.symoff + increased_size;
             if (end > symtab.symoff and start < test_end) {
                 return test_end;
@@ -809,7 +818,7 @@ fn detectAllocCollisionLinkedit(self: *DebugSymbols, start: u64, size: u64) ?u64
         }
         {
             // String table
-            const increased_size = satMul(symtab.strsize, alloc_num) / alloc_den;
+            const increased_size = padToIdeal(symtab.strsize);
             const test_end = symtab.stroff + increased_size;
             if (end > symtab.stroff and start < test_end) {
                 return test_end;
@@ -895,8 +904,7 @@ pub fn updateDeclLineNumber(self: *DebugSymbols, module: *Module, decl: *const M
     const tracy = trace(@src());
     defer tracy.end();
 
-    const container_scope = decl.scope.cast(Module.Scope.Container).?;
-    const tree = container_scope.file_scope.contents.tree;
+    const tree = decl.container.file_scope.contents.tree;
     const file_ast_decls = tree.root_node.decls();
     // TODO Look into improving the performance here by adding a token-index-to-line
     // lookup table. Currently this involves scanning over the source code for newlines.
@@ -940,22 +948,14 @@ pub fn initDeclDebugBuffers(
             try dbg_line_buffer.ensureCapacity(26);
 
             const line_off: u28 = blk: {
-                if (decl.scope.cast(Module.Scope.Container)) |container_scope| {
-                    const tree = container_scope.file_scope.contents.tree;
-                    const file_ast_decls = tree.root_node.decls();
-                    // TODO Look into improving the performance here by adding a token-index-to-line
-                    // lookup table. Currently this involves scanning over the source code for newlines.
-                    const fn_proto = file_ast_decls[decl.src_index].castTag(.FnProto).?;
-                    const block = fn_proto.getBodyNode().?.castTag(.Block).?;
-                    const line_delta = std.zig.lineDelta(tree.source, 0, tree.token_locs[block.lbrace].start);
-                    break :blk @intCast(u28, line_delta);
-                } else if (decl.scope.cast(Module.Scope.ZIRModule)) |zir_module| {
-                    const byte_off = zir_module.contents.module.decls[decl.src_index].inst.src;
-                    const line_delta = std.zig.lineDelta(zir_module.source.bytes, 0, byte_off);
-                    break :blk @intCast(u28, line_delta);
-                } else {
-                    unreachable;
-                }
+                const tree = decl.container.file_scope.contents.tree;
+                const file_ast_decls = tree.root_node.decls();
+                // TODO Look into improving the performance here by adding a token-index-to-line
+                // lookup table. Currently this involves scanning over the source code for newlines.
+                const fn_proto = file_ast_decls[decl.src_index].castTag(.FnProto).?;
+                const block = fn_proto.getBodyNode().?.castTag(.Block).?;
+                const line_delta = std.zig.lineDelta(tree.source, 0, tree.token_locs[block.lbrace].start);
+                break :blk @intCast(u28, line_delta);
             };
 
             dbg_line_buffer.appendSliceAssumeCapacity(&[_]u8{
@@ -1077,7 +1077,8 @@ pub fn commitDeclDebugInfo(
             const debug_line_sect = &dwarf_segment.sections.items[self.debug_line_section_index.?];
             const src_fn = &decl.fn_link.macho;
             src_fn.len = @intCast(u32, dbg_line_buffer.items.len);
-            if (self.dbg_line_fn_last) |last| {
+            if (self.dbg_line_fn_last) |last| blk: {
+                if (src_fn == last) break :blk;
                 if (src_fn.next) |next| {
                     // Update existing function - non-last item.
                     if (src_fn.off + src_fn.len + min_nop_size > next.off) {
@@ -1096,7 +1097,7 @@ pub fn commitDeclDebugInfo(
                         last.next = src_fn;
                         self.dbg_line_fn_last = src_fn;
 
-                        src_fn.off = last.off + (last.len * alloc_num / alloc_den);
+                        src_fn.off = last.off + padToIdeal(last.len);
                     }
                 } else if (src_fn.prev == null) {
                     // Append new function.
@@ -1105,14 +1106,14 @@ pub fn commitDeclDebugInfo(
                     last.next = src_fn;
                     self.dbg_line_fn_last = src_fn;
 
-                    src_fn.off = last.off + (last.len * alloc_num / alloc_den);
+                    src_fn.off = last.off + padToIdeal(last.len);
                 }
             } else {
                 // This is the first function of the Line Number Program.
                 self.dbg_line_fn_first = src_fn;
                 self.dbg_line_fn_last = src_fn;
 
-                src_fn.off = self.dbgLineNeededHeaderBytes(module) * alloc_num / alloc_den;
+                src_fn.off = padToIdeal(self.dbgLineNeededHeaderBytes(module));
             }
 
             const last_src_fn = self.dbg_line_fn_last.?;
@@ -1236,7 +1237,8 @@ fn updateDeclDebugInfoAllocation(
     const dwarf_segment = &self.load_commands.items[self.dwarf_segment_cmd_index.?].Segment;
     const debug_info_sect = &dwarf_segment.sections.items[self.debug_info_section_index.?];
     text_block.dbg_info_len = len;
-    if (self.dbg_info_decl_last) |last| {
+    if (self.dbg_info_decl_last) |last| blk: {
+        if (text_block == last) break :blk;
         if (text_block.dbg_info_next) |next| {
             // Update existing Decl - non-last item.
             if (text_block.dbg_info_off + text_block.dbg_info_len + min_nop_size > next.dbg_info_off) {
@@ -1255,7 +1257,7 @@ fn updateDeclDebugInfoAllocation(
                 last.dbg_info_next = text_block;
                 self.dbg_info_decl_last = text_block;
 
-                text_block.dbg_info_off = last.dbg_info_off + (last.dbg_info_len * alloc_num / alloc_den);
+                text_block.dbg_info_off = last.dbg_info_off + padToIdeal(last.dbg_info_len);
             }
         } else if (text_block.dbg_info_prev == null) {
             // Append new Decl.
@@ -1264,14 +1266,14 @@ fn updateDeclDebugInfoAllocation(
             last.dbg_info_next = text_block;
             self.dbg_info_decl_last = text_block;
 
-            text_block.dbg_info_off = last.dbg_info_off + (last.dbg_info_len * alloc_num / alloc_den);
+            text_block.dbg_info_off = last.dbg_info_off + padToIdeal(last.dbg_info_len);
         }
     } else {
         // This is the first Decl of the .debug_info
         self.dbg_info_decl_first = text_block;
         self.dbg_info_decl_last = text_block;
 
-        text_block.dbg_info_off = self.dbgInfoNeededHeaderBytes() * alloc_num / alloc_den;
+        text_block.dbg_info_off = padToIdeal(self.dbgInfoNeededHeaderBytes());
     }
 }
 

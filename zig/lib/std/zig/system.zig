@@ -14,8 +14,7 @@ const process = std.process;
 const Target = std.Target;
 const CrossTarget = std.zig.CrossTarget;
 const macos = @import("system/macos.zig");
-
-const is_windows = Target.current.os.tag == .windows;
+pub const windows = @import("system/windows.zig");
 
 pub const getSDKPath = macos.getSDKPath;
 
@@ -26,7 +25,9 @@ pub const NativePaths = struct {
     rpaths: ArrayList([:0]u8),
     warnings: ArrayList([:0]u8),
 
-    pub fn detect(allocator: *Allocator) !NativePaths {
+    pub fn detect(allocator: *Allocator, native_info: NativeTargetInfo) !NativePaths {
+        const native_target = native_info.target;
+
         var self: NativePaths = .{
             .include_dirs = ArrayList([:0]u8).init(allocator),
             .lib_dirs = ArrayList([:0]u8).init(allocator),
@@ -103,9 +104,9 @@ pub const NativePaths = struct {
             return self;
         }
 
-        if (!is_windows) {
-            const triple = try Target.current.linuxTriple(allocator);
-            const qual = Target.current.cpu.arch.ptrBitWidth();
+        if (native_target.os.tag != .windows) {
+            const triple = try native_target.linuxTriple(allocator);
+            const qual = native_target.cpu.arch.ptrBitWidth();
 
             // TODO: $ ld --verbose | grep SEARCH_DIR
             // the output contains some paths that end with lib64, maybe include them too?
@@ -221,6 +222,7 @@ pub const NativeTargetInfo = struct {
         ProcessFdQuotaExceeded,
         SystemFdQuotaExceeded,
         DeviceBusy,
+        OSVersionDetectionFail,
     };
 
     /// Given a `CrossTarget`, which specifies in detail which parts of the target should be detected
@@ -249,76 +251,11 @@ pub const NativeTargetInfo = struct {
                     }
                 },
                 .windows => {
-                    var version_info: std.os.windows.RTL_OSVERSIONINFOW = undefined;
-                    version_info.dwOSVersionInfoSize = @sizeOf(@TypeOf(version_info));
-
-                    switch (std.os.windows.ntdll.RtlGetVersion(&version_info)) {
-                        .SUCCESS => {},
-                        else => unreachable,
-                    }
-
-                    // Starting from the system infos build a NTDDI-like version
-                    // constant whose format is:
-                    //   B0 B1 B2 B3
-                    //   `---` `` ``--> Sub-version (Starting from Windows 10 onwards)
-                    //     \    `--> Service pack (Always zero in the constants defined)
-                    //      `--> OS version (Major & minor)
-                    const os_ver: u16 = @intCast(u16, version_info.dwMajorVersion & 0xff) << 8 |
-                        @intCast(u16, version_info.dwMinorVersion & 0xff);
-                    const sp_ver: u8 = 0;
-                    const sub_ver: u8 = if (os_ver >= 0x0A00) subver: {
-                        // There's no other way to obtain this info beside
-                        // checking the build number against a known set of
-                        // values
-                        const known_build_numbers = [_]u32{
-                            10240, 10586, 14393, 15063, 16299, 17134, 17763,
-                            18362, 19041,
-                        };
-                        var last_idx: usize = 0;
-                        for (known_build_numbers) |build, i| {
-                            if (version_info.dwBuildNumber >= build)
-                                last_idx = i;
-                        }
-                        break :subver @truncate(u8, last_idx);
-                    } else 0;
-
-                    const version: u32 = @as(u32, os_ver) << 16 | @as(u32, sp_ver) << 8 | sub_ver;
-
-                    os.version_range.windows.max = @intToEnum(Target.Os.WindowsVersion, version);
-                    os.version_range.windows.min = @intToEnum(Target.Os.WindowsVersion, version);
+                    const detected_version = windows.detectRuntimeVersion();
+                    os.version_range.windows.min = detected_version;
+                    os.version_range.windows.max = detected_version;
                 },
-                .macos => {
-                    var scbuf: [32]u8 = undefined;
-                    var size: usize = undefined;
-
-                    // The osproductversion sysctl was introduced first with 10.13.4 High Sierra.
-                    const key_osproductversion = "kern.osproductversion"; // eg. "10.15.4"
-                    size = scbuf.len;
-                    if (std.os.sysctlbynameZ(key_osproductversion, &scbuf, &size, null, 0)) |_| {
-                        const string_version = scbuf[0 .. size - 1];
-                        if (std.builtin.Version.parse(string_version)) |ver| {
-                            os.version_range.semver.min = ver;
-                            os.version_range.semver.max = ver;
-                        } else |err| switch (err) {
-                            error.Overflow => {},
-                            error.InvalidCharacter => {},
-                            error.InvalidVersion => {},
-                        }
-                    } else |err| switch (err) {
-                        error.UnknownName => {
-                            const key_osversion = "kern.osversion"; // eg. "19E287"
-                            size = scbuf.len;
-                            std.os.sysctlbynameZ(key_osversion, &scbuf, &size, null, 0) catch {
-                                @panic("unable to detect macOS version: " ++ key_osversion);
-                            };
-                            if (macos.version_from_build(scbuf[0 .. size - 1])) |ver| {
-                                os.version_range.semver.min = ver;
-                                os.version_range.semver.max = ver;
-                            } else |_| {}
-                        },
-                        else => @panic("unable to detect macOS version: " ++ key_osproductversion),
-                    }
-                },
+                .macos => try macos.detect(&os),
                 .freebsd => {
                     var osreldate: u32 = undefined;
                     var len: usize = undefined;

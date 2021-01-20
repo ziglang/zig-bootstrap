@@ -100,8 +100,11 @@ pub fn deinit(self: *Wasm) void {
 // Generate code for the Decl, storing it in memory to be later written to
 // the file on flush().
 pub fn updateDecl(self: *Wasm, module: *Module, decl: *Module.Decl) !void {
-    if (decl.typed_value.most_recent.typed_value.ty.zigTypeTag() != .Fn)
+    const typed_value = decl.typed_value.most_recent.typed_value;
+    if (typed_value.ty.zigTypeTag() != .Fn)
         return error.TODOImplementNonFnDeclsForWasm;
+    if (typed_value.val.tag() == .extern_fn)
+        return error.TODOImplementExternFnDeclsForWasm;
 
     if (decl.fn_link.wasm) |*fn_data| {
         fn_data.functype.items.len = 0;
@@ -115,10 +118,29 @@ pub fn updateDecl(self: *Wasm, module: *Module, decl: *Module.Decl) !void {
 
     var managed_functype = fn_data.functype.toManaged(self.base.allocator);
     var managed_code = fn_data.code.toManaged(self.base.allocator);
-    try codegen.genFunctype(&managed_functype, decl);
-    try codegen.genCode(&managed_code, decl);
-    fn_data.functype = managed_functype.toUnmanaged();
-    fn_data.code = managed_code.toUnmanaged();
+
+    var context = codegen.Context{
+        .gpa = self.base.allocator,
+        .values = codegen.ValueTable.init(self.base.allocator),
+        .code = managed_code,
+        .func_type_data = managed_functype,
+        .decl = decl,
+        .err_msg = undefined,
+    };
+    defer context.values.deinit();
+
+    // generate the 'code' section for the function declaration
+    context.gen() catch |err| switch (err) {
+        error.CodegenFail => {
+            decl.analysis = .codegen_failure;
+            try module.failed_decls.put(module.gpa, decl, context.err_msg);
+            return;
+        },
+        else => |e| return err,
+    };
+
+    fn_data.functype = context.func_type_data.toUnmanaged();
+    fn_data.code = context.code.toUnmanaged();
 }
 
 pub fn updateDeclExports(

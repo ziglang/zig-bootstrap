@@ -37,6 +37,7 @@ pub const UCHAR = u8;
 pub const FLOAT = f32;
 pub const HANDLE = *c_void;
 pub const HCRYPTPROV = ULONG_PTR;
+pub const ATOM = u16;
 pub const HBRUSH = *opaque {};
 pub const HCURSOR = *opaque {};
 pub const HICON = *opaque {};
@@ -770,11 +771,23 @@ pub const FILE_FLAG_SESSION_AWARE = 0x00800000;
 pub const FILE_FLAG_SEQUENTIAL_SCAN = 0x08000000;
 pub const FILE_FLAG_WRITE_THROUGH = 0x80000000;
 
+pub const RECT = extern struct {
+    left: LONG,
+    top: LONG,
+    right: LONG,
+    bottom: LONG,
+};
+
 pub const SMALL_RECT = extern struct {
     Left: SHORT,
     Top: SHORT,
     Right: SHORT,
     Bottom: SHORT,
+};
+
+pub const POINT = extern struct {
+    x: LONG,
+    y: LONG,
 };
 
 pub const COORD = extern struct {
@@ -813,7 +826,8 @@ pub const FILE_NOTIFY_INFORMATION = extern struct {
     NextEntryOffset: DWORD,
     Action: DWORD,
     FileNameLength: DWORD,
-    FileName: [1]WCHAR,
+    // Flexible array member
+    // FileName: [1]WCHAR,
 };
 
 pub const FILE_ACTION_ADDED = 0x00000001;
@@ -1606,3 +1620,23 @@ pub const IOCTL_MOUNTMGR_QUERY_POINTS: ULONG = 0x6d0008;
 pub const SD_RECEIVE = 0;
 pub const SD_SEND = 1;
 pub const SD_BOTH = 2;
+
+pub const OBJECT_INFORMATION_CLASS = extern enum {
+    ObjectBasicInformation = 0,
+    ObjectNameInformation = 1,
+    ObjectTypeInformation = 2,
+    ObjectTypesInformation = 3,
+    ObjectHandleFlagInformation = 4,
+    ObjectSessionInformation = 5,
+    MaxObjectInfoClass,
+};
+
+pub const OBJECT_NAME_INFORMATION = extern struct {
+    Name: UNICODE_STRING,
+};
+pub const POBJECT_NAME_INFORMATION = *OBJECT_NAME_INFORMATION;
+
+pub const SRWLOCK = usize;
+pub const SRWLOCK_INIT: SRWLOCK = 0;
+pub const CONDITION_VARIABLE = usize;
+pub const CONDITION_VARIABLE_INIT: CONDITION_VARIABLE = 0;

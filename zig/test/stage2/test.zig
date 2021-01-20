@@ -11,19 +11,9 @@ const linux_x64 = std.zig.CrossTarget{
     .os_tag = .linux,
 };
 
-const macosx_x64 = std.zig.CrossTarget{
-    .cpu_arch = .x86_64,
-    .os_tag = .macos,
-};
-
 const linux_riscv64 = std.zig.CrossTarget{
     .cpu_arch = .riscv64,
     .os_tag = .linux,
-};
-
-const wasi = std.zig.CrossTarget{
-    .cpu_arch = .wasm32,
-    .os_tag = .wasi,
 };
 
 pub fn addCases(ctx: *TestContext) !void {
@@ -32,11 +22,13 @@ pub fn addCases(ctx: *TestContext) !void {
     try @import("arm.zig").addCases(ctx);
     try @import("aarch64.zig").addCases(ctx);
     try @import("llvm.zig").addCases(ctx);
+    try @import("wasm.zig").addCases(ctx);
+    try @import("darwin.zig").addCases(ctx);
 
     {
         var case = ctx.exe("hello world with updates", linux_x64);
 
-        case.addError("", &[_][]const u8{"no entry point found"});
+        case.addError("", &[_][]const u8{"error: no entry point found"});
 
         // Incorrect return type
         case.addError(
@@ -146,118 +138,7 @@ pub fn addCases(ctx: *TestContext) !void {
     }
 
     {
-        var case = ctx.exe("hello world with updates", macosx_x64);
-        case.addError("", &[_][]const u8{"no entry point found"});
-
-        // Incorrect return type
-        case.addError(
-            \\export fn _start() noreturn {
-            \\}
-        , &[_][]const u8{":2:1: error: expected noreturn, found void"});
-
-        // Regular old hello world
-        case.addCompareOutput(
-            \\export fn _start() noreturn {
-            \\    print();
-            \\
-            \\    exit();
-            \\}
-            \\
-            \\fn print() void {
-            \\    asm volatile ("syscall"
-            \\        :
-            \\        : [number] "{rax}" (0x2000004),
-            \\          [arg1] "{rdi}" (1),
-            \\          [arg2] "{rsi}" (@ptrToInt("Hello, World!\n")),
-            \\          [arg3] "{rdx}" (14)
-            \\        : "memory"
-            \\    );
-            \\    return;
-            \\}
-            \\
-            \\fn exit() noreturn {
-            \\    asm volatile ("syscall"
-            \\        :
-            \\        : [number] "{rax}" (0x2000001),
-            \\          [arg1] "{rdi}" (0)
-            \\        : "memory"
-            \\    );
-            \\    unreachable;
-            \\}
-        ,
-            "Hello, World!\n",
-        );
-        // Now change the message only
-        case.addCompareOutput(
-            \\export fn _start() noreturn {
-            \\    print();
-            \\
-            \\    exit();
-            \\}
-            \\
-            \\fn print() void {
-            \\    asm volatile ("syscall"
-            \\        :
-            \\        : [number] "{rax}" (0x2000004),
-            \\          [arg1] "{rdi}" (1),
-            \\          [arg2] "{rsi}" (@ptrToInt("What is up? This is a longer message that will force the data to be relocated in virtual address space.\n")),
-            \\          [arg3] "{rdx}" (104)
-            \\        : "memory"
-            \\    );
-            \\    return;
-            \\}
-            \\
-            \\fn exit() noreturn {
-            \\    asm volatile ("syscall"
-            \\        :
-            \\        : [number] "{rax}" (0x2000001),
-            \\          [arg1] "{rdi}" (0)
-            \\        : "memory"
-            \\    );
-            \\    unreachable;
-            \\}
-        ,
-            "What is up? This is a longer message that will force the data to be relocated in virtual address space.\n",
-        );
-        // Now we print it twice.
-        case.addCompareOutput(
-            \\export fn _start() noreturn {
-            \\    print();
-            \\    print();
-            \\
-            \\    exit();
-            \\}
-            \\
-            \\fn print() void {
-            \\    asm volatile ("syscall"
-            \\        :
-            \\        : [number] "{rax}" (0x2000004),
-            \\          [arg1] "{rdi}" (1),
-            \\          [arg2] "{rsi}" (@ptrToInt("What is up? This is a longer message that will force the data to be relocated in virtual address space.\n")),
-            \\          [arg3] "{rdx}" (104)
-            \\        : "memory"
-            \\    );
-            \\    return;
-            \\}
-            \\
-            \\fn exit() noreturn {
-            \\    asm volatile ("syscall"
-            \\        :
-            \\        : [number] "{rax}" (0x2000001),
-            \\          [arg1] "{rdi}" (0)
-            \\        : "memory"
-            \\    );
-            \\    unreachable;
-            \\}
-        ,
-            \\What is up? This is a longer message that will force the data to be relocated in virtual address space.
-            \\What is up? This is a longer message that will force the data to be relocated in virtual address space.
-            \\
-        );
-    }
-
-    {
-        var case = ctx.exe("hello world", linux_riscv64);
+        var case = ctx.exe("riscv64 hello world", linux_riscv64);
         // Regular old hello world
         case.addCompareOutput(
             \\export fn _start() noreturn {
@@ -1158,62 +1039,6 @@ pub fn addCases(ctx: *TestContext) !void {
         });
     }
 
-    {
-        var case = ctx.exe("wasm function calls", wasi);
-
-        case.addCompareOutput(
-            \\export fn _start() u32 {
-            \\    foo();
-            \\    bar();
-            \\    return 42;
-            \\}
-            \\fn foo() void {
-            \\    bar();
-            \\    bar();
-            \\}
-            \\fn bar() void {}
-        ,
-            "42\n",
-        );
-
-        case.addCompareOutput(
-            \\export fn _start() i64 {
-            \\    bar();
-            \\    foo();
-            \\    foo();
-            \\    bar();
-            \\    foo();
-            \\    bar();
-            \\    return 42;
-            \\}
-            \\fn foo() void {
-            \\    bar();
-            \\}
-            \\fn bar() void {}
-        ,
-            "42\n",
-        );
-
-        case.addCompareOutput(
-            \\export fn _start() f32 {
-            \\    bar();
-            \\    foo();
-            \\    return 42.0;
-            \\}
-            \\fn foo() void {
-            \\    bar();
-            \\    bar();
-            \\    bar();
-            \\}
-            \\fn bar() void {}
-        ,
-        // This is what you get when you take the bits of the IEE-754
-        // representation of 42.0 and reinterpret them as an unsigned
-        // integer. Guess that's a bug in wasmtime.
-            "1109917696\n",
-        );
-    }
-
     ctx.compileError("function redefinition", linux_x64,
         \\fn entry() void {}
         \\fn entry() void {}
@@ -1234,7 +1059,10 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    var i: u32 = 10;
             \\    unreachable;
             \\}
-        , &[_][]const u8{":3:9: error: redefinition of 'i'"});
+        , &[_][]const u8{
+            ":3:9: error: redefinition of 'i'",
+            ":2:9: note: previous definition is here",
+        });
         case.addError(
             \\var testing: i64 = 10;
             \\export fn _start() noreturn {
@@ -1243,24 +1071,46 @@ pub fn addCases(ctx: *TestContext) !void {
             \\}
         , &[_][]const u8{":3:9: error: redefinition of 'testing'"});
     }
-    ctx.compileError("compileLog", linux_x64,
-        \\export fn _start() noreturn {
-        \\  const b = true;
-        \\  var f: u32 = 1;
-        \\  @compileLog(b, 20, f, x);
-        \\  @compileLog(1000);
-        \\  var bruh: usize = true;
-        \\  unreachable;
-        \\}
-        \\fn x() void {}
-    , &[_][]const u8{
-        ":4:3: error: found compile log statement",
-        ":5:3: error: found compile log statement",
-        ":6:21: error: expected usize, found bool",
-    });
-    // TODO if this is here it invalidates the compile error checker:
-    // "| true, 20, (runtime value), (function)"
-    // "| 1000"
+
+    {
+        // TODO make the test harness support checking the compile log output too
+        var case = ctx.obj("@compileLog", linux_x64);
+        // The other compile error prevents emission of a "found compile log" statement.
+        case.addError(
+            \\export fn _start() noreturn {
+            \\    const b = true;
+            \\    var f: u32 = 1;
+            \\    @compileLog(b, 20, f, x);
+            \\    @compileLog(1000);
+            \\    var bruh: usize = true;
+            \\    unreachable;
+            \\}
+            \\export fn other() void {
+            \\    @compileLog(1234);
+            \\}
+            \\fn x() void {}
+        , &[_][]const u8{
+            ":6:23: error: expected usize, found bool",
+        });
+
+        // Now only compile log statements remain. One per Decl.
+        case.addError(
+            \\export fn _start() noreturn {
+            \\    const b = true;
+            \\    var f: u32 = 1;
+            \\    @compileLog(b, 20, f, x);
+            \\    @compileLog(1000);
+            \\    unreachable;
+            \\}
+            \\export fn other() void {
+            \\    @compileLog(1234);
+            \\}
+            \\fn x() void {}
+        , &[_][]const u8{
+            ":11:8: error: found compile log statement",
+            ":4:5: note: also here",
+        });
+    }
 
     {
         var case = ctx.obj("extern variable has no type", linux_x64);
@@ -1387,6 +1237,14 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    foo: for ("foo") |_| {}
             \\}
         , &[_][]const u8{":2:5: error: unused for label"});
+        case.addError(
+            \\comptime {
+            \\    blk: {blk: {}}
+            \\}
+        , &[_][]const u8{
+            ":2:11: error: redefinition of label 'blk'",
+            ":2:5: note: previous definition is here",
+        });
     }
 
     {
@@ -1494,5 +1352,82 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    unreachable;
             \\}
         , &[_][]const u8{":8:10: error: evaluation exceeded 1000 backwards branches"});
+    }
+    {
+        var case = ctx.exe("orelse at comptime", linux_x64);
+        case.addCompareOutput(
+            \\export fn _start() noreturn {
+            \\    const i: ?u64 = 0;
+            \\    const orelsed = i orelse 5;
+            \\    assert(orelsed == 0);
+            \\    exit();
+            \\}
+            \\fn assert(b: bool) void {
+            \\    if (!b) unreachable;
+            \\}
+            \\fn exit() noreturn {
+            \\    asm volatile ("syscall"
+            \\        :
+            \\        : [number] "{rax}" (231),
+            \\          [arg1] "{rdi}" (0)
+            \\        : "rcx", "r11", "memory"
+            \\    );
+            \\    unreachable;
+            \\}
+        ,
+            "",
+        );
+        case.addCompareOutput(
+            \\export fn _start() noreturn {
+            \\    const i: ?u64 = null;
+            \\    const orelsed = i orelse 5;
+            \\    assert(orelsed == 5);
+            \\    exit();
+            \\}
+            \\fn assert(b: bool) void {
+            \\    if (!b) unreachable;
+            \\}
+            \\fn exit() noreturn {
+            \\    asm volatile ("syscall"
+            \\        :
+            \\        : [number] "{rax}" (231),
+            \\          [arg1] "{rdi}" (0)
+            \\        : "rcx", "r11", "memory"
+            \\    );
+            \\    unreachable;
+            \\}
+        ,
+            "",
+        );
+    }
+
+    {
+        var case = ctx.exe("only 1 function and it gets updated", linux_x64);
+        case.addCompareOutput(
+            \\export fn _start() noreturn {
+            \\    asm volatile ("syscall"
+            \\        :
+            \\        : [number] "{rax}" (60), // exit
+            \\          [arg1] "{rdi}" (0)
+            \\        : "rcx", "r11", "memory"
+            \\    );
+            \\    unreachable;
+            \\}
+        ,
+            "",
+        );
+        case.addCompareOutput(
+            \\export fn _start() noreturn {
+            \\    asm volatile ("syscall"
+            \\        :
+            \\        : [number] "{rax}" (231), // exit_group
+            \\          [arg1] "{rdi}" (0)
+            \\        : "rcx", "r11", "memory"
+            \\    );
+            \\    unreachable;
+            \\}
+        ,
+            "",
+        );
     }
 }

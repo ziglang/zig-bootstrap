@@ -2031,7 +2031,7 @@ fn transStringLiteral(
             const bytes_ptr = stmt.getString_bytes_begin_size(&len);
             const str = bytes_ptr[0..len];
 
-            const token = try appendTokenFmt(rp.c, .StringLiteral, "\"{Z}\"", .{str});
+            const token = try appendTokenFmt(rp.c, .StringLiteral, "\"{}\"", .{std.zig.fmtEscapes(str)});
             const node = try rp.c.arena.create(ast.Node.OneToken);
             node.* = .{
                 .base = .{ .tag = .StringLiteral },
@@ -2082,12 +2082,19 @@ fn transCCast(
         // 3. Bit-cast to correct signed-ness
         const src_type_is_signed = cIsSignedInteger(src_type) or cIsEnum(src_type);
         const src_int_type = if (cIsInteger(src_type)) src_type else cIntTypeForEnum(src_type);
-        const src_int_expr = if (cIsInteger(src_type)) expr else try transEnumToInt(rp.c, expr);
+        var src_int_expr = if (cIsInteger(src_type)) expr else try transEnumToInt(rp.c, expr);
 
         // @bitCast(dest_type, intermediate_value)
         const cast_node = try rp.c.createBuiltinCall("@bitCast", 2);
         cast_node.params()[0] = try transQualType(rp, dst_type, loc);
         _ = try appendToken(rp.c, .Comma, ",");
+
+        if (isBoolRes(src_int_expr)) {
+            const bool_to_int_node = try rp.c.createBuiltinCall("@boolToInt", 1);
+            bool_to_int_node.params()[0] = src_int_expr;
+            bool_to_int_node.rparen_token = try appendToken(rp.c, .RParen, ")");
+            src_int_expr = &bool_to_int_node.base;
+        }
 
         switch (cIntTypeCmp(dst_type, src_int_type)) {
             .lt => {
@@ -2935,16 +2942,17 @@ fn transCharLiteral(
     suppress_as: SuppressCast,
 ) TransError!*ast.Node {
     const kind = stmt.getKind();
+    const val = stmt.getValue();
     const int_lit_node = switch (kind) {
         .Ascii, .UTF8 => blk: {
-            const val = stmt.getValue();
             if (kind == .Ascii) {
                 // C has a somewhat obscure feature called multi-character character
                 // constant
                 if (val > 255)
                     break :blk try transCreateNodeInt(rp.c, val);
             }
-            const token = try appendTokenFmt(rp.c, .CharLiteral, "'{Z}'", .{@intCast(u8, val)});
+            const val_array = [_]u8 { @intCast(u8, val) };
+            const token = try appendTokenFmt(rp.c, .CharLiteral, "'{}'", .{std.zig.fmtEscapes(&val_array)});
             const node = try rp.c.arena.create(ast.Node.OneToken);
             node.* = .{
                 .base = .{ .tag = .CharLiteral },
@@ -2952,13 +2960,15 @@ fn transCharLiteral(
             };
             break :blk &node.base;
         },
-        .UTF16, .UTF32, .Wide => return revertAndWarn(
-            rp,
-            error.UnsupportedTranslation,
-            @ptrCast(*const clang.Stmt, stmt).getBeginLoc(),
-            "TODO: support character literal kind {}",
-            .{kind},
-        ),
+        .Wide, .UTF16, .UTF32 => blk: {
+            const token = try appendTokenFmt(rp.c, .CharLiteral, "'\\u{{{x}}}'", .{val});
+            const node = try rp.c.arena.create(ast.Node.OneToken);
+            node.* = .{
+                .base = .{ .tag = .CharLiteral },
+                .token = token,
+            };
+            break :blk &node.base;
+        },
     };
     if (suppress_as == .no_as) {
         return maybeSuppressResult(rp, scope, result_used, int_lit_node);
@@ -3112,7 +3122,26 @@ fn transCallExpr(rp: RestorePoint, scope: *Scope, stmt: *const clang.CallExpr, r
         if (i != 0) {
             _ = try appendToken(rp.c, .Comma, ",");
         }
-        call_params[i] = try transExpr(rp, scope, args[i], .used, .r_value);
+        var call_param = try transExpr(rp, scope, args[i], .used, .r_value);
+
+        // In C the result type of a boolean expression is int. If this result is passed as
+        // an argument to a function whose parameter is also int, there is no cast. Therefore
+        // in Zig we'll need to cast it from bool to u1 (which will safely coerce to c_int).
+        if (fn_ty) |ty| {
+            switch (ty) {
+                .Proto => |fn_proto| {
+                    const param_qt = fn_proto.getParamType(@intCast(c_uint, i));
+                    if (isBoolRes(call_param) and cIsNativeInt(param_qt)) {
+                        const builtin_node = try rp.c.createBuiltinCall("@boolToInt", 1);
+                        builtin_node.params()[0] = call_param;
+                        builtin_node.rparen_token = try appendToken(rp.c, .RParen, ")");
+                        call_param = &builtin_node.base;
+                    }
+                },
+                else => {},
+            }
+        }
+        call_params[i] = call_param;
     }
     node.rtoken = try appendToken(rp.c, .RParen, ")");
 
@@ -4122,6 +4151,13 @@ fn cIsSignedInteger(qt: clang.QualType) bool {
         => true,
         else => false,
     };
+}
+
+fn cIsNativeInt(qt: clang.QualType) bool {
+    const c_type = qualTypeCanon(qt);
+    if (c_type.getTypeClass() != .Builtin) return false;
+    const builtin_ty = @ptrCast(*const clang.BuiltinType, c_type);
+    return builtin_ty.getKind() == .Int;
 }
 
 fn cIsFloating(qt: clang.QualType) bool {
@@ -5268,7 +5304,7 @@ fn appendTokenFmt(c: *Context, token_id: Token.Id, comptime format: []const u8, 
     try c.token_locs.ensureCapacity(c.gpa, c.token_locs.items.len + 1);
 
     const start_index = c.source_buffer.items.len;
-    try c.source_buffer.outStream().print(format ++ " ", args);
+    try c.source_buffer.writer().print(format ++ " ", args);
 
     c.token_ids.appendAssumeCapacity(token_id);
     c.token_locs.appendAssumeCapacity(.{
@@ -5315,7 +5351,7 @@ fn isZigPrimitiveType(name: []const u8) bool {
 }
 
 fn appendIdentifier(c: *Context, name: []const u8) !ast.TokenIndex {
-    return appendTokenFmt(c, .Identifier, "{z}", .{name});
+    return appendTokenFmt(c, .Identifier, "{}", .{std.zig.fmtId(name)});
 }
 
 fn transCreateNodeIdentifier(c: *Context, name: []const u8) !*ast.Node {

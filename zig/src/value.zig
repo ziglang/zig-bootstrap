@@ -389,7 +389,6 @@ pub const Value = extern union {
             },
             .@"error" => return self.copyPayloadShallow(allocator, Payload.Error),
 
-            // memory is managed by the declaration
             .error_set => return self.copyPayloadShallow(allocator, Payload.ErrorSet),
 
             .inferred_alloc => unreachable,
@@ -491,8 +490,8 @@ pub const Value = extern union {
                 val = elem_ptr.array_ptr;
             },
             .empty_array => return out_stream.writeAll(".{}"),
-            .enum_literal => return out_stream.print(".{z}", .{self.castTag(.enum_literal).?.data}),
-            .bytes => return out_stream.print("\"{Z}\"", .{self.castTag(.bytes).?.data}),
+            .enum_literal => return out_stream.print(".{}", .{std.zig.fmtId(self.castTag(.enum_literal).?.data)}),
+            .bytes => return out_stream.print("\"{}\"", .{std.zig.fmtEscapes(self.castTag(.bytes).?.data)}),
             .repeated => {
                 try out_stream.writeAll("(repeated) ");
                 val = val.castTag(.repeated).?.data;
@@ -2025,6 +2024,7 @@ pub const Value = extern union {
             data: f128,
         };
 
+        // TODO move to type.zig
         pub const ErrorSet = struct {
             pub const base_tag = Tag.error_set;
 
