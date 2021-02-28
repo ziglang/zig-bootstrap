@@ -109,6 +109,7 @@ pub const Module = extern struct {
     err_color: ErrColor,
     pic: bool,
     pie: bool,
+    lto: bool,
     link_libc: bool,
     link_libcpp: bool,
     strip: bool,
@@ -277,7 +278,9 @@ export fn stage2_attach_segfault_handler() void {
 // ABI warning
 export fn stage2_progress_create() *std.Progress {
     const ptr = std.heap.c_allocator.create(std.Progress) catch @panic("out of memory");
-    ptr.* = std.Progress{};
+    // If the terminal is dumb, we dont want to show the user all the
+    // output.
+    ptr.* = std.Progress{ .dont_print_on_dumb = true };
     return ptr;
 }
 

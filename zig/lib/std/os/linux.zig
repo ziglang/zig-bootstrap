@@ -126,7 +126,7 @@ pub fn fork() usize {
 /// It is advised to avoid this function and use clone instead, because
 /// the compiler is not aware of how vfork affects control flow and you may
 /// see different results in optimized builds.
-pub inline fn vfork() usize {
+pub fn vfork() callconv(.Inline) usize {
     return @call(.{ .modifier = .always_inline }, syscall0, .{.vfork});
 }
 
@@ -632,6 +632,37 @@ pub fn tkill(tid: pid_t, sig: i32) usize {
 
 pub fn tgkill(tgid: pid_t, tid: pid_t, sig: i32) usize {
     return syscall2(.tgkill, @bitCast(usize, @as(isize, tgid)), @bitCast(usize, @as(isize, tid)), @bitCast(usize, @as(isize, sig)));
+}
+
+pub fn link(oldpath: [*:0]const u8, newpath: [*:0]const u8, flags: i32) usize {
+    if (@hasField(SYS, "link")) {
+        return syscall3(
+            .link,
+            @ptrToInt(oldpath),
+            @ptrToInt(newpath),
+            @bitCast(usize, @as(isize, flags)),
+        );
+    } else {
+        return syscall5(
+            .linkat,
+            @bitCast(usize, @as(isize, AT_FDCWD)),
+            @ptrToInt(oldpath),
+            @bitCast(usize, @as(isize, AT_FDCWD)),
+            @ptrToInt(newpath),
+            @bitCast(usize, @as(isize, flags)),
+        );
+    }
+}
+
+pub fn linkat(oldfd: fd_t, oldpath: [*:0]const u8, newfd: fd_t, newpath: [*:0]const u8, flags: i32) usize {
+    return syscall5(
+        .linkat,
+        @bitCast(usize, @as(isize, oldfd)),
+        @ptrToInt(oldpath),
+        @bitCast(usize, @as(isize, newfd)),
+        @ptrToInt(newpath),
+        @bitCast(usize, @as(isize, flags)),
+    );
 }
 
 pub fn unlink(path: [*:0]const u8) usize {
@@ -1355,7 +1386,7 @@ pub fn madvise(address: [*]u8, len: usize, advice: u32) usize {
     return syscall3(.madvise, @ptrToInt(address), len, advice);
 }
 
-test "" {
+test {
     if (builtin.os.tag == .linux) {
         _ = @import("linux/test.zig");
     }

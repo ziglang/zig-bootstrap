@@ -53,13 +53,16 @@ pub const Inst = struct {
         indexable_ptr_len,
         /// Function parameter value. These must be first in a function's main block,
         /// in respective order with the parameters.
+        /// TODO make this instruction implicit; after we transition to having ZIR
+        /// instructions be same sized and referenced by index, the first N indexes
+        /// will implicitly be references to the parameters of the function.
         arg,
         /// Type coercion.
         as,
         /// Inline assembly.
         @"asm",
         /// Bitwise AND. `&`
-        bitand,
+        bit_and,
         /// TODO delete this instruction, it has no purpose.
         bitcast,
         /// An arbitrary typed pointer is pointer-casted to a new Pointer.
@@ -71,9 +74,9 @@ pub const Inst = struct {
         /// The new result location pointer has an inferred type.
         bitcast_result_ptr,
         /// Bitwise NOT. `~`
-        bitnot,
+        bit_not,
         /// Bitwise OR. `|`
-        bitor,
+        bit_or,
         /// A labeled block of code, which can return a value.
         block,
         /// A block of code, which can return a value. There are no instructions that break out of
@@ -83,17 +86,17 @@ pub const Inst = struct {
         block_comptime,
         /// Same as `block_flat` but additionally makes the inner instructions execute at comptime.
         block_comptime_flat,
-        /// Boolean AND. See also `bitand`.
-        booland,
-        /// Boolean NOT. See also `bitnot`.
-        boolnot,
-        /// Boolean OR. See also `bitor`.
-        boolor,
+        /// Boolean AND. See also `bit_and`.
+        bool_and,
+        /// Boolean NOT. See also `bit_not`.
+        bool_not,
+        /// Boolean OR. See also `bit_or`.
+        bool_or,
         /// Return a value from a `Block`.
         @"break",
         breakpoint,
         /// Same as `break` but without an operand; the operand is assumed to be the void value.
-        breakvoid,
+        break_void,
         /// Function call.
         call,
         /// `<`
@@ -112,16 +115,10 @@ pub const Inst = struct {
         /// as type coercion from the new element type to the old element type.
         /// LHS is destination element type, RHS is result pointer.
         coerce_result_ptr,
-        /// This instruction does a `coerce_result_ptr` operation on a `Block`'s
-        /// result location pointer, whose type is inferred by peer type resolution on the
-        /// `Block`'s corresponding `break` instructions.
-        coerce_result_block_ptr,
-        /// Equivalent to `as(ptr_child_type(typeof(ptr)), value)`.
-        coerce_to_ptr_elem,
         /// Emit an error message and fail compilation.
-        compileerror,
+        compile_error,
         /// Log compile time variables and emit an error message.
-        compilelog,
+        compile_log,
         /// Conditional branch. Splits control flow based on a boolean condition value.
         condbr,
         /// Special case, has no textual representation.
@@ -135,11 +132,11 @@ pub const Inst = struct {
         /// Declares the beginning of a statement. Used for debug info.
         dbg_stmt,
         /// Represents a pointer to a global decl.
-        declref,
+        decl_ref,
         /// Represents a pointer to a global decl by string name.
-        declref_str,
-        /// Equivalent to a declref followed by deref.
-        declval,
+        decl_ref_str,
+        /// Equivalent to a decl_ref followed by deref.
+        decl_val,
         /// Load the value from a pointer.
         deref,
         /// Arithmetic division. Asserts no integer overflow.
@@ -157,6 +154,8 @@ pub const Inst = struct {
         error_union_type,
         /// Create an error set.
         error_set,
+        /// `error.Foo` syntax.
+        error_value,
         /// Export the provided Decl as the provided name in the compilation's output object file.
         @"export",
         /// Given a pointer to a struct or object that contains virtual fields, returns a pointer
@@ -175,8 +174,10 @@ pub const Inst = struct {
         floatcast,
         /// Declare a function body.
         @"fn",
-        /// Returns a function type.
-        fntype,
+        /// Returns a function type, assuming unspecified calling convention.
+        fn_type,
+        /// Returns a function type, with a calling convention instruction operand.
+        fn_type_cc,
         /// @import(operand)
         import,
         /// Integer literal.
@@ -185,7 +186,7 @@ pub const Inst = struct {
         /// can hold the same mathematical value.
         intcast,
         /// Make an integer type out of signedness and bit count.
-        inttype,
+        int_type,
         /// Return a boolean false if an optional is null. `x != null`
         is_non_null,
         /// Return a boolean true if an optional is null. `x == null`
@@ -232,7 +233,7 @@ pub const Inst = struct {
         /// Sends control flow back to the function's callee. Takes an operand as the return value.
         @"return",
         /// Same as `return` but there is no operand; the operand is implicitly the void value.
-        returnvoid,
+        return_void,
         /// Changes the maximum number of backwards branches that compile-time
         /// code execution can use before giving up and making a compile error.
         set_eval_branch_quota,
@@ -270,6 +271,9 @@ pub const Inst = struct {
         /// Write a value to a pointer. For loading, see `deref`.
         store,
         /// Same as `store` but the type of the value being stored will be used to infer
+        /// the block type. The LHS is the pointer to store to.
+        store_to_block_ptr,
+        /// Same as `store` but the type of the value being stored will be used to infer
         /// the pointer type.
         store_to_inferred_ptr,
         /// String Literal. Makes an anonymous Decl and then takes a pointer to it.
@@ -286,11 +290,11 @@ pub const Inst = struct {
         typeof_peer,
         /// Asserts control-flow will not reach this instruction. Not safety checked - the compiler
         /// will assume the correctness of this instruction.
-        unreach_nocheck,
+        unreachable_unsafe,
         /// Asserts control-flow will not reach this instruction. In safety-checked modes,
         /// this will generate a call to the panic function unless it can be proven unreachable
         /// by the compiler.
-        @"unreachable",
+        unreachable_safe,
         /// Bitwise XOR. `^`
         xor,
         /// Create an optional type '?T'
@@ -339,8 +343,12 @@ pub const Inst = struct {
         enum_literal,
         /// Create an enum type.
         enum_type,
+        /// Does nothing; returns a void value.
+        void_value,
         /// A switch expression.
         switchbr,
+        /// Same as `switchbr` but the target is a pointer to the value being switched on.
+        switchbr_ref,
         /// A range in a switch case, `lhs...rhs`.
         /// Only checks that `lhs >= rhs` if they are ints, everything else is
         /// validated by the .switch instruction.
@@ -352,17 +360,18 @@ pub const Inst = struct {
                 .alloc_inferred_mut,
                 .breakpoint,
                 .dbg_stmt,
-                .returnvoid,
+                .return_void,
                 .ret_ptr,
                 .ret_type,
-                .unreach_nocheck,
-                .@"unreachable",
+                .unreachable_unsafe,
+                .unreachable_safe,
+                .void_value,
                 => NoOp,
 
                 .alloc,
                 .alloc_mut,
-                .boolnot,
-                .compileerror,
+                .bool_not,
+                .compile_error,
                 .deref,
                 .@"return",
                 .is_null,
@@ -400,7 +409,7 @@ pub const Inst = struct {
                 .err_union_code_ptr,
                 .ensure_err_payload_void,
                 .anyframe_type,
-                .bitnot,
+                .bit_not,
                 .import,
                 .set_eval_branch_quota,
                 .indexable_ptr_len,
@@ -411,10 +420,10 @@ pub const Inst = struct {
                 .array_cat,
                 .array_mul,
                 .array_type,
-                .bitand,
-                .bitor,
-                .booland,
-                .boolor,
+                .bit_and,
+                .bit_or,
+                .bool_and,
+                .bool_or,
                 .div,
                 .mod_rem,
                 .mul,
@@ -422,6 +431,7 @@ pub const Inst = struct {
                 .shl,
                 .shr,
                 .store,
+                .store_to_block_ptr,
                 .store_to_inferred_ptr,
                 .sub,
                 .subwrap,
@@ -449,22 +459,22 @@ pub const Inst = struct {
                 .block_comptime_flat,
                 => Block,
 
+                .switchbr, .switchbr_ref => SwitchBr,
+
                 .arg => Arg,
                 .array_type_sentinel => ArrayTypeSentinel,
                 .@"break" => Break,
-                .breakvoid => BreakVoid,
+                .break_void => BreakVoid,
                 .call => Call,
-                .coerce_to_ptr_elem => CoerceToPtrElem,
-                .declref => DeclRef,
-                .declref_str => DeclRefStr,
-                .declval => DeclVal,
-                .coerce_result_block_ptr => CoerceResultBlockPtr,
-                .compilelog => CompileLog,
+                .decl_ref => DeclRef,
+                .decl_ref_str => DeclRefStr,
+                .decl_val => DeclVal,
+                .compile_log => CompileLog,
                 .loop => Loop,
                 .@"const" => Const,
                 .str => Str,
                 .int => Int,
-                .inttype => IntType,
+                .int_type => IntType,
                 .field_ptr, .field_val => Field,
                 .field_ptr_named, .field_val_named => FieldNamed,
                 .@"asm" => Asm,
@@ -472,14 +482,15 @@ pub const Inst = struct {
                 .@"export" => Export,
                 .param_type => ParamType,
                 .primitive => Primitive,
-                .fntype => FnType,
+                .fn_type => FnType,
+                .fn_type_cc => FnTypeCc,
                 .elem_ptr, .elem_val => Elem,
                 .condbr => CondBr,
                 .ptr_type => PtrType,
                 .enum_literal => EnumLiteral,
                 .error_set => ErrorSet,
+                .error_value => ErrorValue,
                 .slice => Slice,
-                .switchbr => SwitchBr,
                 .typeof_peer => TypeOfPeer,
                 .container_field_named => ContainerFieldNamed,
                 .container_field_typed => ContainerFieldTyped,
@@ -508,18 +519,18 @@ pub const Inst = struct {
                 .arg,
                 .as,
                 .@"asm",
-                .bitand,
+                .bit_and,
                 .bitcast,
                 .bitcast_ref,
                 .bitcast_result_ptr,
-                .bitor,
+                .bit_or,
                 .block,
                 .block_flat,
                 .block_comptime,
                 .block_comptime_flat,
-                .boolnot,
-                .booland,
-                .boolor,
+                .bool_not,
+                .bool_and,
+                .bool_or,
                 .breakpoint,
                 .call,
                 .cmp_lt,
@@ -529,13 +540,11 @@ pub const Inst = struct {
                 .cmp_gt,
                 .cmp_neq,
                 .coerce_result_ptr,
-                .coerce_result_block_ptr,
-                .coerce_to_ptr_elem,
                 .@"const",
                 .dbg_stmt,
-                .declref,
-                .declref_str,
-                .declval,
+                .decl_ref,
+                .decl_ref_str,
+                .decl_val,
                 .deref,
                 .div,
                 .elem_ptr,
@@ -549,10 +558,11 @@ pub const Inst = struct {
                 .field_ptr_named,
                 .field_val_named,
                 .@"fn",
-                .fntype,
+                .fn_type,
+                .fn_type_cc,
                 .int,
                 .intcast,
-                .inttype,
+                .int_type,
                 .is_non_null,
                 .is_null,
                 .is_non_null_ptr,
@@ -579,6 +589,7 @@ pub const Inst = struct {
                 .mut_slice_type,
                 .const_slice_type,
                 .store,
+                .store_to_block_ptr,
                 .store_to_inferred_ptr,
                 .str,
                 .sub,
@@ -602,34 +613,37 @@ pub const Inst = struct {
                 .merge_error_sets,
                 .anyframe_type,
                 .error_union_type,
-                .bitnot,
+                .bit_not,
                 .error_set,
+                .error_value,
                 .slice,
                 .slice_start,
                 .import,
-                .switch_range,
                 .typeof_peer,
                 .resolve_inferred_alloc,
                 .set_eval_branch_quota,
-                .compilelog,
+                .compile_log,
                 .enum_type,
                 .union_type,
                 .struct_type,
+                .void_value,
+                .switch_range,
                 => false,
 
                 .@"break",
-                .breakvoid,
+                .break_void,
                 .condbr,
-                .compileerror,
+                .compile_error,
                 .@"return",
-                .returnvoid,
-                .unreach_nocheck,
-                .@"unreachable",
+                .return_void,
+                .unreachable_unsafe,
+                .unreachable_safe,
                 .loop,
-                .switchbr,
                 .container_field_named,
                 .container_field_typed,
                 .container_field,
+                .switchbr,
+                .switchbr_ref,
                 => true,
             };
         }
@@ -690,6 +704,8 @@ pub const Inst = struct {
         base: Inst,
 
         positionals: struct {
+            /// This exists to be passed to the arg TZIR instruction, which
+            /// needs it for debug info.
             name: []const u8,
         },
         kw_args: struct {},
@@ -717,7 +733,7 @@ pub const Inst = struct {
     };
 
     pub const BreakVoid = struct {
-        pub const base_tag = Tag.breakvoid;
+        pub const base_tag = Tag.break_void;
         base: Inst,
 
         positionals: struct {
@@ -726,6 +742,8 @@ pub const Inst = struct {
         kw_args: struct {},
     };
 
+    // TODO break this into multiple call instructions to avoid paying the cost
+    // of the calling convention field most of the time.
     pub const Call = struct {
         pub const base_tag = Tag.call;
         base: Inst,
@@ -733,25 +751,13 @@ pub const Inst = struct {
         positionals: struct {
             func: *Inst,
             args: []*Inst,
-        },
-        kw_args: struct {
             modifier: std.builtin.CallOptions.Modifier = .auto,
-        },
-    };
-
-    pub const CoerceToPtrElem = struct {
-        pub const base_tag = Tag.coerce_to_ptr_elem;
-        base: Inst,
-
-        positionals: struct {
-            ptr: *Inst,
-            value: *Inst,
         },
         kw_args: struct {},
     };
 
     pub const DeclRef = struct {
-        pub const base_tag = Tag.declref;
+        pub const base_tag = Tag.decl_ref;
         base: Inst,
 
         positionals: struct {
@@ -761,7 +767,7 @@ pub const Inst = struct {
     };
 
     pub const DeclRefStr = struct {
-        pub const base_tag = Tag.declref_str;
+        pub const base_tag = Tag.decl_ref_str;
         base: Inst,
 
         positionals: struct {
@@ -771,7 +777,7 @@ pub const Inst = struct {
     };
 
     pub const DeclVal = struct {
-        pub const base_tag = Tag.declval;
+        pub const base_tag = Tag.decl_val;
         base: Inst,
 
         positionals: struct {
@@ -780,19 +786,8 @@ pub const Inst = struct {
         kw_args: struct {},
     };
 
-    pub const CoerceResultBlockPtr = struct {
-        pub const base_tag = Tag.coerce_result_block_ptr;
-        base: Inst,
-
-        positionals: struct {
-            dest_type: *Inst,
-            block: *Block,
-        },
-        kw_args: struct {},
-    };
-
     pub const CompileLog = struct {
-        pub const base_tag = Tag.compilelog;
+        pub const base_tag = Tag.compile_log;
         base: Inst,
 
         positionals: struct {
@@ -872,8 +867,8 @@ pub const Inst = struct {
         kw_args: struct {
             @"volatile": bool = false,
             output: ?*Inst = null,
-            inputs: []*Inst = &[0]*Inst{},
-            clobbers: []*Inst = &[0]*Inst{},
+            inputs: []const []const u8 = &.{},
+            clobbers: []const []const u8 = &.{},
             args: []*Inst = &[0]*Inst{},
         },
     };
@@ -886,26 +881,34 @@ pub const Inst = struct {
             fn_type: *Inst,
             body: Body,
         },
-        kw_args: struct {
-            is_inline: bool = false,
-        },
+        kw_args: struct {},
     };
 
     pub const FnType = struct {
-        pub const base_tag = Tag.fntype;
+        pub const base_tag = Tag.fn_type;
         base: Inst,
 
         positionals: struct {
             param_types: []*Inst,
             return_type: *Inst,
         },
-        kw_args: struct {
-            cc: std.builtin.CallingConvention = .Unspecified,
+        kw_args: struct {},
+    };
+
+    pub const FnTypeCc = struct {
+        pub const base_tag = Tag.fn_type_cc;
+        base: Inst,
+
+        positionals: struct {
+            param_types: []*Inst,
+            return_type: *Inst,
+            cc: *Inst,
         },
+        kw_args: struct {},
     };
 
     pub const IntType = struct {
-        pub const base_tag = Tag.inttype;
+        pub const base_tag = Tag.int_type;
         base: Inst,
 
         positionals: struct {
@@ -1100,6 +1103,16 @@ pub const Inst = struct {
         kw_args: struct {},
     };
 
+    pub const ErrorValue = struct {
+        pub const base_tag = Tag.error_value;
+        base: Inst,
+
+        positionals: struct {
+            name: []const u8,
+        },
+        kw_args: struct {},
+    };
+
     pub const Slice = struct {
         pub const base_tag = Tag.slice;
         base: Inst,
@@ -1114,32 +1127,6 @@ pub const Inst = struct {
         },
     };
 
-    pub const SwitchBr = struct {
-        pub const base_tag = Tag.switchbr;
-        base: Inst,
-
-        positionals: struct {
-            target_ptr: *Inst,
-            /// List of all individual items and ranges
-            items: []*Inst,
-            cases: []Case,
-            else_body: Body,
-        },
-        kw_args: struct {
-            /// Pointer to first range if such exists.
-            range: ?*Inst = null,
-            special_prong: enum {
-                none,
-                @"else",
-                underscore,
-            } = .none,
-        },
-
-        pub const Case = struct {
-            item: *Inst,
-            body: Body,
-        };
-    };
     pub const TypeOfPeer = struct {
         pub const base_tag = .typeof_peer;
         base: Inst,
@@ -1219,15 +1206,35 @@ pub const Inst = struct {
         },
         kw_args: struct {
             init_inst: ?*Inst = null,
-            init_kind: InitKind = .none,
+            has_enum_token: bool,
             layout: std.builtin.TypeInfo.ContainerLayout = .Auto,
         },
+    };
 
-        // TODO error: values of type '(enum literal)' must be comptime known
-        pub const InitKind = enum {
-            enum_type,
-            tag_type,
+    pub const SwitchBr = struct {
+        base: Inst,
+
+        positionals: struct {
+            target: *Inst,
+            /// List of all individual items and ranges
+            items: []*Inst,
+            cases: []Case,
+            else_body: Body,
+            /// Pointer to first range if such exists.
+            range: ?*Inst = null,
+            special_prong: SpecialProng = .none,
+        },
+        kw_args: struct {},
+
+        pub const SpecialProng = enum {
             none,
+            @"else",
+            underscore,
+        };
+
+        pub const Case = struct {
+            item: *Inst,
+            body: Body,
         };
     };
 };
@@ -1413,6 +1420,7 @@ const Writer = struct {
         }
         switch (@TypeOf(param)) {
             *Inst => return self.writeInstParamToStream(stream, param),
+            ?*Inst => return self.writeInstParamToStream(stream, param.?),
             []*Inst => {
                 try stream.writeByte('[');
                 for (param) |inst, i| {
@@ -1473,14 +1481,14 @@ const Writer = struct {
             TypedValue => return stream.print("TypedValue{{ .ty = {}, .val = {}}}", .{ param.ty, param.val }),
             *IrModule.Decl => return stream.print("Decl({s})", .{param.name}),
             *Inst.Block => {
-                const name = self.block_table.get(param).?;
+                const name = self.block_table.get(param) orelse "!BADREF!";
                 return stream.print("\"{}\"", .{std.zig.fmtEscapes(name)});
             },
             *Inst.Loop => {
                 const name = self.loop_table.get(param).?;
                 return stream.print("\"{}\"", .{std.zig.fmtEscapes(name)});
             },
-            [][]const u8 => {
+            [][]const u8, []const []const u8 => {
                 try stream.writeByte('[');
                 for (param) |str, i| {
                     if (i != 0) {
@@ -1608,6 +1616,7 @@ const DumpTzir = struct {
                 .unreach,
                 .breakpoint,
                 .dbg_stmt,
+                .arg,
                 => {},
 
                 .ref,
@@ -1627,6 +1636,12 @@ const DumpTzir = struct {
                 .optional_payload,
                 .optional_payload_ptr,
                 .wrap_optional,
+                .wrap_errunion_payload,
+                .wrap_errunion_err,
+                .unwrap_errunion_payload,
+                .unwrap_errunion_err,
+                .unwrap_errunion_payload_ptr,
+                .unwrap_errunion_err_ptr,
                 => {
                     const un_op = inst.cast(ir.Inst.UnOp).?;
                     try dtz.findConst(un_op.operand);
@@ -1641,10 +1656,10 @@ const DumpTzir = struct {
                 .cmp_gt,
                 .cmp_neq,
                 .store,
-                .booland,
-                .boolor,
-                .bitand,
-                .bitor,
+                .bool_and,
+                .bool_or,
+                .bit_and,
+                .bit_or,
                 .xor,
                 => {
                     const bin_op = inst.cast(ir.Inst.BinOp).?;
@@ -1652,17 +1667,21 @@ const DumpTzir = struct {
                     try dtz.findConst(bin_op.rhs);
                 },
 
-                .arg => {},
-
                 .br => {
                     const br = inst.castTag(.br).?;
                     try dtz.findConst(&br.block.base);
                     try dtz.findConst(br.operand);
                 },
 
-                .brvoid => {
-                    const brvoid = inst.castTag(.brvoid).?;
-                    try dtz.findConst(&brvoid.block.base);
+                .br_block_flat => {
+                    const br_block_flat = inst.castTag(.br_block_flat).?;
+                    try dtz.findConst(&br_block_flat.block.base);
+                    try dtz.fetchInstsAndResolveConsts(br_block_flat.body);
+                },
+
+                .br_void => {
+                    const br_void = inst.castTag(.br_void).?;
+                    try dtz.findConst(&br_void.block.base);
                 },
 
                 .block => {
@@ -1734,6 +1753,12 @@ const DumpTzir = struct {
                 .optional_payload,
                 .optional_payload_ptr,
                 .wrap_optional,
+                .wrap_errunion_err,
+                .wrap_errunion_payload,
+                .unwrap_errunion_err,
+                .unwrap_errunion_payload,
+                .unwrap_errunion_payload_ptr,
+                .unwrap_errunion_err_ptr,
                 => {
                     const un_op = inst.cast(ir.Inst.UnOp).?;
                     const kinky = try dtz.writeInst(writer, un_op.operand);
@@ -1753,10 +1778,10 @@ const DumpTzir = struct {
                 .cmp_gt,
                 .cmp_neq,
                 .store,
-                .booland,
-                .boolor,
-                .bitand,
-                .bitor,
+                .bool_and,
+                .bool_or,
+                .bit_and,
+                .bit_or,
                 .xor,
                 => {
                     const bin_op = inst.cast(ir.Inst.BinOp).?;
@@ -1805,9 +1830,27 @@ const DumpTzir = struct {
                     }
                 },
 
-                .brvoid => {
-                    const brvoid = inst.castTag(.brvoid).?;
-                    const kinky = try dtz.writeInst(writer, &brvoid.block.base);
+                .br_block_flat => {
+                    const br_block_flat = inst.castTag(.br_block_flat).?;
+                    const block_kinky = try dtz.writeInst(writer, &br_block_flat.block.base);
+                    if (block_kinky != null) {
+                        try writer.writeAll(", { // Instruction does not dominate all uses!\n");
+                    } else {
+                        try writer.writeAll(", {\n");
+                    }
+
+                    const old_indent = dtz.indent;
+                    dtz.indent += 2;
+                    try dtz.dumpBody(br_block_flat.body, writer);
+                    dtz.indent = old_indent;
+
+                    try writer.writeByteNTimes(' ', dtz.indent);
+                    try writer.writeAll("})\n");
+                },
+
+                .br_void => {
+                    const br_void = inst.castTag(.br_void).?;
+                    const kinky = try dtz.writeInst(writer, &br_void.block.base);
                     if (kinky) |_| {
                         try writer.writeAll(") // Instruction does not dominate all uses!\n");
                     } else {
@@ -1818,7 +1861,7 @@ const DumpTzir = struct {
                 .block => {
                     const block = inst.castTag(.block).?;
 
-                    try writer.writeAll("\n");
+                    try writer.writeAll("{\n");
 
                     const old_indent = dtz.indent;
                     dtz.indent += 2;
@@ -1826,7 +1869,7 @@ const DumpTzir = struct {
                     dtz.indent = old_indent;
 
                     try writer.writeByteNTimes(' ', dtz.indent);
-                    try writer.writeAll(")\n");
+                    try writer.writeAll("})\n");
                 },
 
                 .condbr => {
@@ -1856,7 +1899,7 @@ const DumpTzir = struct {
                 .loop => {
                     const loop = inst.castTag(.loop).?;
 
-                    try writer.writeAll("\n");
+                    try writer.writeAll("{\n");
 
                     const old_indent = dtz.indent;
                     dtz.indent += 2;
@@ -1864,7 +1907,7 @@ const DumpTzir = struct {
                     dtz.indent = old_indent;
 
                     try writer.writeByteNTimes(' ', dtz.indent);
-                    try writer.writeAll(")\n");
+                    try writer.writeAll("})\n");
                 },
 
                 .call => {

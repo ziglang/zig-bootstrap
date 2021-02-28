@@ -69,6 +69,7 @@ pub const FormatOptions = struct {
 /// - `c`: output integer as an ASCII character. Integer type must have 8 bits at max.
 /// - `u`: output integer as an UTF-8 sequence. Integer type must have 21 bits at max.
 /// - `*`: output the address of the value instead of the value itself.
+/// - `any`: output a value of any type using its default format
 ///
 /// If a formatted user type contains a function of the type
 /// ```
@@ -387,15 +388,30 @@ pub fn formatAddress(value: anytype, options: FormatOptions, writer: anytype) @T
                 return;
             }
         },
-        .Array => |info| {
-            try writer.writeAll(@typeName(info.child) ++ "@");
-            try formatInt(@ptrToInt(value), 16, false, FormatOptions{}, writer);
-            return;
-        },
         else => {},
     }
 
     @compileError("Cannot format non-pointer type " ++ @typeName(T) ++ " with * specifier");
+}
+
+// This ANY const is a workaround for: https://github.com/ziglang/zig/issues/7948
+const ANY = "any";
+
+fn defaultSpec(comptime T: type) [:0]const u8 {
+    switch (@typeInfo(T)) {
+        .Array => |_| return ANY,
+        .Pointer => |ptr_info| switch (ptr_info.size) {
+            .One => switch (@typeInfo(ptr_info.child)) {
+                .Array => |_| return "*",
+                else => {},
+            },
+            .Many, .C => return "*",
+            .Slice => return ANY,
+        },
+        .Optional => |info| return defaultSpec(info.child),
+        else => {},
+    }
+    return "";
 }
 
 pub fn formatType(
@@ -405,18 +421,19 @@ pub fn formatType(
     writer: anytype,
     max_depth: usize,
 ) @TypeOf(writer).Error!void {
-    if (comptime std.mem.eql(u8, fmt, "*")) {
+    const actual_fmt = comptime if (std.mem.eql(u8, fmt, ANY)) defaultSpec(@TypeOf(value)) else fmt;
+    if (comptime std.mem.eql(u8, actual_fmt, "*")) {
         return formatAddress(value, options, writer);
     }
 
     const T = @TypeOf(value);
     if (comptime std.meta.trait.hasFn("format")(T)) {
-        return try value.format(fmt, options, writer);
+        return try value.format(actual_fmt, options, writer);
     }
 
     switch (@typeInfo(T)) {
         .ComptimeInt, .Int, .ComptimeFloat, .Float => {
-            return formatValue(value, fmt, options, writer);
+            return formatValue(value, actual_fmt, options, writer);
         },
         .Void => {
             return formatBuf("void", options, writer);
@@ -426,16 +443,16 @@ pub fn formatType(
         },
         .Optional => {
             if (value) |payload| {
-                return formatType(payload, fmt, options, writer, max_depth);
+                return formatType(payload, actual_fmt, options, writer, max_depth);
             } else {
                 return formatBuf("null", options, writer);
             }
         },
         .ErrorUnion => {
             if (value) |payload| {
-                return formatType(payload, fmt, options, writer, max_depth);
+                return formatType(payload, actual_fmt, options, writer, max_depth);
             } else |err| {
-                return formatType(err, fmt, options, writer, max_depth);
+                return formatType(err, actual_fmt, options, writer, max_depth);
             }
         },
         .ErrorSet => {
@@ -461,7 +478,7 @@ pub fn formatType(
             }
 
             try writer.writeAll("(");
-            try formatType(@enumToInt(value), fmt, options, writer, max_depth);
+            try formatType(@enumToInt(value), actual_fmt, options, writer, max_depth);
             try writer.writeAll(")");
         },
         .Union => |info| {
@@ -475,7 +492,7 @@ pub fn formatType(
                 try writer.writeAll(" = ");
                 inline for (info.fields) |u_field| {
                     if (value == @field(UnionTagType, u_field.name)) {
-                        try formatType(@field(value, u_field.name), fmt, options, writer, max_depth - 1);
+                        try formatType(@field(value, u_field.name), ANY, options, writer, max_depth - 1);
                     }
                 }
                 try writer.writeAll(" }");
@@ -497,48 +514,54 @@ pub fn formatType(
                 }
                 try writer.writeAll(f.name);
                 try writer.writeAll(" = ");
-                try formatType(@field(value, f.name), fmt, options, writer, max_depth - 1);
+                try formatType(@field(value, f.name), ANY, options, writer, max_depth - 1);
             }
             try writer.writeAll(" }");
         },
         .Pointer => |ptr_info| switch (ptr_info.size) {
             .One => switch (@typeInfo(ptr_info.child)) {
                 .Array => |info| {
+                    if (actual_fmt.len == 0)
+                        @compileError("cannot format array ref without a specifier (i.e. {s} or {*})");
                     if (info.child == u8) {
-                        if (fmt.len > 0 and comptime mem.indexOfScalar(u8, "sxXeEzZ", fmt[0]) != null) {
-                            return formatText(value, fmt, options, writer);
+                        if (comptime mem.indexOfScalar(u8, "sxXeE", actual_fmt[0]) != null) {
+                            return formatText(value, actual_fmt, options, writer);
                         }
                     }
-                    return format(writer, "{s}@{x}", .{ @typeName(ptr_info.child), @ptrToInt(value) });
+                    @compileError("Unknown format string: '" ++ actual_fmt ++ "'");
                 },
                 .Enum, .Union, .Struct => {
-                    return formatType(value.*, fmt, options, writer, max_depth);
+                    return formatType(value.*, actual_fmt, options, writer, max_depth);
                 },
                 else => return format(writer, "{s}@{x}", .{ @typeName(ptr_info.child), @ptrToInt(value) }),
             },
             .Many, .C => {
+                if (actual_fmt.len == 0)
+                    @compileError("cannot format pointer without a specifier (i.e. {s} or {*})");
                 if (ptr_info.sentinel) |sentinel| {
-                    return formatType(mem.span(value), fmt, options, writer, max_depth);
+                    return formatType(mem.span(value), actual_fmt, options, writer, max_depth);
                 }
                 if (ptr_info.child == u8) {
-                    if (fmt.len > 0 and comptime mem.indexOfScalar(u8, "sxXeEzZ", fmt[0]) != null) {
-                        return formatText(mem.span(value), fmt, options, writer);
+                    if (comptime mem.indexOfScalar(u8, "sxXeE", actual_fmt[0]) != null) {
+                        return formatText(mem.span(value), actual_fmt, options, writer);
                     }
                 }
-                return format(writer, "{s}@{x}", .{ @typeName(ptr_info.child), @ptrToInt(value) });
+                @compileError("Unknown format string: '" ++ actual_fmt ++ "'");
             },
             .Slice => {
+                if (actual_fmt.len == 0)
+                    @compileError("cannot format slice without a specifier (i.e. {s} or {any})");
                 if (max_depth == 0) {
                     return writer.writeAll("{ ... }");
                 }
                 if (ptr_info.child == u8) {
-                    if (fmt.len > 0 and comptime mem.indexOfScalar(u8, "sxXeEzZ", fmt[0]) != null) {
-                        return formatText(value, fmt, options, writer);
+                    if (comptime mem.indexOfScalar(u8, "sxXeE", actual_fmt[0]) != null) {
+                        return formatText(value, actual_fmt, options, writer);
                     }
                 }
                 try writer.writeAll("{ ");
                 for (value) |elem, i| {
-                    try formatType(elem, fmt, options, writer, max_depth - 1);
+                    try formatType(elem, actual_fmt, options, writer, max_depth - 1);
                     if (i != value.len - 1) {
                         try writer.writeAll(", ");
                     }
@@ -547,17 +570,19 @@ pub fn formatType(
             },
         },
         .Array => |info| {
+            if (actual_fmt.len == 0)
+                @compileError("cannot format array without a specifier (i.e. {s} or {any})");
             if (max_depth == 0) {
                 return writer.writeAll("{ ... }");
             }
             if (info.child == u8) {
-                if (fmt.len > 0 and comptime mem.indexOfScalar(u8, "sxXeEzZ", fmt[0]) != null) {
-                    return formatText(&value, fmt, options, writer);
+                if (comptime mem.indexOfScalar(u8, "sxXeE", actual_fmt[0]) != null) {
+                    return formatText(&value, actual_fmt, options, writer);
                 }
             }
             try writer.writeAll("{ ");
             for (value) |elem, i| {
-                try formatType(elem, fmt, options, writer, max_depth - 1);
+                try formatType(elem, actual_fmt, options, writer, max_depth - 1);
                 if (i < value.len - 1) {
                     try writer.writeAll(", ");
                 }
@@ -568,7 +593,7 @@ pub fn formatType(
             try writer.writeAll("{ ");
             var i: usize = 0;
             while (i < info.len) : (i += 1) {
-                try formatValue(value[i], fmt, options, writer);
+                try formatValue(value[i], actual_fmt, options, writer);
                 if (i < info.len - 1) {
                     try writer.writeAll(", ");
                 }
@@ -621,8 +646,7 @@ pub fn formatIntValue(
     const int_value = if (@TypeOf(value) == comptime_int) blk: {
         const Int = math.IntFittingRange(value, value);
         break :blk @as(Int, value);
-    } else
-        value;
+    } else value;
 
     if (fmt.len == 0 or comptime std.mem.eql(u8, fmt, "d")) {
         radix = 10;
@@ -632,13 +656,6 @@ pub fn formatIntValue(
             return formatAsciiChar(@as(u8, int_value), options, writer);
         } else {
             @compileError("Cannot print integer that is larger than 8 bits as a ascii");
-        }
-    } else if (comptime std.mem.eql(u8, fmt, "Z")) {
-        if (@typeInfo(@TypeOf(int_value)).Int.bits <= 8) {
-            const c: u8 = int_value;
-            return formatZigEscapes(@as(*const [1]u8, &c), options, writer);
-        } else {
-            @compileError("Cannot escape character with more than 8 bits");
         }
     } else if (comptime std.mem.eql(u8, fmt, "u")) {
         if (@typeInfo(@TypeOf(int_value)).Int.bits <= 21) {
@@ -659,7 +676,7 @@ pub fn formatIntValue(
         radix = 8;
         uppercase = false;
     } else {
-        @compileError("Unknown format string: '" ++ fmt ++ "'");
+        @compileError("Unsupported format string '" ++ fmt ++ "' for type '" ++ @typeName(@TypeOf(value)) ++ "'");
     }
 
     return formatInt(int_value, radix, uppercase, options, writer);
@@ -686,7 +703,7 @@ fn formatFloatValue(
             else => |e| return e,
         };
     } else {
-        @compileError("Unknown format string: '" ++ fmt ++ "'");
+        @compileError("Unsupported format string '" ++ fmt ++ "' for type '" ++ @typeName(@TypeOf(value)) ++ "'");
     }
 
     return formatBuf(buf_stream.getWritten(), options, writer);
@@ -715,12 +732,8 @@ pub fn formatText(
             }
         }
         return;
-    } else if (comptime std.mem.eql(u8, fmt, "z")) {
-        @compileError("specifier 'z' has been deprecated, wrap your argument in std.zig.fmtId instead");
-    } else if (comptime std.mem.eql(u8, fmt, "Z")) {
-        @compileError("specifier 'Z' has been deprecated, wrap your argument in std.zig.fmtEscapes instead");
     } else {
-        @compileError("Unknown format string: '" ++ fmt ++ "'");
+        @compileError("Unsupported format string '" ++ fmt ++ "' for type '" ++ @typeName(@TypeOf(value)) ++ "'");
     }
 }
 
@@ -1073,8 +1086,7 @@ pub fn formatInt(
     const int_value = if (@TypeOf(value) == comptime_int) blk: {
         const Int = math.IntFittingRange(value, value);
         break :blk @as(Int, value);
-    } else
-        value;
+    } else value;
 
     const value_info = @typeInfo(@TypeOf(int_value)).Int;
 
@@ -1673,7 +1685,7 @@ test "slice" {
     {
         var int_slice = [_]u32{ 1, 4096, 391891, 1111111111 };
         var runtime_zero: usize = 0;
-        try expectFmt("int: { 1, 4096, 391891, 1111111111 }", "int: {}", .{int_slice[runtime_zero..]});
+        try expectFmt("int: { 1, 4096, 391891, 1111111111 }", "int: {any}", .{int_slice[runtime_zero..]});
         try expectFmt("int: { 1, 4096, 391891, 1111111111 }", "int: {d}", .{int_slice[runtime_zero..]});
         try expectFmt("int: { 1, 1000, 5fad3, 423a35c7 }", "int: {x}", .{int_slice[runtime_zero..]});
         try expectFmt("int: { 00001, 01000, 5fad3, 423a35c7 }", "int: {x:0>5}", .{int_slice[runtime_zero..]});
@@ -1968,23 +1980,34 @@ test "bytes.hex" {
 pub const trim = @compileError("deprecated; use std.mem.trim with std.ascii.spaces instead");
 pub const isWhiteSpace = @compileError("deprecated; use std.ascii.isSpace instead");
 
-pub fn hexToBytes(out: []u8, input: []const u8) !void {
-    if (out.len * 2 < input.len)
+/// Decodes the sequence of bytes represented by the specified string of
+/// hexadecimal characters.
+/// Returns a slice of the output buffer containing the decoded bytes.
+pub fn hexToBytes(out: []u8, input: []const u8) ![]u8 {
+    // Expect 0 or n pairs of hexadecimal digits.
+    if (input.len & 1 != 0)
         return error.InvalidLength;
+    if (out.len * 2 < input.len)
+        return error.NoSpaceLeft;
 
     var in_i: usize = 0;
-    while (in_i != input.len) : (in_i += 2) {
+    while (in_i < input.len) : (in_i += 2) {
         const hi = try charToDigit(input[in_i], 16);
         const lo = try charToDigit(input[in_i + 1], 16);
         out[in_i / 2] = (hi << 4) | lo;
     }
+
+    return out[0 .. in_i / 2];
 }
 
 test "hexToBytes" {
-    const test_hex_str = "909A312BB12ED1F819B3521AC4C1E896F2160507FFC1C8381E3B07BB16BD1706";
-    var pb: [32]u8 = undefined;
-    try hexToBytes(pb[0..], test_hex_str);
-    try expectFmt(test_hex_str, "{X}", .{pb});
+    var buf: [32]u8 = undefined;
+    try expectFmt("90" ** 32, "{X}", .{try hexToBytes(&buf, "90" ** 32)});
+    try expectFmt("ABCD", "{X}", .{try hexToBytes(&buf, "ABCD")});
+    try expectFmt("", "{X}", .{try hexToBytes(&buf, "")});
+    std.testing.expectError(error.InvalidCharacter, hexToBytes(&buf, "012Z"));
+    std.testing.expectError(error.InvalidLength, hexToBytes(&buf, "AAA"));
+    std.testing.expectError(error.NoSpaceLeft, hexToBytes(buf[0..1], "ABAB"));
 }
 
 test "formatIntValue with comptime_int" {
