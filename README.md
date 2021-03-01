@@ -5,16 +5,21 @@ end with a fully operational Zig compiler for any target.
 
 ## Version Information
 
-This repository copies sources from upstream, with no patches, except to delete
-some unused files.
+This repository copies sources from upstream. Patches listed below. Use git
+to find and inspect the patch diffs.
 
- * LLVM 11.0.1
- * Clang 11.0.1
- * LLD 11.0.1
+ * LLVM 12.0.0rc2
+ * Clang 12.0.0rc2
+ * LLD 12.0.0rc2
  * Zig master branch (check the build script for the specific revision. It will
    will be zig 0.8.0 when the release is tagged)
 
 For other versions, check the git tags of this repository.
+
+### Patches
+
+ * Remove unused test/ files in order to make tarball less bloated.
+ * LLD: add additional include directory to Zig's libunwind.
 
 ## Host System Dependencies
 
