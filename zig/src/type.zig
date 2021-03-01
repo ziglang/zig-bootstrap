@@ -28,6 +28,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .usize,
             .isize,
             .c_short,
@@ -110,7 +112,7 @@ pub const Type = extern union {
 
     pub fn tag(self: Type) Tag {
         if (self.tag_if_small_enough < Tag.no_payload_count) {
-            return @intToEnum(Tag, @intCast(@TagType(Tag), self.tag_if_small_enough));
+            return @intToEnum(Tag, @intCast(std.meta.Tag(Tag), self.tag_if_small_enough));
         } else {
             return self.ptr_otherwise.tag;
         }
@@ -357,6 +359,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .usize,
             .isize,
             .c_short,
@@ -506,6 +510,8 @@ pub const Type = extern union {
                 .i32,
                 .u64,
                 .i64,
+                .u128,
+                .i128,
                 .usize,
                 .isize,
                 .c_short,
@@ -552,7 +558,9 @@ pub const Type = extern union {
                         if (i != 0) try out_stream.writeAll(", ");
                         try param_type.format("", .{}, out_stream);
                     }
-                    try out_stream.writeAll(") ");
+                    try out_stream.writeAll(") callconv(.");
+                    try out_stream.writeAll(@tagName(payload.cc));
+                    try out_stream.writeAll(")");
                     ty = payload.return_type;
                     continue;
                 },
@@ -770,6 +778,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .usize,
             .isize,
             .c_short,
@@ -866,6 +876,7 @@ pub const Type = extern union {
             .i16, .u16 => return 2,
             .i32, .u32 => return 4,
             .i64, .u64 => return 8,
+            .u128, .i128 => return 16,
 
             .isize,
             .usize,
@@ -1008,6 +1019,7 @@ pub const Type = extern union {
             .i16, .u16 => return 2,
             .i32, .u32 => return 4,
             .i64, .u64 => return 8,
+            .u128, .i128 => return 16,
 
             .@"anyframe", .anyframe_T, .isize, .usize => return @divExact(target.cpu.arch.ptrBitWidth(), 8),
 
@@ -1107,6 +1119,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .usize,
             .isize,
             .c_short,
@@ -1189,6 +1203,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .usize,
             .isize,
             .c_short,
@@ -1276,6 +1292,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .usize,
             .isize,
             .c_short,
@@ -1357,6 +1375,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .usize,
             .isize,
             .c_short,
@@ -1438,6 +1458,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .usize,
             .isize,
             .c_short,
@@ -1520,6 +1542,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .usize,
             .isize,
             .c_short,
@@ -1658,6 +1682,8 @@ pub const Type = extern union {
             .i32 => unreachable,
             .u64 => unreachable,
             .i64 => unreachable,
+            .u128 => unreachable,
+            .i128 => unreachable,
             .usize => unreachable,
             .isize => unreachable,
             .c_short => unreachable,
@@ -1774,6 +1800,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .usize,
             .isize,
             .c_short,
@@ -1854,6 +1882,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .usize,
             .isize,
             .c_short,
@@ -2007,6 +2037,8 @@ pub const Type = extern union {
             .i16,
             .i32,
             .i64,
+            .u128,
+            .i128,
             => true,
         };
     }
@@ -2059,6 +2091,8 @@ pub const Type = extern union {
             .i16,
             .i32,
             .i64,
+            .u128,
+            .i128,
             .optional,
             .optional_single_mut_pointer,
             .optional_single_const_pointer,
@@ -2165,6 +2199,8 @@ pub const Type = extern union {
             .i32 => .{ .signedness = .signed, .bits = 32 },
             .u64 => .{ .signedness = .unsigned, .bits = 64 },
             .i64 => .{ .signedness = .signed, .bits = 64 },
+            .u128 => .{ .signedness = .unsigned, .bits = 128 },
+            .i128 => .{ .signedness = .signed, .bits = 128 },
             .usize => .{ .signedness = .unsigned, .bits = target.cpu.arch.ptrBitWidth() },
             .isize => .{ .signedness = .signed, .bits = target.cpu.arch.ptrBitWidth() },
             .c_short => .{ .signedness = .signed, .bits = CType.short.sizeInBits(target) },
@@ -2225,6 +2261,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .optional,
             .optional_single_mut_pointer,
             .optional_single_const_pointer,
@@ -2331,6 +2369,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .usize,
             .isize,
             .c_short,
@@ -2415,6 +2455,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .usize,
             .isize,
             .c_short,
@@ -2498,6 +2540,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .usize,
             .isize,
             .c_short,
@@ -2581,6 +2625,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .usize,
             .isize,
             .c_short,
@@ -2661,6 +2707,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .usize,
             .isize,
             .c_short,
@@ -2741,6 +2789,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .usize,
             .isize,
             .c_short,
@@ -2791,6 +2841,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .usize,
             .isize,
             .c_short,
@@ -2872,6 +2924,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .usize,
             .isize,
             .c_short,
@@ -2969,6 +3023,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .usize,
             .isize,
             .c_short,
@@ -3058,6 +3114,8 @@ pub const Type = extern union {
             .i32,
             .u64,
             .i64,
+            .u128,
+            .i128,
             .usize,
             .isize,
             .c_short,
@@ -3191,6 +3249,8 @@ pub const Type = extern union {
         i32,
         u64,
         i64,
+        u128,
+        i128,
         usize,
         isize,
         c_short,
@@ -3275,6 +3335,8 @@ pub const Type = extern union {
                 .i32,
                 .u64,
                 .i64,
+                .u128,
+                .i128,
                 .usize,
                 .isize,
                 .c_short,
@@ -3348,6 +3410,11 @@ pub const Type = extern union {
                 .@"union" => Payload.Union,
                 .@"opaque" => Payload.Opaque,
             };
+        }
+
+        pub fn init(comptime t: Tag) Type {
+            comptime std.debug.assert(@enumToInt(t) < Tag.no_payload_count);
+            return .{ .tag_if_small_enough = @enumToInt(t) };
         }
 
         pub fn create(comptime t: Tag, ally: *Allocator, data: Data(t)) error{OutOfMemory}!Type {
@@ -3579,11 +3646,11 @@ pub const CType = enum {
             .kfreebsd,
             .lv2,
             .solaris,
+            .zos,
             .haiku,
             .minix,
             .rtems,
             .nacl,
-            .cnk,
             .aix,
             .cuda,
             .nvcl,
@@ -3597,6 +3664,9 @@ pub const CType = enum {
             .amdpal,
             .hermit,
             .hurd,
+            .opencl,
+            .glsl450,
+            .vulkan,
             => @panic("TODO specify the C integer and float type sizes for this OS"),
         }
     }

@@ -71,6 +71,7 @@ pub fn libCGenericName(target: std.Target) [:0]const u8 {
         .gnueabi,
         .gnueabihf,
         .gnux32,
+        .gnuilp32,
         => return "glibc",
         .musl,
         .musleabi,
@@ -189,7 +190,7 @@ pub fn supportsStackProbing(target: std.Target) bool {
 
 pub fn osToLLVM(os_tag: std.Target.Os.Tag) llvm.OSType {
     return switch (os_tag) {
-        .freestanding, .other => .UnknownOS,
+        .freestanding, .other, .opencl, .glsl450, .vulkan => .UnknownOS,
         .windows, .uefi => .Win32,
         .ananas => .Ananas,
         .cloudabi => .CloudABI,
@@ -204,11 +205,11 @@ pub fn osToLLVM(os_tag: std.Target.Os.Tag) llvm.OSType {
         .netbsd => .NetBSD,
         .openbsd => .OpenBSD,
         .solaris => .Solaris,
+        .zos => .ZOS,
         .haiku => .Haiku,
         .minix => .Minix,
         .rtems => .RTEMS,
         .nacl => .NaCl,
-        .cnk => .CNK,
         .aix => .AIX,
         .cuda => .CUDA,
         .nvcl => .NVCL,
@@ -238,6 +239,7 @@ pub fn archToLLVM(arch_tag: std.Target.Cpu.Arch) llvm.ArchType {
         .avr => .avr,
         .bpfel => .bpfel,
         .bpfeb => .bpfeb,
+        .csky => .csky,
         .hexagon => .hexagon,
         .mips => .mips,
         .mipsel => .mipsel,
@@ -245,6 +247,7 @@ pub fn archToLLVM(arch_tag: std.Target.Cpu.Arch) llvm.ArchType {
         .mips64el => .mips64el,
         .msp430 => .msp430,
         .powerpc => .ppc,
+        .powerpcle => .ppcle,
         .powerpc64 => .ppc64,
         .powerpc64le => .ppc64le,
         .r600 => .r600,
@@ -280,7 +283,7 @@ pub fn archToLLVM(arch_tag: std.Target.Cpu.Arch) llvm.ArchType {
         .renderscript32 => .renderscript32,
         .renderscript64 => .renderscript64,
         .ve => .ve,
-        .spu_2 => .UnknownArch,
+        .spu_2, .spirv32, .spirv64 => .UnknownArch,
     };
 }
 
@@ -354,8 +357,6 @@ pub fn hasRedZone(target: std.Target) bool {
     return switch (target.cpu.arch) {
         .x86_64,
         .i386,
-        .wasm32,
-        .wasm64,
         .powerpc,
         .powerpc64,
         .powerpc64le,

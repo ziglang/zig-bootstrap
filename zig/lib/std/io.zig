@@ -142,9 +142,6 @@ pub const bitReader = @import("io/bit_reader.zig").bitReader;
 pub const BitWriter = @import("io/bit_writer.zig").BitWriter;
 pub const bitWriter = @import("io/bit_writer.zig").bitWriter;
 
-pub const AutoIndentingStream = @import("io/auto_indenting_stream.zig").AutoIndentingStream;
-pub const autoIndentingStream = @import("io/auto_indenting_stream.zig").autoIndentingStream;
-
 pub const ChangeDetectionStream = @import("io/change_detection_stream.zig").ChangeDetectionStream;
 pub const changeDetectionStream = @import("io/change_detection_stream.zig").changeDetectionStream;
 
@@ -171,7 +168,7 @@ test "null_writer" {
     null_writer.writeAll("yay" ** 10) catch |err| switch (err) {};
 }
 
-test "" {
+test {
     _ = @import("io/bit_reader.zig");
     _ = @import("io/bit_writer.zig");
     _ = @import("io/buffered_atomic_file.zig");

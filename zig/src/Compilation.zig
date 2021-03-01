@@ -444,6 +444,7 @@ pub const InitOptions = struct {
     want_valgrind: ?bool = null,
     want_tsan: ?bool = null,
     want_compiler_rt: ?bool = null,
+    want_lto: ?bool = null,
     use_llvm: ?bool = null,
     use_lld: ?bool = null,
     use_clang: ?bool = null,
@@ -467,6 +468,11 @@ pub const InitOptions = struct {
     disable_c_depfile: bool = false,
     linker_z_nodelete: bool = false,
     linker_z_defs: bool = false,
+    linker_tsaware: bool = false,
+    linker_nxcompat: bool = false,
+    linker_dynamicbase: bool = false,
+    major_subsystem_version: ?u32 = null,
+    minor_subsystem_version: ?u32 = null,
     clang_passthrough_mode: bool = false,
     verbose_cc: bool = false,
     verbose_link: bool = false,
@@ -602,6 +608,12 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             if (ofmt == .c)
                 break :blk false;
 
+            if (options.want_lto) |lto| {
+                if (lto) {
+                    break :blk true;
+                }
+            }
+
             // Our linker can't handle objects or most advanced options yet.
             if (options.link_objects.len != 0 or
                 options.c_source_files.len != 0 or
@@ -633,7 +645,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
         };
 
         const darwin_options: DarwinOptions = if (build_options.have_llvm and comptime std.Target.current.isDarwin()) outer: {
-            const opts: DarwinOptions = if (use_lld and options.is_native_os and options.target.isDarwin()) inner: {
+            const opts: DarwinOptions = if (use_lld and std.builtin.os.tag == .macos and options.target.isDarwin()) inner: {
                 // TODO Revisit this targeting versions lower than macOS 11 when LLVM 12 is out.
                 // See https://github.com/ziglang/zig/issues/6996
                 const at_least_big_sur = options.target.os.getVersionRange().semver.min.major >= 11;
@@ -646,6 +658,26 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             } else .{};
             break :outer opts;
         } else .{};
+
+        const lto = blk: {
+            if (options.want_lto) |explicit| {
+                if (!use_lld)
+                    return error.LtoUnavailableWithoutLld;
+                break :blk explicit;
+            } else if (!use_lld) {
+                break :blk false;
+            } else if (options.c_source_files.len == 0) {
+                break :blk false;
+            } else if (darwin_options.system_linker_hack) {
+                break :blk false;
+            } else switch (options.output_mode) {
+                .Lib, .Obj => break :blk false,
+                .Exe => switch (options.optimize_mode) {
+                    .Debug => break :blk false,
+                    .ReleaseSafe, .ReleaseFast, .ReleaseSmall => break :blk true,
+                },
+            }
+        };
 
         const tsan = options.want_tsan orelse false;
 
@@ -821,6 +853,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
         cache.hash.add(ofmt);
         cache.hash.add(pic);
         cache.hash.add(pie);
+        cache.hash.add(lto);
         cache.hash.add(tsan);
         cache.hash.add(stack_check);
         cache.hash.add(red_zone);
@@ -888,7 +921,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
                         // TODO this is duped so it can be freed in Container.deinit
                         .sub_file_path = try gpa.dupe(u8, root_pkg.root_src_path),
                         .source = .{ .unloaded = {} },
-                        .contents = .{ .not_available = {} },
+                        .tree = undefined,
                         .status = .never_loaded,
                         .pkg = root_pkg,
                         .root_container = .{
@@ -1007,6 +1040,11 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             .bind_global_refs_locally = options.linker_bind_global_refs_locally orelse false,
             .z_nodelete = options.linker_z_nodelete,
             .z_defs = options.linker_z_defs,
+            .tsaware = options.linker_tsaware,
+            .nxcompat = options.linker_nxcompat,
+            .dynamicbase = options.linker_dynamicbase,
+            .major_subsystem_version = options.major_subsystem_version,
+            .minor_subsystem_version = options.minor_subsystem_version,
             .stack_size_override = options.stack_size_override,
             .image_base_override = options.image_base_override,
             .include_compiler_rt = include_compiler_rt,
@@ -1022,6 +1060,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             .libc_installation = libc_dirs.libc_installation,
             .pic = pic,
             .pie = pie,
+            .lto = lto,
             .valgrind = valgrind,
             .tsan = tsan,
             .stack_check = stack_check,
@@ -1295,7 +1334,7 @@ pub fn update(self: *Compilation) !void {
         self.c_object_work_queue.writeItemAssumeCapacity(entry.key);
     }
 
-    const use_stage1 = build_options.is_stage1 and self.bin_file.options.use_llvm;
+    const use_stage1 = build_options.omit_stage2 or build_options.is_stage1 and self.bin_file.options.use_llvm;
     if (!use_stage1) {
         if (self.bin_file.options.module) |module| {
             module.compile_log_text.shrinkAndFree(module.gpa, 0);
@@ -1499,7 +1538,9 @@ pub fn getCompileLogOutput(self: *Compilation) []const u8 {
 }
 
 pub fn performAllTheWork(self: *Compilation) error{ TimerUnsupported, OutOfMemory }!void {
-    var progress: std.Progress = .{};
+    // If the terminal is dumb, we dont want to show the user all the
+    // output.
+    var progress: std.Progress = .{ .dont_print_on_dumb = true };
     var main_progress_node = try progress.start("", 0);
     defer main_progress_node.end();
     if (self.color == .off) progress.terminal = null;
@@ -1843,7 +1884,7 @@ pub fn cImport(comp: *Compilation, c_src: []const u8) !CImportResult {
         const c_headers_dir_path = try comp.zig_lib_directory.join(arena, &[_][]const u8{"include"});
         const c_headers_dir_path_z = try arena.dupeZ(u8, c_headers_dir_path);
         var clang_errors: []translate_c.ClangErrMsg = &[0]translate_c.ClangErrMsg{};
-        const tree = translate_c.translate(
+        var tree = translate_c.translate(
             comp.gpa,
             new_argv.ptr,
             new_argv.ptr + new_argv.len,
@@ -1862,7 +1903,7 @@ pub fn cImport(comp: *Compilation, c_src: []const u8) !CImportResult {
                 };
             },
         };
-        defer tree.deinit();
+        defer tree.deinit(comp.gpa);
 
         if (comp.verbose_cimport) {
             log.info("C import .d file: {s}", .{out_dep_path});
@@ -1880,9 +1921,10 @@ pub fn cImport(comp: *Compilation, c_src: []const u8) !CImportResult {
         var out_zig_file = try o_dir.createFile(cimport_zig_basename, .{});
         defer out_zig_file.close();
 
-        var bos = std.io.bufferedWriter(out_zig_file.writer());
-        _ = try std.zig.render(comp.gpa, bos.writer(), tree);
-        try bos.flush();
+        const formatted = try tree.render(comp.gpa);
+        defer comp.gpa.free(formatted);
+
+        try out_zig_file.writeAll(formatted);
 
         man.writeManifest() catch |err| {
             log.warn("failed to write cache manifest for C import: {s}", .{@errorName(err)});
@@ -1895,7 +1937,7 @@ pub fn cImport(comp: *Compilation, c_src: []const u8) !CImportResult {
         "o", &digest, cimport_zig_basename,
     });
     if (comp.verbose_cimport) {
-        log.info("C import output: {s}\n", .{out_zig_path});
+        log.info("C import output: {s}", .{out_zig_path});
     }
     return CImportResult{
         .out_zig_path = out_zig_path,
@@ -2233,6 +2275,9 @@ pub fn addCCArgs(
                 "-nostdinc",
                 "-fno-spell-checking",
             });
+            if (comp.bin_file.options.lto) {
+                try argv.append("-flto");
+            }
 
             // According to Rich Felker libc headers are supposed to go before C language headers.
             // However as noted by @dimenus, appending libc headers before c_headers breaks intrinsics
@@ -2956,7 +3001,7 @@ pub fn updateSubCompilation(sub_compilation: *Compilation) !void {
         for (errors.list) |full_err_msg| {
             switch (full_err_msg) {
                 .src => |src| {
-                    log.err("{s}:{d}:{d}: {s}\n", .{
+                    log.err("{s}:{d}:{d}: {s}", .{
                         src.src_path,
                         src.line + 1,
                         src.column + 1,
@@ -3255,6 +3300,7 @@ fn updateStage1Module(comp: *Compilation, main_progress_node: *std.Progress.Node
         .err_color = @enumToInt(comp.color),
         .pic = comp.bin_file.options.pic,
         .pie = comp.bin_file.options.pie,
+        .lto = comp.bin_file.options.lto,
         .link_libc = comp.bin_file.options.link_libc,
         .link_libcpp = comp.bin_file.options.link_libcpp,
         .strip = comp.bin_file.options.strip,
@@ -3415,6 +3461,10 @@ pub fn build_crt_file(
         .want_tsan = false,
         .want_pic = comp.bin_file.options.pic,
         .want_pie = comp.bin_file.options.pie,
+        .want_lto = switch (output_mode) {
+            .Lib => comp.bin_file.options.lto,
+            .Obj, .Exe => false,
+        },
         .emit_h = null,
         .strip = comp.compilerRtStrip(),
         .is_native_os = comp.bin_file.options.is_native_os,

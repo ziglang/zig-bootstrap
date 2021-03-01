@@ -26,6 +26,7 @@ pub fn targetTriple(allocator: *Allocator, target: std.Target) ![:0]u8 {
         .avr => "avr",
         .bpfel => "bpfel",
         .bpfeb => "bpfeb",
+        .csky => "csky",
         .hexagon => "hexagon",
         .mips => "mips",
         .mipsel => "mipsel",
@@ -33,6 +34,7 @@ pub fn targetTriple(allocator: *Allocator, target: std.Target) ![:0]u8 {
         .mips64el => "mips64el",
         .msp430 => "msp430",
         .powerpc => "powerpc",
+        .powerpcle => "powerpcle",
         .powerpc64 => "powerpc64",
         .powerpc64le => "powerpc64le",
         .r600 => "r600",
@@ -69,6 +71,8 @@ pub fn targetTriple(allocator: *Allocator, target: std.Target) ![:0]u8 {
         .renderscript64 => "renderscript64",
         .ve => "ve",
         .spu_2 => return error.LLVMBackendDoesNotSupportSPUMarkII,
+        .spirv32 => return error.LLVMBackendDoesNotSupportSPIRV,
+        .spirv64 => return error.LLVMBackendDoesNotSupportSPIRV,
     };
     // TODO Add a sub-arch for some architectures depending on CPU features.
 
@@ -88,11 +92,11 @@ pub fn targetTriple(allocator: *Allocator, target: std.Target) ![:0]u8 {
         .openbsd => "openbsd",
         .solaris => "solaris",
         .windows => "windows",
+        .zos => "zos",
         .haiku => "haiku",
         .minix => "minix",
         .rtems => "rtems",
         .nacl => "nacl",
-        .cnk => "cnk",
         .aix => "aix",
         .cuda => "cuda",
         .nvcl => "nvcl",
@@ -109,6 +113,9 @@ pub fn targetTriple(allocator: *Allocator, target: std.Target) ![:0]u8 {
         .wasi => "wasi",
         .emscripten => "emscripten",
         .uefi => "windows",
+        .opencl => return error.LLVMBackendDoesNotSupportOpenCL,
+        .glsl450 => return error.LLVMBackendDoesNotSupportGLSL450,
+        .vulkan => return error.LLVMBackendDoesNotSupportVulkan,
         .other => "unknown",
     };
 
@@ -120,6 +127,7 @@ pub fn targetTriple(allocator: *Allocator, target: std.Target) ![:0]u8 {
         .gnueabi => "gnueabi",
         .gnueabihf => "gnueabihf",
         .gnux32 => "gnux32",
+        .gnuilp32 => "gnuilp32",
         .code16 => "code16",
         .eabi => "eabi",
         .eabihf => "eabihf",

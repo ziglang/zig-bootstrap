@@ -556,17 +556,17 @@ fn linkWithLLD(self: *MachO, comp: *Compilation) !void {
             id_symlink_basename,
             &prev_digest_buf,
         ) catch |err| blk: {
-            log.debug("MachO LLD new_digest={} error: {s}", .{ digest, @errorName(err) });
+            log.debug("MachO LLD new_digest={x} error: {s}", .{ digest, @errorName(err) });
             // Handle this as a cache miss.
             break :blk prev_digest_buf[0..0];
         };
         if (mem.eql(u8, prev_digest, &digest)) {
-            log.debug("MachO LLD digest={} match - skipping invocation", .{digest});
+            log.debug("MachO LLD digest={x} match - skipping invocation", .{digest});
             // Hot diggity dog! The output binary is already there.
             self.base.lock = man.toOwnedLock();
             return;
         }
-        log.debug("MachO LLD prev_digest={} new_digest={}", .{ prev_digest, digest });
+        log.debug("MachO LLD prev_digest={x} new_digest={x}", .{ prev_digest, digest });
 
         // We are about to change the output file to be different, so we invalidate the build hash now.
         directory.handle.deleteFile(id_symlink_basename) catch |err| switch (err) {
@@ -620,6 +620,13 @@ fn linkWithLLD(self: *MachO, comp: *Compilation) !void {
             try argv.append("0");
         }
 
+        if (self.base.options.lto) {
+            switch (self.base.options.optimize_mode) {
+                .Debug => {},
+                .ReleaseSmall => try argv.append("-O2"),
+                .ReleaseFast, .ReleaseSafe => try argv.append("-O3"),
+            }
+        }
         try argv.append("-demangle");
 
         if (self.base.options.rdynamic and !self.base.options.system_linker_hack) {
@@ -2359,7 +2366,7 @@ fn allocatedSizeLinkedit(self: *MachO, start: u64) u64 {
     return min_pos - start;
 }
 
-inline fn checkForCollision(start: u64, end: u64, off: u64, size: u64) ?u64 {
+fn checkForCollision(start: u64, end: u64, off: u64, size: u64) callconv(.Inline) ?u64 {
     const increased_size = padToIdeal(size);
     const test_end = off + increased_size;
     if (end > off and start < test_end) {

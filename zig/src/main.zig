@@ -287,6 +287,8 @@ const usage_build_generic =
     \\  -fno-PIC                  Force-disable Position Independent Code
     \\  -fPIE                     Force-enable Position Independent Executable
     \\  -fno-PIE                  Force-disable Position Independent Executable
+    \\  -flto                     Force-enable Link Time Optimization (requires LLVM extensions)
+    \\  -fno-lto                  Force-disable Link Time Optimization
     \\  -fstack-check             Enable stack probing in unsafe builds
     \\  -fno-stack-check          Disable stack probing in safe builds
     \\  -fsanitize-c              Enable C undefined behavior detection in unsafe builds
@@ -310,6 +312,7 @@ const usage_build_generic =
     \\    pe                      Portable Executable (Windows)
     \\    coff                    Common Object File Format (Windows)
     \\    macho                   macOS relocatables
+    \\    spirv                   Standard, Portable Intermediate Representation V (SPIR-V)
     \\    hex    (planned)        Intel IHEX
     \\    raw    (planned)        Dump machine code directly
     \\  -dirafter [dir]           Add directory to AFTER include search path
@@ -511,6 +514,7 @@ fn buildOutputType(
     var enable_cache: ?bool = null;
     var want_pic: ?bool = null;
     var want_pie: ?bool = null;
+    var want_lto: ?bool = null;
     var want_sanitize_c: ?bool = null;
     var want_stack_check: ?bool = null;
     var want_red_zone: ?bool = null;
@@ -526,6 +530,9 @@ fn buildOutputType(
     var linker_bind_global_refs_locally: ?bool = null;
     var linker_z_nodelete = false;
     var linker_z_defs = false;
+    var linker_tsaware = false;
+    var linker_nxcompat = false;
+    var linker_dynamicbase = false;
     var test_evented_io = false;
     var stack_size_override: ?u64 = null;
     var image_base_override: ?u64 = null;
@@ -546,6 +553,8 @@ fn buildOutputType(
     var main_pkg_path: ?[]const u8 = null;
     var clang_preprocessor_mode: Compilation.ClangPreprocessorMode = .no;
     var subsystem: ?std.Target.SubSystem = null;
+    var major_subsystem_version: ?u32 = null;
+    var minor_subsystem_version: ?u32 = null;
 
     var system_libs = std.ArrayList([]const u8).init(gpa);
     defer system_libs.deinit();
@@ -852,6 +861,10 @@ fn buildOutputType(
                         want_pie = true;
                     } else if (mem.eql(u8, arg, "-fno-PIE")) {
                         want_pie = false;
+                    } else if (mem.eql(u8, arg, "-flto")) {
+                        want_lto = true;
+                    } else if (mem.eql(u8, arg, "-fno-lto")) {
+                        want_lto = false;
                     } else if (mem.eql(u8, arg, "-fstack-check")) {
                         want_stack_check = true;
                     } else if (mem.eql(u8, arg, "-fno-stack-check")) {
@@ -1085,6 +1098,8 @@ fn buildOutputType(
                     .no_pic => want_pic = false,
                     .pie => want_pie = true,
                     .no_pie => want_pie = false,
+                    .lto => want_lto = true,
+                    .no_lto => want_lto = false,
                     .red_zone => want_red_zone = true,
                     .no_red_zone => want_red_zone = false,
                     .nostdlib => ensure_libc_on_non_freestanding = false,
@@ -1171,6 +1186,7 @@ fn buildOutputType(
                     .framework_dir => try framework_dirs.append(it.only_arg),
                     .framework => try frameworks.append(it.only_arg),
                     .nostdlibinc => want_native_include_dirs = false,
+                    .strip => strip = true,
                 }
             }
             // Parse linker args.
@@ -1298,10 +1314,56 @@ fn buildOutputType(
                     image_base_override = std.fmt.parseUnsigned(u64, linker_args.items[i], 0) catch |err| {
                         fatal("unable to parse '{s}': {s}", .{ arg, @errorName(err) });
                     };
+                } else if (mem.eql(u8, arg, "-T")) {
+                    i += 1;
+                    if (i >= linker_args.items.len) {
+                        fatal("expected linker arg after '{s}'", .{arg});
+                    }
+                    linker_script = linker_args.items[i];
                 } else if (mem.eql(u8, arg, "--eh-frame-hdr")) {
                     link_eh_frame_hdr = true;
                 } else if (mem.eql(u8, arg, "--no-eh-frame-hdr")) {
                     link_eh_frame_hdr = false;
+                } else if (mem.eql(u8, arg, "--tsaware")) {
+                    linker_tsaware = true;
+                } else if (mem.eql(u8, arg, "--nxcompat")) {
+                    linker_nxcompat = true;
+                } else if (mem.eql(u8, arg, "--dynamicbase")) {
+                    linker_dynamicbase = true;
+                } else if (mem.eql(u8, arg, "--high-entropy-va")) {
+                    // This option does not do anything.
+                } else if (mem.eql(u8, arg, "--export-all-symbols")) {
+                    rdynamic = true;
+                } else if (mem.eql(u8, arg, "--start-group") or
+                    mem.eql(u8, arg, "--end-group"))
+                {
+                    // We don't need to care about these because these args are
+                    // for resolving circular dependencies but our linker takes
+                    // care of this without explicit args.
+                } else if (mem.startsWith(u8, arg, "--major-os-version") or
+                    mem.startsWith(u8, arg, "--minor-os-version"))
+                {
+                    // This option does not do anything.
+                } else if (mem.startsWith(u8, arg, "--major-subsystem-version=")) {
+                    major_subsystem_version = std.fmt.parseUnsigned(
+                        u32,
+                        arg["--major-subsystem-version=".len..],
+                        10,
+                    ) catch |err| {
+                        fatal("unable to parse '{s}': {s}", .{ arg, @errorName(err) });
+                    };
+                } else if (mem.startsWith(u8, arg, "--minor-subsystem-version=")) {
+                    minor_subsystem_version = std.fmt.parseUnsigned(
+                        u32,
+                        arg["--minor-subsystem-version=".len..],
+                        10,
+                    ) catch |err| {
+                        fatal("unable to parse '{s}': {s}", .{ arg, @errorName(err) });
+                    };
+                } else if (mem.startsWith(u8, arg, "--major-os-version=") or
+                    mem.startsWith(u8, arg, "--minor-os-version="))
+                {
+                    // These args do nothing.
                 } else {
                     warn("unsupported linker arg: {s}", .{arg});
                 }
@@ -1475,8 +1537,9 @@ fn buildOutputType(
         }
 
         const has_sysroot = if (comptime std.Target.current.isDarwin()) outer: {
-            const at_least_big_sur = target_info.target.os.getVersionRange().semver.min.major >= 11;
-            if (at_least_big_sur) {
+            const min = target_info.target.os.getVersionRange().semver.min;
+            const at_least_catalina = min.major >= 11 or (min.major >= 10 and min.minor >= 15);
+            if (at_least_catalina) {
                 const sdk_path = try std.zig.system.getSDKPath(arena);
                 try clang_argv.ensureCapacity(clang_argv.items.len + 2);
                 clang_argv.appendAssumeCapacity("-isysroot");
@@ -1528,6 +1591,8 @@ fn buildOutputType(
             break :blk .hex;
         } else if (mem.eql(u8, ofmt, "raw")) {
             break :blk .raw;
+        } else if (mem.eql(u8, ofmt, "spirv")) {
+            break :blk .spirv;
         } else {
             fatal("unsupported object format: {s}", .{ofmt});
         }
@@ -1771,6 +1836,7 @@ fn buildOutputType(
         .link_libcpp = link_libcpp,
         .want_pic = want_pic,
         .want_pie = want_pie,
+        .want_lto = want_lto,
         .want_sanitize_c = want_sanitize_c,
         .want_stack_check = want_stack_check,
         .want_red_zone = want_red_zone,
@@ -1790,6 +1856,11 @@ fn buildOutputType(
         .linker_bind_global_refs_locally = linker_bind_global_refs_locally,
         .linker_z_nodelete = linker_z_nodelete,
         .linker_z_defs = linker_z_defs,
+        .linker_tsaware = linker_tsaware,
+        .linker_nxcompat = linker_nxcompat,
+        .linker_dynamicbase = linker_dynamicbase,
+        .major_subsystem_version = major_subsystem_version,
+        .minor_subsystem_version = minor_subsystem_version,
         .link_eh_frame_hdr = link_eh_frame_hdr,
         .link_emit_relocs = link_emit_relocs,
         .stack_size_override = stack_size_override,
@@ -2087,7 +2158,7 @@ fn cmdTranslateC(comp: *Compilation, arena: *Allocator, enable_cache: bool) !voi
         const c_headers_dir_path = try comp.zig_lib_directory.join(arena, &[_][]const u8{"include"});
         const c_headers_dir_path_z = try arena.dupeZ(u8, c_headers_dir_path);
         var clang_errors: []translate_c.ClangErrMsg = &[0]translate_c.ClangErrMsg{};
-        const tree = translate_c.translate(
+        var tree = translate_c.translate(
             comp.gpa,
             new_argv.ptr,
             new_argv.ptr + new_argv.len,
@@ -2108,7 +2179,7 @@ fn cmdTranslateC(comp: *Compilation, arena: *Allocator, enable_cache: bool) !voi
                 process.exit(1);
             },
         };
-        defer tree.deinit();
+        defer tree.deinit(comp.gpa);
 
         if (out_dep_path) |dep_file_path| {
             const dep_basename = std.fs.path.basename(dep_file_path);
@@ -2122,16 +2193,21 @@ fn cmdTranslateC(comp: *Compilation, arena: *Allocator, enable_cache: bool) !voi
 
         const digest = man.final();
         const o_sub_path = try fs.path.join(arena, &[_][]const u8{ "o", &digest });
+
         var o_dir = try comp.local_cache_directory.handle.makeOpenPath(o_sub_path, .{});
         defer o_dir.close();
+
         var zig_file = try o_dir.createFile(translated_zig_basename, .{});
         defer zig_file.close();
 
-        var bw = io.bufferedWriter(zig_file.writer());
-        _ = try std.zig.render(comp.gpa, bw.writer(), tree);
-        try bw.flush();
+        const formatted = try tree.render(comp.gpa);
+        defer comp.gpa.free(formatted);
 
-        man.writeManifest() catch |err| warn("failed to write cache manifest: {s}", .{@errorName(err)});
+        try zig_file.writeAll(formatted);
+
+        man.writeManifest() catch |err| warn("failed to write cache manifest: {s}", .{
+            @errorName(err),
+        });
 
         break :digest digest;
     };
@@ -2618,10 +2694,10 @@ pub fn cmdFmt(gpa: *Allocator, args: []const []const u8) !void {
         const source_code = try stdin.readAllAlloc(gpa, max_src_size);
         defer gpa.free(source_code);
 
-        const tree = std.zig.parse(gpa, source_code) catch |err| {
+        var tree = std.zig.parse(gpa, source_code) catch |err| {
             fatal("error parsing stdin: {s}", .{err});
         };
-        defer tree.deinit();
+        defer tree.deinit(gpa);
 
         for (tree.errors) |parse_error| {
             try printErrMsgToFile(gpa, parse_error, tree, "<stdin>", stderr_file, color);
@@ -2629,16 +2705,15 @@ pub fn cmdFmt(gpa: *Allocator, args: []const []const u8) !void {
         if (tree.errors.len != 0) {
             process.exit(1);
         }
+        const formatted = try tree.render(gpa);
+        defer gpa.free(formatted);
+
         if (check_flag) {
-            const anything_changed = try std.zig.render(gpa, io.null_writer, tree);
-            const code = if (anything_changed) @as(u8, 1) else @as(u8, 0);
+            const code: u8 = @boolToInt(mem.eql(u8, formatted, source_code));
             process.exit(code);
         }
 
-        var bw = io.bufferedWriter(io.getStdOut().writer());
-        _ = try std.zig.render(gpa, bw.writer(), tree);
-        try bw.flush();
-        return;
+        return io.getStdOut().writeAll(formatted);
     }
 
     if (input_files.items.len == 0) {
@@ -2775,8 +2850,8 @@ fn fmtPathFile(
     // Add to set after no longer possible to get error.IsDir.
     if (try fmt.seen.fetchPut(stat.inode, {})) |_| return;
 
-    const tree = try std.zig.parse(fmt.gpa, source_code);
-    defer tree.deinit();
+    var tree = try std.zig.parse(fmt.gpa, source_code);
+    defer tree.deinit(fmt.gpa);
 
     for (tree.errors) |parse_error| {
         try printErrMsgToFile(fmt.gpa, parse_error, tree, file_path, std.io.getStdErr(), fmt.color);
@@ -2786,22 +2861,19 @@ fn fmtPathFile(
         return;
     }
 
-    if (check_mode) {
-        const anything_changed = try std.zig.render(fmt.gpa, io.null_writer, tree);
-        if (anything_changed) {
-            const stdout = io.getStdOut().writer();
-            try stdout.print("{s}\n", .{file_path});
-            fmt.any_error = true;
-        }
-    } else {
-        // As a heuristic, we make enough capacity for the same as the input source.
-        try fmt.out_buffer.ensureCapacity(source_code.len);
-        fmt.out_buffer.items.len = 0;
-        const writer = fmt.out_buffer.writer();
-        const anything_changed = try std.zig.render(fmt.gpa, writer, tree);
-        if (!anything_changed)
-            return; // Good thing we didn't waste any file system access on this.
+    // As a heuristic, we make enough capacity for the same as the input source.
+    fmt.out_buffer.shrinkRetainingCapacity(0);
+    try fmt.out_buffer.ensureCapacity(source_code.len);
 
+    try tree.renderToArrayList(&fmt.out_buffer);
+    if (mem.eql(u8, fmt.out_buffer.items, source_code))
+        return;
+
+    if (check_mode) {
+        const stdout = io.getStdOut().writer();
+        try stdout.print("{s}\n", .{file_path});
+        fmt.any_error = true;
+    } else {
         var af = try dir.atomicFile(sub_path, .{ .mode = stat.mode });
         defer af.deinit();
 
@@ -2815,7 +2887,7 @@ fn fmtPathFile(
 fn printErrMsgToFile(
     gpa: *mem.Allocator,
     parse_error: ast.Error,
-    tree: *ast.Tree,
+    tree: ast.Tree,
     path: []const u8,
     file: fs.File,
     color: Color,
@@ -2825,19 +2897,17 @@ fn printErrMsgToFile(
         .on => true,
         .off => false,
     };
-    const lok_token = parse_error.loc();
-    const span_first = lok_token;
-    const span_last = lok_token;
+    const lok_token = parse_error.token;
 
-    const first_token = tree.token_locs[span_first];
-    const last_token = tree.token_locs[span_last];
-    const start_loc = tree.tokenLocationLoc(0, first_token);
-    const end_loc = tree.tokenLocationLoc(first_token.end, last_token);
+    const token_starts = tree.tokens.items(.start);
+    const token_tags = tree.tokens.items(.tag);
+    const first_token_start = token_starts[lok_token];
+    const start_loc = tree.tokenLocation(0, lok_token);
 
     var text_buf = std.ArrayList(u8).init(gpa);
     defer text_buf.deinit();
     const writer = text_buf.writer();
-    try parse_error.render(tree.token_ids, writer);
+    try tree.renderError(parse_error, writer);
     const text = text_buf.items;
 
     const stream = file.writer();
@@ -2854,8 +2924,12 @@ fn printErrMsgToFile(
     }
     try stream.writeByte('\n');
     try stream.writeByteNTimes(' ', start_loc.column);
-    try stream.writeByteNTimes('~', last_token.end - first_token.start);
-    try stream.writeByte('\n');
+    if (token_tags[lok_token].lexeme()) |lexeme| {
+        try stream.writeByteNTimes('~', lexeme.len);
+        try stream.writeByte('\n');
+    } else {
+        try stream.writeAll("^\n");
+    }
 }
 
 pub const info_zen =
@@ -2952,6 +3026,8 @@ pub const ClangArgIterator = struct {
         no_pic,
         pie,
         no_pie,
+        lto,
+        no_lto,
         nostdlib,
         nostdlib_cpp,
         shared,
@@ -2975,6 +3051,7 @@ pub const ClangArgIterator = struct {
         nostdlibinc,
         red_zone,
         no_red_zone,
+        strip,
     };
 
     const Args = struct {
@@ -3144,8 +3221,7 @@ pub const ClangArgIterator = struct {
                 self.zig_equivalent = clang_arg.zig_equivalent;
                 break :find_clang_arg;
             },
-        }
-        else {
+        } else {
             fatal("Unknown Clang option: '{s}'", .{arg});
         }
     }

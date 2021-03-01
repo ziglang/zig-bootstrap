@@ -250,6 +250,24 @@ pub fn panicExtra(trace: ?*const builtin.StackTrace, first_trace_addr: ?usize, c
         resetSegfaultHandler();
     }
 
+    if (comptime std.Target.current.isDarwin() and std.Target.current.cpu.arch == .aarch64)
+        nosuspend {
+            // As a workaround for not having threadlocal variable support in LLD for this target,
+            // we have a simpler panic implementation that does not use threadlocal variables.
+            // TODO https://github.com/ziglang/zig/issues/7527
+            const stderr = io.getStdErr().writer();
+            if (@atomicRmw(u8, &panicking, .Add, 1, .SeqCst) == 0) {
+                stderr.print("panic: " ++ format ++ "\n", args) catch os.abort();
+                if (trace) |t| {
+                    dumpStackTrace(t.*);
+                }
+                dumpCurrentStackTrace(first_trace_addr);
+            } else {
+                stderr.print("Panicked during a panic. Aborting.\n", .{}) catch os.abort();
+            }
+            os.abort();
+        };
+
     nosuspend switch (panic_stage) {
         0 => {
             panic_stage = 1;
@@ -1107,12 +1125,15 @@ pub const DebugInfo = struct {
     }
 
     pub fn getModuleForAddress(self: *DebugInfo, address: usize) !*ModuleDebugInfo {
-        if (comptime std.Target.current.isDarwin())
-            return self.lookupModuleDyld(address)
-        else if (builtin.os.tag == .windows)
-            return self.lookupModuleWin32(address)
-        else
+        if (comptime std.Target.current.isDarwin()) {
+            return self.lookupModuleDyld(address);
+        } else if (builtin.os.tag == .windows) {
+            return self.lookupModuleWin32(address);
+        } else if (builtin.os.tag == .haiku) {
+            return self.lookupModuleHaiku(address);
+        } else {
             return self.lookupModuleDl(address);
+        }
     }
 
     fn lookupModuleDyld(self: *DebugInfo, address: usize) !*ModuleDebugInfo {
@@ -1317,6 +1338,10 @@ pub const DebugInfo = struct {
         try self.address_map.putNoClobber(ctx.base_address, obj_di);
 
         return obj_di;
+    }
+
+    fn lookupModuleHaiku(self: *DebugInfo, address: usize) !*ModuleDebugInfo {
+        @panic("TODO implement lookup module for Haiku");
     }
 };
 

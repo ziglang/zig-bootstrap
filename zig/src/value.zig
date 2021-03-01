@@ -102,6 +102,7 @@ pub const Value = extern union {
         enum_literal,
         error_set,
         @"error",
+        error_union,
         /// This is a special value that tracks a set of types that have been stored
         /// to an inferred allocation. It does not support any of the normal value queries.
         inferred_alloc,
@@ -174,6 +175,7 @@ pub const Value = extern union {
 
                 .ref_val,
                 .repeated,
+                .error_union,
                 => Payload.SubValue,
 
                 .bytes,
@@ -223,7 +225,7 @@ pub const Value = extern union {
 
     pub fn tag(self: Value) Tag {
         if (self.tag_if_small_enough < Tag.no_payload_count) {
-            return @intToEnum(Tag, @intCast(@TagType(Tag), self.tag_if_small_enough));
+            return @intToEnum(Tag, @intCast(std.meta.Tag(Tag), self.tag_if_small_enough));
         } else {
             return self.ptr_otherwise.tag;
         }
@@ -388,9 +390,17 @@ pub const Value = extern union {
                 return Value{ .ptr_otherwise = &new_payload.base };
             },
             .@"error" => return self.copyPayloadShallow(allocator, Payload.Error),
+            .error_union => {
+                const payload = self.castTag(.error_union).?;
+                const new_payload = try allocator.create(Payload.SubValue);
+                new_payload.* = .{
+                    .base = payload.base,
+                    .data = try payload.data.copy(allocator),
+                };
+                return Value{ .ptr_otherwise = &new_payload.base };
+            },
 
             .error_set => return self.copyPayloadShallow(allocator, Payload.ErrorSet),
-
             .inferred_alloc => unreachable,
         }
     }
@@ -510,6 +520,8 @@ pub const Value = extern union {
                 return out_stream.writeAll("}");
             },
             .@"error" => return out_stream.print("error.{s}", .{val.castTag(.@"error").?.data.name}),
+            // TODO to print this it should be error{ Set, Items }!T(val), but we need the type for that
+            .error_union => return out_stream.print("error_union_val({})", .{val.castTag(.error_union).?.data}),
             .inferred_alloc => return out_stream.writeAll("(inferred allocation value)"),
         };
     }
@@ -622,6 +634,7 @@ pub const Value = extern union {
             .float_128,
             .enum_literal,
             .@"error",
+            .error_union,
             .empty_struct_value,
             .inferred_alloc,
             => unreachable,
@@ -692,6 +705,7 @@ pub const Value = extern union {
             .empty_array,
             .enum_literal,
             .error_set,
+            .error_union,
             .@"error",
             .empty_struct_value,
             .inferred_alloc,
@@ -779,6 +793,7 @@ pub const Value = extern union {
             .enum_literal,
             .error_set,
             .@"error",
+            .error_union,
             .empty_struct_value,
             .inferred_alloc,
             => unreachable,
@@ -865,6 +880,7 @@ pub const Value = extern union {
             .enum_literal,
             .error_set,
             .@"error",
+            .error_union,
             .empty_struct_value,
             .inferred_alloc,
             => unreachable,
@@ -979,6 +995,7 @@ pub const Value = extern union {
             .enum_literal,
             .error_set,
             .@"error",
+            .error_union,
             .empty_struct_value,
             .inferred_alloc,
             => unreachable,
@@ -1069,6 +1086,7 @@ pub const Value = extern union {
             .enum_literal,
             .error_set,
             .@"error",
+            .error_union,
             .empty_struct_value,
             .inferred_alloc,
             => unreachable,
@@ -1228,6 +1246,7 @@ pub const Value = extern union {
             .enum_literal,
             .error_set,
             .@"error",
+            .error_union,
             .empty_struct_value,
             .inferred_alloc,
             => unreachable,
@@ -1305,6 +1324,7 @@ pub const Value = extern union {
             .enum_literal,
             .error_set,
             .@"error",
+            .error_union,
             .empty_struct_value,
             .inferred_alloc,
             => unreachable,
@@ -1543,7 +1563,10 @@ pub const Value = extern union {
                 hasher.update(payload.name);
                 std.hash.autoHash(&hasher, payload.value);
             },
-
+            .error_union => {
+                const payload = self.castTag(.error_union).?.data;
+                std.hash.autoHash(&hasher, payload.hash());
+            },
             .inferred_alloc => unreachable,
         }
         return hasher.final();
@@ -1621,6 +1644,7 @@ pub const Value = extern union {
             .enum_literal,
             .error_set,
             .@"error",
+            .error_union,
             .empty_struct_value,
             .inferred_alloc,
             => unreachable,
@@ -1707,6 +1731,7 @@ pub const Value = extern union {
             .enum_literal,
             .error_set,
             .@"error",
+            .error_union,
             .empty_struct_value,
             .inferred_alloc,
             => unreachable,
@@ -1810,6 +1835,7 @@ pub const Value = extern union {
             .enum_literal,
             .error_set,
             .@"error",
+            .error_union,
             .empty_struct_value,
             => false,
 
@@ -1820,6 +1846,93 @@ pub const Value = extern union {
         };
     }
 
+    /// Valid for all types. Asserts the value is not undefined and not unreachable.
+    pub fn getError(self: Value) ?[]const u8 {
+        return switch (self.tag()) {
+            .ty,
+            .int_type,
+            .u8_type,
+            .i8_type,
+            .u16_type,
+            .i16_type,
+            .u32_type,
+            .i32_type,
+            .u64_type,
+            .i64_type,
+            .usize_type,
+            .isize_type,
+            .c_short_type,
+            .c_ushort_type,
+            .c_int_type,
+            .c_uint_type,
+            .c_long_type,
+            .c_ulong_type,
+            .c_longlong_type,
+            .c_ulonglong_type,
+            .c_longdouble_type,
+            .f16_type,
+            .f32_type,
+            .f64_type,
+            .f128_type,
+            .c_void_type,
+            .bool_type,
+            .void_type,
+            .type_type,
+            .anyerror_type,
+            .comptime_int_type,
+            .comptime_float_type,
+            .noreturn_type,
+            .null_type,
+            .undefined_type,
+            .fn_noreturn_no_args_type,
+            .fn_void_no_args_type,
+            .fn_naked_noreturn_no_args_type,
+            .fn_ccc_void_no_args_type,
+            .single_const_pointer_to_comptime_int_type,
+            .const_slice_u8_type,
+            .enum_literal_type,
+            .anyframe_type,
+            .zero,
+            .one,
+            .null_value,
+            .empty_array,
+            .bool_true,
+            .bool_false,
+            .function,
+            .extern_fn,
+            .variable,
+            .int_u64,
+            .int_i64,
+            .int_big_positive,
+            .int_big_negative,
+            .ref_val,
+            .decl_ref,
+            .elem_ptr,
+            .bytes,
+            .repeated,
+            .float_16,
+            .float_32,
+            .float_64,
+            .float_128,
+            .void_value,
+            .enum_literal,
+            .error_set,
+            .empty_struct_value,
+            => null,
+
+            .error_union => {
+                const data = self.castTag(.error_union).?.data;
+                return if (data.tag() == .@"error")
+                    data.castTag(.@"error").?.data.name
+                else
+                    null;
+            },
+            .@"error" => self.castTag(.@"error").?.data.name,
+            .undef => unreachable,
+            .unreachable_value => unreachable,
+            .inferred_alloc => unreachable,
+        };
+    }
     /// Valid for all types. Asserts the value is not undefined.
     pub fn isFloat(self: Value) bool {
         return switch (self.tag()) {
@@ -1908,6 +2021,7 @@ pub const Value = extern union {
             .void_value,
             .enum_literal,
             .@"error",
+            .error_union,
             .empty_struct_value,
             .null_value,
             => false,
@@ -2024,13 +2138,13 @@ pub const Value = extern union {
             data: f128,
         };
 
-        // TODO move to type.zig
+        /// TODO move to type.zig
         pub const ErrorSet = struct {
             pub const base_tag = Tag.error_set;
 
             base: Payload = .{ .tag = base_tag },
             data: struct {
-                // TODO revisit this when we have the concept of the error tag type
+                /// TODO revisit this when we have the concept of the error tag type
                 fields: std.StringHashMapUnmanaged(u16),
                 decl: *Module.Decl,
             },
@@ -2039,9 +2153,9 @@ pub const Value = extern union {
         pub const Error = struct {
             base: Payload = .{ .tag = .@"error" },
             data: struct {
-                // TODO revisit this when we have the concept of the error tag type
                 /// `name` is owned by `Module` and will be valid for the entire
                 /// duration of the compilation.
+                /// TODO revisit this when we have the concept of the error tag type
                 name: []const u8,
                 value: u16,
             },

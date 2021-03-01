@@ -73,11 +73,11 @@ enum Os {
     OsOpenBSD,
     OsSolaris,
     OsWindows,
+    OsZOS,
     OsHaiku,
     OsMinix,
     OsRTEMS,
     OsNaCl,       // Native Client
-    OsCNK,        // BG/P Compute-Node Kernel
     OsAIX,
     OsCUDA,       // NVIDIA CUDA
     OsNVCL,       // NVIDIA OpenCL
@@ -178,6 +178,7 @@ struct ZigStage1 {
 
     bool pic;
     bool pie;
+    bool lto;
     bool link_libc;
     bool link_libcpp;
     bool strip;

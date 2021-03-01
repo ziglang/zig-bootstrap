@@ -858,6 +858,7 @@ pub fn DeleteFile(sub_path_w: []const u16, options: DeleteFileOptions) DeleteFil
         .SUCCESS => return CloseHandle(tmp_handle),
         .OBJECT_NAME_INVALID => unreachable,
         .OBJECT_NAME_NOT_FOUND => return error.FileNotFound,
+        .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
         .INVALID_PARAMETER => unreachable,
         .FILE_IS_A_DIRECTORY => return error.IsDir,
         .NOT_A_DIRECTORY => return error.NotDir,
@@ -1668,7 +1669,7 @@ pub fn wToPrefixedFileW(s: []const u16) !PathSpace {
     return path_space;
 }
 
-inline fn MAKELANGID(p: c_ushort, s: c_ushort) LANGID {
+fn MAKELANGID(p: c_ushort, s: c_ushort) callconv(.Inline) LANGID {
     return (s << 10) | p;
 }
 
