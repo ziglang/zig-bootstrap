@@ -67,6 +67,7 @@ elseif(("${ZIG_TARGET_TRIPLE}" STREQUAL "native") OR ZIG_PREFER_LLVM_CONFIG)
   find_program(LLVM_CONFIG_EXE
       NAMES llvm-config-12 llvm-config-12.0 llvm-config120 llvm-config12 llvm-config
       PATHS
+          "${CMAKE_SOURCE_DIR}/../out/host/bin"
           "/mingw64/bin"
           "/c/msys64/mingw64/bin"
           "c:/msys64/mingw64/bin"
