@@ -470,9 +470,9 @@ fn renderExpression(gpa: *Allocator, ais: *Ais, tree: ast.Tree, node: ast.Node.I
             return renderToken(ais, tree, rbracket, space); // ]
         },
 
-        .slice_open => return renderSlice(gpa, ais, tree, tree.sliceOpen(node), space),
-        .slice => return renderSlice(gpa, ais, tree, tree.slice(node), space),
-        .slice_sentinel => return renderSlice(gpa, ais, tree, tree.sliceSentinel(node), space),
+        .slice_open => return renderSlice(gpa, ais, tree, node, tree.sliceOpen(node), space),
+        .slice => return renderSlice(gpa, ais, tree, node, tree.slice(node), space),
+        .slice_sentinel => return renderSlice(gpa, ais, tree, node, tree.sliceSentinel(node), space),
 
         .deref => {
             try renderExpression(gpa, ais, tree, datas[node].lhs, .none);
@@ -815,6 +815,7 @@ fn renderSlice(
     gpa: *Allocator,
     ais: *Ais,
     tree: ast.Tree,
+    slice_node: ast.Node.Index,
     slice: ast.full.Slice,
     space: Space,
 ) Error!void {
@@ -822,7 +823,9 @@ fn renderSlice(
     const after_start_space_bool = nodeCausesSliceOpSpace(node_tags[slice.ast.start]) or
         if (slice.ast.end != 0) nodeCausesSliceOpSpace(node_tags[slice.ast.end]) else false;
     const after_start_space = if (after_start_space_bool) Space.space else Space.none;
-    const after_dots_space = if (slice.ast.end != 0) after_start_space else Space.none;
+    const after_dots_space = if (slice.ast.end != 0)
+        after_start_space
+    else if (slice.ast.sentinel != 0) Space.space else Space.none;
 
     try renderExpression(gpa, ais, tree, slice.ast.sliced, .none);
     try renderToken(ais, tree, slice.ast.lbracket, .none); // lbracket
@@ -830,20 +833,18 @@ fn renderSlice(
     const start_last = tree.lastToken(slice.ast.start);
     try renderExpression(gpa, ais, tree, slice.ast.start, after_start_space);
     try renderToken(ais, tree, start_last + 1, after_dots_space); // ellipsis2 ("..")
-    if (slice.ast.end == 0) {
-        return renderToken(ais, tree, start_last + 2, space); // rbracket
+
+    if (slice.ast.end != 0) {
+        const after_end_space = if (slice.ast.sentinel != 0) Space.space else Space.none;
+        try renderExpression(gpa, ais, tree, slice.ast.end, after_end_space);
     }
 
-    const end_last = tree.lastToken(slice.ast.end);
-    const after_end_space = if (slice.ast.sentinel != 0) Space.space else Space.none;
-    try renderExpression(gpa, ais, tree, slice.ast.end, after_end_space);
-    if (slice.ast.sentinel == 0) {
-        return renderToken(ais, tree, end_last + 1, space); // rbracket
+    if (slice.ast.sentinel != 0) {
+        try renderToken(ais, tree, tree.firstToken(slice.ast.sentinel) - 1, .none); // colon
+        try renderExpression(gpa, ais, tree, slice.ast.sentinel, .none);
     }
 
-    try renderToken(ais, tree, end_last + 1, .none); // colon
-    try renderExpression(gpa, ais, tree, slice.ast.sentinel, .none);
-    try renderToken(ais, tree, tree.lastToken(slice.ast.sentinel) + 1, space); // rbracket
+    try renderToken(ais, tree, tree.lastToken(slice_node), space); // rbracket
 }
 
 fn renderAsmOutput(
@@ -2352,18 +2353,24 @@ fn renderComments(ais: *Ais, tree: ast.Tree, start: usize, end: usize) Error!boo
             }
         }
 
-        try ais.writer().print("{s}\n", .{trimmed_comment});
-        index = 1 + (newline orelse return true);
+        index = 1 + (newline orelse end - 1);
 
-        if (ais.disabled_offset) |disabled_offset| {
-            if (mem.eql(u8, trimmed_comment, "// zig fmt: on")) {
-                // write the source for which formatting was disabled directly
-                // to the underlying writer, fixing up invaild whitespace
-                try writeFixingWhitespace(ais.underlying_writer, tree.source[disabled_offset..index]);
-                ais.disabled_offset = null;
-            }
-        } else if (mem.eql(u8, trimmed_comment, "// zig fmt: off")) {
+        const comment_content = mem.trimLeft(u8, trimmed_comment["//".len..], &std.ascii.spaces);
+        if (ais.disabled_offset != null and mem.eql(u8, comment_content, "zig fmt: on")) {
+            // Write the source for which formatting was disabled directly
+            // to the underlying writer, fixing up invaild whitespace.
+            const disabled_source = tree.source[ais.disabled_offset.?..comment_start];
+            try writeFixingWhitespace(ais.underlying_writer, disabled_source);
+            ais.disabled_offset = null;
+            // Write with the canonical single space.
+            try ais.writer().writeAll("// zig fmt: on\n");
+        } else if (ais.disabled_offset == null and mem.eql(u8, comment_content, "zig fmt: off")) {
+            // Write with the canonical single space.
+            try ais.writer().writeAll("// zig fmt: off\n");
             ais.disabled_offset = index;
+        } else {
+            // Write the comment minus trailing whitespace.
+            try ais.writer().print("{s}\n", .{trimmed_comment});
         }
     }
 

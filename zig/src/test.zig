@@ -868,10 +868,10 @@ pub const TestContext = struct {
                                 std.testing.zig_exe_path,
                                 "run",
                                 "-cflags",
-                                "-std=c89",
+                                "-std=c99",
                                 "-pedantic",
                                 "-Werror",
-                                "-Wno-declaration-after-statement",
+                                "-Wno-incompatible-library-redeclaration", // https://github.com/ziglang/zig/issues/875
                                 "--",
                                 "-lc",
                                 exe_path,
@@ -1030,8 +1030,8 @@ pub const TestContext = struct {
             var file = try tmp_dir.openFile(bin_name, .{ .read = true });
             defer file.close();
 
-            const header = try std.elf.readHeader(file);
-            var iterator = header.program_header_iterator(file);
+            const header = try std.elf.Header.read(&file);
+            var iterator = header.program_header_iterator(&file);
 
             var none_loaded = true;
 

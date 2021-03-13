@@ -91,8 +91,10 @@ pub fn analyzeInst(mod: *Module, scope: *Scope, old_inst: *zir.Inst) InnerError!
         .@"fn" => return zirFn(mod, scope, old_inst.castTag(.@"fn").?),
         .@"export" => return zirExport(mod, scope, old_inst.castTag(.@"export").?),
         .primitive => return zirPrimitive(mod, scope, old_inst.castTag(.primitive).?),
-        .fn_type => return zirFnType(mod, scope, old_inst.castTag(.fn_type).?),
-        .fn_type_cc => return zirFnTypeCc(mod, scope, old_inst.castTag(.fn_type_cc).?),
+        .fn_type => return zirFnType(mod, scope, old_inst.castTag(.fn_type).?, false),
+        .fn_type_cc => return zirFnTypeCc(mod, scope, old_inst.castTag(.fn_type_cc).?, false),
+        .fn_type_var_args => return zirFnType(mod, scope, old_inst.castTag(.fn_type_var_args).?, true),
+        .fn_type_cc_var_args => return zirFnTypeCc(mod, scope, old_inst.castTag(.fn_type_cc_var_args).?, true),
         .intcast => return zirIntcast(mod, scope, old_inst.castTag(.intcast).?),
         .bitcast => return zirBitcast(mod, scope, old_inst.castTag(.bitcast).?),
         .floatcast => return zirFloatcast(mod, scope, old_inst.castTag(.floatcast).?),
@@ -131,6 +133,7 @@ pub fn analyzeInst(mod: *Module, scope: *Scope, old_inst: *zir.Inst) InnerError!
         .typeof => return zirTypeof(mod, scope, old_inst.castTag(.typeof).?),
         .typeof_peer => return zirTypeofPeer(mod, scope, old_inst.castTag(.typeof_peer).?),
         .optional_type => return zirOptionalType(mod, scope, old_inst.castTag(.optional_type).?),
+        .optional_type_from_ptr_elem => return zirOptionalTypeFromPtrElem(mod, scope, old_inst.castTag(.optional_type_from_ptr_elem).?),
         .optional_payload_safe => return zirOptionalPayload(mod, scope, old_inst.castTag(.optional_payload_safe).?, true),
         .optional_payload_unsafe => return zirOptionalPayload(mod, scope, old_inst.castTag(.optional_payload_unsafe).?, false),
         .optional_payload_safe_ptr => return zirOptionalPayloadPtr(mod, scope, old_inst.castTag(.optional_payload_safe_ptr).?, true),
@@ -159,6 +162,11 @@ pub fn analyzeInst(mod: *Module, scope: *Scope, old_inst: *zir.Inst) InnerError!
         .switchbr => return zirSwitchBr(mod, scope, old_inst.castTag(.switchbr).?, false),
         .switchbr_ref => return zirSwitchBr(mod, scope, old_inst.castTag(.switchbr_ref).?, true),
         .switch_range => return zirSwitchRange(mod, scope, old_inst.castTag(.switch_range).?),
+        .@"await" => return zirAwait(mod, scope, old_inst.castTag(.@"await").?),
+        .nosuspend_await => return zirAwait(mod, scope, old_inst.castTag(.nosuspend_await).?),
+        .@"resume" => return zirResume(mod, scope, old_inst.castTag(.@"resume").?),
+        .@"suspend" => return zirSuspend(mod, scope, old_inst.castTag(.@"suspend").?),
+        .suspend_block => return zirSuspendBlock(mod, scope, old_inst.castTag(.suspend_block).?),
 
         .container_field_named,
         .container_field_typed,
@@ -516,9 +524,11 @@ fn zirParamType(mod: *Module, scope: *Scope, inst: *zir.Inst.ParamType) InnerErr
         },
     };
 
-    // TODO support C-style var args
     const param_count = fn_ty.fnParamLen();
     if (arg_index >= param_count) {
+        if (fn_ty.fnIsVarArgs()) {
+            return mod.constType(scope, inst.base.src, Type.initTag(.var_args_param));
+        }
         return mod.fail(scope, inst.base.src, "arg index {d} out of bounds; '{}' has {d} argument(s)", .{
             arg_index,
             fn_ty,
@@ -940,6 +950,7 @@ fn zirCall(mod: *Module, scope: *Scope, inst: *zir.Inst.Call) InnerError!*Inst {
     const call_params_len = inst.positionals.args.len;
     const fn_params_len = func.ty.fnParamLen();
     if (func.ty.fnIsVarArgs()) {
+        assert(cc == .C);
         if (call_params_len < fn_params_len) {
             // TODO add error note: declared here
             return mod.fail(
@@ -949,7 +960,6 @@ fn zirCall(mod: *Module, scope: *Scope, inst: *zir.Inst.Call) InnerError!*Inst {
                 .{ fn_params_len, call_params_len },
             );
         }
-        return mod.fail(scope, inst.base.src, "TODO implement support for calling var args functions", .{});
     } else if (fn_params_len != call_params_len) {
         // TODO add error note: declared here
         return mod.fail(
@@ -968,15 +978,10 @@ fn zirCall(mod: *Module, scope: *Scope, inst: *zir.Inst.Call) InnerError!*Inst {
     }
 
     // TODO handle function calls of generic functions
-
-    const fn_param_types = try mod.gpa.alloc(Type, fn_params_len);
-    defer mod.gpa.free(fn_param_types);
-    func.ty.fnParamTypes(fn_param_types);
-
-    const casted_args = try scope.arena().alloc(*Inst, fn_params_len);
+    const casted_args = try scope.arena().alloc(*Inst, call_params_len);
     for (inst.positionals.args) |src_arg, i| {
-        const uncasted_arg = try resolveInst(mod, scope, src_arg);
-        casted_args[i] = try mod.coerce(scope, fn_param_types[i], uncasted_arg);
+        // the args are already casted to the result of a param type instruction.
+        casted_args[i] = try resolveInst(mod, scope, src_arg);
     }
 
     const ret_type = func.ty.fnReturnType();
@@ -1079,6 +1084,22 @@ fn zirFn(mod: *Module, scope: *Scope, fn_inst: *zir.Inst.Fn) InnerError!*Inst {
     });
 }
 
+fn zirAwait(mod: *Module, scope: *Scope, inst: *zir.Inst.UnOp) InnerError!*Inst {
+    return mod.fail(scope, inst.base.src, "TODO implement await", .{});
+}
+
+fn zirResume(mod: *Module, scope: *Scope, inst: *zir.Inst.UnOp) InnerError!*Inst {
+    return mod.fail(scope, inst.base.src, "TODO implement resume", .{});
+}
+
+fn zirSuspend(mod: *Module, scope: *Scope, inst: *zir.Inst.NoOp) InnerError!*Inst {
+    return mod.fail(scope, inst.base.src, "TODO implement suspend", .{});
+}
+
+fn zirSuspendBlock(mod: *Module, scope: *Scope, inst: *zir.Inst.Block) InnerError!*Inst {
+    return mod.fail(scope, inst.base.src, "TODO implement suspend", .{});
+}
+
 fn zirIntType(mod: *Module, scope: *Scope, inttype: *zir.Inst.IntType) InnerError!*Inst {
     const tracy = trace(@src());
     defer tracy.end();
@@ -1091,6 +1112,16 @@ fn zirOptionalType(mod: *Module, scope: *Scope, optional: *zir.Inst.UnOp) InnerE
     const child_type = try resolveType(mod, scope, optional.positionals.operand);
 
     return mod.constType(scope, optional.base.src, try mod.optionalType(scope, child_type));
+}
+
+fn zirOptionalTypeFromPtrElem(mod: *Module, scope: *Scope, inst: *zir.Inst.UnOp) InnerError!*Inst {
+    const tracy = trace(@src());
+    defer tracy.end();
+
+    const ptr = try resolveInst(mod, scope, inst.positionals.operand);
+    const elem_ty = ptr.ty.elemType();
+
+    return mod.constType(scope, inst.base.src, try mod.optionalType(scope, elem_ty));
 }
 
 fn zirArrayType(mod: *Module, scope: *Scope, array: *zir.Inst.BinOp) InnerError!*Inst {
@@ -1154,7 +1185,7 @@ fn zirErrorSet(mod: *Module, scope: *Scope, inst: *zir.Inst.ErrorSet) InnerError
 
     for (inst.positionals.fields) |field_name| {
         const entry = try mod.getErrorValue(field_name);
-        if (payload.data.fields.fetchPutAssumeCapacity(entry.key, entry.value)) |prev| {
+        if (payload.data.fields.fetchPutAssumeCapacity(entry.key, {})) |_| {
             return mod.fail(scope, inst.base.src, "duplicate error: '{s}'", .{field_name});
         }
     }
@@ -1185,7 +1216,79 @@ fn zirErrorValue(mod: *Module, scope: *Scope, inst: *zir.Inst.ErrorValue) InnerE
 fn zirMergeErrorSets(mod: *Module, scope: *Scope, inst: *zir.Inst.BinOp) InnerError!*Inst {
     const tracy = trace(@src());
     defer tracy.end();
-    return mod.fail(scope, inst.base.src, "TODO implement merge_error_sets", .{});
+
+    const rhs_ty = try resolveType(mod, scope, inst.positionals.rhs);
+    const lhs_ty = try resolveType(mod, scope, inst.positionals.lhs);
+    if (rhs_ty.zigTypeTag() != .ErrorSet)
+        return mod.fail(scope, inst.positionals.rhs.src, "expected error set type, found {}", .{rhs_ty});
+    if (lhs_ty.zigTypeTag() != .ErrorSet)
+        return mod.fail(scope, inst.positionals.lhs.src, "expected error set type, found {}", .{lhs_ty});
+
+    // anything merged with anyerror is anyerror
+    if (lhs_ty.tag() == .anyerror or rhs_ty.tag() == .anyerror)
+        return mod.constInst(scope, inst.base.src, .{
+            .ty = Type.initTag(.type),
+            .val = Value.initTag(.anyerror_type),
+        });
+    // The declarations arena will store the hashmap.
+    var new_decl_arena = std.heap.ArenaAllocator.init(mod.gpa);
+    errdefer new_decl_arena.deinit();
+
+    const payload = try new_decl_arena.allocator.create(Value.Payload.ErrorSet);
+    payload.* = .{
+        .base = .{ .tag = .error_set },
+        .data = .{
+            .fields = .{},
+            .decl = undefined, // populated below
+        },
+    };
+    try payload.data.fields.ensureCapacity(&new_decl_arena.allocator, @intCast(u32, switch (rhs_ty.tag()) {
+        .error_set_single => 1,
+        .error_set => rhs_ty.castTag(.error_set).?.data.typed_value.most_recent.typed_value.val.castTag(.error_set).?.data.fields.size,
+        else => unreachable,
+    } + switch (lhs_ty.tag()) {
+        .error_set_single => 1,
+        .error_set => lhs_ty.castTag(.error_set).?.data.typed_value.most_recent.typed_value.val.castTag(.error_set).?.data.fields.size,
+        else => unreachable,
+    }));
+
+    switch (lhs_ty.tag()) {
+        .error_set_single => {
+            const name = lhs_ty.castTag(.error_set_single).?.data;
+            payload.data.fields.putAssumeCapacity(name, {});
+        },
+        .error_set => {
+            var multiple = lhs_ty.castTag(.error_set).?.data.typed_value.most_recent.typed_value.val.castTag(.error_set).?.data.fields;
+            var it = multiple.iterator();
+            while (it.next()) |entry| {
+                payload.data.fields.putAssumeCapacity(entry.key, entry.value);
+            }
+        },
+        else => unreachable,
+    }
+
+    switch (rhs_ty.tag()) {
+        .error_set_single => {
+            const name = rhs_ty.castTag(.error_set_single).?.data;
+            payload.data.fields.putAssumeCapacity(name, {});
+        },
+        .error_set => {
+            var multiple = rhs_ty.castTag(.error_set).?.data.typed_value.most_recent.typed_value.val.castTag(.error_set).?.data.fields;
+            var it = multiple.iterator();
+            while (it.next()) |entry| {
+                payload.data.fields.putAssumeCapacity(entry.key, entry.value);
+            }
+        },
+        else => unreachable,
+    }
+    // TODO create name in format "error:line:column"
+    const new_decl = try mod.createAnonymousDecl(scope, &new_decl_arena, .{
+        .ty = Type.initTag(.type),
+        .val = Value.initPayload(&payload.base),
+    });
+    payload.data.decl = new_decl;
+
+    return mod.analyzeDeclVal(scope, inst.base.src, new_decl);
 }
 
 fn zirEnumLiteral(mod: *Module, scope: *Scope, inst: *zir.Inst.EnumLiteral) InnerError!*Inst {
@@ -1399,7 +1502,7 @@ fn zirEnsureErrPayloadVoid(mod: *Module, scope: *Scope, unwrap: *zir.Inst.UnOp) 
     return mod.constVoid(scope, unwrap.base.src);
 }
 
-fn zirFnType(mod: *Module, scope: *Scope, fntype: *zir.Inst.FnType) InnerError!*Inst {
+fn zirFnType(mod: *Module, scope: *Scope, fntype: *zir.Inst.FnType, var_args: bool) InnerError!*Inst {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -1410,10 +1513,11 @@ fn zirFnType(mod: *Module, scope: *Scope, fntype: *zir.Inst.FnType) InnerError!*
         fntype.positionals.param_types,
         fntype.positionals.return_type,
         .Unspecified,
+        var_args,
     );
 }
 
-fn zirFnTypeCc(mod: *Module, scope: *Scope, fntype: *zir.Inst.FnTypeCc) InnerError!*Inst {
+fn zirFnTypeCc(mod: *Module, scope: *Scope, fntype: *zir.Inst.FnTypeCc, var_args: bool) InnerError!*Inst {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -1430,6 +1534,7 @@ fn zirFnTypeCc(mod: *Module, scope: *Scope, fntype: *zir.Inst.FnTypeCc) InnerErr
         fntype.positionals.param_types,
         fntype.positionals.return_type,
         cc,
+        var_args,
     );
 }
 
@@ -1440,11 +1545,12 @@ fn fnTypeCommon(
     zir_param_types: []*zir.Inst,
     zir_return_type: *zir.Inst,
     cc: std.builtin.CallingConvention,
+    var_args: bool,
 ) InnerError!*Inst {
     const return_type = try resolveType(mod, scope, zir_return_type);
 
     // Hot path for some common function types.
-    if (zir_param_types.len == 0) {
+    if (zir_param_types.len == 0 and !var_args) {
         if (return_type.zigTypeTag() == .NoReturn and cc == .Unspecified) {
             return mod.constType(scope, zir_inst.src, Type.initTag(.fn_noreturn_no_args));
         }
@@ -1477,6 +1583,7 @@ fn fnTypeCommon(
         .param_types = param_types,
         .return_type = return_type,
         .cc = cc,
+        .is_var_args = var_args,
     });
     return mod.constType(scope, zir_inst.src, fn_ty);
 }
@@ -1963,7 +2070,7 @@ fn zirBitwise(mod: *Module, scope: *Scope, inst: *zir.Inst.BinOp) InnerError!*In
                 rhs.ty.arrayLen(),
             });
         }
-        return mod.fail(scope, inst.base.src, "TODO implement support for vectors in analyzeInstBitwise", .{});
+        return mod.fail(scope, inst.base.src, "TODO implement support for vectors in zirBitwise", .{});
     } else if (lhs.ty.zigTypeTag() == .Vector or rhs.ty.zigTypeTag() == .Vector) {
         return mod.fail(scope, inst.base.src, "mixed scalar and vector operands to binary expression: '{}' and '{}'", .{
             lhs.ty,
@@ -2044,7 +2151,7 @@ fn zirArithmetic(mod: *Module, scope: *Scope, inst: *zir.Inst.BinOp) InnerError!
                 rhs.ty.arrayLen(),
             });
         }
-        return mod.fail(scope, inst.base.src, "TODO implement support for vectors in analyzeInstBinOp", .{});
+        return mod.fail(scope, inst.base.src, "TODO implement support for vectors in zirBinOp", .{});
     } else if (lhs.ty.zigTypeTag() == .Vector or rhs.ty.zigTypeTag() == .Vector) {
         return mod.fail(scope, inst.base.src, "mixed scalar and vector operands to binary expression: '{}' and '{}'", .{
             lhs.ty,
@@ -2072,9 +2179,13 @@ fn zirArithmetic(mod: *Module, scope: *Scope, inst: *zir.Inst.BinOp) InnerError!
     }
 
     const b = try mod.requireRuntimeBlock(scope, inst.base.src);
-    const ir_tag = switch (inst.base.tag) {
-        .add => Inst.Tag.add,
-        .sub => Inst.Tag.sub,
+    const ir_tag: Inst.Tag = switch (inst.base.tag) {
+        .add => .add,
+        .addwrap => .addwrap,
+        .sub => .sub,
+        .subwrap => .subwrap,
+        .mul => .mul,
+        .mulwrap => .mulwrap,
         else => return mod.fail(scope, inst.base.src, "TODO implement arithmetic for operand '{s}''", .{@tagName(inst.base.tag)}),
     };
 
@@ -2218,7 +2329,8 @@ fn zirCmp(
                 return mod.constBool(scope, inst.base.src, std.mem.eql(u8, lval.castTag(.@"error").?.data.name, rval.castTag(.@"error").?.data.name) == (op == .eq));
             }
         }
-        return mod.fail(scope, inst.base.src, "TODO implement equality comparison between runtime errors", .{});
+        const b = try mod.requireRuntimeBlock(scope, inst.base.src);
+        return mod.addBinOp(b, inst.base.src, Type.initTag(.bool), if (op == .eq) .cmp_eq else .cmp_neq, lhs, rhs);
     } else if (lhs.ty.isNumeric() and rhs.ty.isNumeric()) {
         // This operation allows any combination of integer and float types, regardless of the
         // signed-ness, comptime-ness, and bit-width. So peer type resolution is incorrect for

@@ -453,13 +453,23 @@ pub fn expr(mod: *Module, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) In
             return rvalue(mod, scope, rl, result);
         },
         .unwrap_optional => {
-            const operand = try expr(mod, scope, rl, node_datas[node].lhs);
-            const op: zir.Inst.Tag = switch (rl) {
-                .ref => .optional_payload_safe_ptr,
-                else => .optional_payload_safe,
-            };
             const src = token_starts[main_tokens[node]];
-            return addZIRUnOp(mod, scope, src, op, operand);
+            switch (rl) {
+                .ref => return addZIRUnOp(
+                    mod,
+                    scope,
+                    src,
+                    .optional_payload_safe_ptr,
+                    try expr(mod, scope, .ref, node_datas[node].lhs),
+                ),
+                else => return rvalue(mod, scope, rl, try addZIRUnOp(
+                    mod,
+                    scope,
+                    src,
+                    .optional_payload_safe,
+                    try expr(mod, scope, .none, node_datas[node].lhs),
+                )),
+            }
         },
         .block_two, .block_two_semicolon => {
             const statements = [2]ast.Node.Index{ node_datas[node].lhs, node_datas[node].rhs };
@@ -616,10 +626,13 @@ pub fn expr(mod: *Module, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) In
         .@"comptime" => return comptimeExpr(mod, scope, rl, node_datas[node].lhs),
         .@"switch", .switch_comma => return switchExpr(mod, scope, rl, node),
 
+        .@"nosuspend" => return nosuspendExpr(mod, scope, rl, node),
+        .@"suspend" => return rvalue(mod, scope, rl, try suspendExpr(mod, scope, node)),
+        .@"await" => return awaitExpr(mod, scope, rl, node),
+        .@"resume" => return rvalue(mod, scope, rl, try resumeExpr(mod, scope, node)),
+
         .@"defer" => return mod.failNode(scope, node, "TODO implement astgen.expr for .defer", .{}),
         .@"errdefer" => return mod.failNode(scope, node, "TODO implement astgen.expr for .errdefer", .{}),
-        .@"await" => return mod.failNode(scope, node, "TODO implement astgen.expr for .await", .{}),
-        .@"resume" => return mod.failNode(scope, node, "TODO implement astgen.expr for .resume", .{}),
         .@"try" => return mod.failNode(scope, node, "TODO implement astgen.expr for .Try", .{}),
 
         .array_init_one,
@@ -642,15 +655,12 @@ pub fn expr(mod: *Module, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) In
         .struct_init_comma,
         => return mod.failNode(scope, node, "TODO implement astgen.expr for struct literals", .{}),
 
-        .@"suspend" => return mod.failNode(scope, node, "TODO implement astgen.expr for .suspend", .{}),
         .@"anytype" => return mod.failNode(scope, node, "TODO implement astgen.expr for .anytype", .{}),
         .fn_proto_simple,
         .fn_proto_multi,
         .fn_proto_one,
         .fn_proto,
         => return mod.failNode(scope, node, "TODO implement astgen.expr for function prototypes", .{}),
-
-        .@"nosuspend" => return mod.failNode(scope, node, "TODO implement astgen.expr for .nosuspend", .{}),
     }
 }
 
@@ -756,6 +766,8 @@ fn breakExpr(
             },
             .local_val => scope = scope.cast(Scope.LocalVal).?.parent,
             .local_ptr => scope = scope.cast(Scope.LocalPtr).?.parent,
+            .gen_suspend => scope = scope.cast(Scope.GenZIR).?.parent,
+            .gen_nosuspend => scope = scope.cast(Scope.Nosuspend).?.parent,
             else => if (break_label != 0) {
                 const label_name = try mod.identifierTokenString(parent_scope, break_label);
                 return mod.failTok(parent_scope, break_label, "label not found: '{s}'", .{label_name});
@@ -809,6 +821,8 @@ fn continueExpr(
             },
             .local_val => scope = scope.cast(Scope.LocalVal).?.parent,
             .local_ptr => scope = scope.cast(Scope.LocalPtr).?.parent,
+            .gen_suspend => scope = scope.cast(Scope.GenZIR).?.parent,
+            .gen_nosuspend => scope = scope.cast(Scope.Nosuspend).?.parent,
             else => if (break_label != 0) {
                 const label_name = try mod.identifierTokenString(parent_scope, break_label);
                 return mod.failTok(parent_scope, break_label, "label not found: '{s}'", .{label_name});
@@ -834,7 +848,9 @@ pub fn blockExpr(
     const token_tags = tree.tokens.items(.tag);
 
     const lbrace = main_tokens[block_node];
-    if (token_tags[lbrace - 1] == .colon) {
+    if (token_tags[lbrace - 1] == .colon and
+        token_tags[lbrace - 2] == .identifier)
+    {
         return labeledBlockExpr(mod, scope, rl, block_node, statements, .block);
     }
 
@@ -883,6 +899,8 @@ fn checkLabelRedefinition(mod: *Module, parent_scope: *Scope, label: ast.TokenIn
             },
             .local_val => scope = scope.cast(Scope.LocalVal).?.parent,
             .local_ptr => scope = scope.cast(Scope.LocalPtr).?.parent,
+            .gen_suspend => scope = scope.cast(Scope.GenZIR).?.parent,
+            .gen_nosuspend => scope = scope.cast(Scope.Nosuspend).?.parent,
             else => return,
         }
     }
@@ -1090,6 +1108,8 @@ fn varDecl(
                 s = local_ptr.parent;
             },
             .gen_zir => s = s.cast(Scope.GenZIR).?.parent,
+            .gen_suspend => s = s.cast(Scope.GenZIR).?.parent,
+            .gen_nosuspend => s = s.cast(Scope.Nosuspend).?.parent,
             else => break,
         };
     }
@@ -1645,7 +1665,7 @@ fn errorSetDecl(
             switch (token_tags[tok_i]) {
                 .doc_comment, .comma => {},
                 .identifier => count += 1,
-                .r_paren => break :count count,
+                .r_brace => break :count count,
                 else => unreachable,
             }
         } else unreachable; // TODO should not need else unreachable here
@@ -1662,7 +1682,7 @@ fn errorSetDecl(
                     fields[field_i] = try mod.identifierTokenString(scope, tok_i);
                     field_i += 1;
                 },
-                .r_paren => break,
+                .r_brace => break,
                 else => unreachable,
             }
         }
@@ -1699,9 +1719,13 @@ fn orelseCatchExpr(
     setBlockResultLoc(&block_scope, rl);
     defer block_scope.instructions.deinit(mod.gpa);
 
-    // This could be a pointer or value depending on the `rl` parameter.
+    // This could be a pointer or value depending on the `operand_rl` parameter.
+    // We cannot use `block_scope.break_result_loc` because that has the bare
+    // type, whereas this expression has the optional type. Later we make
+    // up for this fact by calling rvalue on the else branch.
     block_scope.break_count += 1;
-    const operand = try expr(mod, &block_scope.base, block_scope.break_result_loc, lhs);
+    const operand_rl = try makeOptionalTypeResultLoc(mod, &block_scope.base, src, block_scope.break_result_loc);
+    const operand = try expr(mod, &block_scope.base, operand_rl, lhs);
     const cond = try addZIRUnOp(mod, &block_scope.base, src, cond_op, operand);
 
     const condbr = try addZIRInstSpecial(mod, &block_scope.base, src, zir.Inst.CondBr, .{
@@ -1753,6 +1777,10 @@ fn orelseCatchExpr(
 
     // This could be a pointer or value depending on `unwrap_op`.
     const unwrapped_payload = try addZIRUnOp(mod, &else_scope.base, src, unwrap_op, operand);
+    const else_result = switch (rl) {
+        .ref => unwrapped_payload,
+        else => try rvalue(mod, &else_scope.base, block_scope.break_result_loc, unwrapped_payload),
+    };
 
     return finishThenElseBlock(
         mod,
@@ -1766,7 +1794,7 @@ fn orelseCatchExpr(
         src,
         src,
         then_result,
-        unwrapped_payload,
+        else_result,
         block,
         block,
     );
@@ -3003,6 +3031,8 @@ fn identifier(
                 s = local_ptr.parent;
             },
             .gen_zir => s = s.cast(Scope.GenZIR).?.parent,
+            .gen_suspend => s = s.cast(Scope.GenZIR).?.parent,
+            .gen_nosuspend => s = s.cast(Scope.Nosuspend).?.parent,
             else => break,
         };
     }
@@ -3615,12 +3645,107 @@ fn callExpr(
     }
 
     const src = token_starts[call.ast.lparen];
+    var modifier: std.builtin.CallOptions.Modifier = .auto;
+    if (call.async_token) |_| modifier = .async_kw;
+
     const result = try addZIRInst(mod, scope, src, zir.Inst.Call, .{
         .func = lhs,
         .args = args,
+        .modifier = modifier,
     }, .{});
     // TODO function call with result location
     return rvalue(mod, scope, rl, result);
+}
+
+fn suspendExpr(mod: *Module, scope: *Scope, node: ast.Node.Index) InnerError!*zir.Inst {
+    const tree = scope.tree();
+    const src = tree.tokens.items(.start)[tree.nodes.items(.main_token)[node]];
+
+    if (scope.getNosuspend()) |some| {
+        const msg = msg: {
+            const msg = try mod.errMsg(scope, src, "suspend in nosuspend block", .{});
+            errdefer msg.destroy(mod.gpa);
+            try mod.errNote(scope, some.src, msg, "nosuspend block here", .{});
+            break :msg msg;
+        };
+        return mod.failWithOwnedErrorMsg(scope, msg);
+    }
+
+    if (scope.getSuspend()) |some| {
+        const msg = msg: {
+            const msg = try mod.errMsg(scope, src, "cannot suspend inside suspend block", .{});
+            errdefer msg.destroy(mod.gpa);
+            try mod.errNote(scope, some.src, msg, "other suspend block here", .{});
+            break :msg msg;
+        };
+        return mod.failWithOwnedErrorMsg(scope, msg);
+    }
+
+    var suspend_scope: Scope.GenZIR = .{
+        .base = .{ .tag = .gen_suspend },
+        .parent = scope,
+        .decl = scope.ownerDecl().?,
+        .arena = scope.arena(),
+        .force_comptime = scope.isComptime(),
+        .instructions = .{},
+    };
+    defer suspend_scope.instructions.deinit(mod.gpa);
+
+    const operand = tree.nodes.items(.data)[node].lhs;
+    if (operand != 0) {
+        const possibly_unused_result = try expr(mod, &suspend_scope.base, .none, operand);
+        if (!possibly_unused_result.tag.isNoReturn()) {
+            _ = try addZIRUnOp(mod, &suspend_scope.base, src, .ensure_result_used, possibly_unused_result);
+        }
+    } else {
+        return addZIRNoOp(mod, scope, src, .@"suspend");
+    }
+
+    const block = try addZIRInstBlock(mod, scope, src, .suspend_block, .{
+        .instructions = try scope.arena().dupe(*zir.Inst, suspend_scope.instructions.items),
+    });
+    return &block.base;
+}
+
+fn nosuspendExpr(mod: *Module, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerError!*zir.Inst {
+    const tree = scope.tree();
+    var child_scope = Scope.Nosuspend{
+        .parent = scope,
+        .gen_zir = scope.getGenZIR(),
+        .src = tree.tokens.items(.start)[tree.nodes.items(.main_token)[node]],
+    };
+
+    return expr(mod, &child_scope.base, rl, tree.nodes.items(.data)[node].lhs);
+}
+
+fn awaitExpr(mod: *Module, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerError!*zir.Inst {
+    const tree = scope.tree();
+    const src = tree.tokens.items(.start)[tree.nodes.items(.main_token)[node]];
+    const is_nosuspend = scope.getNosuspend() != null;
+
+    // TODO some @asyncCall stuff
+
+    if (scope.getSuspend()) |some| {
+        const msg = msg: {
+            const msg = try mod.errMsg(scope, src, "cannot await inside suspend block", .{});
+            errdefer msg.destroy(mod.gpa);
+            try mod.errNote(scope, some.src, msg, "suspend block here", .{});
+            break :msg msg;
+        };
+        return mod.failWithOwnedErrorMsg(scope, msg);
+    }
+
+    const operand = try expr(mod, scope, .ref, tree.nodes.items(.data)[node].lhs);
+    // TODO pass result location
+    return addZIRUnOp(mod, scope, src, if (is_nosuspend) .nosuspend_await else .@"await", operand);
+}
+
+fn resumeExpr(mod: *Module, scope: *Scope, node: ast.Node.Index) InnerError!*zir.Inst {
+    const tree = scope.tree();
+    const src = tree.tokens.items(.start)[tree.nodes.items(.main_token)[node]];
+
+    const operand = try expr(mod, scope, .ref, tree.nodes.items(.data)[node].lhs);
+    return addZIRUnOp(mod, scope, src, .@"resume", operand);
 }
 
 pub const simple_types = std.ComptimeStringMap(Value.Tag, .{
@@ -3951,6 +4076,25 @@ fn rlStrategy(rl: ResultLoc, block_scope: *Scope.GenZIR) ResultLoc.Strategy {
                     .elide_store_to_block_ptr_instructions = false,
                 };
             }
+        },
+    }
+}
+
+/// If the input ResultLoc is ref, returns ResultLoc.ref. Otherwise:
+/// Returns ResultLoc.ty, where the type is determined by the input
+/// ResultLoc type, wrapped in an optional type. If the input ResultLoc
+/// has no type, .none is returned.
+fn makeOptionalTypeResultLoc(mod: *Module, scope: *Scope, src: usize, rl: ResultLoc) !ResultLoc {
+    switch (rl) {
+        .ref => return ResultLoc.ref,
+        .discard, .none, .block_ptr, .inferred_ptr, .bitcasted_ptr => return ResultLoc.none,
+        .ty => |elem_ty| {
+            const wrapped_ty = try addZIRUnOp(mod, scope, src, .optional_type, elem_ty);
+            return ResultLoc{ .ty = wrapped_ty };
+        },
+        .ptr => |ptr_ty| {
+            const wrapped_ty = try addZIRUnOp(mod, scope, src, .optional_type_from_ptr_elem, ptr_ty);
+            return ResultLoc{ .ty = wrapped_ty };
         },
     }
 }
