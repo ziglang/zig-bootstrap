@@ -2879,7 +2879,7 @@ pub fn bind(sock: socket_t, addr: *const sockaddr, len: socklen_t) BindError!voi
     unreachable;
 }
 
-const ListenError = error{
+pub const ListenError = error{
     /// Another socket is already listening on the same port.
     /// For Internet domain sockets, the  socket referred to by sockfd had not previously
     /// been bound to an address and, upon attempting to bind it to an ephemeral port, it
@@ -3254,6 +3254,9 @@ pub const ConnectError = error{
 
     /// Connection was reset by peer before connect could complete.
     ConnectionResetByPeer,
+
+    /// Socket is non-blocking and already has a pending connection in progress.
+    ConnectionPending,
 } || UnexpectedError;
 
 /// Initiate a connection on a socket.
@@ -3267,6 +3270,7 @@ pub fn connect(sock: socket_t, sock_addr: *const sockaddr, len: socklen_t) Conne
             .WSAEADDRINUSE => return error.AddressInUse,
             .WSAEADDRNOTAVAIL => return error.AddressNotAvailable,
             .WSAECONNREFUSED => return error.ConnectionRefused,
+            .WSAECONNRESET => return error.ConnectionResetByPeer,
             .WSAETIMEDOUT => return error.ConnectionTimedOut,
             .WSAEHOSTUNREACH, // TODO: should we return NetworkUnreachable in this case as well?
             .WSAENETUNREACH,
@@ -3293,9 +3297,10 @@ pub fn connect(sock: socket_t, sock_addr: *const sockaddr, len: socklen_t) Conne
             EADDRNOTAVAIL => return error.AddressNotAvailable,
             EAFNOSUPPORT => return error.AddressFamilyNotSupported,
             EAGAIN, EINPROGRESS => return error.WouldBlock,
-            EALREADY => unreachable, // The socket is nonblocking and a previous connection attempt has not yet been completed.
+            EALREADY => return error.ConnectionPending,
             EBADF => unreachable, // sockfd is not a valid open file descriptor.
             ECONNREFUSED => return error.ConnectionRefused,
+            ECONNRESET => return error.ConnectionResetByPeer,
             EFAULT => unreachable, // The socket structure address is outside the user's address space.
             EINTR => continue,
             EISCONN => unreachable, // The socket is already connected.
@@ -3323,7 +3328,7 @@ pub fn getsockoptError(sockfd: fd_t) ConnectError!void {
             EADDRNOTAVAIL => return error.AddressNotAvailable,
             EAFNOSUPPORT => return error.AddressFamilyNotSupported,
             EAGAIN => return error.SystemResources,
-            EALREADY => unreachable, // The socket is nonblocking and a previous connection attempt has not yet been completed.
+            EALREADY => return error.ConnectionPending,
             EBADF => unreachable, // sockfd is not a valid open file descriptor.
             ECONNREFUSED => return error.ConnectionRefused,
             EFAULT => unreachable, // The socket structure address is outside the user's address space.
@@ -5610,6 +5615,7 @@ pub fn recvfrom(
                 EAGAIN => return error.WouldBlock,
                 ENOMEM => return error.SystemResources,
                 ECONNREFUSED => return error.ConnectionRefused,
+                ECONNRESET => return error.ConnectionResetByPeer,
                 else => |err| return unexpectedErrno(err),
             }
         }
@@ -5827,7 +5833,7 @@ pub fn tcsetattr(handle: fd_t, optional_action: TCSA, termios_p: termios) Termio
     }
 }
 
-const IoCtl_SIOCGIFINDEX_Error = error{
+pub const IoCtl_SIOCGIFINDEX_Error = error{
     FileSystem,
     InterfaceNotFound,
 } || UnexpectedError;

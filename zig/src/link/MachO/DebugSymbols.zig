@@ -839,8 +839,8 @@ fn findFreeSpaceLinkedit(self: *DebugSymbols, object_size: u64, min_alignment: u
 
 fn relocateSymbolTable(self: *DebugSymbols) !void {
     const symtab = &self.load_commands.items[self.symtab_cmd_index.?].Symtab;
-    const nlocals = self.base.local_symbols.items.len;
-    const nglobals = self.base.global_symbols.items.len;
+    const nlocals = self.base.locals.items.len;
+    const nglobals = self.base.globals.items.len;
     const nsyms = nlocals + nglobals;
 
     if (symtab.nsyms < nsyms) {
@@ -875,7 +875,7 @@ pub fn writeLocalSymbol(self: *DebugSymbols, index: usize) !void {
     const symtab = &self.load_commands.items[self.symtab_cmd_index.?].Symtab;
     const off = symtab.symoff + @sizeOf(macho.nlist_64) * index;
     log.debug("writing dSym local symbol {} at 0x{x}", .{ index, off });
-    try self.file.pwriteAll(mem.asBytes(&self.base.local_symbols.items[index]), off);
+    try self.file.pwriteAll(mem.asBytes(&self.base.locals.items[index]), off);
 }
 
 fn writeStringTable(self: *DebugSymbols) !void {
@@ -909,10 +909,9 @@ pub fn updateDeclLineNumber(self: *DebugSymbols, module: *Module, decl: *const M
     const node_datas = tree.nodes.items(.data);
     const token_starts = tree.tokens.items(.start);
 
-    const file_ast_decls = tree.rootDecls();
     // TODO Look into improving the performance here by adding a token-index-to-line
     // lookup table. Currently this involves scanning over the source code for newlines.
-    const fn_decl = file_ast_decls[decl.src_index];
+    const fn_decl = decl.src_node;
     assert(node_tags[fn_decl] == .fn_decl);
     const block = node_datas[fn_decl].rhs;
     const lbrace = tree.firstToken(block);
@@ -959,10 +958,9 @@ pub fn initDeclDebugBuffers(
                 const node_datas = tree.nodes.items(.data);
                 const token_starts = tree.tokens.items(.start);
 
-                const file_ast_decls = tree.rootDecls();
                 // TODO Look into improving the performance here by adding a token-index-to-line
                 // lookup table. Currently this involves scanning over the source code for newlines.
-                const fn_decl = file_ast_decls[decl.src_index];
+                const fn_decl = decl.src_node;
                 assert(node_tags[fn_decl] == .fn_decl);
                 const block = node_datas[fn_decl].rhs;
                 const lbrace = tree.firstToken(block);
@@ -1057,7 +1055,7 @@ pub fn commitDeclDebugInfo(
     var dbg_info_buffer = &debug_buffers.dbg_info_buffer;
     var dbg_info_type_relocs = &debug_buffers.dbg_info_type_relocs;
 
-    const symbol = self.base.local_symbols.items[decl.link.macho.local_sym_index];
+    const symbol = self.base.locals.items[decl.link.macho.local_sym_index];
     const text_block = &decl.link.macho;
     // If the Decl is a function, we need to update the __debug_line program.
     const typed_value = decl.typed_value.most_recent.typed_value;

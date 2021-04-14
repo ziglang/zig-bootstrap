@@ -477,14 +477,14 @@ pub const list = list: {
             "@intCast",
             .{
                 .tag = .int_cast,
-                .param_count = 1,
+                .param_count = 2,
             },
         },
         .{
             "@intToEnum",
             .{
                 .tag = .int_to_enum,
-                .param_count = 1,
+                .param_count = 2,
             },
         },
         .{

@@ -40,6 +40,8 @@ pub const Node = extern union {
         string_literal,
         char_literal,
         enum_literal,
+        /// "string"[0..end]
+        string_slice,
         identifier,
         @"if",
         /// if (!operand) break;
@@ -64,6 +66,7 @@ pub const Node = extern union {
         @"enum",
         @"struct",
         @"union",
+        @"comptime",
         array_init,
         tuple,
         container_init,
@@ -152,6 +155,8 @@ pub const Node = extern union {
         div_exact,
         /// @byteOffsetOf(lhs, rhs)
         byte_offset_of,
+        /// @shuffle(type, a, b, mask)
+        shuffle,
 
         negate,
         negate_wrap,
@@ -170,15 +175,21 @@ pub const Node = extern union {
         sizeof,
         alignof,
         typeof,
+        typeinfo,
         type,
 
         optional_type,
         c_pointer,
         single_pointer,
         array_type,
+        null_sentinel_array_type,
 
         /// @import("std").meta.sizeof(operand)
         std_meta_sizeof,
+        /// @import("std").meta.shuffleVectorIndex(lhs, rhs)
+        std_meta_shuffle_vector_index,
+        /// @import("std").meta.Vector(lhs, rhs)
+        std_meta_vector,
         /// @import("std").mem.zeroes(operand)
         std_mem_zeroes,
         /// @import("std").mem.zeroInit(lhs, rhs)
@@ -230,6 +241,7 @@ pub const Node = extern union {
 
                 .std_mem_zeroes,
                 .@"return",
+                .@"comptime",
                 .discard,
                 .std_math_Log2Int,
                 .negate,
@@ -252,6 +264,7 @@ pub const Node = extern union {
                 .sizeof,
                 .alignof,
                 .typeof,
+                .typeinfo,
                 => Payload.UnOp,
 
                 .add,
@@ -305,6 +318,8 @@ pub const Node = extern union {
                 .align_cast,
                 .array_access,
                 .std_mem_zeroinit,
+                .std_meta_shuffle_vector_index,
+                .std_meta_vector,
                 .ptr_cast,
                 .div_exact,
                 .byte_offset_of,
@@ -334,7 +349,7 @@ pub const Node = extern union {
                 .std_meta_promoteIntLiteral => Payload.PromoteIntLiteral,
                 .block => Payload.Block,
                 .c_pointer, .single_pointer => Payload.Pointer,
-                .array_type => Payload.Array,
+                .array_type, .null_sentinel_array_type => Payload.Array,
                 .arg_redecl, .alias, .fail_decl => Payload.ArgRedecl,
                 .log2_int_type => Payload.Log2IntType,
                 .var_simple, .pub_var_simple => Payload.SimpleVarDecl,
@@ -342,6 +357,8 @@ pub const Node = extern union {
                 .array_filler => Payload.ArrayFiller,
                 .pub_inline_fn => Payload.PubInlineFn,
                 .field_access => Payload.FieldAccess,
+                .string_slice => Payload.StringSlice,
+                .shuffle => Payload.Shuffle,
             };
         }
 
@@ -584,10 +601,12 @@ pub const Payload = struct {
 
     pub const Array = struct {
         base: Payload,
-        data: struct {
+        data: ArrayTypeInfo,
+
+        pub const ArrayTypeInfo = struct {
             elem_type: Node,
             len: usize,
-        },
+        };
     };
 
     pub const Pointer = struct {
@@ -662,6 +681,24 @@ pub const Payload = struct {
             value: Node,
             type: Node,
             radix: Node,
+        },
+    };
+
+    pub const StringSlice = struct {
+        base: Payload,
+        data: struct {
+            string: Node,
+            end: usize,
+        },
+    };
+
+    pub const Shuffle = struct {
+        base: Payload,
+        data: struct {
+            element_type: Node,
+            a: Node,
+            b: Node,
+            mask_vector: Node,
         },
     };
 };
@@ -854,6 +891,16 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
             const import_node = try renderStdImport(c, "mem", "zeroInit");
             return renderCall(c, import_node, &.{ payload.lhs, payload.rhs });
         },
+        .std_meta_shuffle_vector_index => {
+            const payload = node.castTag(.std_meta_shuffle_vector_index).?.data;
+            const import_node = try renderStdImport(c, "meta", "shuffleVectorIndex");
+            return renderCall(c, import_node, &.{ payload.lhs, payload.rhs });
+        },
+        .std_meta_vector => {
+            const payload = node.castTag(.std_meta_vector).?.data;
+            const import_node = try renderStdImport(c, "meta", "Vector");
+            return renderCall(c, import_node, &.{ payload.lhs, payload.rhs });
+        },
         .call => {
             const payload = node.castTag(.call).?.data;
             const lhs = try renderNode(c, payload.lhs);
@@ -950,6 +997,17 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
                 },
             });
         },
+        .@"comptime" => {
+            const payload = node.castTag(.@"comptime").?.data;
+            return c.addNode(.{
+                .tag = .@"comptime",
+                .main_token = try c.addToken(.keyword_comptime, "comptime"),
+                .data = .{
+                    .lhs = try renderNode(c, payload),
+                    .rhs = undefined,
+                },
+            });
+        },
         .type => {
             const payload = node.castTag(.type).?.data;
             return c.addNode(.{
@@ -1013,6 +1071,36 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
                 .tag = .enum_literal,
                 .main_token = try c.addToken(.identifier, payload),
                 .data = undefined,
+            });
+        },
+        .string_slice => {
+            const payload = node.castTag(.string_slice).?.data;
+
+            const string = try renderNode(c, payload.string);
+            const l_bracket = try c.addToken(.l_bracket, "[");
+            const start = try c.addNode(.{
+                .tag = .integer_literal,
+                .main_token = try c.addToken(.integer_literal, "0"),
+                .data = undefined,
+            });
+            _ = try c.addToken(.ellipsis2, "..");
+            const end = try c.addNode(.{
+                .tag = .integer_literal,
+                .main_token = try c.addTokenFmt(.integer_literal, "{d}", .{payload.end}),
+                .data = undefined,
+            });
+            _ = try c.addToken(.r_bracket, "]");
+
+            return c.addNode(.{
+                .tag = .slice,
+                .main_token = l_bracket,
+                .data = .{
+                    .lhs = string,
+                    .rhs = try c.addExtra(std.zig.ast.Node.Slice{
+                        .start = start,
+                        .end = end,
+                    }),
+                },
             });
         },
         .fail_decl => {
@@ -1173,6 +1261,15 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
             const payload = node.castTag(.sizeof).?.data;
             return renderBuiltinCall(c, "@sizeOf", &.{payload});
         },
+        .shuffle => {
+            const payload = node.castTag(.shuffle).?.data;
+            return renderBuiltinCall(c, "@shuffle", &.{
+                payload.element_type,
+                payload.a,
+                payload.b,
+                payload.mask_vector,
+            });
+        },
         .alignof => {
             const payload = node.castTag(.alignof).?.data;
             return renderBuiltinCall(c, "@alignOf", &.{payload});
@@ -1180,6 +1277,10 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
         .typeof => {
             const payload = node.castTag(.typeof).?.data;
             return renderBuiltinCall(c, "@TypeOf", &.{payload});
+        },
+        .typeinfo => {
+            const payload = node.castTag(.typeinfo).?.data;
+            return renderBuiltinCall(c, "@typeInfo", &.{payload});
         },
         .negate => return renderPrefixOp(c, node, .negation, .minus, "-"),
         .negate_wrap => return renderPrefixOp(c, node, .negation_wrap, .minus_percent, "-%"),
@@ -1581,6 +1682,10 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
             const payload = node.castTag(.array_type).?.data;
             return renderArrayType(c, payload.len, payload.elem_type);
         },
+        .null_sentinel_array_type => {
+            const payload = node.castTag(.null_sentinel_array_type).?.data;
+            return renderNullSentinelArrayType(c, payload.len, payload.elem_type);
+        },
         .array_filler => {
             const payload = node.castTag(.array_filler).?.data;
 
@@ -1946,6 +2051,36 @@ fn renderArrayType(c: *Context, len: usize, elem_type: Node) !NodeIndex {
     });
 }
 
+fn renderNullSentinelArrayType(c: *Context, len: usize, elem_type: Node) !NodeIndex {
+    const l_bracket = try c.addToken(.l_bracket, "[");
+    const len_expr = try c.addNode(.{
+        .tag = .integer_literal,
+        .main_token = try c.addTokenFmt(.integer_literal, "{d}", .{len}),
+        .data = undefined,
+    });
+    _ = try c.addToken(.colon, ":");
+
+    const sentinel_expr = try c.addNode(.{
+        .tag = .integer_literal,
+        .main_token = try c.addToken(.integer_literal, "0"),
+        .data = undefined,
+    });
+
+    _ = try c.addToken(.r_bracket, "]");
+    const elem_type_expr = try renderNode(c, elem_type);
+    return c.addNode(.{
+        .tag = .array_type_sentinel,
+        .main_token = l_bracket,
+        .data = .{
+            .lhs = len_expr,
+            .rhs = try c.addExtra(std.zig.ast.Node.ArrayTypeSentinel {
+                .sentinel = sentinel_expr,
+                .elem_type = elem_type_expr,
+            }),
+        },
+    });
+}
+
 fn addSemicolonIfNeeded(c: *Context, node: Node) !void {
     switch (node.tag()) {
         .warning => unreachable,
@@ -2007,13 +2142,17 @@ fn renderNodeGrouped(c: *Context, node: Node) !NodeIndex {
         .sizeof,
         .alignof,
         .typeof,
+        .typeinfo,
         .std_meta_sizeof,
         .std_meta_cast,
         .std_meta_promoteIntLiteral,
+        .std_meta_vector,
+        .std_meta_shuffle_vector_index,
         .std_mem_zeroinit,
         .integer_literal,
         .float_literal,
         .string_literal,
+        .string_slice,
         .char_literal,
         .enum_literal,
         .identifier,
@@ -2035,9 +2174,11 @@ fn renderNodeGrouped(c: *Context, node: Node) !NodeIndex {
         .func,
         .call,
         .array_type,
+        .null_sentinel_array_type,
         .bool_to_int,
         .div_exact,
         .byte_offset_of,
+        .shuffle,
         => {
             // no grouping needed
             return renderNode(c, node);
@@ -2105,6 +2246,7 @@ fn renderNodeGrouped(c: *Context, node: Node) !NodeIndex {
         .discard,
         .@"continue",
         .@"return",
+        .@"comptime",
         .usingnamespace_builtins,
         .while_true,
         .if_not_break,
@@ -2247,6 +2389,8 @@ fn renderBuiltinCall(c: *Context, builtin: []const u8, args: []const Node) !Node
     _ = try c.addToken(.l_paren, "(");
     var arg_1: NodeIndex = 0;
     var arg_2: NodeIndex = 0;
+    var arg_3: NodeIndex = 0;
+    var arg_4: NodeIndex = 0;
     switch (args.len) {
         0 => {},
         1 => {
@@ -2257,18 +2401,41 @@ fn renderBuiltinCall(c: *Context, builtin: []const u8, args: []const Node) !Node
             _ = try c.addToken(.comma, ",");
             arg_2 = try renderNode(c, args[1]);
         },
+        4 => {
+            arg_1 = try renderNode(c, args[0]);
+            _ = try c.addToken(.comma, ",");
+            arg_2 = try renderNode(c, args[1]);
+            _ = try c.addToken(.comma, ",");
+            arg_3 = try renderNode(c, args[2]);
+            _ = try c.addToken(.comma, ",");
+            arg_4 = try renderNode(c, args[3]);
+        },
         else => unreachable, // expand this function as needed.
     }
 
     _ = try c.addToken(.r_paren, ")");
-    return c.addNode(.{
-        .tag = .builtin_call_two,
-        .main_token = builtin_tok,
-        .data = .{
-            .lhs = arg_1,
-            .rhs = arg_2,
-        },
-    });
+    if (args.len <= 2) {
+        return c.addNode(.{
+            .tag = .builtin_call_two,
+            .main_token = builtin_tok,
+            .data = .{
+                .lhs = arg_1,
+                .rhs = arg_2,
+            },
+        });
+    } else {
+        std.debug.assert(args.len == 4);
+
+        const params = try c.listToSpan(&.{ arg_1, arg_2, arg_3, arg_4 });
+        return c.addNode(.{
+            .tag = .builtin_call,
+            .main_token = builtin_tok,
+            .data = .{
+                .lhs = params.start,
+                .rhs = params.end,
+            },
+        });
+    }
 }
 
 fn renderVar(c: *Context, node: Node) !NodeIndex {

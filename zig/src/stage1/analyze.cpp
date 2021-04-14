@@ -1237,6 +1237,22 @@ Error type_val_resolve_zero_bits(CodeGen *g, ZigValue *type_val, ZigType *parent
                         parent_type_val, is_zero_bits);
             }
         }
+        case LazyValueIdPtrTypeSimple:
+        case LazyValueIdPtrTypeSimpleConst: {
+            LazyValuePtrTypeSimple *lazy_ptr_type = reinterpret_cast<LazyValuePtrTypeSimple *>(type_val->data.x_lazy);
+
+            if (parent_type_val == lazy_ptr_type->elem_type->value) {
+                // Does a struct which contains a pointer field to itself have bits? Yes.
+                *is_zero_bits = false;
+                return ErrorNone;
+            } else {
+                if (parent_type_val == nullptr) {
+                    parent_type_val = type_val;
+                }
+                return type_val_resolve_zero_bits(g, lazy_ptr_type->elem_type->value, parent_type,
+                        parent_type_val, is_zero_bits);
+            }
+        }
         case LazyValueIdArrayType: {
             LazyValueArrayType *lazy_array_type =
                 reinterpret_cast<LazyValueArrayType *>(type_val->data.x_lazy);
@@ -1285,6 +1301,8 @@ Error type_val_resolve_is_opaque_type(CodeGen *g, ZigValue *type_val, bool *is_o
             zig_unreachable();
         case LazyValueIdSliceType:
         case LazyValueIdPtrType:
+        case LazyValueIdPtrTypeSimple:
+        case LazyValueIdPtrTypeSimpleConst:
         case LazyValueIdFnType:
         case LazyValueIdOptType:
         case LazyValueIdErrUnionType:
@@ -1311,6 +1329,11 @@ static ReqCompTime type_val_resolve_requires_comptime(CodeGen *g, ZigValue *type
         }
         case LazyValueIdPtrType: {
             LazyValuePtrType *lazy_ptr_type = reinterpret_cast<LazyValuePtrType *>(type_val->data.x_lazy);
+            return type_val_resolve_requires_comptime(g, lazy_ptr_type->elem_type->value);
+        }
+        case LazyValueIdPtrTypeSimple:
+        case LazyValueIdPtrTypeSimpleConst: {
+            LazyValuePtrTypeSimple *lazy_ptr_type = reinterpret_cast<LazyValuePtrTypeSimple *>(type_val->data.x_lazy);
             return type_val_resolve_requires_comptime(g, lazy_ptr_type->elem_type->value);
         }
         case LazyValueIdOptType: {
@@ -1413,6 +1436,24 @@ start_over:
             }
             return ErrorNone;
         }
+        case LazyValueIdPtrTypeSimple:
+        case LazyValueIdPtrTypeSimpleConst: {
+            LazyValuePtrTypeSimple *lazy_ptr_type = reinterpret_cast<LazyValuePtrTypeSimple *>(type_val->data.x_lazy);
+            bool is_zero_bits;
+            if ((err = type_val_resolve_zero_bits(g, lazy_ptr_type->elem_type->value, nullptr,
+                nullptr, &is_zero_bits)))
+            {
+                return err;
+            }
+            if (is_zero_bits) {
+                *abi_size = 0;
+                *size_in_bits = 0;
+            } else {
+                *abi_size = g->builtin_types.entry_usize->abi_size;
+                *size_in_bits = g->builtin_types.entry_usize->size_in_bits;
+            }
+            return ErrorNone;
+        }
         case LazyValueIdFnType:
             *abi_size = g->builtin_types.entry_usize->abi_size;
             *size_in_bits = g->builtin_types.entry_usize->size_in_bits;
@@ -1449,6 +1490,8 @@ Error type_val_resolve_abi_align(CodeGen *g, AstNode *source_node, ZigValue *typ
             zig_unreachable();
         case LazyValueIdSliceType:
         case LazyValueIdPtrType:
+        case LazyValueIdPtrTypeSimple:
+        case LazyValueIdPtrTypeSimpleConst:
         case LazyValueIdFnType:
             *abi_align = g->builtin_types.entry_usize->abi_align;
             return ErrorNone;
@@ -1506,7 +1549,9 @@ static OnePossibleValue type_val_resolve_has_one_possible_value(CodeGen *g, ZigV
                 return OnePossibleValueYes;
             return type_val_resolve_has_one_possible_value(g, lazy_array_type->elem_type->value);
         }
-        case LazyValueIdPtrType: {
+        case LazyValueIdPtrType:
+        case LazyValueIdPtrTypeSimple:
+        case LazyValueIdPtrTypeSimpleConst: {
             Error err;
             bool zero_bits;
             if ((err = type_val_resolve_zero_bits(g, type_val, nullptr, nullptr, &zero_bits))) {
@@ -5758,6 +5803,8 @@ static bool can_mutate_comptime_var_state(ZigValue *value) {
             case LazyValueIdAlignOf:
             case LazyValueIdSizeOf:
             case LazyValueIdPtrType:
+            case LazyValueIdPtrTypeSimple:
+            case LazyValueIdPtrTypeSimpleConst:
             case LazyValueIdOptType:
             case LazyValueIdSliceType:
             case LazyValueIdFnType:
@@ -8138,14 +8185,18 @@ bool err_ptr_eql(const ErrorTableEntry *a, const ErrorTableEntry *b) {
 }
 
 ZigValue *get_builtin_value(CodeGen *codegen, const char *name) {
-    ScopeDecls *builtin_scope = get_container_scope(codegen->compile_var_import);
-    Tld *tld = find_container_decl(codegen, builtin_scope, buf_create_from_str(name));
+    Buf *buf_name = buf_create_from_str(name);
+
+    ScopeDecls *builtin_scope = get_container_scope(codegen->std_builtin_import);
+    Tld *tld = find_container_decl(codegen, builtin_scope, buf_name);
     assert(tld != nullptr);
     resolve_top_level_decl(codegen, tld, nullptr, false);
     assert(tld->id == TldIdVar && tld->resolution == TldResolutionOk);
     TldVar *tld_var = (TldVar *)tld;
     ZigValue *var_value = tld_var->var->const_value;
     assert(var_value != nullptr);
+
+    buf_destroy(buf_name);
     return var_value;
 }
 
@@ -8676,7 +8727,9 @@ static void resolve_llvm_types_struct(CodeGen *g, ZigType *struct_type, ResolveS
                 assert(async_frame_type->id == ZigTypeIdFnFrame);
                 assert(field_type->id == ZigTypeIdFn);
                 resolve_llvm_types_fn(g, async_frame_type->data.frame.fn);
-                llvm_type = LLVMPointerType(async_frame_type->data.frame.fn->raw_type_ref, 0);
+
+                const unsigned addrspace = ZigLLVMDataLayoutGetProgramAddressSpace(g->target_data_ref);
+                llvm_type = LLVMPointerType(async_frame_type->data.frame.fn->raw_type_ref, addrspace);
             } else {
                 llvm_type = get_llvm_type(g, field_type);
             }

@@ -121,6 +121,138 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    return x + y;
             \\}
         , "35\n");
+
+        case.addCompareOutput(
+            \\export fn _start() u32 {
+            \\    var i: u32 = 20;
+            \\    i -= 5;
+            \\    return i;
+            \\}
+        , "15\n");
+
+        case.addCompareOutput(
+            \\export fn _start() u32 {
+            \\    var i: u32 = 5;
+            \\    i -= 3;
+            \\    var result: u32 = foo(i, 10);
+            \\    return result;
+            \\}
+            \\fn foo(x: u32, y: u32) u32 {
+            \\    return y - x;
+            \\}
+        , "8\n");
+
+        case.addCompareOutput(
+            \\export fn _start() u32 {
+            \\    var i: u32 = 5;
+            \\    i *= 7;
+            \\    var result: u32 = foo(i, 10);
+            \\    return result;
+            \\}
+            \\fn foo(x: u32, y: u32) u32 {
+            \\    return x * y;
+            \\}
+        , "350\n");
+
+        case.addCompareOutput(
+            \\export fn _start() u32 {
+            \\    var i: u32 = 352;
+            \\    i /= 7; // i = 50
+            \\    var result: u32 = foo(i, 7);
+            \\    return result;
+            \\}
+            \\fn foo(x: u32, y: u32) u32 {
+            \\    return x / y;
+            \\}
+        , "7\n");
+
+        case.addCompareOutput(
+            \\export fn _start() u32 {
+            \\    var i: u32 = 5;
+            \\    i &= 6;
+            \\    return i;
+            \\}
+        , "4\n");
+
+        case.addCompareOutput(
+            \\export fn _start() u32 {
+            \\    var i: u32 = 5;
+            \\    i |= 6;
+            \\    return i;
+            \\}
+        , "7\n");
+
+        case.addCompareOutput(
+            \\export fn _start() u32 {
+            \\    var i: u32 = 5;
+            \\    i ^= 6;
+            \\    return i;
+            \\}
+        , "3\n");
+
+        case.addCompareOutput(
+            \\export fn _start() bool {
+            \\    var b: bool = false;
+            \\    b = b or false;
+            \\    return b;
+            \\}
+        , "0\n");
+
+        case.addCompareOutput(
+            \\export fn _start() bool {
+            \\    var b: bool = true;
+            \\    b = b or false;
+            \\    return b;
+            \\}
+        , "1\n");
+
+        case.addCompareOutput(
+            \\export fn _start() bool {
+            \\    var b: bool = false;
+            \\    b = b or true;
+            \\    return b;
+            \\}
+        , "1\n");
+
+        case.addCompareOutput(
+            \\export fn _start() bool {
+            \\    var b: bool = true;
+            \\    b = b or true;
+            \\    return b;
+            \\}
+        , "1\n");
+
+        case.addCompareOutput(
+            \\export fn _start() bool {
+            \\    var b: bool = false;
+            \\    b = b and false;
+            \\    return b;
+            \\}
+        , "0\n");
+
+        case.addCompareOutput(
+            \\export fn _start() bool {
+            \\    var b: bool = true;
+            \\    b = b and false;
+            \\    return b;
+            \\}
+        , "0\n");
+
+        case.addCompareOutput(
+            \\export fn _start() bool {
+            \\    var b: bool = false;
+            \\    b = b and true;
+            \\    return b;
+            \\}
+        , "0\n");
+
+        case.addCompareOutput(
+            \\export fn _start() bool {
+            \\    var b: bool = true;
+            \\    b = b and true;
+            \\    return b;
+            \\}
+        , "1\n");
     }
 
     {
@@ -175,6 +307,41 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    return i;
             \\}
         , "31\n");
+
+        case.addCompareOutput(
+            \\export fn _start() void {
+            \\    assert(foo(true) != @as(i32, 30));
+            \\}
+            \\
+            \\fn assert(ok: bool) void {
+            \\    if (!ok) unreachable;
+            \\}
+            \\
+            \\fn foo(ok: bool) i32 {
+            \\    const x = if(ok) @as(i32, 20) else @as(i32, 10);
+            \\    return x;
+            \\}
+        , "");
+
+        case.addCompareOutput(
+            \\export fn _start() void {
+            \\    assert(foo(false) == @as(i32, 20));
+            \\    assert(foo(true) == @as(i32, 30));
+            \\}
+            \\
+            \\fn assert(ok: bool) void {
+            \\    if (!ok) unreachable;
+            \\}
+            \\
+            \\fn foo(ok: bool) i32 {
+            \\    const val: i32 = blk: {
+            \\        var x: i32 = 1;
+            \\        if (!ok) break :blk x + @as(i32, 9);
+            \\        break :blk x + @as(i32, 19);
+            \\    };
+            \\    return val + 10;
+            \\}
+        , "");
     }
 
     {

@@ -4,6 +4,31 @@
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
 
+test "zig fmt: respect line breaks in struct field value declaration" {
+    try testCanonical(
+        \\const Foo = struct {
+        \\    bar: u32 =
+        \\        42,
+        \\    bar: u32 =
+        \\        // a comment
+        \\        42,
+        \\    bar: u32 =
+        \\        42,
+        \\    // a comment
+        \\    bar: []const u8 =
+        \\        \\ foo
+        \\        \\ bar
+        \\        \\ baz
+        \\    ,
+        \\    bar: u32 =
+        \\        blk: {
+        \\            break :blk 42;
+        \\        },
+        \\};
+        \\
+    );
+}
+
 // TODO Remove this after zig 0.9.0 is released.
 test "zig fmt: rewrite inline functions as callconv(.Inline)" {
     try testTransform(
@@ -1776,17 +1801,21 @@ test "zig fmt: array literal with hint" {
     );
 }
 
-test "zig fmt: array literal veritical column alignment" {
+test "zig fmt: array literal vertical column alignment" {
     try testTransform(
         \\const a = []u8{
         \\    1000, 200,
         \\    30, 4,
-        \\    50000, 60
+        \\    50000, 60,
         \\};
         \\const a = []u8{0,   1, 2, 3, 40,
         \\    4,5,600,7,
         \\           80,
-        \\    9, 10, 11, 0, 13, 14, 15};
+        \\    9, 10, 11, 0, 13, 14, 15,};
+        \\const a = [12]u8{
+        \\    31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+        \\const a = [12]u8{
+        \\    31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31, };
         \\
     ,
         \\const a = []u8{
@@ -1799,6 +1828,21 @@ test "zig fmt: array literal veritical column alignment" {
         \\    4,  5,  600, 7, 80,
         \\    9,  10, 11,  0, 13,
         \\    14, 15,
+        \\};
+        \\const a = [12]u8{ 31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31 };
+        \\const a = [12]u8{
+        \\    31,
+        \\    28,
+        \\    31,
+        \\    30,
+        \\    31,
+        \\    30,
+        \\    31,
+        \\    31,
+        \\    30,
+        \\    31,
+        \\    30,
+        \\    31,
         \\};
         \\
     );
@@ -2001,10 +2045,7 @@ test "zig fmt: add trailing comma to array literal" {
         \\    return []u16{
         \\        'm', 's', 'y', 's', '-', // hi
         \\    };
-        \\    return []u16{
-        \\        'm', 's', 'y', 's',
-        \\        '-',
-        \\    };
+        \\    return []u16{ 'm', 's', 'y', 's', '-' };
         \\    return []u16{ 'm', 's', 'y', 's', '-' };
         \\}
         \\
@@ -3038,6 +3079,54 @@ test "zig fmt: switch" {
         \\}
         \\
     );
+
+    try testTransform(
+        \\test {
+        \\    switch (x) {
+        \\        foo =>
+        \\            "bar",
+        \\    }
+        \\}
+        \\
+    ,
+        \\test {
+        \\    switch (x) {
+        \\        foo => "bar",
+        \\    }
+        \\}
+        \\
+    );
+}
+
+test "zig fmt: switch multiline string" {
+    try testCanonical(
+        \\test "switch multiline string" {
+        \\    const x: u32 = 0;
+        \\    const str = switch (x) {
+        \\        1 => "one",
+        \\        2 =>
+        \\        \\ Comma after the multiline string
+        \\        \\ is needed
+        \\        ,
+        \\        3 => "three",
+        \\        else => "else",
+        \\    };
+        \\
+        \\    const Union = union(enum) {
+        \\        Int: i64,
+        \\        Float: f64,
+        \\    };
+        \\
+        \\    const str = switch (u) {
+        \\        Union.Int => |int|
+        \\        \\ Comma after the multiline string
+        \\        \\ is needed
+        \\        ,
+        \\        Union.Float => |*float| unreachable,
+        \\    };
+        \\}
+        \\
+    );
 }
 
 test "zig fmt: while" {
@@ -3065,6 +3154,11 @@ test "zig fmt: while" {
         \\
         \\    i = 0;
         \\    var j: usize = 0;
+        \\    while (i < 10) : ({
+        \\        i += 1;
+        \\        j += 1;
+        \\    }) continue;
+        \\
         \\    while (i < 10) : ({
         \\        i += 1;
         \\        j += 1;
@@ -3184,6 +3278,156 @@ test "zig fmt: for" {
     );
 }
 
+test "zig fmt: for if" {
+    try testCanonical(
+        \\test {
+        \\    for (a) |x| if (x) f(x);
+        \\
+        \\    for (a) |x| if (x)
+        \\        f(x);
+        \\
+        \\    for (a) |x| if (x) {
+        \\        f(x);
+        \\    };
+        \\
+        \\    for (a) |x|
+        \\        if (x)
+        \\            f(x);
+        \\
+        \\    for (a) |x|
+        \\        if (x) {
+        \\            f(x);
+        \\        };
+        \\}
+        \\
+    );
+}
+
+test "zig fmt: if for" {
+    try testCanonical(
+        \\test {
+        \\    if (a) for (x) |x| f(x);
+        \\
+        \\    if (a) for (x) |x|
+        \\        f(x);
+        \\
+        \\    if (a) for (x) |x| {
+        \\        f(x);
+        \\    };
+        \\
+        \\    if (a)
+        \\        for (x) |x|
+        \\            f(x);
+        \\
+        \\    if (a)
+        \\        for (x) |x| {
+        \\            f(x);
+        \\        };
+        \\}
+        \\
+    );
+}
+
+test "zig fmt: while if" {
+    try testCanonical(
+        \\test {
+        \\    while (a) if (x) f(x);
+        \\
+        \\    while (a) if (x)
+        \\        f(x);
+        \\
+        \\    while (a) if (x) {
+        \\        f(x);
+        \\    };
+        \\
+        \\    while (a)
+        \\        if (x)
+        \\            f(x);
+        \\
+        \\    while (a)
+        \\        if (x) {
+        \\            f(x);
+        \\        };
+        \\}
+        \\
+    );
+}
+
+test "zig fmt: if while" {
+    try testCanonical(
+        \\test {
+        \\    if (a) while (x) : (cont) f(x);
+        \\
+        \\    if (a) while (x) : (cont)
+        \\        f(x);
+        \\
+        \\    if (a) while (x) : (cont) {
+        \\        f(x);
+        \\    };
+        \\
+        \\    if (a)
+        \\        while (x) : (cont)
+        \\            f(x);
+        \\
+        \\    if (a)
+        \\        while (x) : (cont) {
+        \\            f(x);
+        \\        };
+        \\}
+        \\
+    );
+}
+
+test "zig fmt: while for" {
+    try testCanonical(
+        \\test {
+        \\    while (a) for (x) |x| f(x);
+        \\
+        \\    while (a) for (x) |x|
+        \\        f(x);
+        \\
+        \\    while (a) for (x) |x| {
+        \\        f(x);
+        \\    };
+        \\
+        \\    while (a)
+        \\        for (x) |x|
+        \\            f(x);
+        \\
+        \\    while (a)
+        \\        for (x) |x| {
+        \\            f(x);
+        \\        };
+        \\}
+        \\
+    );
+}
+
+test "zig fmt: for while" {
+    try testCanonical(
+        \\test {
+        \\    for (a) |a| while (x) |x| f(x);
+        \\
+        \\    for (a) |a| while (x) |x|
+        \\        f(x);
+        \\
+        \\    for (a) |a| while (x) |x| {
+        \\        f(x);
+        \\    };
+        \\
+        \\    for (a) |a|
+        \\        while (x) |x|
+        \\            f(x);
+        \\
+        \\    for (a) |a|
+        \\        while (x) |x| {
+        \\            f(x);
+        \\        };
+        \\}
+        \\
+    );
+}
+
 test "zig fmt: if" {
     try testCanonical(
         \\test "if" {
@@ -3228,6 +3472,82 @@ test "zig fmt: if" {
         \\    } else |err| {
         \\        unreachable;
         \\    }
+        \\}
+        \\
+    );
+}
+
+test "zig fmt: fix single statement if/for/while line breaks" {
+    try testTransform(
+        \\test {
+        \\    if (cond) a
+        \\    else b;
+        \\
+        \\    if (cond)
+        \\        a
+        \\    else b;
+        \\
+        \\    for (xs) |x| foo()
+        \\    else bar();
+        \\
+        \\    for (xs) |x|
+        \\        foo()
+        \\    else bar();
+        \\
+        \\    while (a) : (b) foo()
+        \\    else bar();
+        \\
+        \\    while (a) : (b)
+        \\        foo()
+        \\    else bar();
+        \\}
+        \\
+    ,
+        \\test {
+        \\    if (cond) a else b;
+        \\
+        \\    if (cond)
+        \\        a
+        \\    else
+        \\        b;
+        \\
+        \\    for (xs) |x| foo() else bar();
+        \\
+        \\    for (xs) |x|
+        \\        foo()
+        \\    else
+        \\        bar();
+        \\
+        \\    while (a) : (b) foo() else bar();
+        \\
+        \\    while (a) : (b)
+        \\        foo()
+        \\    else
+        \\        bar();
+        \\}
+        \\
+    );
+}
+
+test "zig fmt: anon struct/array literal in if" {
+    try testCanonical(
+        \\test {
+        \\    const a = if (cond) .{
+        \\        1, 2,
+        \\        3, 4,
+        \\    } else .{
+        \\        1,
+        \\        2,
+        \\        3,
+        \\    };
+        \\
+        \\    const rl_and_tag: struct { rl: ResultLoc, tag: zir.Inst.Tag } = if (any_payload_is_ref) .{
+        \\        .rl = .ref,
+        \\        .tag = .switchbr_ref,
+        \\    } else .{
+        \\        .rl = .none,
+        \\        .tag = .switchbr,
+        \\    };
         \\}
         \\
     );
@@ -3820,9 +4140,24 @@ test "zig fmt: comments in ternary ifs" {
         \\    // Comment
         \\    1
         \\else
+        \\    // Comment
         \\    0;
         \\
         \\pub extern "c" fn printf(format: [*:0]const u8, ...) c_int;
+        \\
+    );
+}
+
+test "zig fmt: while statement in blockless if" {
+    try testCanonical(
+        \\pub fn main() void {
+        \\    const zoom_node = if (focused_node == layout_first)
+        \\        while (it.next()) |node| {
+        \\            if (!node.view.pending.float and !node.view.pending.fullscreen) break node;
+        \\        } else null
+        \\    else
+        \\        focused_node;
+        \\}
         \\
     );
 }
@@ -4338,6 +4673,90 @@ test "zig fmt: insert trailing comma if there are comments between switch values
         \\    // comment
         \\    => i,
         \\};
+        \\
+    );
+}
+
+test "zig fmt: insert trailing comma if comments in array init" {
+    try testTransform(
+        \\var a = .{
+        \\    "foo", //
+        \\    "bar"
+        \\};
+        \\var a = .{
+        \\    "foo",
+        \\    "bar" //
+        \\};
+        \\var a = .{
+        \\    "foo",
+        \\    "//"
+        \\};
+        \\var a = .{
+        \\    "foo",
+        \\    "//" //
+        \\};
+        \\
+    ,
+        \\var a = .{
+        \\    "foo", //
+        \\    "bar",
+        \\};
+        \\var a = .{
+        \\    "foo",
+        \\    "bar", //
+        \\};
+        \\var a = .{ "foo", "//" };
+        \\var a = .{
+        \\    "foo",
+        \\    "//", //
+        \\};
+        \\
+    );
+}
+
+test "zig fmt: make single-line if no trailing comma" {
+    try testTransform(
+        \\test "function call no trailing comma" {
+        \\    foo(
+        \\        1,
+        \\        2
+        \\    );
+        \\}
+        \\
+    ,
+        \\test "function call no trailing comma" {
+        \\    foo(1, 2);
+        \\}
+        \\
+    );
+
+    try testTransform(
+        \\test "struct no trailing comma" {
+        \\    const a = .{
+        \\        .foo = 1,
+        \\        .bar = 2
+        \\    };
+        \\}
+        \\
+    ,
+        \\test "struct no trailing comma" {
+        \\    const a = .{ .foo = 1, .bar = 2 };
+        \\}
+        \\
+    );
+
+    try testTransform(
+        \\test "array no trailing comma" {
+        \\    var stream = multiOutStream(.{
+        \\        fbs1.outStream(),
+        \\        fbs2.outStream()
+        \\    });
+        \\}
+        \\
+    ,
+        \\test "array no trailing comma" {
+        \\    var stream = multiOutStream(.{ fbs1.outStream(), fbs2.outStream() });
+        \\}
         \\
     );
 }

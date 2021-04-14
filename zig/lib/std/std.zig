@@ -20,6 +20,9 @@ pub const ComptimeStringMap = @import("comptime_string_map.zig").ComptimeStringM
 pub const DynLib = @import("dynamic_library.zig").DynLib;
 pub const DynamicBitSet = bit_set.DynamicBitSet;
 pub const DynamicBitSetUnmanaged = bit_set.DynamicBitSetUnmanaged;
+pub const EnumArray = enums.EnumArray;
+pub const EnumMap = enums.EnumMap;
+pub const EnumSet = enums.EnumSet;
 pub const HashMap = hash_map.HashMap;
 pub const HashMapUnmanaged = hash_map.HashMapUnmanaged;
 pub const MultiArrayList = @import("multi_array_list.zig").MultiArrayList;
@@ -28,6 +31,7 @@ pub const PackedIntArrayEndian = @import("packed_int_array.zig").PackedIntArrayE
 pub const PackedIntSlice = @import("packed_int_array.zig").PackedIntSlice;
 pub const PackedIntSliceEndian = @import("packed_int_array.zig").PackedIntSliceEndian;
 pub const PriorityQueue = @import("priority_queue.zig").PriorityQueue;
+pub const PriorityDequeue = @import("priority_dequeue.zig").PriorityDequeue;
 pub const Progress = @import("Progress.zig");
 pub const SemanticVersion = @import("SemanticVersion.zig");
 pub const SinglyLinkedList = @import("linked_list.zig").SinglyLinkedList;
@@ -54,6 +58,7 @@ pub const cstr = @import("cstr.zig");
 pub const debug = @import("debug.zig");
 pub const dwarf = @import("dwarf.zig");
 pub const elf = @import("elf.zig");
+pub const enums = @import("enums.zig");
 pub const event = @import("event.zig");
 pub const fifo = @import("fifo.zig");
 pub const fmt = @import("fmt.zig");
@@ -87,7 +92,7 @@ pub const zig = @import("zig.zig");
 pub const start = @import("start.zig");
 
 // This forces the start.zig file to be imported, and the comptime logic inside that
-// file decides whether to export any appropriate start symbols.
+// file decides whether to export any appropriate start symbols, and call main.
 comptime {
     _ = start;
 }
