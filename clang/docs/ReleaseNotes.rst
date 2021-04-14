@@ -82,31 +82,6 @@ New Compiler Flags
   in that case. The option's behaviour mirrors GCC, the helpers are implemented
   both in compiler-rt and libgcc.
 
-- -fpch-codegen and -fpch-debuginfo generate shared code and/or debuginfo
-  for contents of a precompiled header in a separate object file. This object
-  file needs to be linked in, but its contents do not need to be generated
-  for other objects using the precompiled header. This should usually save
-  compile time. If not using clang-cl, the separate object file needs to
-  be created explicitly from the precompiled header.
-  Example of use:
-
-  .. code-block:: console
-
-    $ clang++ -x c++-header header.h -o header.pch -fpch-codegen -fpch-debuginfo
-    $ clang++ -c header.pch -o shared.o
-    $ clang++ -c source.cpp -o source.o -include-pch header.pch
-    $ clang++ -o binary source.o shared.o
-
-  - Using -fpch-instantiate-templates when generating the precompiled header
-    usually increases the amount of code/debuginfo that can be shared.
-  - In some cases, especially when building with optimizations enabled, using
-    -fpch-codegen may generate so much code in the shared object that compiling
-    it may be a net loss in build time.
-  - Since headers may bring in private symbols of other libraries, it may be
-    sometimes necessary to discard unused symbols (such as by adding
-    -Wl,--gc-sections on ELF platforms to the linking command, and possibly
-    adding -fdata-sections -ffunction-sections to the command generating
-    the shared object).
 - New option ``-fbinutils-version=`` specifies the targeted binutils version.
   For example, ``-fbinutils-version=2.35`` means compatibility with GNU as/ld
   before 2.35 is not needed: new features can be used and there is no need to
@@ -139,6 +114,16 @@ Modified Compiler Flags
   This behavior matches newer GCC.
   (`D91760 <https://reviews.llvm.org/D91760>`_)
   (`D92054 <https://reviews.llvm.org/D92054>`_)
+- Support has been added for the following processors (command-line identifiers
+  in parentheses):
+
+  - Arm Cortex-A78C (cortex-a78c).
+  - Arm Cortex-R82 (cortex-r82).
+  - Arm Neoverse V1 (neoverse-v1).
+  - Arm Neoverse N2 (neoverse-n2).
+  - Fujitsu A64FX (a64fx).
+  For example, to select architecture support and tuning for Neoverse-V1 based
+  systems, use ``-mcpu=neoverse-v1``.
 
 Removed Compiler Flags
 -------------------------
@@ -183,6 +168,13 @@ Windows Support
   exception. To workaround (with reduced security), compile with
   /guard:cf,nolongjmp.
 
+- Windows on Arm64: LLVM 12 adds official binary release hosted on
+  Windows on Arm64.  The binary is built and tested by Linaro alongside
+  AArch64 and ARM 32-bit Linux binary releases.  This first WoA release
+  includes Clang compiler, LLD Linker, and compiler-rt runtime libraries.
+  Work on LLDB, sanitizer support, OpenMP, and other features is in progress
+  and will be included in future Windows on Arm64 LLVM releases.
+
 C Language Changes in Clang
 ---------------------------
 
@@ -200,10 +192,38 @@ C++1z Feature Support
 Objective-C Language Changes in Clang
 -------------------------------------
 
-OpenCL C Language Changes in Clang
-----------------------------------
+OpenCL Kernel Language Changes in Clang
+---------------------------------------
 
-...
+- Improved online documentation: :doc:`UsersManual` and :doc:`OpenCLSupport`
+  pages.
+- Added ``-cl-std=CL3.0`` and predefined version macro for OpenCL 3.0.
+- Added ``-cl-std=CL1.0`` and mapped to the existing OpenCL 1.0 functionality.
+- Improved OpenCL extension handling per target.
+- Added clang extension for function pointers ``__cl_clang_function_pointers``
+  and variadic functions ``__cl_clang_variadic_functions``, more details can be
+  found in :doc:`LanguageExtensions`.
+- Removed extensions without kernel language changes:
+  ``cl_khr_select_fprounding_mode``, ``cl_khr_gl_sharing``, ``cl_khr_icd``,
+  ``cl_khr_gl_event``, ``cl_khr_d3d10_sharing``, ``cl_khr_context_abort``,
+  ``cl_khr_d3d11_sharing``, ``cl_khr_dx9_media_sharing``,
+  ``cl_khr_image2d_from_buffer``, ``cl_khr_initialize_memory``,
+  ``cl_khr_gl_depth_images``, ``cl_khr_spir``, ``cl_khr_egl_event``,
+  ``cl_khr_egl_image``, ``cl_khr_terminate_context``.
+- Improved diagnostics for  unevaluated ``vec_step`` expression.
+- Allow nested pointers (e.g. pointer-to-pointer) kernel arguments beyond OpenCL
+  1.2.
+- Added ``global_device`` and ``global_host`` address spaces for USM
+  allocations.
+
+Miscellaneous improvements in C++ for OpenCL support:
+
+- Added diagnostics for pointers to member functions and references to
+  functions.
+- Added support of ``vec_step`` builtin.
+- Fixed ICE on address spaces with forwarding references and templated copy
+  constructors.
+- Removed warning for variadic macro use.
 
 ABI Changes in Clang
 --------------------
