@@ -1021,7 +1021,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\export fn entry() void {
         \\    nosuspend {
         \\        const bar = async foo();
-        \\        suspend;
+        \\        suspend {}
         \\        resume bar;
         \\    }
         \\}
@@ -2120,7 +2120,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    non_async_fn = func;
         \\}
         \\fn func() void {
-        \\    suspend;
+        \\    suspend {}
         \\}
     , &[_][]const u8{
         "tmp.zig:5:1: error: 'func' cannot be async",
@@ -2136,7 +2136,9 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\}
         \\fn func() callconv(.Async) void {}
     , &[_][]const u8{
-        "tmp.zig:4:21: error: expected type '[]align(16) u8', found '*[64]u8'",
+        // Split the check in two as the alignment value is target dependent.
+        "tmp.zig:4:21: error: expected type '[]align(",
+        ") u8', found '*[64]u8'",
     });
 
     cases.add("atomic orderings of fence Acquire or stricter",
@@ -2198,7 +2200,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    var x: anyframe = &f;
         \\}
         \\fn func() void {
-        \\    suspend;
+        \\    suspend {}
         \\}
     , &[_][]const u8{
         "tmp.zig:3:12: error: expected type 'anyframe', found '*const @Frame(func)'",
@@ -2231,10 +2233,10 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    frame = async bar();
         \\}
         \\fn foo() void {
-        \\    suspend;
+        \\    suspend {}
         \\}
         \\fn bar() void {
-        \\    suspend;
+        \\    suspend {}
         \\}
     , &[_][]const u8{
         "tmp.zig:3:13: error: expected type '*@Frame(bar)', found '*@Frame(foo)'",
@@ -2269,7 +2271,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    var result = await frame;
         \\}
         \\fn func() void {
-        \\    suspend;
+        \\    suspend {}
         \\}
     , &[_][]const u8{
         "tmp.zig:1:1: error: function with calling convention 'C' cannot be async",
@@ -2347,7 +2349,7 @@ pub fn addCases(cases: *tests.CompileErrorContext) void {
         \\    bar();
         \\}
         \\fn bar() void {
-        \\    suspend;
+        \\    suspend {}
         \\}
     , &[_][]const u8{
         "tmp.zig:1:1: error: function with calling convention 'C' cannot be async",

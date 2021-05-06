@@ -195,7 +195,8 @@ pub const Builder = struct {
             self.install_prefix = install_prefix orelse "/usr";
             self.install_path = fs.path.join(self.allocator, &[_][]const u8{ dest_dir, self.install_prefix }) catch unreachable;
         } else {
-            self.install_prefix = install_prefix orelse self.cache_root;
+            self.install_prefix = install_prefix orelse
+                (fs.path.join(self.allocator, &[_][]const u8{ self.build_root, "zig-out" }) catch unreachable);
             self.install_path = self.install_prefix;
         }
         self.lib_dir = fs.path.join(self.allocator, &[_][]const u8{ self.install_path, "lib" }) catch unreachable;
@@ -675,17 +676,19 @@ pub const Builder = struct {
 
     /// Exposes standard `zig build` options for choosing a target.
     pub fn standardTargetOptions(self: *Builder, args: StandardTargetOptionsArgs) CrossTarget {
-        const triple = self.option(
+        const maybe_triple = self.option(
             []const u8,
             "target",
             "The CPU architecture, OS, and ABI to build for",
-        ) orelse return args.default_target;
+        );
+        const mcpu = self.option([]const u8, "cpu", "Target CPU");
 
-        // TODO add cpu and features as part of the target triple
+        const triple = maybe_triple orelse return args.default_target;
 
         var diags: CrossTarget.ParseOptions.Diagnostics = .{};
         const selected_target = CrossTarget.parse(.{
             .arch_os_abi = triple,
+            .cpu_features = mcpu,
             .diagnostics = &diags,
         }) catch |err| switch (err) {
             error.UnknownCpuModel => {
@@ -1383,6 +1386,8 @@ pub const LibExeObjStep = struct {
     /// Place every function in its own section so that unused ones may be
     /// safely garbage-collected during the linking phase.
     link_function_sections: bool = false,
+
+    linker_allow_shlib_undefined: ?bool = null,
 
     /// Uses system Wine installation to run cross compiled Windows build artifacts.
     enable_wine: bool = false,
@@ -2335,6 +2340,9 @@ pub const LibExeObjStep = struct {
         }
         if (self.link_function_sections) {
             try zig_args.append("-ffunction-sections");
+        }
+        if (self.linker_allow_shlib_undefined) |x| {
+            try zig_args.append(if (x) "-fallow-shlib-undefined" else "-fno-allow-shlib-undefined");
         }
         if (self.single_threaded) {
             try zig_args.append("--single-threaded");

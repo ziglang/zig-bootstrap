@@ -4,10 +4,16 @@
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
 const std = @import("std");
+const crypto = std.crypto;
 const debug = std.debug;
 const fmt = std.fmt;
 const mem = std.mem;
-const Error = std.crypto.Error;
+
+const EncodingError = crypto.errors.EncodingError;
+const IdentityElementError = crypto.errors.IdentityElementError;
+const NonCanonicalError = crypto.errors.NonCanonicalError;
+const NotSquareError = crypto.errors.NotSquareError;
+const WeakPublicKeyError = crypto.errors.WeakPublicKeyError;
 
 /// Group operations over Edwards25519.
 pub const Edwards25519 = struct {
@@ -26,7 +32,7 @@ pub const Edwards25519 = struct {
     is_base: bool = false,
 
     /// Decode an Edwards25519 point from its compressed (Y+sign) coordinates.
-    pub fn fromBytes(s: [encoded_length]u8) Error!Edwards25519 {
+    pub fn fromBytes(s: [encoded_length]u8) EncodingError!Edwards25519 {
         const z = Fe.one;
         const y = Fe.fromBytes(s);
         var u = y.sq();
@@ -56,7 +62,7 @@ pub const Edwards25519 = struct {
     }
 
     /// Check that the encoding of a point is canonical.
-    pub fn rejectNonCanonical(s: [32]u8) Error!void {
+    pub fn rejectNonCanonical(s: [32]u8) NonCanonicalError!void {
         return Fe.rejectNonCanonical(s, true);
     }
 
@@ -69,19 +75,11 @@ pub const Edwards25519 = struct {
         .is_base = true,
     };
 
-    /// The edwards25519 neutral element.
-    pub const neutralElement = Edwards25519{
-        .x = Fe{ .limbs = .{ 2251799813685229, 2251799813685247, 2251799813685247, 2251799813685247, 2251799813685247 } },
-        .y = Fe{ .limbs = .{ 1507481815385608, 2223447444246085, 1083941587175919, 2059929906842505, 1581435440146976 } },
-        .z = Fe{ .limbs = .{ 1507481815385608, 2223447444246085, 1083941587175919, 2059929906842505, 1581435440146976 } },
-        .t = Fe{ .limbs = .{ 2251799813685229, 2251799813685247, 2251799813685247, 2251799813685247, 2251799813685247 } },
-        .is_base = false,
-    };
-
-    const identityElement = Edwards25519{ .x = Fe.zero, .y = Fe.one, .z = Fe.one, .t = Fe.zero };
+    pub const neutralElement = @compileError("deprecated: use identityElement instead");
+    pub const identityElement = Edwards25519{ .x = Fe.zero, .y = Fe.one, .z = Fe.one, .t = Fe.zero };
 
     /// Reject the neutral element.
-    pub fn rejectIdentity(p: Edwards25519) Error!void {
+    pub fn rejectIdentity(p: Edwards25519) IdentityElementError!void {
         if (p.x.isZero()) {
             return error.IdentityElement;
         }
@@ -154,9 +152,10 @@ pub const Edwards25519 = struct {
         return t;
     }
 
-    fn nonAdjacentForm(s: [32]u8) [2 * 32]i8 {
+    fn slide(s: [32]u8) [2 * 32]i8 {
+        const reduced = if ((s[s.len - 1] & 0x80) != 0) s else scalar.reduce(s);
         var e: [2 * 32]i8 = undefined;
-        for (s) |x, i| {
+        for (reduced) |x, i| {
             e[i * 2 + 0] = @as(i8, @truncate(u4, x));
             e[i * 2 + 1] = @as(i8, @truncate(u4, x >> 4));
         }
@@ -177,9 +176,9 @@ pub const Edwards25519 = struct {
     // Based on real-world benchmarks, we only use this for multi-scalar multiplication.
     // NAF could be useful to half the size of precomputation tables, but we intentionally
     // avoid these to keep the standard library lightweight.
-    fn pcMul(pc: [9]Edwards25519, s: [32]u8, comptime vartime: bool) Error!Edwards25519 {
+    fn pcMul(pc: [9]Edwards25519, s: [32]u8, comptime vartime: bool) IdentityElementError!Edwards25519 {
         std.debug.assert(vartime);
-        const e = nonAdjacentForm(s);
+        const e = slide(s);
         var q = Edwards25519.identityElement;
         var pos: usize = 2 * 32 - 1;
         while (true) : (pos -= 1) {
@@ -197,7 +196,7 @@ pub const Edwards25519 = struct {
     }
 
     // Scalar multiplication with a 4-bit window and the first 15 multiples.
-    fn pcMul16(pc: [16]Edwards25519, s: [32]u8, comptime vartime: bool) Error!Edwards25519 {
+    fn pcMul16(pc: [16]Edwards25519, s: [32]u8, comptime vartime: bool) IdentityElementError!Edwards25519 {
         var q = Edwards25519.identityElement;
         var pos: usize = 252;
         while (true) : (pos -= 4) {
@@ -232,13 +231,18 @@ pub const Edwards25519 = struct {
         break :pc precompute(Edwards25519.basePoint, 15);
     };
 
+    const basePointPc8 = comptime pc: {
+        @setEvalBranchQuota(10000);
+        break :pc precompute(Edwards25519.basePoint, 8);
+    };
+
     /// Multiply an Edwards25519 point by a scalar without clamping it.
-    /// Return error.WeakPublicKey if the resulting point is
-    /// the identity element.
-    pub fn mul(p: Edwards25519, s: [32]u8) Error!Edwards25519 {
+    /// Return error.WeakPublicKey if the base generates a small-order group,
+    /// and error.IdentityElement if the result is the identity element.
+    pub fn mul(p: Edwards25519, s: [32]u8) (IdentityElementError || WeakPublicKeyError)!Edwards25519 {
         const pc = if (p.is_base) basePointPc else pc: {
             const xpc = precompute(p, 15);
-            xpc[4].rejectIdentity() catch |_| return error.WeakPublicKey;
+            xpc[4].rejectIdentity() catch return error.WeakPublicKey;
             break :pc xpc;
         };
         return pcMul16(pc, s, false);
@@ -246,7 +250,7 @@ pub const Edwards25519 = struct {
 
     /// Multiply an Edwards25519 point by a *PUBLIC* scalar *IN VARIABLE TIME*
     /// This can be used for signature verification.
-    pub fn mulPublic(p: Edwards25519, s: [32]u8) Error!Edwards25519 {
+    pub fn mulPublic(p: Edwards25519, s: [32]u8) (IdentityElementError || WeakPublicKeyError)!Edwards25519 {
         if (p.is_base) {
             return pcMul16(basePointPc, s, true);
         } else {
@@ -256,14 +260,50 @@ pub const Edwards25519 = struct {
         }
     }
 
+    /// Double-base multiplication of public parameters - Compute (p1*s1)+(p2*s2) *IN VARIABLE TIME*
+    /// This can be used for signature verification.
+    pub fn mulDoubleBasePublic(p1: Edwards25519, s1: [32]u8, p2: Edwards25519, s2: [32]u8) (IdentityElementError || WeakPublicKeyError)!Edwards25519 {
+        const pc1 = if (p1.is_base) basePointPc8 else pc: {
+            const xpc = precompute(p1, 8);
+            xpc[4].rejectIdentity() catch return error.WeakPublicKey;
+            break :pc xpc;
+        };
+        const pc2 = if (p2.is_base) basePointPc8 else pc: {
+            const xpc = precompute(p2, 8);
+            xpc[4].rejectIdentity() catch return error.WeakPublicKey;
+            break :pc xpc;
+        };
+        const e1 = slide(s1);
+        const e2 = slide(s2);
+        var q = Edwards25519.identityElement;
+        var pos: usize = 2 * 32 - 1;
+        while (true) : (pos -= 1) {
+            const slot1 = e1[pos];
+            if (slot1 > 0) {
+                q = q.add(pc1[@intCast(usize, slot1)]);
+            } else if (slot1 < 0) {
+                q = q.sub(pc1[@intCast(usize, -slot1)]);
+            }
+            const slot2 = e2[pos];
+            if (slot2 > 0) {
+                q = q.add(pc2[@intCast(usize, slot2)]);
+            } else if (slot2 < 0) {
+                q = q.sub(pc2[@intCast(usize, -slot2)]);
+            }
+            if (pos == 0) break;
+            q = q.dbl().dbl().dbl().dbl();
+        }
+        try q.rejectIdentity();
+        return q;
+    }
+
     /// Multiscalar multiplication *IN VARIABLE TIME* for public data
     /// Computes ps0*ss0 + ps1*ss1 + ps2*ss2... faster than doing many of these operations individually
-    pub fn mulMulti(comptime count: usize, ps: [count]Edwards25519, ss: [count][32]u8) Error!Edwards25519 {
+    pub fn mulMulti(comptime count: usize, ps: [count]Edwards25519, ss: [count][32]u8) (IdentityElementError || WeakPublicKeyError)!Edwards25519 {
         var pcs: [count][9]Edwards25519 = undefined;
         for (ps) |p, i| {
             if (p.is_base) {
-                @setEvalBranchQuota(10000);
-                pcs[i] = comptime precompute(Edwards25519.basePoint, 8);
+                pcs[i] = basePointPc8;
             } else {
                 pcs[i] = precompute(p, 8);
                 pcs[i][4].rejectIdentity() catch |_| return error.WeakPublicKey;
@@ -271,7 +311,7 @@ pub const Edwards25519 = struct {
         }
         var es: [count][2 * 32]i8 = undefined;
         for (ss) |s, i| {
-            es[i] = nonAdjacentForm(s);
+            es[i] = slide(s);
         }
         var q = Edwards25519.identityElement;
         var pos: usize = 2 * 32 - 1;
@@ -297,14 +337,14 @@ pub const Edwards25519 = struct {
     /// This is strongly recommended for DH operations.
     /// Return error.WeakPublicKey if the resulting point is
     /// the identity element.
-    pub fn clampedMul(p: Edwards25519, s: [32]u8) Error!Edwards25519 {
+    pub fn clampedMul(p: Edwards25519, s: [32]u8) (IdentityElementError || WeakPublicKeyError)!Edwards25519 {
         var t: [32]u8 = s;
         scalar.clamp(&t);
         return mul(p, t);
     }
 
     // montgomery -- recover y = sqrt(x^3 + A*x^2 + x)
-    fn xmontToYmont(x: Fe) Error!Fe {
+    fn xmontToYmont(x: Fe) NotSquareError!Fe {
         var x2 = x.sq();
         const x3 = x.mul(x2);
         x2 = x2.mul32(Fe.edwards25519a_32);
@@ -367,7 +407,7 @@ pub const Edwards25519 = struct {
 
     fn stringToPoints(comptime n: usize, ctx: []const u8, s: []const u8) [n]Edwards25519 {
         debug.assert(n <= 2);
-        const H = std.crypto.hash.sha2.Sha512;
+        const H = crypto.hash.sha2.Sha512;
         const h_l: usize = 48;
         var xctx = ctx;
         var hctx: [H.digest_length]u8 = undefined;
@@ -485,8 +525,8 @@ test "edwards25519 packing/unpacking" {
 test "edwards25519 point addition/substraction" {
     var s1: [32]u8 = undefined;
     var s2: [32]u8 = undefined;
-    std.crypto.random.bytes(&s1);
-    std.crypto.random.bytes(&s2);
+    crypto.random.bytes(&s1);
+    crypto.random.bytes(&s2);
     const p = try Edwards25519.basePoint.clampedMul(s1);
     const q = try Edwards25519.basePoint.clampedMul(s2);
     const r = p.add(q).add(q).sub(q).sub(q);

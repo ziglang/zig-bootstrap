@@ -36,7 +36,7 @@ pub fn build(b: *Builder) !void {
     const docs_step = b.step("docs", "Build documentation");
     docs_step.dependOn(&docgen_cmd.step);
 
-    const test_step = b.step("test", "Run all the tests");
+    const toolchain_step = b.step("test-toolchain", "Run the tests for the toolchain");
 
     var test_stage2 = b.addTest("src/test.zig");
     test_stage2.setBuildMode(mode);
@@ -44,6 +44,7 @@ pub fn build(b: *Builder) !void {
 
     const fmt_build_zig = b.addFmt(&[_][]const u8{"build.zig"});
 
+    const skip_debug = b.option(bool, "skip-debug", "Main test suite skips debug builds") orelse false;
     const skip_release = b.option(bool, "skip-release", "Main test suite skips release builds") orelse false;
     const skip_release_small = b.option(bool, "skip-release-small", "Main test suite skips release-small builds") orelse skip_release;
     const skip_release_fast = b.option(bool, "skip-release-fast", "Main test suite skips release-fast builds") orelse skip_release;
@@ -51,9 +52,12 @@ pub fn build(b: *Builder) !void {
     const skip_non_native = b.option(bool, "skip-non-native", "Main test suite skips non-native builds") orelse false;
     const skip_libc = b.option(bool, "skip-libc", "Main test suite skips tests that link libc") orelse false;
     const skip_compile_errors = b.option(bool, "skip-compile-errors", "Main test suite skips compile error tests") orelse false;
+    const skip_run_translated_c = b.option(bool, "skip-run-translated-c", "Main test suite skips run-translated-c tests") orelse false;
+    const skip_stage2_tests = b.option(bool, "skip-stage2-tests", "Main test suite skips self-hosted compiler tests") orelse false;
 
     const only_install_lib_files = b.option(bool, "lib-files-only", "Only install library files") orelse false;
     const is_stage1 = b.option(bool, "stage1", "Build the stage1 compiler, put stage2 behind a feature flag") orelse false;
+    const omit_stage2 = b.option(bool, "omit-stage2", "Do not include stage2 behind a feature flag inside stage1") orelse false;
     const static_llvm = b.option(bool, "static-llvm", "Disable integration with system-installed LLVM, Clang, LLD, and libc++") orelse false;
     const enable_llvm = b.option(bool, "enable-llvm", "Build self-hosted compiler with LLVM backend enabled") orelse (is_stage1 or static_llvm);
     const config_h_path_option = b.option([]const u8, "config_h", "Path to the generated config.h");
@@ -86,7 +90,7 @@ pub fn build(b: *Builder) !void {
     exe.install();
     exe.setBuildMode(mode);
     exe.setTarget(target);
-    test_step.dependOn(&exe.step);
+    toolchain_step.dependOn(&exe.step);
     b.default_step.dependOn(&exe.step);
 
     exe.addBuildOption(bool, "skip_non_native", skip_non_native);
@@ -195,7 +199,7 @@ pub fn build(b: *Builder) !void {
     exe.addBuildOption(bool, "enable_logging", enable_logging);
     exe.addBuildOption(bool, "enable_tracy", tracy != null);
     exe.addBuildOption(bool, "is_stage1", is_stage1);
-    exe.addBuildOption(bool, "omit_stage2", false);
+    exe.addBuildOption(bool, "omit_stage2", omit_stage2);
     if (tracy) |tracy_path| {
         const client_cpp = fs.path.join(
             b.allocator,
@@ -218,7 +222,7 @@ pub fn build(b: *Builder) !void {
 
     test_stage2.addBuildOption(bool, "skip_non_native", skip_non_native);
     test_stage2.addBuildOption(bool, "is_stage1", is_stage1);
-    test_stage2.addBuildOption(bool, "omit_stage2", false);
+    test_stage2.addBuildOption(bool, "omit_stage2", omit_stage2);
     test_stage2.addBuildOption(bool, "have_llvm", enable_llvm);
     test_stage2.addBuildOption(bool, "enable_qemu", is_qemu_enabled);
     test_stage2.addBuildOption(bool, "enable_wine", is_wine_enabled);
@@ -228,12 +232,16 @@ pub fn build(b: *Builder) !void {
 
     const test_stage2_step = b.step("test-stage2", "Run the stage2 compiler tests");
     test_stage2_step.dependOn(&test_stage2.step);
-    test_step.dependOn(test_stage2_step);
+    if (!skip_stage2_tests) {
+        toolchain_step.dependOn(test_stage2_step);
+    }
 
     var chosen_modes: [4]builtin.Mode = undefined;
     var chosen_mode_index: usize = 0;
-    chosen_modes[chosen_mode_index] = builtin.Mode.Debug;
-    chosen_mode_index += 1;
+    if (!skip_debug) {
+        chosen_modes[chosen_mode_index] = builtin.Mode.Debug;
+        chosen_mode_index += 1;
+    }
     if (!skip_release_safe) {
         chosen_modes[chosen_mode_index] = builtin.Mode.ReleaseSafe;
         chosen_mode_index += 1;
@@ -249,30 +257,37 @@ pub fn build(b: *Builder) !void {
     const modes = chosen_modes[0..chosen_mode_index];
 
     // run stage1 `zig fmt` on this build.zig file just to make sure it works
-    test_step.dependOn(&fmt_build_zig.step);
+    toolchain_step.dependOn(&fmt_build_zig.step);
     const fmt_step = b.step("test-fmt", "Run zig fmt against build.zig to make sure it works");
     fmt_step.dependOn(&fmt_build_zig.step);
 
     // TODO for the moment, skip wasm32-wasi until bugs are sorted out.
-    test_step.dependOn(tests.addPkgTests(b, test_filter, "test/stage1/behavior.zig", "behavior", "Run the behavior tests", modes, false, skip_non_native, skip_libc, is_wine_enabled, is_qemu_enabled, is_wasmtime_enabled, glibc_multi_dir));
+    toolchain_step.dependOn(tests.addPkgTests(b, test_filter, "test/stage1/behavior.zig", "behavior", "Run the behavior tests", modes, false, skip_non_native, skip_libc, is_wine_enabled, is_qemu_enabled, is_wasmtime_enabled, glibc_multi_dir));
 
-    test_step.dependOn(tests.addPkgTests(b, test_filter, "lib/std/std.zig", "std", "Run the standard library tests", modes, false, skip_non_native, skip_libc, is_wine_enabled, is_qemu_enabled, is_wasmtime_enabled, glibc_multi_dir));
+    toolchain_step.dependOn(tests.addPkgTests(b, test_filter, "lib/std/special/compiler_rt.zig", "compiler-rt", "Run the compiler_rt tests", modes, true, skip_non_native, true, is_wine_enabled, is_qemu_enabled, is_wasmtime_enabled, glibc_multi_dir));
+    toolchain_step.dependOn(tests.addPkgTests(b, test_filter, "lib/std/special/c.zig", "minilibc", "Run the mini libc tests", modes, true, skip_non_native, true, is_wine_enabled, is_qemu_enabled, is_wasmtime_enabled, glibc_multi_dir));
 
-    test_step.dependOn(tests.addPkgTests(b, test_filter, "lib/std/special/compiler_rt.zig", "compiler-rt", "Run the compiler_rt tests", modes, true, skip_non_native, true, is_wine_enabled, is_qemu_enabled, is_wasmtime_enabled, glibc_multi_dir));
-
-    test_step.dependOn(tests.addCompareOutputTests(b, test_filter, modes));
-    test_step.dependOn(tests.addStandaloneTests(b, test_filter, modes));
-    test_step.dependOn(tests.addStackTraceTests(b, test_filter, modes));
-    test_step.dependOn(tests.addCliTests(b, test_filter, modes));
-    test_step.dependOn(tests.addAssembleAndLinkTests(b, test_filter, modes));
-    test_step.dependOn(tests.addRuntimeSafetyTests(b, test_filter, modes));
-    test_step.dependOn(tests.addTranslateCTests(b, test_filter));
-    test_step.dependOn(tests.addRunTranslatedCTests(b, test_filter, target));
-    // tests for this feature are disabled until we have the self-hosted compiler available
-    // test_step.dependOn(tests.addGenHTests(b, test_filter));
-    if (!skip_compile_errors) {
-        test_step.dependOn(tests.addCompileErrorTests(b, test_filter, modes));
+    toolchain_step.dependOn(tests.addCompareOutputTests(b, test_filter, modes));
+    toolchain_step.dependOn(tests.addStandaloneTests(b, test_filter, modes));
+    toolchain_step.dependOn(tests.addStackTraceTests(b, test_filter, modes));
+    toolchain_step.dependOn(tests.addCliTests(b, test_filter, modes));
+    toolchain_step.dependOn(tests.addAssembleAndLinkTests(b, test_filter, modes));
+    toolchain_step.dependOn(tests.addRuntimeSafetyTests(b, test_filter, modes));
+    toolchain_step.dependOn(tests.addTranslateCTests(b, test_filter));
+    if (!skip_run_translated_c) {
+        toolchain_step.dependOn(tests.addRunTranslatedCTests(b, test_filter, target));
     }
+    // tests for this feature are disabled until we have the self-hosted compiler available
+    // toolchain_step.dependOn(tests.addGenHTests(b, test_filter));
+    if (!skip_compile_errors) {
+        toolchain_step.dependOn(tests.addCompileErrorTests(b, test_filter, modes));
+    }
+
+    const std_step = tests.addPkgTests(b, test_filter, "lib/std/std.zig", "std", "Run the standard library tests", modes, false, skip_non_native, skip_libc, is_wine_enabled, is_qemu_enabled, is_wasmtime_enabled, glibc_multi_dir);
+
+    const test_step = b.step("test", "Run all the tests");
+    test_step.dependOn(toolchain_step);
+    test_step.dependOn(std_step);
     test_step.dependOn(docs_step);
 }
 
@@ -739,80 +754,60 @@ const lld_libs = [_][]const u8{
 };
 // This list can be re-generated with `llvm-config --libfiles` and then
 // reformatting using your favorite text editor. Note we do not execute
-// `llvm-config` here because we are cross compiling.
+// `llvm-config` here because we are cross compiling. Also omit LLVMTableGen
+// from these libs.
 const llvm_libs = [_][]const u8{
-    "LLVMXRay",
     "LLVMWindowsManifest",
-    "LLVMSymbolize",
-    "LLVMDebugInfoPDB",
-    "LLVMOrcJIT",
-    "LLVMOrcError",
-    "LLVMJITLink",
-    "LLVMObjectYAML",
-    "LLVMMCA",
-    "LLVMLTO",
-    "LLVMPasses",
-    "LLVMCoroutines",
-    "LLVMObjCARCOpts",
-    "LLVMExtensions",
-    "LLVMLineEditor",
+    "LLVMXRay",
     "LLVMLibDriver",
-    "LLVMInterpreter",
-    "LLVMFuzzMutate",
-    "LLVMMCJIT",
-    "LLVMExecutionEngine",
-    "LLVMRuntimeDyld",
-    "LLVMDWARFLinker",
     "LLVMDlltoolDriver",
-    "LLVMOption",
-    "LLVMDebugInfoGSYM",
     "LLVMCoverage",
+    "LLVMLineEditor",
     "LLVMXCoreDisassembler",
     "LLVMXCoreCodeGen",
     "LLVMXCoreDesc",
     "LLVMXCoreInfo",
     "LLVMX86Disassembler",
-    "LLVMX86CodeGen",
     "LLVMX86AsmParser",
+    "LLVMX86CodeGen",
     "LLVMX86Desc",
     "LLVMX86Info",
     "LLVMWebAssemblyDisassembler",
+    "LLVMWebAssemblyAsmParser",
     "LLVMWebAssemblyCodeGen",
     "LLVMWebAssemblyDesc",
-    "LLVMWebAssemblyAsmParser",
     "LLVMWebAssemblyInfo",
     "LLVMSystemZDisassembler",
-    "LLVMSystemZCodeGen",
     "LLVMSystemZAsmParser",
+    "LLVMSystemZCodeGen",
     "LLVMSystemZDesc",
     "LLVMSystemZInfo",
     "LLVMSparcDisassembler",
-    "LLVMSparcCodeGen",
     "LLVMSparcAsmParser",
+    "LLVMSparcCodeGen",
     "LLVMSparcDesc",
     "LLVMSparcInfo",
     "LLVMRISCVDisassembler",
-    "LLVMRISCVCodeGen",
     "LLVMRISCVAsmParser",
+    "LLVMRISCVCodeGen",
     "LLVMRISCVDesc",
-    "LLVMRISCVUtils",
     "LLVMRISCVInfo",
     "LLVMPowerPCDisassembler",
-    "LLVMPowerPCCodeGen",
     "LLVMPowerPCAsmParser",
+    "LLVMPowerPCCodeGen",
     "LLVMPowerPCDesc",
     "LLVMPowerPCInfo",
     "LLVMNVPTXCodeGen",
     "LLVMNVPTXDesc",
     "LLVMNVPTXInfo",
     "LLVMMSP430Disassembler",
-    "LLVMMSP430CodeGen",
     "LLVMMSP430AsmParser",
+    "LLVMMSP430CodeGen",
     "LLVMMSP430Desc",
     "LLVMMSP430Info",
     "LLVMMipsDisassembler",
-    "LLVMMipsCodeGen",
     "LLVMMipsAsmParser",
+    "LLVMMipsCodeGen",
     "LLVMMipsDesc",
     "LLVMMipsInfo",
     "LLVMLanaiDisassembler",
@@ -826,44 +821,73 @@ const llvm_libs = [_][]const u8{
     "LLVMHexagonDesc",
     "LLVMHexagonInfo",
     "LLVMBPFDisassembler",
-    "LLVMBPFCodeGen",
     "LLVMBPFAsmParser",
+    "LLVMBPFCodeGen",
     "LLVMBPFDesc",
     "LLVMBPFInfo",
     "LLVMAVRDisassembler",
-    "LLVMAVRCodeGen",
     "LLVMAVRAsmParser",
+    "LLVMAVRCodeGen",
     "LLVMAVRDesc",
     "LLVMAVRInfo",
     "LLVMARMDisassembler",
-    "LLVMARMCodeGen",
     "LLVMARMAsmParser",
+    "LLVMARMCodeGen",
     "LLVMARMDesc",
     "LLVMARMUtils",
     "LLVMARMInfo",
     "LLVMAMDGPUDisassembler",
-    "LLVMAMDGPUCodeGen",
-    "LLVMMIRParser",
-    "LLVMipo",
-    "LLVMInstrumentation",
-    "LLVMVectorize",
-    "LLVMLinker",
-    "LLVMIRReader",
-    "LLVMAsmParser",
-    "LLVMFrontendOpenMP",
     "LLVMAMDGPUAsmParser",
+    "LLVMAMDGPUCodeGen",
     "LLVMAMDGPUDesc",
     "LLVMAMDGPUUtils",
     "LLVMAMDGPUInfo",
     "LLVMAArch64Disassembler",
-    "LLVMMCDisassembler",
+    "LLVMAArch64AsmParser",
     "LLVMAArch64CodeGen",
+    "LLVMAArch64Desc",
+    "LLVMAArch64Utils",
+    "LLVMAArch64Info",
+    "LLVMOrcJIT",
+    "LLVMMCJIT",
+    "LLVMJITLink",
+    "LLVMOrcTargetProcess",
+    "LLVMOrcShared",
+    "LLVMInterpreter",
+    "LLVMExecutionEngine",
+    "LLVMRuntimeDyld",
+    "LLVMSymbolize",
+    "LLVMDebugInfoPDB",
+    "LLVMDebugInfoGSYM",
+    "LLVMOption",
+    "LLVMObjectYAML",
+    "LLVMMCA",
+    "LLVMMCDisassembler",
+    "LLVMLTO",
+    "LLVMPasses",
     "LLVMCFGuard",
+    "LLVMCoroutines",
+    "LLVMObjCARCOpts",
+    "LLVMHelloNew",
+    "LLVMipo",
+    "LLVMVectorize",
+    "LLVMLinker",
+    "LLVMInstrumentation",
+    "LLVMFrontendOpenMP",
+    "LLVMFrontendOpenACC",
+    "LLVMExtensions",
+    "LLVMDWARFLinker",
     "LLVMGlobalISel",
-    "LLVMSelectionDAG",
+    "LLVMMIRParser",
     "LLVMAsmPrinter",
     "LLVMDebugInfoDWARF",
+    "LLVMSelectionDAG",
     "LLVMCodeGen",
+    "LLVMIRReader",
+    "LLVMAsmParser",
+    "LLVMInterfaceStub",
+    "LLVMFileCheck",
+    "LLVMFuzzMutate",
     "LLVMTarget",
     "LLVMScalarOpts",
     "LLVMInstCombine",
@@ -874,19 +898,15 @@ const llvm_libs = [_][]const u8{
     "LLVMProfileData",
     "LLVMObject",
     "LLVMTextAPI",
+    "LLVMMCParser",
+    "LLVMMC",
+    "LLVMDebugInfoCodeView",
+    "LLVMDebugInfoMSF",
     "LLVMBitReader",
     "LLVMCore",
     "LLVMRemarks",
     "LLVMBitstreamReader",
-    "LLVMAArch64AsmParser",
-    "LLVMMCParser",
-    "LLVMAArch64Desc",
-    "LLVMMC",
-    "LLVMDebugInfoCodeView",
-    "LLVMDebugInfoMSF",
     "LLVMBinaryFormat",
-    "LLVMAArch64Utils",
-    "LLVMAArch64Info",
     "LLVMSupport",
     "LLVMDemangle",
 };
