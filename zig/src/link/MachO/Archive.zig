@@ -16,7 +16,7 @@ allocator: *Allocator,
 arch: ?std.Target.Cpu.Arch = null,
 file: ?fs.File = null,
 header: ?ar_hdr = null,
-name: ?[]u8 = null,
+name: ?[]const u8 = null,
 
 /// Parsed table of contents.
 /// Each symbol name points to a list of all definition
@@ -195,7 +195,7 @@ fn parseTableOfContents(self: *Archive, reader: anytype) !void {
 }
 
 /// Caller owns the Object instance.
-pub fn parseObject(self: Archive, offset: u32) !Object {
+pub fn parseObject(self: Archive, offset: u32) !*Object {
     var reader = self.file.?.reader();
     try reader.context.seekTo(offset);
 
@@ -208,17 +208,19 @@ pub fn parseObject(self: Archive, offset: u32) !Object {
 
     const object_name = try parseName(self.allocator, object_header, reader);
     defer self.allocator.free(object_name);
-    const object_basename = std.fs.path.basename(object_name);
 
-    log.debug("extracting object '{s}' from archive '{s}'", .{ object_basename, self.name.? });
+    log.debug("extracting object '{s}' from archive '{s}'", .{ object_name, self.name.? });
 
     const name = name: {
         var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
         const path = try std.os.realpath(self.name.?, &buffer);
-        break :name try std.fmt.allocPrint(self.allocator, "{s}({s})", .{ path, object_basename });
+        break :name try std.fmt.allocPrint(self.allocator, "{s}({s})", .{ path, object_name });
     };
 
-    var object = Object.init(self.allocator);
+    var object = try self.allocator.create(Object);
+    errdefer self.allocator.destroy(object);
+
+    object.* = Object.init(self.allocator);
     object.arch = self.arch.?;
     object.file = try fs.cwd().openFile(self.name.?, .{});
     object.name = name;

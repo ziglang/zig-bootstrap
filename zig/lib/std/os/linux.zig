@@ -52,6 +52,7 @@ pub fn getauxval(index: usize) usize {
 // Some architectures (and some syscalls) require 64bit parameters to be passed
 // in a even-aligned register pair.
 const require_aligned_register_pair =
+    std.Target.current.cpu.arch.isPPC() or
     std.Target.current.cpu.arch.isMIPS() or
     std.Target.current.cpu.arch.isARM() or
     std.Target.current.cpu.arch.isThumb();
@@ -385,7 +386,7 @@ pub fn symlinkat(existing: [*:0]const u8, newfd: i32, newpath: [*:0]const u8) us
 }
 
 pub fn pread(fd: i32, buf: [*]u8, count: usize, offset: u64) usize {
-    if (@hasField(SYS, "pread64")) {
+    if (@hasField(SYS, "pread64") and usize_bits < 64) {
         const offset_halves = splitValue64(offset);
         if (require_aligned_register_pair) {
             return syscall6(
@@ -408,8 +409,10 @@ pub fn pread(fd: i32, buf: [*]u8, count: usize, offset: u64) usize {
             );
         }
     } else {
+        // Some architectures (eg. 64bit SPARC) pread is called pread64.
+        const S = if (!@hasField(SYS, "pread") and @hasField(SYS, "pread64")) .pread64 else .pread;
         return syscall4(
-            .pread,
+            S,
             @bitCast(usize, @as(isize, fd)),
             @ptrToInt(buf),
             count,
@@ -449,7 +452,7 @@ pub fn write(fd: i32, buf: [*]const u8, count: usize) usize {
 }
 
 pub fn ftruncate(fd: i32, length: u64) usize {
-    if (@hasField(SYS, "ftruncate64")) {
+    if (@hasField(SYS, "ftruncate64") and usize_bits < 64) {
         const length_halves = splitValue64(length);
         if (require_aligned_register_pair) {
             return syscall4(
@@ -477,7 +480,7 @@ pub fn ftruncate(fd: i32, length: u64) usize {
 }
 
 pub fn pwrite(fd: i32, buf: [*]const u8, count: usize, offset: u64) usize {
-    if (@hasField(SYS, "pwrite64")) {
+    if (@hasField(SYS, "pwrite64") and usize_bits < 64) {
         const offset_halves = splitValue64(offset);
 
         if (require_aligned_register_pair) {
@@ -501,8 +504,10 @@ pub fn pwrite(fd: i32, buf: [*]const u8, count: usize, offset: u64) usize {
             );
         }
     } else {
+        // Some architectures (eg. 64bit SPARC) pwrite is called pwrite64.
+        const S = if (!@hasField(SYS, "pwrite") and @hasField(SYS, "pwrite64")) .pwrite64 else .pwrite;
         return syscall4(
-            .pwrite,
+            S,
             @bitCast(usize, @as(isize, fd)),
             @ptrToInt(buf),
             count,
@@ -632,7 +637,7 @@ pub fn tkill(tid: pid_t, sig: i32) usize {
 }
 
 pub fn tgkill(tgid: pid_t, tid: pid_t, sig: i32) usize {
-    return syscall2(.tgkill, @bitCast(usize, @as(isize, tgid)), @bitCast(usize, @as(isize, tid)), @bitCast(usize, @as(isize, sig)));
+    return syscall3(.tgkill, @bitCast(usize, @as(isize, tgid)), @bitCast(usize, @as(isize, tid)), @bitCast(usize, @as(isize, sig)));
 }
 
 pub fn link(oldpath: [*:0]const u8, newpath: [*:0]const u8, flags: i32) usize {
@@ -1385,6 +1390,53 @@ pub fn prlimit(pid: pid_t, resource: rlimit_resource, new_limit: ?*const rlimit,
 
 pub fn madvise(address: [*]u8, len: usize, advice: u32) usize {
     return syscall3(.madvise, @ptrToInt(address), len, advice);
+}
+
+pub fn pidfd_open(pid: pid_t, flags: u32) usize {
+    return syscall2(.pidfd_open, @bitCast(usize, @as(isize, pid)), flags);
+}
+
+pub fn pidfd_getfd(pidfd: fd_t, targetfd: fd_t, flags: u32) usize {
+    return syscall3(
+        .pidfd_getfd,
+        @bitCast(usize, @as(isize, pidfd)),
+        @bitCast(usize, @as(isize, targetfd)),
+        flags,
+    );
+}
+
+pub fn pidfd_send_signal(pidfd: fd_t, sig: i32, info: ?*siginfo_t, flags: u32) usize {
+    return syscall4(
+        .pidfd_send_signal,
+        @bitCast(usize, @as(isize, pidfd)),
+        @bitCast(usize, @as(isize, sig)),
+        @ptrToInt(info),
+        flags,
+    );
+}
+
+pub fn process_vm_readv(pid: pid_t, local: [*]const iovec, local_count: usize, remote: [*]const iovec, remote_count: usize, flags: usize) usize {
+    return syscall6(
+        .process_vm_readv,
+        @bitCast(usize, @as(isize, pid)),
+        @ptrToInt(local),
+        local_count,
+        @ptrToInt(remote),
+        remote_count,
+        flags,
+    );
+}
+
+pub fn process_vm_writev(pid: pid_t, local: [*]const iovec, local_count: usize, remote: [*]const iovec, remote_count: usize, flags: usize) usize {
+    return syscall6(
+        .process_vm_writev,
+        @bitCast(usize, @as(isize, pid)),
+        @ptrToInt(local),
+        local_count,
+        @ptrToInt(remote),
+        remote_count,
+        flags,
+    );
 }
 
 test {

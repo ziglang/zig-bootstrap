@@ -9534,7 +9534,7 @@ static IrInstSrc *ir_gen_nosuspend(IrBuilderSrc *irb, Scope *parent_scope, AstNo
 
     Scope *child_scope = create_nosuspend_scope(irb->codegen, node, parent_scope);
     // purposefully pass null for result_loc and let EndExpr handle it
-    return ir_gen_node_extra(irb, node->data.comptime_expr.expr, child_scope, lval, nullptr);
+    return ir_gen_node_extra(irb, node->data.nosuspend_expr.expr, child_scope, lval, nullptr);
 }
 
 static IrInstSrc *ir_gen_return_from_block(IrBuilderSrc *irb, Scope *break_scope, AstNode *node, ScopeBlock *block_scope) {
@@ -10199,14 +10199,12 @@ static IrInstSrc *ir_gen_suspend(IrBuilderSrc *irb, Scope *parent_scope, AstNode
     }
 
     IrInstSrcSuspendBegin *begin = ir_build_suspend_begin_src(irb, parent_scope, node);
-    if (node->data.suspend.block != nullptr) {
-        ScopeSuspend *suspend_scope = create_suspend_scope(irb->codegen, node, parent_scope);
-        Scope *child_scope = &suspend_scope->base;
-        IrInstSrc *susp_res = ir_gen_node(irb, node->data.suspend.block, child_scope);
-        if (susp_res == irb->codegen->invalid_inst_src)
-            return irb->codegen->invalid_inst_src;
-        ir_mark_gen(ir_build_check_statement_is_void(irb, child_scope, node->data.suspend.block, susp_res));
-    }
+    ScopeSuspend *suspend_scope = create_suspend_scope(irb->codegen, node, parent_scope);
+    Scope *child_scope = &suspend_scope->base;
+    IrInstSrc *susp_res = ir_gen_node(irb, node->data.suspend.block, child_scope);
+    if (susp_res == irb->codegen->invalid_inst_src)
+        return irb->codegen->invalid_inst_src;
+    ir_mark_gen(ir_build_check_statement_is_void(irb, child_scope, node->data.suspend.block, susp_res));
 
     return ir_mark_gen(ir_build_suspend_finish_src(irb, parent_scope, node, begin));
 }
@@ -11363,11 +11361,8 @@ static void float_negate(ZigValue *out_val, ZigValue *op) {
     } else if (op->type->id == ZigTypeIdFloat) {
         switch (op->type->data.floating.bit_count) {
             case 16:
-                {
-                    const float16_t zero = zig_double_to_f16(0);
-                    out_val->data.x_f16 = f16_sub(zero, op->data.x_f16);
-                    return;
-                }
+                out_val->data.x_f16 = f16_neg(op->data.x_f16);
+                return;
             case 32:
                 out_val->data.x_f32 = -op->data.x_f32;
                 return;
@@ -11375,9 +11370,7 @@ static void float_negate(ZigValue *out_val, ZigValue *op) {
                 out_val->data.x_f64 = -op->data.x_f64;
                 return;
             case 128:
-                float128_t zero_f128;
-                ui32_to_f128M(0, &zero_f128);
-                f128M_sub(&zero_f128, &op->data.x_f128, &out_val->data.x_f128);
+                f128M_neg(&op->data.x_f128, &out_val->data.x_f128);
                 return;
             default:
                 zig_unreachable();
@@ -19223,6 +19216,7 @@ static IrInstGen *ir_analyze_instruction_export(IrAnalyze *ira, IrInstSrcExport 
                 case CallingConventionAPCS:
                 case CallingConventionAAPCS:
                 case CallingConventionAAPCSVFP:
+                case CallingConventionSysV:
                     add_fn_export(ira->codegen, fn_entry, buf_ptr(symbol_name), global_linkage_id, cc);
                     fn_entry->section_name = section_name;
                     break;
@@ -20666,8 +20660,12 @@ static IrInstGen *analyze_casted_new_stack(IrAnalyze *ira, IrInst* source_instr,
                 get_fn_frame_type(ira->codegen, fn_entry), false);
         return ir_implicit_cast(ira, new_stack, needed_frame_type);
     } else {
+        // XXX The stack alignment is hardcoded to 16 here and in
+        // std.Target.stack_align.
+        const uint32_t required_align = is_async_call_builtin ?
+                get_async_frame_align_bytes(ira->codegen) : 16;
         ZigType *u8_ptr = get_pointer_to_type_extra(ira->codegen, ira->codegen->builtin_types.entry_u8,
-                false, false, PtrLenUnknown, target_fn_align(ira->codegen->zig_target), 0, 0, false);
+                false, false, PtrLenUnknown, required_align, 0, 0, false);
         ZigType *u8_slice = get_slice_type(ira->codegen, u8_ptr);
         ira->codegen->need_frame_size_prefix_data = true;
         return ir_implicit_cast2(ira, new_stack_src, new_stack, u8_slice);
@@ -21665,8 +21663,8 @@ static ErrorMsg *ir_eval_negation_scalar(IrAnalyze *ira, IrInst* source_instr, Z
 {
     bool is_float = (scalar_type->id == ZigTypeIdFloat || scalar_type->id == ZigTypeIdComptimeFloat);
 
-    bool ok_type = ((scalar_type->id == ZigTypeIdInt && scalar_type->data.integral.is_signed) ||
-        scalar_type->id == ZigTypeIdComptimeInt || (is_float && !is_wrap_op));
+    bool ok_type = scalar_type->id == ZigTypeIdInt || scalar_type->id == ZigTypeIdComptimeInt ||
+            (is_float && !is_wrap_op);
 
     if (!ok_type) {
         const char *fmt = is_wrap_op ? "invalid wrapping negation type: '%s'" : "invalid negation type: '%s'";
@@ -21677,7 +21675,7 @@ static ErrorMsg *ir_eval_negation_scalar(IrAnalyze *ira, IrInst* source_instr, Z
         float_negate(scalar_out_val, operand_val);
     } else if (is_wrap_op) {
         bigint_negate_wrap(&scalar_out_val->data.x_bigint, &operand_val->data.x_bigint,
-                scalar_type->data.integral.bit_count);
+                scalar_type->data.integral.bit_count, scalar_type->data.integral.is_signed);
     } else {
         bigint_negate(&scalar_out_val->data.x_bigint, &operand_val->data.x_bigint);
     }
@@ -26086,11 +26084,11 @@ static Error ir_make_type_info_value(IrAnalyze *ira, IrInst* source_instr, ZigTy
                 fields[0]->special = ConstValSpecialStatic;
                 fields[0]->type = get_builtin_type(ira->codegen, "CallingConvention");
                 bigint_init_unsigned(&fields[0]->data.x_enum_tag, type_entry->data.fn.fn_type_id.cc);
-                // alignment: u29
+                // alignment: comptime_int
                 ensure_field_index(result->type, "alignment", 1);
                 fields[1]->special = ConstValSpecialStatic;
                 fields[1]->type = ira->codegen->builtin_types.entry_num_lit_int;
-                bigint_init_unsigned(&fields[1]->data.x_bigint, type_entry->data.fn.fn_type_id.alignment);
+                bigint_init_unsigned(&fields[1]->data.x_bigint, get_ptr_align(ira->codegen, type_entry));
                 // is_generic: bool
                 ensure_field_index(result->type, "is_generic", 2);
                 bool is_generic = type_entry->data.fn.is_generic;
@@ -30102,7 +30100,7 @@ static IrInstGen *ir_align_cast(IrAnalyze *ira, IrInstGen *target, uint32_t alig
         fn_type_id.alignment = align_bytes;
         result_type = get_fn_type(ira->codegen, &fn_type_id);
     } else if (target_type->id == ZigTypeIdAnyFrame) {
-        if (align_bytes >= target_fn_align(ira->codegen->zig_target)) {
+        if (align_bytes >= get_async_frame_align_bytes(ira->codegen)) {
             result_type = target_type;
         } else {
             ir_add_error(ira, &target->base, buf_sprintf("sub-aligned anyframe not allowed"));

@@ -117,10 +117,21 @@ test "std.meta.bitCount" {
     testing.expect(bitCount(f32) == 32);
 }
 
+/// Returns the alignment of type T.
+/// Note that if T is a pointer or function type the result is different than
+/// the one returned by @alignOf(T).
+/// If T is a pointer type the alignment of the type it points to is returned.
+/// If T is a function type the alignment a target-dependent value is returned.
 pub fn alignment(comptime T: type) comptime_int {
-    //@alignOf works on non-pointer types
-    const P = if (comptime trait.is(.Pointer)(T)) T else *T;
-    return @typeInfo(P).Pointer.alignment;
+    return switch (@typeInfo(T)) {
+        .Optional => |info| switch (@typeInfo(info.child)) {
+            .Pointer, .Fn => alignment(info.child),
+            else => @alignOf(T),
+        },
+        .Pointer => |info| info.alignment,
+        .Fn => |info| info.alignment,
+        else => @alignOf(T),
+    };
 }
 
 test "std.meta.alignment" {
@@ -129,6 +140,8 @@ test "std.meta.alignment" {
     testing.expect(alignment(*align(2) u8) == 2);
     testing.expect(alignment([]align(1) u8) == 1);
     testing.expect(alignment([]align(2) u8) == 2);
+    testing.expect(alignment(fn () void) > 0);
+    testing.expect(alignment(fn () align(128) void) == 128);
 }
 
 pub fn Child(comptime T: type) type {
@@ -888,7 +901,7 @@ pub fn Vector(comptime len: u32, comptime child: type) type {
 /// Given a type and value, cast the value to the type as c would.
 /// This is for translate-c and is not intended for general use.
 pub fn cast(comptime DestType: type, target: anytype) DestType {
-    // this function should behave like transCCast in translate-c, except it's for macros
+    // this function should behave like transCCast in translate-c, except it's for macros and enums
     const SourceType = @TypeOf(target);
     switch (@typeInfo(DestType)) {
         .Pointer => {
@@ -925,9 +938,10 @@ pub fn cast(comptime DestType: type, target: anytype) DestType {
                 }
             }
         },
-        .Enum => {
+        .Enum => |enum_type| {
             if (@typeInfo(SourceType) == .Int or @typeInfo(SourceType) == .ComptimeInt) {
-                return @intToEnum(DestType, target);
+                const intermediate = cast(enum_type.tag_type, target);
+                return @intToEnum(DestType, intermediate);
             }
         },
         .Int => {
@@ -1015,6 +1029,17 @@ test "std.meta.cast" {
     testing.expectEqual(@intToPtr(*u8, 2), cast(*u8, @intToPtr(*volatile u8, 2)));
 
     testing.expectEqual(@intToPtr(?*c_void, 2), cast(?*c_void, @intToPtr(*u8, 2)));
+
+    const C_ENUM = extern enum(c_int) {
+        A = 0,
+        B,
+        C,
+        _,
+    };
+    testing.expectEqual(cast(C_ENUM, @as(i64, -1)), @intToEnum(C_ENUM, -1));
+    testing.expectEqual(cast(C_ENUM, @as(i8, 1)), .B);
+    testing.expectEqual(cast(C_ENUM, @as(u64, 1)), .B);
+    testing.expectEqual(cast(C_ENUM, @as(u64, 42)), @intToEnum(C_ENUM, 42));
 }
 
 /// Given a value returns its size as C's sizeof operator would.
@@ -1333,4 +1358,14 @@ test "shuffleVectorIndex" {
     testing.expect(shuffleVectorIndex(5, vector_len) == -2);
     testing.expect(shuffleVectorIndex(6, vector_len) == -3);
     testing.expect(shuffleVectorIndex(7, vector_len) == -4);
+}
+
+/// Returns whether `error_union` contains an error.
+pub fn isError(error_union: anytype) bool {
+    return if (error_union) |_| false else |_| true;
+}
+
+test "isError" {
+    std.testing.expect(isError(math.absInt(@as(i8, -128))));
+    std.testing.expect(!isError(math.absInt(@as(i8, -127))));
 }

@@ -5,7 +5,8 @@
 // and substantial portions of the software.
 const std = @import("std");
 const mem = std.mem;
-const Error = std.crypto.Error;
+
+const NonCanonicalError = std.crypto.errors.NonCanonicalError;
 
 /// 2^252 + 27742317777372353535851937790883648493
 pub const field_size = [32]u8{
@@ -19,7 +20,7 @@ pub const CompressedScalar = [32]u8;
 pub const zero = [_]u8{0} ** 32;
 
 /// Reject a scalar whose encoding is not canonical.
-pub fn rejectNonCanonical(s: [32]u8) Error!void {
+pub fn rejectNonCanonical(s: [32]u8) NonCanonicalError!void {
     var c: u8 = 0;
     var n: u8 = 1;
     var i: usize = 31;
@@ -97,7 +98,7 @@ pub fn sub(a: [32]u8, b: [32]u8) [32]u8 {
     return add(a, neg(b));
 }
 
-/// A scalar in unpacked reprentation
+/// A scalar in unpacked representation
 pub const Scalar = struct {
     const Limbs = [5]u64;
     limbs: Limbs = undefined,

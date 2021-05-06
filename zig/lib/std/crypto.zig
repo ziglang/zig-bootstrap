@@ -67,6 +67,7 @@ pub const dh = struct {
 pub const ecc = struct {
     pub const Curve25519 = @import("crypto/25519/curve25519.zig").Curve25519;
     pub const Edwards25519 = @import("crypto/25519/edwards25519.zig").Edwards25519;
+    pub const P256 = @import("crypto/pcurves/p256.zig").P256;
     pub const Ristretto255 = @import("crypto/25519/ristretto255.zig").Ristretto255;
 };
 
@@ -154,7 +155,7 @@ pub const random = &@import("crypto/tlcsprng.zig").interface;
 
 const std = @import("std.zig");
 
-pub const Error = @import("crypto/error.zig").Error;
+pub const errors = @import("crypto/errors.zig");
 
 test "crypto" {
     const please_windows_dont_oom = std.Target.current.os.tag == .windows;

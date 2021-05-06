@@ -239,6 +239,28 @@ const llvm_targets = [_]LlvmTarget{
                     "zcz_fp",
                 },
             },
+            .{
+                .llvm_name = null,
+                .zig_name = "xgene1",
+                .features = &.{
+                    "fp_armv8",
+                    "neon",
+                    "perfmon",
+                    "v8a",
+                },
+            },
+            .{
+                .llvm_name = null,
+                .zig_name = "emag",
+                .features = &.{
+                    "crc",
+                    "crypto",
+                    "fp_armv8",
+                    "neon",
+                    "perfmon",
+                    "v8a",
+                },
+            },
         },
     },
     .{
@@ -663,6 +685,12 @@ const llvm_targets = [_]LlvmTarget{
         .zig_name = "powerpc",
         .llvm_name = "PowerPC",
         .td_name = "PPC.td",
+        .feature_overrides = &.{
+            .{
+                .llvm_name = "ppc32",
+                .omit = true,
+            },
+        },
     },
     .{
         .zig_name = "riscv",

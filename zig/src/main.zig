@@ -340,6 +340,8 @@ const usage_build_generic =
     \\  -rpath [path]                  Add directory to the runtime library search path
     \\  -feach-lib-rpath               Ensure adding rpath for each used dynamic library
     \\  -fno-each-lib-rpath            Prevent adding rpath for each used dynamic library
+    \\  -fallow-shlib-undefined        Allows undefined symbols in shared libraries
+    \\  -fno-allow-shlib-undefined     Disallows undefined symbols in shared libraries
     \\  --eh-frame-hdr                 Enable C++ exception handling by passing --eh-frame-hdr to linker
     \\  --emit-relocs                  Enable output of relocation sections for post build tools
     \\  -dynamic                       Force output to be dynamically linked
@@ -670,7 +672,7 @@ fn buildOutputType(
                         extra_cflags.shrinkRetainingCapacity(0);
                         while (true) {
                             i += 1;
-                            if (i + 1 >= args.len) fatal("expected -- after -cflags", .{});
+                            if (i >= args.len) fatal("expected -- after -cflags", .{});
                             if (mem.eql(u8, args[i], "--")) break;
                             try extra_cflags.append(args[i]);
                         }
@@ -973,6 +975,10 @@ fn buildOutputType(
                         link_eh_frame_hdr = true;
                     } else if (mem.eql(u8, arg, "--emit-relocs")) {
                         link_emit_relocs = true;
+                    } else if (mem.eql(u8, arg, "-fallow-shlib-undefined")) {
+                        linker_allow_shlib_undefined = true;
+                    } else if (mem.eql(u8, arg, "-fno-allow-shlib-undefined")) {
+                        linker_allow_shlib_undefined = false;
                     } else if (mem.eql(u8, arg, "-Bsymbolic")) {
                         linker_bind_global_refs_locally = true;
                     } else if (mem.eql(u8, arg, "--verbose-link")) {
@@ -2623,7 +2629,10 @@ pub fn cmdBuild(gpa: *Allocator, arena: *Allocator, args: []const []const u8) !v
         };
         defer comp.destroy();
 
-        try updateModule(gpa, comp, .none);
+        updateModule(gpa, comp, .none) catch |err| switch (err) {
+            error.SemanticAnalyzeFail => process.exit(1),
+            else => |e| return e,
+        };
         try comp.makeBinFileExecutable();
 
         child_argv.items[argv_index_exe] = try comp.bin_file.options.emit.?.directory.join(
@@ -2859,6 +2868,7 @@ const FmtError = error{
     Unseekable,
     NotOpenForWriting,
     UnsupportedEncoding,
+    ConnectionResetByPeer,
 } || fs.File.OpenError;
 
 fn fmtPath(fmt: *Fmt, file_path: []const u8, check_mode: bool, dir: fs.Dir, sub_path: []const u8) FmtError!void {

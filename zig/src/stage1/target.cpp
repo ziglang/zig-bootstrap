@@ -122,6 +122,9 @@ static const Os os_list[] = {
     OsWASI,
     OsEmscripten,
     OsUefi,
+    OsOpenCL,
+    OsGLSL450,
+    OsVulkan,
     OsOther,
 };
 
@@ -213,6 +216,9 @@ Os target_os_enum(size_t index) {
 ZigLLVM_OSType get_llvm_os_type(Os os_type) {
     switch (os_type) {
         case OsFreestanding:
+        case OsOpenCL:
+        case OsGLSL450:
+        case OsVulkan:
         case OsOther:
             return ZigLLVM_UnknownOS;
         case OsAnanas:
@@ -330,6 +336,9 @@ const char *target_os_name(Os os_type) {
         case OsHurd:
         case OsWASI:
         case OsEmscripten:
+        case OsOpenCL:
+        case OsGLSL450:
+        case OsVulkan:
             return ZigLLVMGetOSTypeName(get_llvm_os_type(os_type));
     }
     zig_unreachable();
@@ -733,6 +742,9 @@ uint32_t target_c_type_size_in_bits(const ZigTarget *target, CIntType id) {
         case OsAMDPAL:
         case OsHermitCore:
         case OsHurd:
+        case OsOpenCL:
+        case OsGLSL450:
+        case OsVulkan:
             zig_panic("TODO c type size in bits for this target");
     }
     zig_unreachable();
@@ -999,6 +1011,10 @@ ZigLLVM_EnvironmentType target_default_abi(ZigLLVM_ArchType arch, Os os) {
         case OsWASI:
         case OsEmscripten:
             return ZigLLVM_Musl;
+        case OsOpenCL:
+        case OsGLSL450:
+        case OsVulkan:
+            return ZigLLVM_UnknownEnvironment;
     }
     zig_unreachable();
 }
@@ -1253,6 +1269,37 @@ bool target_is_ppc(const ZigTarget *target) {
         target->arch == ZigLLVM_ppc64le;
 }
 
+// Returns the minimum alignment for every function pointer on the given
+// architecture.
+unsigned target_fn_ptr_align(const ZigTarget *target) {
+    // TODO This is a pessimization but is always correct.
+    return 1;
+}
+
+// Returns the minimum alignment for every function on the given architecture.
 unsigned target_fn_align(const ZigTarget *target) {
-    return 16;
+    switch (target->arch) {
+        case ZigLLVM_riscv32:
+        case ZigLLVM_riscv64:
+            // TODO If the C extension is not present the value is 4.
+            return 2;
+        case ZigLLVM_ppc:
+        case ZigLLVM_ppcle:
+        case ZigLLVM_ppc64:
+        case ZigLLVM_ppc64le:
+        case ZigLLVM_aarch64:
+        case ZigLLVM_aarch64_be:
+        case ZigLLVM_aarch64_32:
+        case ZigLLVM_sparc:
+        case ZigLLVM_sparcel:
+        case ZigLLVM_sparcv9:
+        case ZigLLVM_mips:
+        case ZigLLVM_mipsel:
+        case ZigLLVM_mips64:
+        case ZigLLVM_mips64el:
+            return 4;
+
+        default:
+            return 1;
+    }
 }
