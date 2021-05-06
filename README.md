@@ -68,7 +68,7 @@ is more portable across Linux distributions.
 | `aarch64-linux-gnu`        | OK             |
 | `aarch64-linux-musl`       | OK             |
 | `aarch64-windows-gnu`      | not tested     |
-| `aarch64-macos-gnu`        | [#44](https://github.com/ziglang/zig-bootstrap/issues/44) |
+| `aarch64-macos-gnu`        | OK             |
 | `armeb-linux-gnueabi`      | not tested     |
 | `armeb-linux-gnueabihf`    | not tested     |
 | `armeb-linux-musleabi`     | not tested     |
