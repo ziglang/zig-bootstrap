@@ -109,7 +109,7 @@ is more portable across Linux distributions.
 | `x86_64-linux-gnux32`      | [#20](https://github.com/ziglang/bootstrap/issues/20) |
 | `x86_64-linux-musl`        | OK             |
 | `x86_64-windows-gnu`       | OK             |
-| `x86_64-macos-gnu`         | [#38](https://github.com/ziglang/bootstrap/issues/38) |
+| `x86_64-macos-gnu`         | OK             |
 
 #### Other Notable Targets Known to Work
 
