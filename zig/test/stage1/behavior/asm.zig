@@ -15,7 +15,7 @@ comptime {
 
 test "module level assembly" {
     if (is_x86_64_linux) {
-        expect(this_is_my_alias() == 1234);
+        try expect(this_is_my_alias() == 1234);
     }
 }
 
@@ -85,6 +85,21 @@ test "sized integer/float in asm input" {
         : [_] "m" (@as(f64, 3.17))
         : ""
     );
+}
+
+test "struct/array/union types as input values" {
+    asm volatile (""
+        :
+        : [_] "m" (@as([1]u32, undefined))
+    ); // fails
+    asm volatile (""
+        :
+        : [_] "m" (@as(struct { x: u32, y: u8 }, undefined))
+    ); // fails
+    asm volatile (""
+        :
+        : [_] "m" (@as(union { x: u32, y: u8 }, undefined))
+    ); // fails
 }
 
 extern fn this_is_my_alias() i32;
