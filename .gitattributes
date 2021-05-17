@@ -1,4 +1,4 @@
-llvm/* linguist-vendored
-lld/* linguist-vendored
-clang/* linguist-vendored
-zig/* linguist-vendored
+llvm/** linguist-vendored
+lld/** linguist-vendored
+clang/** linguist-vendored
+zig/** linguist-vendored
