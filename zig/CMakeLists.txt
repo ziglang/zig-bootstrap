@@ -712,11 +712,14 @@ set_target_properties(zigcpp PROPERTIES
     COMPILE_FLAGS ${EXE_CFLAGS}
 )
 
+find_library(ZLIB NAMES libz.a z zlib libz)
+
 target_link_libraries(zigcpp LINK_PUBLIC
     ${CLANG_LIBRARIES}
     ${LLD_LIBRARIES}
     ${LLVM_LIBRARIES}
     ${CMAKE_THREAD_LIBS_INIT}
+    ${ZLIB}
 )
 
 add_library(opt_c_util STATIC ${OPTIMIZED_C_SOURCES})
