@@ -129,6 +129,9 @@ pub fn buildLibCXX(comp: *Compilation) !void {
         try cflags.append("-D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS");
         try cflags.append("-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS");
         try cflags.append("-D_LIBCPP_HAS_NO_VENDOR_AVAILABILITY_ANNOTATIONS");
+        try cflags.append("-D_LIBCPP_DISABLE_NEW_DELETE_DEFINITIONS");
+        try cflags.append("-fvisibility=hidden");
+        try cflags.append("-fvisibility-inlines-hidden");
 
         if (target.abi.isMusl()) {
             try cflags.append("-D_LIBCPP_HAS_MUSL_LIBC");
@@ -144,7 +147,6 @@ pub fn buildLibCXX(comp: *Compilation) !void {
             try cflags.append("-fPIC");
         }
         try cflags.append("-nostdinc++");
-        try cflags.append("-fvisibility-inlines-hidden");
         try cflags.append("-std=c++14");
         try cflags.append("-Wno-user-defined-literals");
 
@@ -174,6 +176,8 @@ pub fn buildLibCXX(comp: *Compilation) !void {
         .want_tsan = comp.bin_file.options.tsan,
         .want_pic = comp.bin_file.options.pic,
         .want_pie = comp.bin_file.options.pie,
+        .want_lto = comp.bin_file.options.lto,
+        .function_sections = comp.bin_file.options.function_sections,
         .emit_h = null,
         .strip = comp.compilerRtStrip(),
         .is_native_os = comp.bin_file.options.is_native_os,
@@ -247,6 +251,8 @@ pub fn buildLibCXXABI(comp: *Compilation) !void {
         try cflags.append("-D_LIBCXXABI_BUILDING_LIBRARY");
         try cflags.append("-D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS");
         try cflags.append("-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS");
+        try cflags.append("-fvisibility=hidden");
+        try cflags.append("-fvisibility-inlines-hidden");
 
         if (target.abi.isMusl()) {
             try cflags.append("-D_LIBCPP_HAS_MUSL_LIBC");
@@ -292,6 +298,8 @@ pub fn buildLibCXXABI(comp: *Compilation) !void {
         .want_tsan = comp.bin_file.options.tsan,
         .want_pic = comp.bin_file.options.pic,
         .want_pie = comp.bin_file.options.pie,
+        .want_lto = comp.bin_file.options.lto,
+        .function_sections = comp.bin_file.options.function_sections,
         .emit_h = null,
         .strip = comp.compilerRtStrip(),
         .is_native_os = comp.bin_file.options.is_native_os,

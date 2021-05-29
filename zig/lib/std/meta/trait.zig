@@ -298,20 +298,6 @@ pub fn isNumber(comptime T: type) bool {
     };
 }
 
-pub fn isIntegerNumber(comptime T: type) bool {
-    return switch (@typeInfo(T)) {
-        .Int, .ComptimeInt => true,
-        else => false,
-    };
-}
-
-pub fn isFloatingNumber(comptime T: type) bool {
-    return switch (@typeInfo(T)) {
-        .Float, .ComptimeFloat => true,
-        else => false,
-    };
-}
-
 test "std.meta.trait.isNumber" {
     const NotANumber = struct {
         number: u8,
@@ -497,8 +483,8 @@ pub fn hasDecls(comptime T: type, comptime names: anytype) bool {
 test "std.meta.trait.hasDecls" {
     const TestStruct1 = struct {};
     const TestStruct2 = struct {
-        pub var a: u32;
-        pub var b: u32;
+        pub var a: u32 = undefined;
+        pub var b: u32 = undefined;
         c: bool,
         pub fn useless() void {}
     };

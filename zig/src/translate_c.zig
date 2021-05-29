@@ -447,7 +447,13 @@ fn declVisitorNamesOnly(c: *Context, decl: *const clang.Decl) Error!void {
             // TODO https://github.com/ziglang/zig/issues/3756
             // TODO https://github.com/ziglang/zig/issues/1802
             const name = if (isZigPrimitiveType(decl_name)) try std.fmt.allocPrint(c.arena, "{s}_{d}", .{ decl_name, c.getMangle() }) else decl_name;
-            try c.unnamed_typedefs.putNoClobber(c.gpa, addr, name);
+            const result = try c.unnamed_typedefs.getOrPut(c.gpa, addr);
+            if (result.found_existing) {
+                // One typedef can declare multiple names.
+                // Don't put this one in `decl_table` so it's processed later.
+                return;
+            }
+            result.entry.value = name;
             // Put this typedef in the decl_table to avoid redefinitions.
             try c.decl_table.putNoClobber(c.gpa, @ptrToInt(typedef_decl.getCanonicalDecl()), name);
         }
@@ -474,11 +480,29 @@ fn declVisitor(c: *Context, decl: *const clang.Decl) Error!void {
         .Empty => {
             // Do nothing
         },
+        .FileScopeAsm => {
+            try transFileScopeAsm(c, &c.global_scope.base, @ptrCast(*const clang.FileScopeAsmDecl, decl));
+        },
         else => {
             const decl_name = try c.str(decl.getDeclKindName());
             try warn(c, &c.global_scope.base, decl.getLocation(), "ignoring {s} declaration", .{decl_name});
         },
     }
+}
+
+fn transFileScopeAsm(c: *Context, scope: *Scope, file_scope_asm: *const clang.FileScopeAsmDecl) Error!void {
+    const asm_string = file_scope_asm.getAsmString();
+    var len: usize = undefined;
+    const bytes_ptr = asm_string.getString_bytes_begin_size(&len);
+
+    const str = try std.fmt.allocPrint(c.arena, "\"{}\"", .{std.zig.fmtEscapes(bytes_ptr[0..len])});
+    const str_node = try Tag.string_literal.create(c.arena, str);
+
+    const asm_node = try Tag.asm_simple.create(c.arena, str_node);
+    const block = try Tag.block_single.create(c.arena, asm_node);
+    const comptime_node = try Tag.@"comptime".create(c.arena, block);
+
+    try scope.appendNode(comptime_node);
 }
 
 fn visitFnDecl(c: *Context, fn_decl: *const clang.FunctionDecl) Error!void {
@@ -1632,6 +1656,22 @@ fn transDeclStmtOne(
                 .init = init_node,
             });
             try block_scope.statements.append(node);
+
+            const cleanup_attr = var_decl.getCleanupAttribute();
+            if (cleanup_attr) |fn_decl| {
+                const cleanup_fn_name = try c.str(@ptrCast(*const clang.NamedDecl, fn_decl).getName_bytes_begin());
+                const fn_id = try Tag.identifier.create(c.arena, cleanup_fn_name);
+
+                const varname = try Tag.identifier.create(c.arena, mangled_name);
+                const args = try c.arena.alloc(Node, 1);
+                args[0] = try Tag.address_of.create(c.arena, varname);
+
+                const cleanup_call = try Tag.call.create(c.arena, .{ .lhs = fn_id, .args = args });
+                const discard = try Tag.discard.create(c.arena, cleanup_call);
+                const deferred_cleanup = try Tag.@"defer".create(c.arena, discard);
+
+                try block_scope.statements.append(deferred_cleanup);
+            }
         },
         .Typedef => {
             try transTypeDef(c, scope, @ptrCast(*const clang.TypedefNameDecl, decl));
@@ -1641,6 +1681,9 @@ fn transDeclStmtOne(
         },
         .Enum => {
             try transEnumDecl(c, scope, @ptrCast(*const clang.EnumDecl, decl));
+        },
+        .Function => {
+            try visitFnDecl(c, @ptrCast(*const clang.FunctionDecl, decl));
         },
         else => |kind| return fail(
             c,
@@ -2317,7 +2360,7 @@ fn transInitListExprArray(
     assert(@ptrCast(*const clang.Type, arr_type).isConstantArrayType());
     const const_arr_ty = @ptrCast(*const clang.ConstantArrayType, arr_type);
     const size_ap_int = const_arr_ty.getSize();
-    const all_count = size_ap_int.getLimitedValue(math.maxInt(usize));
+    const all_count = size_ap_int.getLimitedValue(usize);
     const leftover_count = all_count - init_count;
 
     if (all_count == 0) {
@@ -2420,6 +2463,10 @@ fn transInitListExpr(
     const qt = getExprQualType(c, @ptrCast(*const clang.Expr, expr));
     var qual_type = qt.getTypePtr();
     const source_loc = @ptrCast(*const clang.Expr, expr).getBeginLoc();
+
+    if (qualTypeWasDemotedToOpaque(c, qt)) {
+        return fail(c, error.UnsupportedTranslation, source_loc, "Cannot initialize opaque type", .{});
+    }
 
     if (qual_type.isRecordType()) {
         return maybeSuppressResult(c, scope, used, try transInitListExprRecord(
@@ -4242,7 +4289,7 @@ fn transType(c: *Context, scope: *Scope, ty: *const clang.Type, source_loc: clan
             const const_arr_ty = @ptrCast(*const clang.ConstantArrayType, ty);
 
             const size_ap_int = const_arr_ty.getSize();
-            const size = size_ap_int.getLimitedValue(math.maxInt(usize));
+            const size = size_ap_int.getLimitedValue(usize);
             const elem_type = try transType(c, scope, const_arr_ty.getElementType().getTypePtr(), source_loc);
 
             return Tag.array_type.create(c.arena, .{ .len = size, .elem_type = elem_type });

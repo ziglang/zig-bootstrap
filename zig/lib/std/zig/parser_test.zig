@@ -61,13 +61,33 @@ test "zig fmt: respect line breaks in struct field value declaration" {
     );
 }
 
-// TODO Remove this after zig 0.9.0 is released.
-test "zig fmt: rewrite inline functions as callconv(.Inline)" {
-    try testTransform(
+test "zig fmt: respect line breaks before functions" {
+    try testCanonical(
+        \\const std = @import("std");
+        \\
         \\inline fn foo() void {}
         \\
-    ,
+        \\noinline fn foo() void {}
+        \\
+        \\export fn foo() void {}
+        \\
+        \\extern fn foo() void;
+        \\
+        \\extern "foo" fn foo() void;
+        \\
+    );
+}
+
+test "zig fmt: rewrite callconv(.Inline) to the inline keyword" {
+    try testTransform(
         \\fn foo() callconv(.Inline) void {}
+        \\const bar = .Inline;
+        \\fn foo() callconv(bar) void {}
+        \\
+    ,
+        \\inline fn foo() void {}
+        \\const bar = .Inline;
+        \\fn foo() callconv(bar) void {}
         \\
     );
 }
@@ -1608,13 +1628,13 @@ test "zig fmt: if-else with comment before else" {
         \\comptime {
         \\    // cexp(finite|nan +- i inf|nan) = nan + i nan
         \\    if ((hx & 0x7fffffff) != 0x7f800000) {
-        \\        return Complex(f32).new(y - y, y - y);
+        \\        return Complex(f32).init(y - y, y - y);
         \\    } // cexp(-inf +- i inf|nan) = 0 + i0
         \\    else if (hx & 0x80000000 != 0) {
-        \\        return Complex(f32).new(0, 0);
+        \\        return Complex(f32).init(0, 0);
         \\    } // cexp(+inf +- i inf|nan) = inf + i nan
         \\    else {
-        \\        return Complex(f32).new(x, y - y);
+        \\        return Complex(f32).init(x, y - y);
         \\    }
         \\}
         \\
@@ -2267,16 +2287,16 @@ test "zig fmt: line comment between if block and else keyword" {
         \\test "aoeu" {
         \\    // cexp(finite|nan +- i inf|nan) = nan + i nan
         \\    if ((hx & 0x7fffffff) != 0x7f800000) {
-        \\        return Complex(f32).new(y - y, y - y);
+        \\        return Complex(f32).init(y - y, y - y);
         \\    }
         \\    // cexp(-inf +- i inf|nan) = 0 + i0
         \\    else if (hx & 0x80000000 != 0) {
-        \\        return Complex(f32).new(0, 0);
+        \\        return Complex(f32).init(0, 0);
         \\    }
         \\    // cexp(+inf +- i inf|nan) = inf + i nan
         \\    // another comment
         \\    else {
-        \\        return Complex(f32).new(x, y - y);
+        \\        return Complex(f32).init(x, y - y);
         \\    }
         \\}
         \\
@@ -2828,6 +2848,7 @@ test "zig fmt: precedence" {
         \\    a or b and c;
         \\    (a or b) and c;
         \\    (a or b) and c;
+        \\    a == b and c == d;
         \\}
         \\
     );
@@ -2866,17 +2887,17 @@ test "zig fmt: functions" {
         \\extern fn puts(s: *const u8) c_int;
         \\extern "c" fn puts(s: *const u8) c_int;
         \\export fn puts(s: *const u8) c_int;
-        \\fn puts(s: *const u8) callconv(.Inline) c_int;
+        \\inline fn puts(s: *const u8) c_int;
         \\noinline fn puts(s: *const u8) c_int;
         \\pub extern fn puts(s: *const u8) c_int;
         \\pub extern "c" fn puts(s: *const u8) c_int;
         \\pub export fn puts(s: *const u8) c_int;
-        \\pub fn puts(s: *const u8) callconv(.Inline) c_int;
+        \\pub inline fn puts(s: *const u8) c_int;
         \\pub noinline fn puts(s: *const u8) c_int;
         \\pub extern fn puts(s: *const u8) align(2 + 2) c_int;
         \\pub extern "c" fn puts(s: *const u8) align(2 + 2) c_int;
         \\pub export fn puts(s: *const u8) align(2 + 2) c_int;
-        \\pub fn puts(s: *const u8) align(2 + 2) callconv(.Inline) c_int;
+        \\pub inline fn puts(s: *const u8) align(2 + 2) c_int;
         \\pub noinline fn puts(s: *const u8) align(2 + 2) c_int;
         \\
     );
@@ -4132,13 +4153,13 @@ test "zig fmt: decimal float literals with underscore separators" {
     try testTransform(
         \\pub fn main() void {
         \\    const a:f64=(10.0e-0+(10.e+0))+10_00.00_00e-2+00_00.00_10e+4;
-        \\    const b:f64=010.0--0_10.+0_1_0.0_0+1e2;
+        \\    const b:f64=010.0--0_10.0+0_1_0.0_0+1e2;
         \\    std.debug.warn("a: {}, b: {} -> a+b: {}\n", .{ a, b, a + b });
         \\}
     ,
         \\pub fn main() void {
         \\    const a: f64 = (10.0e-0 + (10.e+0)) + 10_00.00_00e-2 + 00_00.00_10e+4;
-        \\    const b: f64 = 010.0 - -0_10. + 0_1_0.0_0 + 1e2;
+        \\    const b: f64 = 010.0 - -0_10.0 + 0_1_0.0_0 + 1e2;
         \\    std.debug.warn("a: {}, b: {} -> a+b: {}\n", .{ a, b, a + b });
         \\}
         \\
@@ -4149,13 +4170,13 @@ test "zig fmt: hexadeciaml float literals with underscore separators" {
     try testTransform(
         \\pub fn main() void {
         \\    const a: f64 = (0x10.0p-0+(0x10.p+0))+0x10_00.00_00p-8+0x00_00.00_10p+16;
-        \\    const b: f64 = 0x0010.0--0x00_10.+0x10.00+0x1p4;
+        \\    const b: f64 = 0x0010.0--0x00_10.0+0x10.00+0x1p4;
         \\    std.debug.warn("a: {}, b: {} -> a+b: {}\n", .{ a, b, a + b });
         \\}
     ,
         \\pub fn main() void {
         \\    const a: f64 = (0x10.0p-0 + (0x10.p+0)) + 0x10_00.00_00p-8 + 0x00_00.00_10p+16;
-        \\    const b: f64 = 0x0010.0 - -0x00_10. + 0x10.00 + 0x1p4;
+        \\    const b: f64 = 0x0010.0 - -0x00_10.0 + 0x10.00 + 0x1p4;
         \\    std.debug.warn("a: {}, b: {} -> a+b: {}\n", .{ a, b, a + b });
         \\}
         \\
@@ -4889,6 +4910,16 @@ test "recovery: missing comma" {
         .expected_token,
         .invalid_and,
         .invalid_token,
+    });
+}
+
+test "recovery: non-associative operators" {
+    try testError(
+        \\const x = a == b == c;
+        \\const x = a == b != c;
+    , &[_]Error{
+        .expected_token,
+        .expected_token,
     });
 }
 

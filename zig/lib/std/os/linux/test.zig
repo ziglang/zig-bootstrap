@@ -4,7 +4,7 @@
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
 const std = @import("../../std.zig");
-const builtin = @import("builtin");
+const builtin = std.builtin;
 const linux = std.os.linux;
 const mem = std.mem;
 const elf = std.elf;
@@ -20,7 +20,7 @@ test "fallocate" {
 
     try expect((try file.stat()).size == 0);
 
-    const len: u64 = 65536;
+    const len: i64 = 65536;
     switch (linux.getErrno(linux.fallocate(file.handle, 0, 0, len))) {
         0 => {},
         linux.ENOSYS => return error.SkipZigTest,

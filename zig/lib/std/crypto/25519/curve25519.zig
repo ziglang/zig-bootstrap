@@ -20,12 +20,12 @@ pub const Curve25519 = struct {
     x: Fe,
 
     /// Decode a Curve25519 point from its compressed (X) coordinates.
-    pub fn fromBytes(s: [32]u8) callconv(.Inline) Curve25519 {
+    pub inline fn fromBytes(s: [32]u8) Curve25519 {
         return .{ .x = Fe.fromBytes(s) };
     }
 
     /// Encode a Curve25519 point.
-    pub fn toBytes(p: Curve25519) callconv(.Inline) [32]u8 {
+    pub inline fn toBytes(p: Curve25519) [32]u8 {
         return p.x.toBytes();
     }
 
@@ -102,7 +102,7 @@ pub const Curve25519 = struct {
     /// key is a low-order point.
     pub fn mul(p: Curve25519, s: [32]u8) (IdentityElementError || WeakPublicKeyError)!Curve25519 {
         const cofactor = [_]u8{8} ++ [_]u8{0} ** 31;
-        _ = ladder(p, cofactor, 4) catch |_| return error.WeakPublicKey;
+        _ = ladder(p, cofactor, 4) catch return error.WeakPublicKey;
         return try ladder(p, s, 256);
     }
 

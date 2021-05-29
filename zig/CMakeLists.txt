@@ -292,7 +292,7 @@ set(ZIG0_SOURCES
 
 set(STAGE1_SOURCES
     "${CMAKE_SOURCE_DIR}/src/stage1/analyze.cpp"
-    "${CMAKE_SOURCE_DIR}/src/stage1/ast_render.cpp"
+    "${CMAKE_SOURCE_DIR}/src/stage1/astgen.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/bigfloat.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/bigint.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/buffer.cpp"
@@ -307,11 +307,11 @@ set(STAGE1_SOURCES
     "${CMAKE_SOURCE_DIR}/src/stage1/os.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/parser.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/range_set.cpp"
+    "${CMAKE_SOURCE_DIR}/src/stage1/softfloat_ext.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/stage1.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/target.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/tokenizer.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/util.cpp"
-    "${CMAKE_SOURCE_DIR}/src/stage1/softfloat_ext.cpp"
 )
 set(OPTIMIZED_C_SOURCES
     "${CMAKE_SOURCE_DIR}/src/stage1/parse_f128.c"
@@ -550,12 +550,11 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/codegen/llvm.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen/llvm/bindings.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen/riscv64.zig"
-    "${CMAKE_SOURCE_DIR}/src/codegen/spu-mk2.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen/wasm.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen/x86_64.zig"
     "${CMAKE_SOURCE_DIR}/src/glibc.zig"
     "${CMAKE_SOURCE_DIR}/src/introspect.zig"
-    "${CMAKE_SOURCE_DIR}/src/ir.zig"
+    "${CMAKE_SOURCE_DIR}/src/air.zig"
     "${CMAKE_SOURCE_DIR}/src/libc_installation.zig"
     "${CMAKE_SOURCE_DIR}/src/libcxx.zig"
     "${CMAKE_SOURCE_DIR}/src/libtsan.zig"
@@ -568,6 +567,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/link/MachO/Archive.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/CodeSignature.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/DebugSymbols.zig"
+    "${CMAKE_SOURCE_DIR}/src/link/MachO/Dylib.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/Object.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/Symbol.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/Trie.zig"
@@ -593,8 +593,9 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/translate_c/ast.zig"
     "${CMAKE_SOURCE_DIR}/src/type.zig"
     "${CMAKE_SOURCE_DIR}/src/value.zig"
+    "${CMAKE_SOURCE_DIR}/src/wasi_libc.zig"
     "${CMAKE_SOURCE_DIR}/src/windows_sdk.zig"
-    "${CMAKE_SOURCE_DIR}/src/zir.zig"
+    "${CMAKE_SOURCE_DIR}/src/Zir.zig"
     "${CMAKE_SOURCE_DIR}/src/Sema.zig"
 )
 
@@ -712,14 +713,11 @@ set_target_properties(zigcpp PROPERTIES
     COMPILE_FLAGS ${EXE_CFLAGS}
 )
 
-find_library(ZLIB NAMES libz.a z zlib libz)
-
 target_link_libraries(zigcpp LINK_PUBLIC
     ${CLANG_LIBRARIES}
     ${LLD_LIBRARIES}
     ${LLVM_LIBRARIES}
     ${CMAKE_THREAD_LIBS_INIT}
-    ${ZLIB}
 )
 
 add_library(opt_c_util STATIC ${OPTIMIZED_C_SOURCES})

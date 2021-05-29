@@ -8,7 +8,6 @@ const build_options = @import("build_options");
 
 const is_darwin = Target.current.isDarwin();
 const is_windows = Target.current.os.tag == .windows;
-const is_gnu = Target.current.isGnu();
 const is_haiku = Target.current.os.tag == .haiku;
 
 const log = std.log.scoped(.libc_installation);
@@ -22,6 +21,7 @@ pub const LibCInstallation = struct {
     crt_dir: ?[]const u8 = null,
     msvc_lib_dir: ?[]const u8 = null,
     kernel32_lib_dir: ?[]const u8 = null,
+    gcc_dir: ?[]const u8 = null,
 
     pub const FindError = error{
         OutOfMemory,
@@ -100,18 +100,22 @@ pub const LibCInstallation = struct {
             log.err("crt_dir may not be empty for {s}\n", .{@tagName(Target.current.os.tag)});
             return error.ParseError;
         }
-        if (self.msvc_lib_dir == null and is_windows and !is_gnu) {
+        if (self.msvc_lib_dir == null and is_windows) {
             log.err("msvc_lib_dir may not be empty for {s}-{s}\n", .{
                 @tagName(Target.current.os.tag),
                 @tagName(Target.current.abi),
             });
             return error.ParseError;
         }
-        if (self.kernel32_lib_dir == null and is_windows and !is_gnu) {
+        if (self.kernel32_lib_dir == null and is_windows) {
             log.err("kernel32_lib_dir may not be empty for {s}-{s}\n", .{
                 @tagName(Target.current.os.tag),
                 @tagName(Target.current.abi),
             });
+            return error.ParseError;
+        }
+        if (self.gcc_dir == null and is_haiku) {
+            log.err("gcc_dir may not be empty for {s}\n", .{@tagName(Target.current.os.tag)});
             return error.ParseError;
         }
 
@@ -125,6 +129,7 @@ pub const LibCInstallation = struct {
         const crt_dir = self.crt_dir orelse "";
         const msvc_lib_dir = self.msvc_lib_dir orelse "";
         const kernel32_lib_dir = self.kernel32_lib_dir orelse "";
+        const gcc_dir = self.gcc_dir orelse "";
 
         try out.print(
             \\# The directory that contains `stdlib.h`.
@@ -149,12 +154,17 @@ pub const LibCInstallation = struct {
             \\# Only needed when targeting MSVC on Windows.
             \\kernel32_lib_dir={s}
             \\
+            \\# The directory that contains `crtbeginS.o` and `crtendS.o`
+            \\# Only needed when targeting Haiku.
+            \\gcc_dir={s}
+            \\
         , .{
             include_dir,
             sys_include_dir,
             crt_dir,
             msvc_lib_dir,
             kernel32_lib_dir,
+            gcc_dir,
         });
     }
 
@@ -189,15 +199,23 @@ pub const LibCInstallation = struct {
                 .NotFound => return error.WindowsSdkNotFound,
                 .PathTooLong => return error.WindowsSdkNotFound,
             }
+        } else if (is_haiku) {
+            try blk: {
+                var batch = Batch(FindError!void, 2, .auto_async).init();
+                errdefer batch.wait() catch {};
+                batch.add(&async self.findNativeIncludeDirPosix(args));
+                batch.add(&async self.findNativeCrtBeginDirHaiku(args));
+                self.crt_dir = try std.mem.dupeZ(args.allocator, u8, "/system/develop/lib");
+                break :blk batch.wait();
+            };
         } else {
             try blk: {
                 var batch = Batch(FindError!void, 2, .auto_async).init();
                 errdefer batch.wait() catch {};
                 batch.add(&async self.findNativeIncludeDirPosix(args));
                 switch (Target.current.os.tag) {
-                    .freebsd, .netbsd, .openbsd => self.crt_dir = try std.mem.dupeZ(args.allocator, u8, "/usr/lib"),
-                    .linux, .dragonfly => batch.add(&async self.findNativeCrtDirPosix(args)),
-                    .haiku => self.crt_dir = try std.mem.dupeZ(args.allocator, u8, "/system/develop/lib"),
+                    .freebsd, .netbsd, .openbsd, .dragonfly => self.crt_dir = try std.mem.dupeZ(args.allocator, u8, "/usr/lib"),
+                    .linux => batch.add(&async self.findNativeCrtDirPosix(args)),
                     else => {},
                 }
                 break :blk batch.wait();
@@ -286,8 +304,7 @@ pub const LibCInstallation = struct {
         else if (is_haiku)
             "posix/errno.h"
         else
-            "sys/errno.h"
-        ;
+            "sys/errno.h";
 
         var path_i: usize = 0;
         while (path_i < search_paths.items.len) : (path_i += 1) {
@@ -383,7 +400,7 @@ pub const LibCInstallation = struct {
         var result_buf = std.ArrayList(u8).init(allocator);
         defer result_buf.deinit();
 
-        const arch_sub_dir = switch (builtin.arch) {
+        const arch_sub_dir = switch (builtin.target.cpu.arch) {
             .i386 => "x86",
             .x86_64 => "x64",
             .arm, .armeb => "arm",
@@ -424,6 +441,15 @@ pub const LibCInstallation = struct {
         });
     }
 
+    fn findNativeCrtBeginDirHaiku(self: *LibCInstallation, args: FindNativeOptions) FindError!void {
+        self.gcc_dir = try ccPrintFileName(.{
+            .allocator = args.allocator,
+            .search_basename = "crtbeginS.o",
+            .want_dirname = .only_dir,
+            .verbose = args.verbose,
+        });
+    }
+
     fn findNativeKernel32LibDir(
         self: *LibCInstallation,
         args: FindNativeOptions,
@@ -437,7 +463,7 @@ pub const LibCInstallation = struct {
         var result_buf = std.ArrayList(u8).init(allocator);
         defer result_buf.deinit();
 
-        const arch_sub_dir = switch (builtin.arch) {
+        const arch_sub_dir = switch (builtin.target.cpu.arch) {
             .i386 => "x86",
             .x86_64 => "x64",
             .arm, .armeb => "arm",

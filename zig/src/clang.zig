@@ -1,3 +1,4 @@
+const std = @import("std");
 pub const builtin = @import("builtin");
 
 pub const SourceLocation = extern struct {
@@ -115,7 +116,9 @@ pub const APFloatBaseSemantics = extern enum {
 };
 
 pub const APInt = opaque {
-    pub const getLimitedValue = ZigClangAPInt_getLimitedValue;
+    pub fn getLimitedValue(self: *const APInt, comptime T: type) T {
+        return @truncate(T, ZigClangAPInt_getLimitedValue(self, std.math.maxInt(T)));
+    }
     extern fn ZigClangAPInt_getLimitedValue(*const APInt, limit: u64) u64;
 };
 
@@ -905,6 +908,11 @@ pub const TypedefNameDecl = opaque {
     extern fn ZigClangTypedefNameDecl_getLocation(*const TypedefNameDecl) SourceLocation;
 };
 
+pub const FileScopeAsmDecl = opaque {
+    pub const getAsmString = ZigClangFileScopeAsmDecl_getAsmString;
+    extern fn ZigClangFileScopeAsmDecl_getAsmString(*const FileScopeAsmDecl) *const StringLiteral;
+};
+
 pub const TypedefType = opaque {
     pub const getDecl = ZigClangTypedefType_getDecl;
     extern fn ZigClangTypedefType_getDecl(*const TypedefType) *const TypedefNameDecl;
@@ -967,6 +975,9 @@ pub const VarDecl = opaque {
 
     pub const getAlignedAttribute = ZigClangVarDecl_getAlignedAttribute;
     extern fn ZigClangVarDecl_getAlignedAttribute(*const VarDecl, *const ASTContext) c_uint;
+
+    pub const getCleanupAttribute = ZigClangVarDecl_getCleanupAttribute;
+    extern fn ZigClangVarDecl_getCleanupAttribute(*const VarDecl) ?*const FunctionDecl;
 
     pub const getTypeSourceInfo_getType = ZigClangVarDecl_getTypeSourceInfo_getType;
     extern fn ZigClangVarDecl_getTypeSourceInfo_getType(*const VarDecl) QualType;

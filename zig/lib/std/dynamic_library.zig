@@ -3,7 +3,7 @@
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
-const builtin = @import("builtin");
+const builtin = std.builtin;
 
 const std = @import("std.zig");
 const mem = std.mem;
@@ -19,7 +19,7 @@ const max = std.math.max;
 pub const DynLib = switch (builtin.os.tag) {
     .linux => if (builtin.link_libc) DlDynlib else ElfDynLib,
     .windows => WindowsDynLib,
-    .macos, .tvos, .watchos, .ios, .freebsd, .openbsd => DlDynlib,
+    .macos, .tvos, .watchos, .ios, .freebsd, .openbsd, .dragonfly => DlDynlib,
     else => void,
 };
 

@@ -67,6 +67,7 @@ pub const Node = extern union {
         @"struct",
         @"union",
         @"comptime",
+        @"defer",
         array_init,
         tuple,
         container_init,
@@ -161,6 +162,8 @@ pub const Node = extern union {
         /// @shuffle(type, a, b, mask)
         shuffle,
 
+        asm_simple,
+
         negate,
         negate_wrap,
         bit_not,
@@ -245,6 +248,8 @@ pub const Node = extern union {
                 .std_mem_zeroes,
                 .@"return",
                 .@"comptime",
+                .@"defer",
+                .asm_simple,
                 .discard,
                 .std_math_Log2Int,
                 .negate,
@@ -1014,6 +1019,30 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
                 .data = .{
                     .lhs = try renderNode(c, payload),
                     .rhs = undefined,
+                },
+            });
+        },
+        .@"defer" => {
+            const payload = node.castTag(.@"defer").?.data;
+            return c.addNode(.{
+                .tag = .@"defer",
+                .main_token = try c.addToken(.keyword_defer, "defer"),
+                .data = .{
+                    .lhs = undefined,
+                    .rhs = try renderNode(c, payload),
+                },
+            });
+        },
+        .asm_simple => {
+            const payload = node.castTag(.asm_simple).?.data;
+            const asm_token = try c.addToken(.keyword_asm, "asm");
+            _ = try c.addToken(.l_paren, "(");
+            return c.addNode(.{
+                .tag = .asm_simple,
+                .main_token = asm_token,
+                .data = .{
+                    .lhs = try renderNode(c, payload),
+                    .rhs = try c.addToken(.r_paren, ")"),
                 },
             });
         },
@@ -2257,6 +2286,8 @@ fn renderNodeGrouped(c: *Context, node: Node) !NodeIndex {
         .@"continue",
         .@"return",
         .@"comptime",
+        .@"defer",
+        .asm_simple,
         .usingnamespace_builtins,
         .while_true,
         .if_not_break,
@@ -2658,6 +2689,7 @@ fn renderFunc(c: *Context, node: Node) !NodeIndex {
 fn renderMacroFunc(c: *Context, node: Node) !NodeIndex {
     const payload = node.castTag(.pub_inline_fn).?.data;
     _ = try c.addToken(.keyword_pub, "pub");
+    _ = try c.addToken(.keyword_inline, "inline");
     const fn_token = try c.addToken(.keyword_fn, "fn");
     _ = try c.addIdentifier(payload.name);
 
@@ -2666,50 +2698,31 @@ fn renderMacroFunc(c: *Context, node: Node) !NodeIndex {
     var span: NodeSubRange = undefined;
     if (params.items.len > 1) span = try c.listToSpan(params.items);
 
-    const callconv_expr = blk: {
-        _ = try c.addToken(.keyword_callconv, "callconv");
-        _ = try c.addToken(.l_paren, "(");
-        _ = try c.addToken(.period, ".");
-        const res = try c.addNode(.{
-            .tag = .enum_literal,
-            .main_token = try c.addToken(.identifier, "Inline"),
-            .data = undefined,
-        });
-        _ = try c.addToken(.r_paren, ")");
-        break :blk res;
-    };
     const return_type_expr = try renderNodeGrouped(c, payload.return_type);
 
-    const fn_proto = try blk: {
-        if (params.items.len < 2)
-            break :blk c.addNode(.{
-                .tag = .fn_proto_one,
+    const fn_proto = blk: {
+        if (params.items.len < 2) {
+            break :blk try c.addNode(.{
+                .tag = .fn_proto_simple,
                 .main_token = fn_token,
                 .data = .{
-                    .lhs = try c.addExtra(std.zig.ast.Node.FnProtoOne{
-                        .param = params.items[0],
-                        .align_expr = 0,
-                        .section_expr = 0,
-                        .callconv_expr = callconv_expr,
-                    }),
+                    .lhs = params.items[0],
                     .rhs = return_type_expr,
                 },
-            })
-        else
-            break :blk c.addNode(.{
-                .tag = .fn_proto,
+            });
+        } else {
+            break :blk try c.addNode(.{
+                .tag = .fn_proto_multi,
                 .main_token = fn_token,
                 .data = .{
-                    .lhs = try c.addExtra(std.zig.ast.Node.FnProto{
-                        .params_start = span.start,
-                        .params_end = span.end,
-                        .align_expr = 0,
-                        .section_expr = 0,
-                        .callconv_expr = callconv_expr,
+                    .lhs = try c.addExtra(std.zig.ast.Node.SubRange{
+                        .start = span.start,
+                        .end = span.end,
                     }),
                     .rhs = return_type_expr,
                 },
             });
+        }
     };
     return c.addNode(.{
         .tag = .fn_decl,

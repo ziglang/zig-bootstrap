@@ -239,6 +239,14 @@ pub const sockaddr = extern struct {
     data: [14]u8,
 };
 
+pub const sockaddr_storage = extern struct {
+    len: u8,
+    family: sa_family_t,
+    __pad1: [5]u8,
+    __align: i64,
+    __pad2: [112]u8,
+};
+
 pub const sockaddr_in = extern struct {
     len: u8 = @sizeOf(sockaddr_in),
     family: sa_family_t = AF_INET,
@@ -713,16 +721,16 @@ pub const Sigaction = extern struct {
 
 pub const _SIG_WORDS = 4;
 pub const _SIG_MAXSIG = 128;
-pub fn _SIG_IDX(sig: usize) callconv(.Inline) usize {
+pub inline fn _SIG_IDX(sig: usize) usize {
     return sig - 1;
 }
-pub fn _SIG_WORD(sig: usize) callconv(.Inline) usize {
+pub inline fn _SIG_WORD(sig: usize) usize {
     return_SIG_IDX(sig) >> 5;
 }
-pub fn _SIG_BIT(sig: usize) callconv(.Inline) usize {
+pub inline fn _SIG_BIT(sig: usize) usize {
     return 1 << (_SIG_IDX(sig) & 31);
 }
-pub fn _SIG_VALID(sig: usize) callconv(.Inline) usize {
+pub inline fn _SIG_VALID(sig: usize) usize {
     return sig <= _SIG_MAXSIG and sig > 0;
 }
 
@@ -850,7 +858,7 @@ pub const EOWNERDEAD = 96; // Previous owner died
 
 pub const ELAST = 96; // Must be equal largest errno
 
-pub const MINSIGSTKSZ = switch (builtin.arch) {
+pub const MINSIGSTKSZ = switch (builtin.cpu.arch) {
     .i386, .x86_64 => 2048,
     .arm, .aarch64 => 4096,
     else => @compileError("MINSIGSTKSZ not defined for this architecture"),
@@ -1306,7 +1314,7 @@ pub const IPPROTO_RESERVED_253 = 253;
 /// Reserved
 pub const IPPROTO_RESERVED_254 = 254;
 
-pub const rlimit_resource = extern enum(c_int) {
+pub const rlimit_resource = enum(c_int) {
     CPU = 0,
     FSIZE = 1,
     DATA = 2,
@@ -1318,13 +1326,13 @@ pub const rlimit_resource = extern enum(c_int) {
     NOFILE = 8,
     SBSIZE = 9,
     VMEM = 10,
-    AS = 10,
     NPTS = 11,
     SWAP = 12,
     KQUEUES = 13,
     UMTXP = 14,
-
     _,
+
+    pub const AS: rlimit_resource = .VMEM;
 };
 
 pub const rlim_t = i64;
@@ -1347,7 +1355,7 @@ pub const SHUT_WR = 1;
 pub const SHUT_RDWR = 2;
 
 // TODO fill out if needed
-pub const directory_which = extern enum(c_int) {
+pub const directory_which = enum(c_int) {
     B_USER_SETTINGS_DIRECTORY = 0xbbe,
 
     _,

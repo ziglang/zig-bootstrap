@@ -459,7 +459,8 @@ pub const Tree = struct {
                         .keyword_extern,
                         .keyword_export,
                         .keyword_pub,
-                        .keyword_threadlocal,
+                        .keyword_inline,
+                        .keyword_noinline,
                         .string_literal,
                         => continue,
 
@@ -1833,7 +1834,7 @@ pub const Tree = struct {
         var result: full.FnProto = .{
             .ast = info,
             .visib_token = null,
-            .extern_export_token = null,
+            .extern_export_inline_token = null,
             .lib_name = null,
             .name_token = null,
             .lparen = undefined,
@@ -1842,7 +1843,11 @@ pub const Tree = struct {
         while (i > 0) {
             i -= 1;
             switch (token_tags[i]) {
-                .keyword_extern, .keyword_export => result.extern_export_token = i,
+                .keyword_extern,
+                .keyword_export,
+                .keyword_inline,
+                .keyword_noinline,
+                => result.extern_export_inline_token = i,
                 .keyword_pub => result.visib_token = i,
                 .string_literal => result.lib_name = i,
                 else => break,
@@ -2123,7 +2128,7 @@ pub const full = struct {
 
     pub const FnProto = struct {
         visib_token: ?TokenIndex,
-        extern_export_token: ?TokenIndex,
+        extern_export_inline_token: ?TokenIndex,
         lib_name: ?TokenIndex,
         name_token: ?TokenIndex,
         lparen: TokenIndex,
@@ -2178,6 +2183,10 @@ pub const full = struct {
                         };
                         it.param_i += 1;
                         it.tok_i = it.tree.lastToken(param_type) + 1;
+                        // Look for anytype and ... params afterwards.
+                        if (token_tags[it.tok_i] == .comma) {
+                            it.tok_i += 1;
+                        }
                         it.tok_flag = true;
                         return Param{
                             .first_doc_comment = first_doc_comment,
@@ -2187,10 +2196,7 @@ pub const full = struct {
                             .type_expr = param_type,
                         };
                     }
-                    // Look for anytype and ... params afterwards.
-                    if (token_tags[it.tok_i] == .comma) {
-                        it.tok_i += 1;
-                    } else {
+                    if (token_tags[it.tok_i] == .r_paren) {
                         return null;
                     }
                     if (token_tags[it.tok_i] == .doc_comment) {
@@ -2242,8 +2248,8 @@ pub const full = struct {
                 .tree = &tree,
                 .fn_proto = &fn_proto,
                 .param_i = 0,
-                .tok_i = undefined,
-                .tok_flag = false,
+                .tok_i = fn_proto.lparen + 1,
+                .tok_flag = true,
             };
         }
     };

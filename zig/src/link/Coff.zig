@@ -662,15 +662,17 @@ pub fn updateDecl(self: *Coff, module: *Module, decl: *Module.Decl) !void {
     if (build_options.have_llvm)
         if (self.llvm_object) |llvm_object| return try llvm_object.updateDecl(module, decl);
 
-    const typed_value = decl.typed_value.most_recent.typed_value;
-    if (typed_value.val.tag() == .extern_fn) {
+    if (decl.val.tag() == .extern_fn) {
         return; // TODO Should we do more when front-end analyzed extern decl?
     }
 
     var code_buffer = std.ArrayList(u8).init(self.base.allocator);
     defer code_buffer.deinit();
 
-    const res = try codegen.generateSymbol(&self.base, decl.srcLoc(), typed_value, &code_buffer, .none);
+    const res = try codegen.generateSymbol(&self.base, decl.srcLoc(), .{
+        .ty = decl.ty,
+        .val = decl.val,
+    }, &code_buffer, .none);
     const code = switch (res) {
         .externally_managed => |x| x,
         .appended => code_buffer.items,
@@ -681,7 +683,7 @@ pub fn updateDecl(self: *Coff, module: *Module, decl: *Module.Decl) !void {
         },
     };
 
-    const required_alignment = typed_value.ty.abiAlignment(self.base.options.target);
+    const required_alignment = decl.ty.abiAlignment(self.base.options.target);
     const curr_size = decl.link.coff.size;
     if (curr_size != 0) {
         const capacity = decl.link.coff.capacity();
@@ -1135,14 +1137,14 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
                         }
 
                         if (is_dyn_lib) {
-                            try argv.append(try comp.get_libc_crt_file(arena, "dllcrt2.o"));
+                            try argv.append(try comp.get_libc_crt_file(arena, "dllcrt2.obj"));
                             if (target.cpu.arch == .i386) {
                                 try argv.append("-ALTERNATENAME:__DllMainCRTStartup@12=_DllMainCRTStartup@12");
                             } else {
                                 try argv.append("-ALTERNATENAME:_DllMainCRTStartup=DllMainCRTStartup");
                             }
                         } else {
-                            try argv.append(try comp.get_libc_crt_file(arena, "crt2.o"));
+                            try argv.append(try comp.get_libc_crt_file(arena, "crt2.obj"));
                         }
 
                         try argv.append(try comp.get_libc_crt_file(arena, "mingw32.lib"));

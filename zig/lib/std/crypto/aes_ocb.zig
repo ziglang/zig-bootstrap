@@ -33,7 +33,7 @@ fn AesOcb(comptime Aes: anytype) type {
             table: [56]Block align(16) = undefined,
             upto: usize,
 
-            fn double(l: Block) callconv(.Inline) Block {
+            inline fn double(l: Block) Block {
                 const l_ = mem.readIntBig(u128, &l);
                 const l_2 = (l_ << 1) ^ (0x87 & -%(l_ >> 127));
                 var l2: Block = undefined;
@@ -106,8 +106,8 @@ fn AesOcb(comptime Aes: anytype) type {
             return offset;
         }
 
-        const has_aesni = comptime std.Target.x86.featureSetHas(std.Target.current.cpu.features, .aes);
-        const has_armaes = comptime std.Target.aarch64.featureSetHas(std.Target.current.cpu.features, .aes);
+        const has_aesni = std.Target.x86.featureSetHas(std.Target.current.cpu.features, .aes);
+        const has_armaes = std.Target.aarch64.featureSetHas(std.Target.current.cpu.features, .aes);
         const wb: usize = if ((std.Target.current.cpu.arch == .x86_64 and has_aesni) or (std.Target.current.cpu.arch == .aarch64 and has_armaes)) 4 else 0;
 
         /// c: ciphertext: output buffer should be of size m.len
@@ -245,7 +245,7 @@ fn AesOcb(comptime Aes: anytype) type {
     };
 }
 
-fn xorBlocks(x: Block, y: Block) callconv(.Inline) Block {
+inline fn xorBlocks(x: Block, y: Block) Block {
     var z: Block = x;
     for (z) |*v, i| {
         v.* = x[i] ^ y[i];
@@ -253,7 +253,7 @@ fn xorBlocks(x: Block, y: Block) callconv(.Inline) Block {
     return z;
 }
 
-fn xorWith(x: *Block, y: Block) callconv(.Inline) void {
+inline fn xorWith(x: *Block, y: Block) void {
     for (x) |*v, i| {
         v.* ^= y[i];
     }

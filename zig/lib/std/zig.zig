@@ -24,6 +24,10 @@ pub fn hashSrc(src: []const u8) SrcHash {
     return out;
 }
 
+pub fn srcHashEql(a: SrcHash, b: SrcHash) bool {
+    return @bitCast(u128, a) == @bitCast(u128, b);
+}
+
 pub fn hashName(parent_hash: SrcHash, sep: []const u8, name: []const u8) SrcHash {
     var out: SrcHash = undefined;
     var hasher = std.crypto.hash.Blake3.init(.{});
@@ -156,8 +160,15 @@ pub fn binNameAlloc(allocator: *std.mem.Allocator, options: BinNameOptions) erro
         },
         .wasm => switch (options.output_mode) {
             .Exe => return std.fmt.allocPrint(allocator, "{s}{s}", .{ root_name, target.exeFileExt() }),
+            .Lib => {
+                switch (options.link_mode orelse .Static) {
+                    .Static => return std.fmt.allocPrint(allocator, "{s}{s}.a", .{
+                        target.libPrefix(), root_name,
+                    }),
+                    .Dynamic => return std.fmt.allocPrint(allocator, "{s}.wasm", .{root_name}),
+                }
+            },
             .Obj => return std.fmt.allocPrint(allocator, "{s}{s}", .{ root_name, target.oFileExt() }),
-            .Lib => return std.fmt.allocPrint(allocator, "{s}.wasm", .{root_name}),
         },
         .c => return std.fmt.allocPrint(allocator, "{s}.c", .{root_name}),
         .spirv => return std.fmt.allocPrint(allocator, "{s}.spv", .{root_name}),

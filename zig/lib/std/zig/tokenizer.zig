@@ -568,11 +568,13 @@ pub const Tokenizer = struct {
                         result.tag = .identifier;
                         state = .string_literal;
                     },
-                    else => {
-                        // reinterpret as a builtin
-                        self.index -= 1;
+                    'a'...'z', 'A'...'Z', '_' => {
                         state = .builtin;
                         result.tag = .builtin;
+                    },
+                    else => {
+                        result.tag = .invalid;
+                        break;
                     },
                 },
 
@@ -698,7 +700,10 @@ pub const Tokenizer = struct {
                     '\\' => {
                         state = .multiline_string_literal_line;
                     },
-                    else => break,
+                    else => {
+                        result.tag = .invalid;
+                        break;
+                    },
                 },
                 .string_literal => switch (c) {
                     '\\' => {
@@ -1155,7 +1160,7 @@ pub const Tokenizer = struct {
                     },
                     '.' => {
                         state = .num_dot_dec;
-                        result.tag = .float_literal;
+                        result.tag = .invalid;
                     },
                     'e', 'E' => {
                         state = .float_exponent_unsigned;
@@ -1184,7 +1189,7 @@ pub const Tokenizer = struct {
                     },
                     '.' => {
                         state = .num_dot_hex;
-                        result.tag = .float_literal;
+                        result.tag = .invalid;
                     },
                     'p', 'P' => {
                         state = .float_exponent_unsigned;
@@ -1206,9 +1211,11 @@ pub const Tokenizer = struct {
                         break;
                     },
                     'e', 'E' => {
+                        result.tag = .float_literal;
                         state = .float_exponent_unsigned;
                     },
                     '0'...'9' => {
+                        result.tag = .float_literal;
                         state = .float_fraction_dec;
                     },
                     else => {
@@ -1226,6 +1233,7 @@ pub const Tokenizer = struct {
                         break;
                     },
                     'p', 'P' => {
+                        result.tag = .float_literal;
                         state = .float_exponent_unsigned;
                     },
                     '0'...'9', 'a'...'f', 'A'...'F' => {
@@ -1847,7 +1855,6 @@ test "tokenizer - number literals decimal" {
     try testTokenize("0_0_f_00", &.{ .invalid, .identifier });
     try testTokenize("1_,", &.{ .invalid, .comma });
 
-    try testTokenize("1.", &.{.float_literal});
     try testTokenize("0.0", &.{.float_literal});
     try testTokenize("1.0", &.{.float_literal});
     try testTokenize("10.0", &.{.float_literal});
@@ -1859,8 +1866,8 @@ test "tokenizer - number literals decimal" {
     try testTokenize("1.0e+100", &.{.float_literal});
     try testTokenize("1.0e-100", &.{.float_literal});
     try testTokenize("1_0_0_0.0_0_0_0_0_1e1_0_0_0", &.{.float_literal});
-    try testTokenize("1.+", &.{ .float_literal, .plus });
 
+    try testTokenize("1.", &.{.invalid});
     try testTokenize("1e", &.{.invalid});
     try testTokenize("1.0e1f0", &.{ .invalid, .identifier });
     try testTokenize("1.0p100", &.{ .invalid, .identifier });
@@ -1872,6 +1879,7 @@ test "tokenizer - number literals decimal" {
     try testTokenize("1.a", &.{ .invalid, .identifier });
     try testTokenize("1.z", &.{ .invalid, .identifier });
     try testTokenize("1._0", &.{ .invalid, .identifier });
+    try testTokenize("1.+", &.{ .invalid, .plus });
     try testTokenize("1._+", &.{ .invalid, .identifier, .plus });
     try testTokenize("1._e", &.{ .invalid, .identifier });
     try testTokenize("1.0e", &.{.invalid});
@@ -1960,7 +1968,7 @@ test "tokenizer - number literals octal" {
     try testTokenize("0o_,", &.{ .invalid, .identifier, .comma });
 }
 
-test "tokenizer - number literals hexadeciaml" {
+test "tokenizer - number literals hexadecimal" {
     try testTokenize("0x0", &.{.integer_literal});
     try testTokenize("0x1", &.{.integer_literal});
     try testTokenize("0x2", &.{.integer_literal});
@@ -1999,16 +2007,18 @@ test "tokenizer - number literals hexadeciaml" {
     try testTokenize("0x0_1_", &.{.invalid});
     try testTokenize("0x_,", &.{ .invalid, .identifier, .comma });
 
-    try testTokenize("0x1.", &.{.float_literal});
     try testTokenize("0x1.0", &.{.float_literal});
-    try testTokenize("0xF.", &.{.float_literal});
     try testTokenize("0xF.0", &.{.float_literal});
     try testTokenize("0xF.F", &.{.float_literal});
     try testTokenize("0xF.Fp0", &.{.float_literal});
     try testTokenize("0xF.FP0", &.{.float_literal});
     try testTokenize("0x1p0", &.{.float_literal});
     try testTokenize("0xfp0", &.{.float_literal});
-    try testTokenize("0x1.+0xF.", &.{ .float_literal, .plus, .float_literal });
+    try testTokenize("0x1.0+0xF.0", &.{ .float_literal, .plus, .float_literal });
+
+    try testTokenize("0x1.", &.{.invalid});
+    try testTokenize("0xF.", &.{.invalid});
+    try testTokenize("0x1.+0xF.", &.{ .invalid, .plus, .invalid });
 
     try testTokenize("0x0123456.789ABCDEF", &.{.float_literal});
     try testTokenize("0x0_123_456.789_ABC_DEF", &.{.float_literal});
@@ -2044,6 +2054,15 @@ test "tokenizer - number literals hexadeciaml" {
     try testTokenize("0x0.0p+_0", &.{ .invalid, .identifier });
     try testTokenize("0x0.0p-_0", &.{ .invalid, .identifier });
     try testTokenize("0x0.0p0_", &.{ .invalid, .eof });
+}
+
+test "tokenizer - multi line string literal with only 1 backslash" {
+    try testTokenize("x \\\n;", &.{ .identifier, .invalid, .semicolon });
+}
+
+test "tokenizer - invalid builtin identifiers" {
+    try testTokenize("@()", &.{ .invalid, .l_paren, .r_paren });
+    try testTokenize("@0()", &.{ .invalid, .integer_literal, .l_paren, .r_paren });
 }
 
 fn testTokenize(source: []const u8, expected_tokens: []const Token.Tag) !void {

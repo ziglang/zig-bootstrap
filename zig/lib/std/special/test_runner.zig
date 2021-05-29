@@ -14,12 +14,18 @@ var log_err_count: usize = 0;
 var args_buffer: [std.fs.MAX_PATH_BYTES + std.mem.page_size]u8 = undefined;
 var args_allocator = std.heap.FixedBufferAllocator.init(&args_buffer);
 
-pub fn main() anyerror!void {
+fn processArgs() void {
     const args = std.process.argsAlloc(&args_allocator.allocator) catch {
         @panic("Too many bytes passed over the CLI to the test runner");
     };
     std.testing.zig_exe_path = args[1];
+}
 
+pub fn main() anyerror!void {
+    if (builtin.zig_is_stage2) {
+        return main2();
+    }
+    processArgs();
     const test_fn_list = builtin.test_functions;
     var ok_count: usize = 0;
     var skip_count: usize = 0;
@@ -84,6 +90,9 @@ pub fn main() anyerror!void {
                 test_node.end();
                 progress.log("{s}... FAIL ({s})\n", .{ test_fn.name, @errorName(err) });
                 if (progress.terminal == null) std.debug.print("FAIL ({s})\n", .{@errorName(err)});
+                if (@errorReturnTrace()) |trace| {
+                    std.debug.dumpStackTrace(trace.*);
+                }
             },
         }
     }
@@ -115,5 +124,12 @@ pub fn log(
     }
     if (@enumToInt(message_level) <= @enumToInt(std.testing.log_level)) {
         std.debug.print("[{s}] ({s}): " ++ format ++ "\n", .{ @tagName(scope), @tagName(message_level) } ++ args);
+    }
+}
+
+pub fn main2() anyerror!void {
+    // Simpler main(), exercising fewer language features, so that stage2 can handle it.
+    for (builtin.test_functions) |test_fn| {
+        try test_fn.func();
     }
 }

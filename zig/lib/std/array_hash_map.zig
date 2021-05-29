@@ -14,15 +14,15 @@ const trait = meta.trait;
 const autoHash = std.hash.autoHash;
 const Wyhash = std.hash.Wyhash;
 const Allocator = mem.Allocator;
-const builtin = @import("builtin");
+const builtin = std.builtin;
 const hash_map = @This();
 
 pub fn AutoArrayHashMap(comptime K: type, comptime V: type) type {
-    return ArrayHashMap(K, V, getAutoHashFn(K), getAutoEqlFn(K), autoEqlIsCheap(K));
+    return ArrayHashMap(K, V, getAutoHashFn(K), getAutoEqlFn(K), !autoEqlIsCheap(K));
 }
 
 pub fn AutoArrayHashMapUnmanaged(comptime K: type, comptime V: type) type {
-    return ArrayHashMapUnmanaged(K, V, getAutoHashFn(K), getAutoEqlFn(K), autoEqlIsCheap(K));
+    return ArrayHashMapUnmanaged(K, V, getAutoHashFn(K), getAutoEqlFn(K), !autoEqlIsCheap(K));
 }
 
 /// Builtin hashmap for strings as keys.
@@ -158,10 +158,20 @@ pub fn ArrayHashMap(
             return self.unmanaged.getOrPutValue(self.allocator, key, value);
         }
 
+        /// Deprecated: call `ensureUnusedCapacity` or `ensureTotalCapacity`.
+        pub const ensureCapacity = ensureTotalCapacity;
+
         /// Increases capacity, guaranteeing that insertions up until the
         /// `expected_count` will not cause an allocation, and therefore cannot fail.
-        pub fn ensureCapacity(self: *Self, new_capacity: usize) !void {
-            return self.unmanaged.ensureCapacity(self.allocator, new_capacity);
+        pub fn ensureTotalCapacity(self: *Self, new_capacity: usize) !void {
+            return self.unmanaged.ensureTotalCapacity(self.allocator, new_capacity);
+        }
+
+        /// Increases capacity, guaranteeing that insertions up until
+        /// `additional_count` **more** items will not cause an allocation, and
+        /// therefore cannot fail.
+        pub fn ensureUnusedCapacity(self: *Self, additional_count: usize) !void {
+            return self.unmanaged.ensureUnusedCapacity(self.allocator, additional_count);
         }
 
         /// Returns the number of total elements which may be present before it is
@@ -472,10 +482,13 @@ pub fn ArrayHashMapUnmanaged(
             return res.entry;
         }
 
+        /// Deprecated: call `ensureUnusedCapacity` or `ensureTotalCapacity`.
+        pub const ensureCapacity = ensureTotalCapacity;
+
         /// Increases capacity, guaranteeing that insertions up until the
         /// `expected_count` will not cause an allocation, and therefore cannot fail.
-        pub fn ensureCapacity(self: *Self, allocator: *Allocator, new_capacity: usize) !void {
-            try self.entries.ensureCapacity(allocator, new_capacity);
+        pub fn ensureTotalCapacity(self: *Self, allocator: *Allocator, new_capacity: usize) !void {
+            try self.entries.ensureTotalCapacity(allocator, new_capacity);
             if (new_capacity <= linear_scan_max) return;
 
             // Ensure that the indexes will be at most 60% full if
@@ -499,6 +512,17 @@ pub fn ArrayHashMapUnmanaged(
                 self.insertAllEntriesIntoNewHeader(header);
                 self.index_header = header;
             }
+        }
+
+        /// Increases capacity, guaranteeing that insertions up until
+        /// `additional_count` **more** items will not cause an allocation, and
+        /// therefore cannot fail.
+        pub fn ensureUnusedCapacity(
+            self: *Self,
+            allocator: *Allocator,
+            additional_capacity: usize,
+        ) !void {
+            return self.ensureTotalCapacity(allocator, self.count() + additional_capacity);
         }
 
         /// Returns the number of total elements which may be present before it is
@@ -1294,7 +1318,7 @@ test "reIndex" {
         try al.append(std.testing.allocator, .{
             .key = i,
             .value = i * 10,
-            .hash = hash(i),
+            .hash = {},
         });
     }
 
@@ -1310,7 +1334,7 @@ test "reIndex" {
 }
 
 test "fromOwnedArrayList" {
-    comptime const array_hash_map_type = AutoArrayHashMap(i32, i32);
+    const array_hash_map_type = AutoArrayHashMap(i32, i32);
     var al = std.ArrayListUnmanaged(array_hash_map_type.Entry){};
     const hash = getAutoHashFn(i32);
 
@@ -1321,7 +1345,7 @@ test "fromOwnedArrayList" {
         try al.append(std.testing.allocator, .{
             .key = i,
             .value = i * 10,
-            .hash = hash(i),
+            .hash = {},
         });
     }
 
@@ -1336,6 +1360,18 @@ test "fromOwnedArrayList" {
         try testing.expect(gop.entry.value == i * 10);
         try testing.expect(gop.index == i);
     }
+}
+
+test "auto store_hash" {
+    const HasCheapEql = AutoArrayHashMap(i32, i32);
+    const HasExpensiveEql = AutoArrayHashMap([32]i32, i32);
+    try testing.expect(meta.fieldInfo(HasCheapEql.Entry, .hash).field_type == void);
+    try testing.expect(meta.fieldInfo(HasExpensiveEql.Entry, .hash).field_type != void);
+
+    const HasCheapEqlUn = AutoArrayHashMapUnmanaged(i32, i32);
+    const HasExpensiveEqlUn = AutoArrayHashMapUnmanaged([32]i32, i32);
+    try testing.expect(meta.fieldInfo(HasCheapEqlUn.Entry, .hash).field_type == void);
+    try testing.expect(meta.fieldInfo(HasExpensiveEqlUn.Entry, .hash).field_type != void);
 }
 
 pub fn getHashPtrAddrFn(comptime K: type) (fn (K) u32) {

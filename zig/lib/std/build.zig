@@ -1019,6 +1019,23 @@ pub const Builder = struct {
         };
     }
 
+    pub fn truncateFile(self: *Builder, dest_path: []const u8) !void {
+        if (self.verbose) {
+            warn("truncate {s}\n", .{dest_path});
+        }
+        const cwd = fs.cwd();
+        var src_file = cwd.createFile(dest_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => blk: {
+                if (fs.path.dirname(dest_path)) |dirname| {
+                    try cwd.makePath(dirname);
+                }
+                break :blk try cwd.createFile(dest_path, .{});
+            },
+            else => |e| return e,
+        };
+        src_file.close();
+    }
+
     pub fn pathFromRoot(self: *Builder, rel_path: []const u8) []u8 {
         return fs.path.resolve(self.allocator, &[_][]const u8{ self.build_root, rel_path }) catch unreachable;
     }
@@ -1324,6 +1341,7 @@ pub const LibExeObjStep = struct {
     name_only_filename: []const u8,
     strip: bool,
     lib_paths: ArrayList([]const u8),
+    rpaths: ArrayList([]const u8),
     framework_dirs: ArrayList([]const u8),
     frameworks: BufSet,
     verbose_link: bool,
@@ -1398,6 +1416,9 @@ pub const LibExeObjStep = struct {
     /// Uses system Wasmtime installation to run cross compiled wasm/wasi build artifacts.
     enable_wasmtime: bool = false,
 
+    /// Experimental. Uses system Darling installation to run cross compiled macOS build artifacts.
+    enable_darling: bool = false,
+
     /// After following the steps in https://github.com/ziglang/zig/wiki/Updating-libc#glibc,
     /// this will be the directory $glibc-build-dir/install/glibcs
     /// Given the example of the aarch64 target, this is the directory
@@ -1412,7 +1433,7 @@ pub const LibExeObjStep = struct {
 
     red_zone: ?bool = null,
 
-    subsystem: ?builtin.SubSystem = null,
+    subsystem: ?std.Target.SubSystem = null,
 
     /// Overrides the default stack size
     stack_size: ?u64 = null,
@@ -1516,6 +1537,7 @@ pub const LibExeObjStep = struct {
             .link_objects = ArrayList(LinkObject).init(builder.allocator),
             .c_macros = ArrayList([]const u8).init(builder.allocator),
             .lib_paths = ArrayList([]const u8).init(builder.allocator),
+            .rpaths = ArrayList([]const u8).init(builder.allocator),
             .framework_dirs = ArrayList([]const u8).init(builder.allocator),
             .object_src = undefined,
             .build_options_contents = std.ArrayList(u8).init(builder.allocator),
@@ -1964,7 +1986,7 @@ pub const LibExeObjStep = struct {
             },
             std.builtin.Version => {
                 out.print(
-                    \\pub const {}: @import("builtin").Version = .{{
+                    \\pub const {}: @import("std").builtin.Version = .{{
                     \\    .major = {d},
                     \\    .minor = {d},
                     \\    .patch = {d},
@@ -2050,6 +2072,10 @@ pub const LibExeObjStep = struct {
 
     pub fn addLibPath(self: *LibExeObjStep, path: []const u8) void {
         self.lib_paths.append(self.builder.dupe(path)) catch unreachable;
+    }
+
+    pub fn addRPath(self: *LibExeObjStep, path: []const u8) void {
+        self.rpaths.append(self.builder.dupe(path)) catch unreachable;
     }
 
     pub fn addFrameworkDir(self: *LibExeObjStep, dir_path: []const u8) void {
@@ -2480,9 +2506,19 @@ pub const LibExeObjStep = struct {
                 try zig_args.append("--test-cmd");
                 try zig_args.append(bin_name);
                 if (glibc_dir_arg) |dir| {
-                    const full_dir = try fs.path.join(builder.allocator, &[_][]const u8{
-                        dir,
-                        try self.target.linuxTriple(builder.allocator),
+                    // TODO look into making this a call to `linuxTriple`. This
+                    // needs the directory to be called "i686" rather than
+                    // "i386" which is why we do it manually here.
+                    const fmt_str = "{s}" ++ fs.path.sep_str ++ "{s}-{s}-{s}";
+                    const cpu_arch = self.target.getCpuArch();
+                    const os_tag = self.target.getOsTag();
+                    const abi = self.target.getAbi();
+                    const cpu_arch_name: []const u8 = if (cpu_arch == .i386)
+                        "i686"
+                    else
+                        @tagName(cpu_arch);
+                    const full_dir = try std.fmt.allocPrint(builder.allocator, fmt_str, .{
+                        dir, cpu_arch_name, @tagName(os_tag), @tagName(abi),
                     });
 
                     try zig_args.append("--test-cmd");
@@ -2502,6 +2538,11 @@ pub const LibExeObjStep = struct {
                 try zig_args.append(bin_name);
                 try zig_args.append("--test-cmd");
                 try zig_args.append("--dir=.");
+                try zig_args.append("--test-cmd-bin");
+            },
+            .darling => |bin_name| if (self.enable_darling) {
+                try zig_args.append("--test-cmd");
+                try zig_args.append(bin_name);
                 try zig_args.append("--test-cmd-bin");
             },
         }
@@ -2531,6 +2572,11 @@ pub const LibExeObjStep = struct {
         for (self.lib_paths.items) |lib_path| {
             try zig_args.append("-L");
             try zig_args.append(lib_path);
+        }
+
+        for (self.rpaths.items) |rpath| {
+            try zig_args.append("-rpath");
+            try zig_args.append(rpath);
         }
 
         for (self.c_macros.items) |c_macro| {
@@ -2773,17 +2819,23 @@ pub const InstallDirectoryOptions = struct {
     source_dir: []const u8,
     install_dir: InstallDir,
     install_subdir: []const u8,
-    exclude_extensions: ?[]const []const u8 = null,
+    /// File paths which end in any of these suffixes will be excluded
+    /// from being installed.
+    exclude_extensions: []const []const u8 = &.{},
+    /// File paths which end in any of these suffixes will result in
+    /// empty files being installed. This is mainly intended for large
+    /// test.zig files in order to prevent needless installation bloat.
+    /// However if the files were not present at all, then
+    /// `@import("test.zig")` would be a compile error.
+    blank_extensions: []const []const u8 = &.{},
 
     fn dupe(self: InstallDirectoryOptions, b: *Builder) InstallDirectoryOptions {
         return .{
             .source_dir = b.dupe(self.source_dir),
             .install_dir = self.install_dir.dupe(b),
             .install_subdir = b.dupe(self.install_subdir),
-            .exclude_extensions = if (self.exclude_extensions) |extensions|
-                b.dupeStrings(extensions)
-            else
-                null,
+            .exclude_extensions = b.dupeStrings(self.exclude_extensions),
+            .blank_extensions = b.dupeStrings(self.blank_extensions),
         };
     }
 };
@@ -2811,17 +2863,29 @@ pub const InstallDirStep = struct {
         const full_src_dir = self.builder.pathFromRoot(self.options.source_dir);
         var it = try fs.walkPath(self.builder.allocator, full_src_dir);
         next_entry: while (try it.next()) |entry| {
-            if (self.options.exclude_extensions) |ext_list| for (ext_list) |ext| {
+            for (self.options.exclude_extensions) |ext| {
                 if (mem.endsWith(u8, entry.path, ext)) {
                     continue :next_entry;
                 }
-            };
+            }
 
             const rel_path = entry.path[full_src_dir.len + 1 ..];
-            const dest_path = try fs.path.join(self.builder.allocator, &[_][]const u8{ dest_prefix, rel_path });
+            const dest_path = try fs.path.join(self.builder.allocator, &[_][]const u8{
+                dest_prefix, rel_path,
+            });
+
             switch (entry.kind) {
                 .Directory => try fs.cwd().makePath(dest_path),
-                .File => try self.builder.updateFile(entry.path, dest_path),
+                .File => {
+                    for (self.options.blank_extensions) |ext| {
+                        if (mem.endsWith(u8, entry.path, ext)) {
+                            try self.builder.truncateFile(dest_path);
+                            continue :next_entry;
+                        }
+                    }
+
+                    try self.builder.updateFile(entry.path, dest_path);
+                },
                 else => continue,
             }
         }
