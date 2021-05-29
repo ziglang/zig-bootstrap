@@ -19,6 +19,8 @@ For other versions, check the git tags of this repository.
 
  * Remove unused test/ files in order to make tarball less bloated.
  * LLD: add additional include directory to Zig's libunwind.
+ * zlib: delete unused files
+ * zlib: CMakeLists.txt: delete the ability to build a shared library
 
 ## Host System Dependencies
 

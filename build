@@ -58,14 +58,18 @@ export CXX="$ZIG c++ -fno-sanitize=all -target $TARGET -mcpu=$MCPU"
 
 # First cross compile zlib for the target, as we need the LLVM linked into
 # the finaly zig binary to have zlib support enabled.
-cd "$ROOTDIR/zlib"
-export AR="$ROOTDIR/out/host/bin/llvm-ar"
-export RANLIB="$ROOTDIR/out/host/bin/llvm-ranlib"
-./configure --static --prefix="$ROOTDIR/out/$TARGET-$MCPU"
-unset AR
-unset RANLIB
+mkdir -p "$ROOTDIR/out/build-zlib-$TARGET-$MCPU"
+cd "$ROOTDIR/out/build-zlib-$TARGET-$MCPU"
+cmake "$ROOTDIR/zlib" \
+  -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/$TARGET-$MCPU" \
+  -DCMAKE_PREFIX_PATH="$ROOTDIR/out/$TARGET-$MCPU" \
+  -DCMAKE_BUILD_TYPE=Release \
+  -DCMAKE_CROSSCOMPILING=True \
+  -DCMAKE_SYSTEM_NAME="$TARGET_OS_CMAKE" \
+  -DCMAKE_AR="$ROOTDIR/out/host/bin/llvm-ar" \
+  -DCMAKE_RANLIB="$ROOTDIR/out/host/bin/llvm-ranlib" \
+  -DSKIP_INSTALL_FILES=ON
 make "$JOBS" install
-make distclean
 
 # Rebuild LLVM with Zig.
 mkdir -p "$ROOTDIR/out/build-llvm-$TARGET-$MCPU"
