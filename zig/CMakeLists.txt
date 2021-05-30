@@ -67,6 +67,7 @@ message("Configuring zig version ${ZIG_VERSION}")
 
 set(ZIG_STATIC off CACHE BOOL "Attempt to build a static zig executable (not compatible with glibc)")
 set(ZIG_STATIC_LLVM off CACHE BOOL "Prefer linking against static LLVM libraries")
+set(ZIG_STATIC_ZLIB off CACHE BOOL "Prefer linking against static zlib")
 set(ZIG_PREFER_CLANG_CPP_DYLIB off CACHE BOOL "Try to link against -lclang-cpp")
 set(ZIG_USE_CCACHE off CACHE BOOL "Use ccache if available")
 
@@ -75,7 +76,8 @@ if(CCACHE_PROGRAM AND ZIG_USE_CCACHE)
 endif()
 
 if(ZIG_STATIC)
-    set(ZIG_STATIC_LLVM "on")
+    set(ZIG_STATIC_LLVM ON)
+    set(ZIG_STATIC_ZLIB ON)
 endif()
 
 string(REGEX REPLACE "\\\\" "\\\\\\\\" ZIG_LIBC_LIB_DIR_ESCAPED "${ZIG_LIBC_LIB_DIR}")
@@ -101,11 +103,13 @@ find_package(llvm)
 find_package(clang)
 find_package(lld)
 
-if(APPLE AND ZIG_STATIC)
+if(ZIG_STATIC_ZLIB)
     list(REMOVE_ITEM LLVM_LIBRARIES "-lz")
-    find_library(ZLIB NAMES libz.a z zlib libz)
+    find_library(ZLIB NAMES libz.a libzlibstatic.a z zlib libz)
     list(APPEND LLVM_LIBRARIES "${ZLIB}")
+endif()
 
+if(APPLE AND ZIG_STATIC)
     list(REMOVE_ITEM LLVM_LIBRARIES "-lcurses")
     find_library(CURSES NAMES libcurses.a curses libcurses libncurses.a ncurses libncurses)
     list(APPEND LLVM_LIBRARIES "${CURSES}")
@@ -713,14 +717,11 @@ set_target_properties(zigcpp PROPERTIES
     COMPILE_FLAGS ${EXE_CFLAGS}
 )
 
-find_library(ZLIB NAMES libz.a z zlib libz)
-
 target_link_libraries(zigcpp LINK_PUBLIC
     ${CLANG_LIBRARIES}
     ${LLD_LIBRARIES}
     ${LLVM_LIBRARIES}
     ${CMAKE_THREAD_LIBS_INIT}
-    ${ZLIB}
 )
 
 add_library(opt_c_util STATIC ${OPTIMIZED_C_SOURCES})
@@ -858,3 +859,4 @@ if(NOT ZIG_SKIP_INSTALL_LIB_FILES)
         install(SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/cmake/install.cmake)
     endif()
 endif()
+

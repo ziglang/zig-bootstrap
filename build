@@ -67,8 +67,7 @@ cmake "$ROOTDIR/zlib" \
   -DCMAKE_CROSSCOMPILING=True \
   -DCMAKE_SYSTEM_NAME="$TARGET_OS_CMAKE" \
   -DCMAKE_AR="$ROOTDIR/out/host/bin/llvm-ar" \
-  -DCMAKE_RANLIB="$ROOTDIR/out/host/bin/llvm-ranlib" \
-  -DSKIP_INSTALL_FILES=ON
+  -DCMAKE_RANLIB="$ROOTDIR/out/host/bin/llvm-ranlib"
 make "$JOBS" install
 
 # Rebuild LLVM with Zig.
@@ -128,7 +127,8 @@ cmake "$ROOTDIR/zig" \
   -DZIG_TARGET_MCPU="$MCPU" \
   -DZIG_EXECUTABLE="$ZIG" \
   -DZIG_VERSION="$ZIG_VERSION" \
-  -DZIG_USE_LLVM_CONFIG=OFF
+  -DZIG_USE_LLVM_CONFIG=OFF \
+  -DZIG_STATIC_ZLIB=ON
 unset CC
 unset CXX
 make "$JOBS" install
