@@ -4688,6 +4688,7 @@ fn transPreprocessorEntities(c: *Context, unit: *clang.ASTUnit) Error!void {
                 const macro = @ptrCast(*clang.MacroDefinitionRecord, entity);
                 const raw_name = macro.getName_getNameStart();
                 const begin_loc = macro.getSourceRange_getBegin();
+                const end_loc = clang.Lexer.getLocForEndOfToken(macro.getSourceRange_getEnd(), c.source_manager, unit);
 
                 const name = try c.str(raw_name);
                 // TODO https://github.com/ziglang/zig/issues/3756
@@ -4698,7 +4699,9 @@ fn transPreprocessorEntities(c: *Context, unit: *clang.ASTUnit) Error!void {
                 }
 
                 const begin_c = c.source_manager.getCharacterData(begin_loc);
-                const slice = begin_c[0..mem.len(begin_c)];
+                const end_c = c.source_manager.getCharacterData(end_loc);
+                const slice_len = @ptrToInt(end_c) - @ptrToInt(begin_c);
+                const slice = begin_c[0..slice_len];
 
                 var tokenizer = std.c.Tokenizer{
                     .buffer = slice,
@@ -4813,8 +4816,11 @@ fn transMacroFnDefine(c: *Context, m: *MacroCtx) ParseError!void {
         const br = blk_last.castTag(.break_val).?;
         break :blk br.data.val;
     } else expr;
-    const return_type = if (typeof_arg.castTag(.std_meta_cast)) |some|
+
+    const return_type = if (typeof_arg.castTag(.std_meta_cast) orelse typeof_arg.castTag(.std_mem_zeroinit)) |some|
         some.data.lhs
+    else if (typeof_arg.castTag(.std_mem_zeroes)) |some|
+        some.data
     else
         try Tag.typeof.create(c.arena, typeof_arg);
 
@@ -4932,17 +4938,28 @@ fn parseCNumLit(c: *Context, m: *MacroCtx) ParseError!Node {
             }
         },
         .FloatLiteral => |suffix| {
-            if (lit_bytes[0] == '.')
+            if (suffix != .none) lit_bytes = lit_bytes[0 .. lit_bytes.len - 1];
+            const dot_index = mem.indexOfScalar(u8, lit_bytes, '.').?;
+            if (dot_index == 0) {
                 lit_bytes = try std.fmt.allocPrint(c.arena, "0{s}", .{lit_bytes});
-            if (suffix == .none) {
-                return transCreateNodeNumber(c, lit_bytes, .float);
+            } else if (dot_index + 1 == lit_bytes.len or !std.ascii.isDigit(lit_bytes[dot_index + 1])) {
+                // If the literal lacks a digit after the `.`, we need to
+                // add one since `1.` or `1.e10` would be invalid syntax in Zig.
+                lit_bytes = try std.fmt.allocPrint(c.arena, "{s}0{s}", .{
+                    lit_bytes[0 .. dot_index + 1],
+                    lit_bytes[dot_index + 1 ..],
+                });
             }
+
+            if (suffix == .none)
+                return transCreateNodeNumber(c, lit_bytes, .float);
+
             const type_node = try Tag.type.create(c.arena, switch (suffix) {
                 .f => "f32",
                 .l => "c_longdouble",
                 else => unreachable,
             });
-            const rhs = try transCreateNodeNumber(c, lit_bytes[0 .. lit_bytes.len - 1], .float);
+            const rhs = try transCreateNodeNumber(c, lit_bytes, .float);
             return Tag.as.create(c.arena, .{ .lhs = type_node, .rhs = rhs });
         },
         else => unreachable,
@@ -5531,6 +5548,42 @@ fn parseCPostfixExpr(c: *Context, m: *MacroCtx, scope: *Scope) ParseError!Node {
                 }
             },
             .LBrace => {
+                // Check for designated field initializers
+                if (m.peek().? == .Period) {
+                    var init_vals = std.ArrayList(ast.Payload.ContainerInitDot.Initializer).init(c.gpa);
+                    defer init_vals.deinit();
+
+                    while (true) {
+                        if (m.next().? != .Period) {
+                            try m.fail(c, "unable to translate C expr: expected '.'", .{});
+                            return error.ParseError;
+                        }
+                        if (m.next().? != .Identifier) {
+                            try m.fail(c, "unable to translate C expr: expected identifier", .{});
+                            return error.ParseError;
+                        }
+                        const name = m.slice();
+                        if (m.next().? != .Equal) {
+                            try m.fail(c, "unable to translate C expr: expected '='", .{});
+                            return error.ParseError;
+                        }
+
+                        const val = try parseCCondExpr(c, m, scope);
+                        try init_vals.append(.{ .name = name, .value = val });
+                        switch (m.next().?) {
+                            .Comma => {},
+                            .RBrace => break,
+                            else => {
+                                try m.fail(c, "unable to translate C expr: expected ',' or '}}'", .{});
+                                return error.ParseError;
+                            },
+                        }
+                    }
+                    const tuple_node = try Tag.container_init_dot.create(c.arena, try c.arena.dupe(ast.Payload.ContainerInitDot.Initializer, init_vals.items));
+                    node = try Tag.std_mem_zeroinit.create(c.arena, .{ .lhs = node, .rhs = tuple_node });
+                    continue;
+                }
+
                 var init_vals = std.ArrayList(Node).init(c.gpa);
                 defer init_vals.deinit();
 

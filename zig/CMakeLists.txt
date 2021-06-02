@@ -323,6 +323,7 @@ set(OPTIMIZED_C_SOURCES
 set(ZIG_CPP_SOURCES
     # These are planned to stay even when we are self-hosted.
     "${CMAKE_SOURCE_DIR}/src/zig_llvm.cpp"
+    "${CMAKE_SOURCE_DIR}/src/zig_llvm-ar.cpp"
     "${CMAKE_SOURCE_DIR}/src/zig_clang.cpp"
     "${CMAKE_SOURCE_DIR}/src/zig_clang_driver.cpp"
     "${CMAKE_SOURCE_DIR}/src/zig_clang_cc1_main.cpp"
@@ -340,8 +341,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/array_list.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/ascii.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/atomic.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/atomic/bool.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/atomic/int.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/atomic/Atomic.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/atomic/queue.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/atomic/stack.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/base64.zig"
@@ -859,4 +859,3 @@ if(NOT ZIG_SKIP_INSTALL_LIB_FILES)
         install(SCRIPT ${CMAKE_CURRENT_SOURCE_DIR}/cmake/install.cmake)
     endif()
 endif()
-
