@@ -132,6 +132,6 @@ cmake "$ROOTDIR/zig" \
   -DZIG_VERSION="$ZIG_VERSION" \
   -DZIG_USE_LLVM_CONFIG=OFF \
   -DZIG_STATIC_ZLIB=ON
+make "$JOBS" install
 unset CC
 unset CXX
-make "$JOBS" install
