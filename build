@@ -56,8 +56,16 @@ make "$JOBS" install
 
 # Now we have Zig as a cross compiler.
 ZIG="$ROOTDIR/out/host/bin/zig"
-export CC="$ZIG cc -fno-sanitize=all -target $TARGET -mcpu=$MCPU"
-export CXX="$ZIG c++ -fno-sanitize=all -target $TARGET -mcpu=$MCPU"
+export CC="$ZIG cc -fno-sanitize=all -mcpu=$MCPU"
+export CXX="$ZIG c++ -fno-sanitize=all -mcpu=$MCPU"
+echo "#!/bin/sh
+env CC=\"clang\" $CC \"\$@\"" > $ROOTDIR/out/host/bin/zigcc
+echo "#!/bin/sh
+env CC=\"clang\" $CXX \"\$@\"" > $ROOTDIR/out/host/bin/zigcxx
+chmod +x $ROOTDIR/out/host/bin/zigcc
+chmod +x $ROOTDIR/out/host/bin/zigcxx
+export CC="$ROOTDIR/out/host/bin/zigcc"
+export CXX="$ROOTDIR/out/host/bin/zigcxx"
 
 # First cross compile zlib for the target, as we need the LLVM linked into
 # the finaly zig binary to have zlib support enabled.
