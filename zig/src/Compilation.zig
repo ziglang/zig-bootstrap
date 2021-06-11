@@ -74,15 +74,14 @@ clang_passthrough_mode: bool,
 clang_preprocessor_mode: ClangPreprocessorMode,
 /// Whether to print clang argvs to stdout.
 verbose_cc: bool,
-verbose_tokenize: bool,
-verbose_ast: bool,
-verbose_ir: bool,
+verbose_air: bool,
 verbose_llvm_ir: bool,
 verbose_cimport: bool,
 verbose_llvm_cpu_features: bool,
 disable_c_depfile: bool,
 time_report: bool,
 stack_report: bool,
+unwind_tables: bool,
 
 c_source_files: []const CSourceFile,
 clang_argv: []const []const u8,
@@ -661,6 +660,7 @@ pub const InitOptions = struct {
     want_tsan: ?bool = null,
     want_compiler_rt: ?bool = null,
     want_lto: ?bool = null,
+    want_unwind_tables: ?bool = null,
     use_llvm: ?bool = null,
     use_lld: ?bool = null,
     use_clang: ?bool = null,
@@ -692,9 +692,7 @@ pub const InitOptions = struct {
     clang_passthrough_mode: bool = false,
     verbose_cc: bool = false,
     verbose_link: bool = false,
-    verbose_tokenize: bool = false,
-    verbose_ast: bool = false,
-    verbose_ir: bool = false,
+    verbose_air: bool = false,
     verbose_llvm_ir: bool = false,
     verbose_cimport: bool = false,
     verbose_llvm_cpu_features: bool = false,
@@ -819,8 +817,20 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             return error.MachineCodeModelNotSupported;
         }
 
+        const tsan = options.want_tsan orelse false;
+        // TSAN is implemented in C++ so it requires linking libc++.
+        const link_libcpp = options.link_libcpp or tsan;
+        const link_libc = link_libcpp or options.link_libc or
+            target_util.osRequiresLibC(options.target);
+
+        const link_libunwind = options.link_libunwind or
+            (link_libcpp and target_util.libcNeedsLibUnwind(options.target));
+        const unwind_tables = options.want_unwind_tables orelse
+            (link_libunwind or target_util.needUnwindTables(options.target));
+        const link_eh_frame_hdr = options.link_eh_frame_hdr or unwind_tables;
+
         // Make a decision on whether to use LLD or our own linker.
-        const use_lld = if (options.use_lld) |explicit| explicit else blk: {
+        const use_lld = options.use_lld orelse blk: {
             if (!build_options.have_llvm)
                 break :blk false;
 
@@ -839,7 +849,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
                 options.frameworks.len != 0 or
                 options.system_libs.len != 0 or
                 options.link_libc or options.link_libcpp or
-                options.link_eh_frame_hdr or
+                link_eh_frame_hdr or
                 options.link_emit_relocs or
                 options.output_mode == .Lib or
                 options.lld_argv.len != 0 or
@@ -897,15 +907,6 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
                 },
             }
         };
-
-        const tsan = options.want_tsan orelse false;
-        // TSAN is implemented in C++ so it requires linking libc++.
-        const link_libcpp = options.link_libcpp or tsan;
-        const link_libc = link_libcpp or options.link_libc or
-            target_util.osRequiresLibC(options.target);
-
-        const link_libunwind = options.link_libunwind or
-            (link_libcpp and target_util.libcNeedsLibUnwind(options.target));
 
         const must_dynamic_link = dl: {
             if (target_util.cannotDynamicLink(options.target))
@@ -1076,6 +1077,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
         cache.hash.add(pic);
         cache.hash.add(pie);
         cache.hash.add(lto);
+        cache.hash.add(unwind_tables);
         cache.hash.add(tsan);
         cache.hash.add(stack_check);
         cache.hash.add(red_zone);
@@ -1307,7 +1309,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             .linker_script = options.linker_script,
             .version_script = options.version_script,
             .gc_sections = options.linker_gc_sections,
-            .eh_frame_hdr = options.link_eh_frame_hdr,
+            .eh_frame_hdr = link_eh_frame_hdr,
             .emit_relocs = options.link_emit_relocs,
             .rdynamic = options.rdynamic,
             .extra_lld_args = options.lld_argv,
@@ -1361,9 +1363,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             .clang_passthrough_mode = options.clang_passthrough_mode,
             .clang_preprocessor_mode = options.clang_preprocessor_mode,
             .verbose_cc = options.verbose_cc,
-            .verbose_tokenize = options.verbose_tokenize,
-            .verbose_ast = options.verbose_ast,
-            .verbose_ir = options.verbose_ir,
+            .verbose_air = options.verbose_air,
             .verbose_llvm_ir = options.verbose_llvm_ir,
             .verbose_cimport = options.verbose_cimport,
             .verbose_llvm_cpu_features = options.verbose_llvm_cpu_features,
@@ -1372,6 +1372,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             .color = options.color,
             .time_report = options.time_report,
             .stack_report = options.stack_report,
+            .unwind_tables = unwind_tables,
             .test_filter = options.test_filter,
             .test_name_prefix = options.test_name_prefix,
             .test_evented_io = options.test_evented_io,
@@ -1850,7 +1851,7 @@ pub fn getAllErrorsAlloc(self: *Compilation) !AllErrors {
 
             for (keys[1..]) |key, i| {
                 err_msg.notes[i] = .{
-                    .src_loc = key.nodeOffsetSrcLoc(values[i+1]),
+                    .src_loc = key.nodeOffsetSrcLoc(values[i + 1]),
                     .msg = "also here",
                 };
             }
@@ -1968,7 +1969,7 @@ pub fn performAllTheWork(self: *Compilation) error{ TimerUnsupported, OutOfMemor
                     log.debug("analyze liveness of {s}", .{decl.name});
                     try liveness.analyze(module.gpa, &decl_arena.allocator, func.body);
 
-                    if (std.builtin.mode == .Debug and self.verbose_ir) {
+                    if (std.builtin.mode == .Debug and self.verbose_air) {
                         func.dump(module.*);
                     }
                 }
@@ -2969,6 +2970,12 @@ pub fn addCCArgs(
             if (target_util.supports_fpic(target) and comp.bin_file.options.pic) {
                 try argv.append("-fPIC");
             }
+
+            if (comp.unwind_tables) {
+                try argv.append("-funwind-tables");
+            } else {
+                try argv.append("-fno-unwind-tables");
+            }
         },
         .shared_library, .ll, .bc, .unknown, .static_library, .object, .zig => {},
         .assembly => {
@@ -3689,9 +3696,7 @@ fn buildOutputFromZig(
         .self_exe_path = comp.self_exe_path,
         .verbose_cc = comp.verbose_cc,
         .verbose_link = comp.bin_file.options.verbose_link,
-        .verbose_tokenize = comp.verbose_tokenize,
-        .verbose_ast = comp.verbose_ast,
-        .verbose_ir = comp.verbose_ir,
+        .verbose_air = comp.verbose_air,
         .verbose_llvm_ir = comp.verbose_llvm_ir,
         .verbose_cimport = comp.verbose_cimport,
         .verbose_llvm_cpu_features = comp.verbose_llvm_cpu_features,
@@ -3935,6 +3940,7 @@ fn updateStage1Module(comp: *Compilation, main_progress_node: *std.Progress.Node
         .pic = comp.bin_file.options.pic,
         .pie = comp.bin_file.options.pie,
         .lto = comp.bin_file.options.lto,
+        .unwind_tables = comp.unwind_tables,
         .link_libc = comp.bin_file.options.link_libc,
         .link_libcpp = comp.bin_file.options.link_libcpp,
         .strip = comp.bin_file.options.strip,
@@ -3949,9 +3955,7 @@ fn updateStage1Module(comp: *Compilation, main_progress_node: *std.Progress.Node
         .enable_time_report = comp.time_report,
         .enable_stack_report = comp.stack_report,
         .test_is_evented = comp.test_evented_io,
-        .verbose_tokenize = comp.verbose_tokenize,
-        .verbose_ast = comp.verbose_ast,
-        .verbose_ir = comp.verbose_ir,
+        .verbose_ir = comp.verbose_air,
         .verbose_llvm_ir = comp.verbose_llvm_ir,
         .verbose_cimport = comp.verbose_cimport,
         .verbose_llvm_cpu_features = comp.verbose_llvm_cpu_features,
@@ -4107,9 +4111,7 @@ pub fn build_crt_file(
         .c_source_files = c_source_files,
         .verbose_cc = comp.verbose_cc,
         .verbose_link = comp.bin_file.options.verbose_link,
-        .verbose_tokenize = comp.verbose_tokenize,
-        .verbose_ast = comp.verbose_ast,
-        .verbose_ir = comp.verbose_ir,
+        .verbose_air = comp.verbose_air,
         .verbose_llvm_ir = comp.verbose_llvm_ir,
         .verbose_cimport = comp.verbose_cimport,
         .verbose_llvm_cpu_features = comp.verbose_llvm_cpu_features,

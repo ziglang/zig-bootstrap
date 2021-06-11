@@ -263,22 +263,26 @@ pub fn mainArgs(gpa: *Allocator, arena: *Allocator, args: []const []const u8) !v
 }
 
 const usage_build_generic =
-    \\Usage: zig build-exe <options> [files]
-    \\       zig build-lib <options> [files]
-    \\       zig build-obj <options> [files]
-    \\       zig test <options> [files]
-    \\       zig run <options> [file] [-- [args]]
+    \\Usage: zig build-exe   <options> [files]
+    \\       zig build-lib   <options> [files]
+    \\       zig build-obj   <options> [files]
+    \\       zig test        <options> [files]
+    \\       zig run         <options> [file] [-- [args]]
+    \\       zig translate-c <options> [file]
     \\
     \\Supported file types:
     \\                    .zig    Zig source code
     \\                      .o    ELF object file
-    \\                      .o    MACH-O (macOS) object file
+    \\                      .o    Mach-O (macOS) object file
+    \\                      .o    WebAssembly object file
     \\                    .obj    COFF (Windows) object file
     \\                    .lib    COFF (Windows) static library
     \\                      .a    ELF static library
+    \\                      .a    Mach-O (macOS) static library
+    \\                      .a    WebAssembly static library
     \\                     .so    ELF shared object (dynamic link)
     \\                    .dll    Windows Dynamic Link Library
-    \\                  .dylib    MACH-O (macOS) dynamic library
+    \\                  .dylib    Mach-O (macOS) dynamic library
     \\                    .tbd    (macOS) text-based dylib definition
     \\                      .s    Target-specific assembly source code
     \\                      .S    Assembly with C preprocessor (requires LLVM extensions)
@@ -341,6 +345,8 @@ const usage_build_generic =
     \\  -fno-sanitize-thread      Disable Thread Sanitizer
     \\  -fdll-export-fns          Mark exported functions as DLL exports (Windows)
     \\  -fno-dll-export-fns       Force-disable marking exported functions as DLL exports
+    \\  -funwind-tables           Always produce unwind table entries for all functions
+    \\  -fno-unwind-tables        Never produce unwind table entries
     \\  -fLLVM                    Force using LLVM as the codegen backend
     \\  -fno-LLVM                 Prevent using LLVM as a codegen backend
     \\  -fClang                   Force using Clang as the C/C++ compilation backend
@@ -407,9 +413,7 @@ const usage_build_generic =
     \\  -fstack-report               Print stack size diagnostics
     \\  --verbose-link               Display linker invocations
     \\  --verbose-cc                 Display C compiler invocations
-    \\  --verbose-tokenize           Enable compiler debug output for tokenization
-    \\  --verbose-ast                Enable compiler debug output for AST parsing
-    \\  --verbose-ir                 Enable compiler debug output for Zig IR
+    \\  --verbose-air                Enable compiler debug output for Zig AIR
     \\  --verbose-llvm-ir            Enable compiler debug output for LLVM IR
     \\  --verbose-cimport            Enable compiler debug output for C imports
     \\  --verbose-llvm-cpu-features  Enable compiler debug output for LLVM CPU features
@@ -541,9 +545,7 @@ fn buildOutputType(
     var watch = false;
     var verbose_link = try optionalBoolEnvVar(arena, "ZIG_VERBOSE_LINK");
     var verbose_cc = try optionalBoolEnvVar(arena, "ZIG_VERBOSE_CC");
-    var verbose_tokenize = false;
-    var verbose_ast = false;
-    var verbose_ir = false;
+    var verbose_air = false;
     var verbose_llvm_ir = false;
     var verbose_cimport = false;
     var verbose_llvm_cpu_features = false;
@@ -572,6 +574,7 @@ fn buildOutputType(
     var want_pic: ?bool = null;
     var want_pie: ?bool = null;
     var want_lto: ?bool = null;
+    var want_unwind_tables: ?bool = null;
     var want_sanitize_c: ?bool = null;
     var want_stack_check: ?bool = null;
     var want_red_zone: ?bool = null;
@@ -924,6 +927,10 @@ fn buildOutputType(
                         want_lto = true;
                     } else if (mem.eql(u8, arg, "-fno-lto")) {
                         want_lto = false;
+                    } else if (mem.eql(u8, arg, "-funwind-tables")) {
+                        want_unwind_tables = true;
+                    } else if (mem.eql(u8, arg, "-fno-unwind-tables")) {
+                        want_unwind_tables = false;
                     } else if (mem.eql(u8, arg, "-fstack-check")) {
                         want_stack_check = true;
                     } else if (mem.eql(u8, arg, "-fno-stack-check")) {
@@ -1031,12 +1038,8 @@ fn buildOutputType(
                         verbose_link = true;
                     } else if (mem.eql(u8, arg, "--verbose-cc")) {
                         verbose_cc = true;
-                    } else if (mem.eql(u8, arg, "--verbose-tokenize")) {
-                        verbose_tokenize = true;
-                    } else if (mem.eql(u8, arg, "--verbose-ast")) {
-                        verbose_ast = true;
-                    } else if (mem.eql(u8, arg, "--verbose-ir")) {
-                        verbose_ir = true;
+                    } else if (mem.eql(u8, arg, "--verbose-air")) {
+                        verbose_air = true;
                     } else if (mem.eql(u8, arg, "--verbose-llvm-ir")) {
                         verbose_llvm_ir = true;
                     } else if (mem.eql(u8, arg, "--verbose-cimport")) {
@@ -1159,6 +1162,8 @@ fn buildOutputType(
                     .no_lto => want_lto = false,
                     .red_zone => want_red_zone = true,
                     .no_red_zone => want_red_zone = false,
+                    .unwind_tables => want_unwind_tables = true,
+                    .no_unwind_tables => want_unwind_tables = false,
                     .nostdlib => ensure_libc_on_non_freestanding = false,
                     .nostdlib_cpp => ensure_libcpp_on_non_freestanding = false,
                     .shared => {
@@ -1901,6 +1906,7 @@ fn buildOutputType(
         .want_pic = want_pic,
         .want_pie = want_pie,
         .want_lto = want_lto,
+        .want_unwind_tables = want_unwind_tables,
         .want_sanitize_c = want_sanitize_c,
         .want_stack_check = want_stack_check,
         .want_red_zone = want_red_zone,
@@ -1940,9 +1946,7 @@ fn buildOutputType(
         .libc_installation = if (libc_installation) |*lci| lci else null,
         .verbose_cc = verbose_cc,
         .verbose_link = verbose_link,
-        .verbose_tokenize = verbose_tokenize,
-        .verbose_ast = verbose_ast,
-        .verbose_ir = verbose_ir,
+        .verbose_air = verbose_air,
         .verbose_llvm_ir = verbose_llvm_ir,
         .verbose_cimport = verbose_cimport,
         .verbose_llvm_cpu_features = verbose_llvm_cpu_features,
@@ -3304,6 +3308,8 @@ pub const ClangArgIterator = struct {
         no_pie,
         lto,
         no_lto,
+        unwind_tables,
+        no_unwind_tables,
         nostdlib,
         nostdlib_cpp,
         shared,

@@ -116,9 +116,6 @@ test "array to vector" {
 }
 
 test "vector casts of sizes not divisable by 8" {
-    // https://github.com/ziglang/zig/issues/3563
-    if (std.Target.current.os.tag == .dragonfly) return error.SkipZigTest;
-
     const S = struct {
         fn doTheTest() !void {
             {
@@ -415,9 +412,6 @@ test "vector bitwise not operator" {
 }
 
 test "vector shift operators" {
-    // TODO investigate why this fails when cross-compiled to wasm.
-    if (builtin.target.os.tag == .wasi) return error.SkipZigTest;
-
     const S = struct {
         fn doTheTestShift(x: anytype, y: anytype) !void {
             const N = @typeInfo(@TypeOf(x)).Array.len;

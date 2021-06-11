@@ -193,7 +193,7 @@
         <a href="https://ziglang.org/documentation/0.4.0/">0.4.0</a> |
         <a href="https://ziglang.org/documentation/0.5.0/">0.5.0</a> |
         <a href="https://ziglang.org/documentation/0.6.0/">0.6.0</a> |
-        <a href="https://ziglang.org/documentation/0.7.0/">0.7.0</a> |
+        <a href="https://ziglang.org/documentation/0.7.1/">0.7.1</a> |
         <a href="https://ziglang.org/documentation/0.8.0/">0.8.0</a> |
         master
         <h1>Contents</h1>
@@ -218,10 +218,6 @@
       Often the most efficient way to learn something new is to see examples, so
       this documentation shows how to use each of Zig's features. It is
       all on one page so you can search with your browser's search tool.
-      </p>
-      <p>
-      If you search for something specific in this documentation and do not find it,
-      please <a href="https://github.com/ziglang/www.ziglang.org/issues/new?title=I%20searched%20for%20___%20in%20the%20docs%20and%20didn%27t%20find%20it">file an issue</a> or <a href="https://webchat.freenode.net/?channels=%23zig">say something on IRC</a>.
       </p>
       <p>
       The code samples in this document are compiled and tested as part of the main test suite of Zig.

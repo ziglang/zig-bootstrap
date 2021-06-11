@@ -11,7 +11,7 @@ const fs = std.fs;
 const InstallDirectoryOptions = std.build.InstallDirectoryOptions;
 const assert = std.debug.assert;
 
-const zig_version = std.builtin.Version{ .major = 0, .minor = 8, .patch = 0 };
+const zig_version = std.builtin.Version{ .major = 0, .minor = 8, .patch = 1 };
 
 pub fn build(b: *Builder) !void {
     b.setPreferredReleaseMode(.ReleaseFast);
@@ -769,6 +769,7 @@ const zig_cpp_sources = [_][]const u8{
     // These are planned to stay even when we are self-hosted.
     "src/zig_llvm.cpp",
     "src/zig_clang.cpp",
+    "src/zig_llvm-ar.cpp",
     "src/zig_clang_driver.cpp",
     "src/zig_clang_cc1_main.cpp",
     "src/zig_clang_cc1as_main.cpp",

@@ -3435,10 +3435,10 @@ pub const WaitPidResult = struct {
 };
 
 pub fn waitpid(pid: pid_t, flags: u32) WaitPidResult {
-    const Status = if (builtin.link_libc) c_uint else u32;
+    const Status = if (builtin.link_libc) c_int else u32;
     var status: Status = undefined;
     while (true) {
-        const rc = system.waitpid(pid, &status, flags);
+        const rc = system.waitpid(pid, &status, if (builtin.link_libc) @intCast(c_int, flags) else flags);
         switch (errno(rc)) {
             0 => return .{
                 .pid = @intCast(pid_t, rc),
@@ -6121,7 +6121,7 @@ pub fn getrlimit(resource: rlimit_resource) GetrlimitError!rlimit {
     }
 }
 
-pub const SetrlimitError = error{PermissionDenied, LimitTooBig} || UnexpectedError;
+pub const SetrlimitError = error{ PermissionDenied, LimitTooBig } || UnexpectedError;
 
 pub fn setrlimit(resource: rlimit_resource, limits: rlimit) SetrlimitError!void {
     const setrlimit_sym = if (builtin.os.tag == .linux and builtin.link_libc)
