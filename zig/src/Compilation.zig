@@ -39,7 +39,6 @@ gpa: *Allocator,
 arena_state: std.heap.ArenaAllocator.State,
 bin_file: *link.File,
 c_object_table: std.AutoArrayHashMapUnmanaged(*CObject, void) = .{},
-c_object_cache_digest_set: std.AutoHashMapUnmanaged(Cache.BinDigest, void) = .{},
 stage1_lock: ?Cache.Lock = null,
 stage1_cache_manifest: *Cache.Manifest = undefined,
 
@@ -612,6 +611,7 @@ pub const InitOptions = struct {
     output_mode: std.builtin.OutputMode,
     thread_pool: *ThreadPool,
     dynamic_linker: ?[]const u8 = null,
+    sysroot: ?[]const u8 = null,
     /// `null` means to not emit a binary file.
     emit_bin: ?EmitLoc,
     /// `null` means to not emit a C header file.
@@ -868,25 +868,32 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             break :blk false;
         };
 
-        const DarwinOptions = struct {
-            syslibroot: ?[]const u8 = null,
-            system_linker_hack: bool = false,
+        const darwin_can_use_system_linker_and_sdk =
+            // comptime conditions
+            ((build_options.have_llvm and comptime std.Target.current.isDarwin()) and
+            // runtime conditions
+            (use_lld and std.builtin.os.tag == .macos and options.target.isDarwin()));
+
+        const darwin_system_linker_hack = blk: {
+            if (darwin_can_use_system_linker_and_sdk) {
+                break :blk std.os.getenv("ZIG_SYSTEM_LINKER_HACK") != null;
+            } else {
+                break :blk false;
+            }
         };
 
-        const darwin_options: DarwinOptions = if (build_options.have_llvm and comptime std.Target.current.isDarwin()) outer: {
-            const opts: DarwinOptions = if (use_lld and std.builtin.os.tag == .macos and options.target.isDarwin()) inner: {
+        const sysroot = blk: {
+            if (options.sysroot) |sysroot| {
+                break :blk sysroot;
+            } else if (darwin_can_use_system_linker_and_sdk) {
                 // TODO Revisit this targeting versions lower than macOS 11 when LLVM 12 is out.
                 // See https://github.com/ziglang/zig/issues/6996
                 const at_least_big_sur = options.target.os.getVersionRange().semver.min.major >= 11;
-                const syslibroot = if (at_least_big_sur) try std.zig.system.getSDKPath(arena) else null;
-                const system_linker_hack = std.os.getenv("ZIG_SYSTEM_LINKER_HACK") != null;
-                break :inner .{
-                    .syslibroot = syslibroot,
-                    .system_linker_hack = system_linker_hack,
-                };
-            } else .{};
-            break :outer opts;
-        } else .{};
+                break :blk if (at_least_big_sur) try std.zig.system.getSDKPath(arena) else null;
+            } else {
+                break :blk null;
+            }
+        };
 
         const lto = blk: {
             if (options.want_lto) |explicit| {
@@ -897,7 +904,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
                 break :blk false;
             } else if (options.c_source_files.len == 0) {
                 break :blk false;
-            } else if (darwin_options.system_linker_hack) {
+            } else if (darwin_system_linker_hack) {
                 break :blk false;
             } else switch (options.output_mode) {
                 .Lib, .Obj => break :blk false,
@@ -956,7 +963,7 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             break :blk lm;
         } else default_link_mode;
 
-        const dll_export_fns = if (options.dll_export_fns) |explicit| explicit else is_dyn_lib;
+        const dll_export_fns = if (options.dll_export_fns) |explicit| explicit else is_dyn_lib or options.rdynamic;
 
         const libc_dirs = try detectLibCIncludeDirs(
             arena,
@@ -1273,13 +1280,14 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             .module = module,
             .target = options.target,
             .dynamic_linker = options.dynamic_linker,
+            .sysroot = sysroot,
             .output_mode = options.output_mode,
             .link_mode = link_mode,
             .object_format = ofmt,
             .optimize_mode = options.optimize_mode,
             .use_lld = use_lld,
             .use_llvm = use_llvm,
-            .system_linker_hack = darwin_options.system_linker_hack,
+            .system_linker_hack = darwin_system_linker_hack,
             .link_libc = link_libc,
             .link_libcpp = link_libcpp,
             .link_libunwind = link_libunwind,
@@ -1287,7 +1295,6 @@ pub fn create(gpa: *Allocator, options: InitOptions) !*Compilation {
             .frameworks = options.frameworks,
             .framework_dirs = options.framework_dirs,
             .system_libs = system_libs,
-            .syslibroot = darwin_options.syslibroot,
             .lib_dirs = options.lib_dirs,
             .rpath_list = options.rpath_list,
             .strip = strip,
@@ -1562,7 +1569,6 @@ pub fn destroy(self: *Compilation) void {
         key.destroy(gpa);
     }
     self.c_object_table.deinit(gpa);
-    self.c_object_cache_digest_set.deinit(gpa);
 
     for (self.failed_c_objects.values()) |value| {
         value.destroy(gpa);
@@ -1599,7 +1605,6 @@ pub fn update(self: *Compilation) !void {
     defer tracy.end();
 
     self.clearMiscFailures();
-    self.c_object_cache_digest_set.clearRetainingCapacity();
 
     // For compiling C objects, we rely on the cache hash system to avoid duplicating work.
     // Add a Job for each C object.
@@ -2558,25 +2563,6 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: *std.P
 
     try man.hashCSource(c_object.src);
 
-    {
-        const is_collision = blk: {
-            const bin_digest = man.hash.peekBin();
-
-            const lock = comp.mutex.acquire();
-            defer lock.release();
-
-            const gop = try comp.c_object_cache_digest_set.getOrPut(comp.gpa, bin_digest);
-            break :blk gop.found_existing;
-        };
-        if (is_collision) {
-            return comp.failCObj(
-                c_object,
-                "the same source file was already added to the same compilation with the same flags",
-                .{},
-            );
-        }
-    }
-
     var arena_allocator = std.heap.ArenaAllocator.init(comp.gpa);
     defer arena_allocator.deinit();
     const arena = &arena_allocator.allocator;
@@ -2984,10 +2970,49 @@ pub fn addCCArgs(
             // all CPU features here.
             switch (target.cpu.arch) {
                 .riscv32, .riscv64 => {
+                    const RvArchFeat = struct { char: u8, feat: std.Target.riscv.Feature };
+                    const letters = [_]RvArchFeat{
+                        .{ .char = 'm', .feat = .m },
+                        .{ .char = 'a', .feat = .a },
+                        .{ .char = 'f', .feat = .f },
+                        .{ .char = 'd', .feat = .d },
+                        .{ .char = 'c', .feat = .c },
+                    };
+                    const prefix: []const u8 = if (target.cpu.arch == .riscv64) "rv64" else "rv32";
+                    const prefix_len = 4;
+                    assert(prefix.len == prefix_len);
+                    var march_buf: [prefix_len + letters.len + 1]u8 = undefined;
+                    var march_index: usize = prefix_len;
+                    mem.copy(u8, &march_buf, prefix);
+
+                    if (std.Target.riscv.featureSetHas(target.cpu.features, .e)) {
+                        march_buf[march_index] = 'e';
+                    } else {
+                        march_buf[march_index] = 'i';
+                    }
+                    march_index += 1;
+
+                    for (letters) |letter| {
+                        if (std.Target.riscv.featureSetHas(target.cpu.features, letter.feat)) {
+                            march_buf[march_index] = letter.char;
+                            march_index += 1;
+                        }
+                    }
+
+                    const march_arg = try std.fmt.allocPrint(arena, "-march={s}", .{
+                        march_buf[0..march_index],
+                    });
+                    try argv.append(march_arg);
+
                     if (std.Target.riscv.featureSetHas(target.cpu.features, .relax)) {
                         try argv.append("-mrelax");
                     } else {
                         try argv.append("-mno-relax");
+                    }
+                    if (std.Target.riscv.featureSetHas(target.cpu.features, .save_restore)) {
+                        try argv.append("-msave-restore");
+                    } else {
+                        try argv.append("-mno-save-restore");
                     }
                 },
                 else => {
@@ -3270,7 +3295,14 @@ fn detectLibCIncludeDirs(
 
     // If zig can't build the libc for the target and we are targeting the
     // native abi, fall back to using the system libc installation.
-    if (is_native_abi) {
+    // On windows, instead of the native (mingw) abi, we want to check
+    // for the MSVC abi as a fallback.
+    const use_system_abi = if (std.Target.current.os.tag == .windows)
+        target.abi == .msvc
+    else
+        is_native_abi;
+
+    if (use_system_abi) {
         const libc = try arena.create(LibCInstallation);
         libc.* = try LibCInstallation.findNative(.{ .allocator = arena, .verbose = true });
         return detectLibCFromLibCInstallation(arena, target, libc);

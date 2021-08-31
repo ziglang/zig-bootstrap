@@ -1354,6 +1354,7 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
         man.hash.add(allow_shlib_undefined);
         man.hash.add(self.base.options.bind_global_refs_locally);
         man.hash.add(self.base.options.tsan);
+        man.hash.addOptionalBytes(self.base.options.sysroot);
 
         // We don't actually care whether it's a cache hit or miss; we just need the digest and the lock.
         _ = try man.hit();
@@ -1422,6 +1423,10 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
         }
 
         try argv.append("-error-limit=0");
+
+        if (self.base.options.sysroot) |sysroot| {
+            try argv.append(try std.fmt.allocPrint(arena, "--sysroot={s}", .{sysroot}));
+        }
 
         if (self.base.options.lto) {
             switch (self.base.options.optimize_mode) {
@@ -1494,6 +1499,15 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
 
         if (self.base.options.pie and self.base.options.output_mode == .Exe) {
             try argv.append("-pie");
+        }
+
+        if (self.base.options.link_mode == .Dynamic and target.os.tag == .netbsd) {
+            // Add options to produce shared objects with only 2 PT_LOAD segments.
+            // NetBSD expects 2 PT_LOAD segments in a shared object, otherwise
+            // ld.elf_so fails to load, emitting a general "not found" error.
+            // See https://github.com/ziglang/zig/issues/9109 .
+            try argv.append("--no-rosegment");
+            try argv.append("-znorelro");
         }
 
         try argv.append("-o");

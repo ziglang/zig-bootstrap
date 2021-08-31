@@ -88,8 +88,11 @@ static void to_twos_complement(BigInt *dest, const BigInt *op, size_t bit_count)
     size_t digits_to_copy = bit_count / 64;
     size_t leftover_bits = bit_count % 64;
     dest->digit_count = digits_to_copy + ((leftover_bits == 0) ? 0 : 1);
-    if (dest->digit_count == 1 && leftover_bits == 0) {
+    if (dest->digit_count == 1) {
         dest->data.digit = op_digits[0];
+        if (leftover_bits != 0) {
+            dest->data.digit &= (1ULL << leftover_bits) - 1;
+        }
         if (dest->data.digit == 0) dest->digit_count = 0;
         return;
     }
@@ -1349,7 +1352,7 @@ void bigint_shl(BigInt *dest, const BigInt *op1, const BigInt *op2) {
 
     if (op1->digit_count == 1 && shift_amt < 64) {
         dest->data.digit = op1_digits[0] << shift_amt;
-        if (dest->data.digit > op1_digits[0]) {
+        if (dest->data.digit >> shift_amt == op1_digits[0]) {
             dest->digit_count = 1;
             dest->is_negative = op1->is_negative;
             return;

@@ -363,11 +363,24 @@ pub const FILE_INFORMATION_CLASS = enum(c_int) {
 pub const OVERLAPPED = extern struct {
     Internal: ULONG_PTR,
     InternalHigh: ULONG_PTR,
-    Offset: DWORD,
-    OffsetHigh: DWORD,
+    DUMMYUNIONNAME: extern union {
+        DUMMYSTRUCTNAME: extern struct {
+            Offset: DWORD,
+            OffsetHigh: DWORD,
+        },
+        Pointer: ?PVOID,
+    },
     hEvent: ?HANDLE,
 };
 pub const LPOVERLAPPED = *OVERLAPPED;
+
+pub const OVERLAPPED_ENTRY = extern struct {
+    lpCompletionKey: ULONG_PTR,
+    lpOverlapped: LPOVERLAPPED,
+    Internal: ULONG_PTR,
+    dwNumberOfBytesTransferred: DWORD,
+};
+pub const LPOVERLAPPED_ENTRY = *OVERLAPPED_ENTRY;
 
 pub const MAX_PATH = 260;
 
@@ -438,6 +451,19 @@ pub const SECURITY_ATTRIBUTES = extern struct {
 };
 pub const PSECURITY_ATTRIBUTES = *SECURITY_ATTRIBUTES;
 pub const LPSECURITY_ATTRIBUTES = *SECURITY_ATTRIBUTES;
+
+pub const PIPE_ACCESS_INBOUND = 0x00000001;
+pub const PIPE_ACCESS_OUTBOUND = 0x00000002;
+pub const PIPE_ACCESS_DUPLEX = 0x00000003;
+
+pub const PIPE_TYPE_BYTE = 0x00000000;
+pub const PIPE_TYPE_MESSAGE = 0x00000004;
+
+pub const PIPE_READMODE_BYTE = 0x00000000;
+pub const PIPE_READMODE_MESSAGE = 0x00000002;
+
+pub const PIPE_WAIT = 0x00000000;
+pub const PIPE_NOWAIT = 0x00000001;
 
 pub const GENERIC_READ = 0x80000000;
 pub const GENERIC_WRITE = 0x40000000;

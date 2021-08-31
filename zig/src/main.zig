@@ -377,6 +377,7 @@ const usage_build_generic =
     \\  -T[script], --script [script]  Use a custom linker script
     \\  --version-script [path]        Provide a version .map file
     \\  --dynamic-linker [path]        Set the dynamic interpreter path (usually ld.so)
+    \\  --sysroot [path]               Set the system root directory (usually /)
     \\  --version [ver]                Dynamic library semver
     \\  -fsoname[=name]                (Linux) Override the default SONAME value
     \\  -fno-soname                    (Linux) Disable emitting a SONAME
@@ -602,6 +603,7 @@ fn buildOutputType(
     var link_eh_frame_hdr = false;
     var link_emit_relocs = false;
     var each_lib_rpath: ?bool = null;
+    var sysroot: ?[]const u8 = null;
     var libc_paths_file: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_LIBC");
     var machine_code_model: std.builtin.CodeModel = .default;
     var runtime_args_start: ?usize = null;
@@ -859,6 +861,10 @@ fn buildOutputType(
                         if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
                         i += 1;
                         target_dynamic_linker = args[i];
+                    } else if (mem.eql(u8, arg, "--sysroot")) {
+                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
+                        i += 1;
+                        sysroot = args[i];
                     } else if (mem.eql(u8, arg, "--libc")) {
                         if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
                         i += 1;
@@ -1174,6 +1180,16 @@ fn buildOutputType(
                     .wl => {
                         var split_it = mem.split(it.only_arg, ",");
                         while (split_it.next()) |linker_arg| {
+                            // Handle nested-joined args like `-Wl,-rpath=foo`.
+                            // Must be prefixed with 1 or 2 dashes.
+                            if (linker_arg.len >= 3 and linker_arg[0] == '-' and linker_arg[2] != '-') {
+                                if (mem.indexOfScalar(u8, linker_arg, '=')) |equals_pos| {
+                                    try linker_args.append(linker_arg[0..equals_pos]);
+                                    try linker_args.append(linker_arg[equals_pos + 1 ..]);
+                                    continue;
+                                }
+                            }
+
                             try linker_args.append(linker_arg);
                         }
                     },
@@ -1382,7 +1398,7 @@ fn buildOutputType(
                     image_base_override = std.fmt.parseUnsigned(u64, linker_args.items[i], 0) catch |err| {
                         fatal("unable to parse '{s}': {s}", .{ arg, @errorName(err) });
                     };
-                } else if (mem.eql(u8, arg, "-T")) {
+                } else if (mem.eql(u8, arg, "-T") or mem.eql(u8, arg, "--script")) {
                     i += 1;
                     if (i >= linker_args.items.len) {
                         fatal("expected linker arg after '{s}'", .{arg});
@@ -1408,30 +1424,40 @@ fn buildOutputType(
                     // We don't need to care about these because these args are
                     // for resolving circular dependencies but our linker takes
                     // care of this without explicit args.
-                } else if (mem.startsWith(u8, arg, "--major-os-version") or
-                    mem.startsWith(u8, arg, "--minor-os-version"))
+                } else if (mem.eql(u8, arg, "--major-os-version") or
+                    mem.eql(u8, arg, "--minor-os-version"))
                 {
+                    i += 1;
+                    if (i >= linker_args.items.len) {
+                        fatal("expected linker arg after '{s}'", .{arg});
+                    }
                     // This option does not do anything.
-                } else if (mem.startsWith(u8, arg, "--major-subsystem-version=")) {
+                } else if (mem.eql(u8, arg, "--major-subsystem-version")) {
+                    i += 1;
+                    if (i >= linker_args.items.len) {
+                        fatal("expected linker arg after '{s}'", .{arg});
+                    }
+
                     major_subsystem_version = std.fmt.parseUnsigned(
                         u32,
-                        arg["--major-subsystem-version=".len..],
+                        linker_args.items[i],
                         10,
                     ) catch |err| {
                         fatal("unable to parse '{s}': {s}", .{ arg, @errorName(err) });
                     };
-                } else if (mem.startsWith(u8, arg, "--minor-subsystem-version=")) {
+                } else if (mem.eql(u8, arg, "--minor-subsystem-version")) {
+                    i += 1;
+                    if (i >= linker_args.items.len) {
+                        fatal("expected linker arg after '{s}'", .{arg});
+                    }
+
                     minor_subsystem_version = std.fmt.parseUnsigned(
                         u32,
-                        arg["--minor-subsystem-version=".len..],
+                        linker_args.items[i],
                         10,
                     ) catch |err| {
                         fatal("unable to parse '{s}': {s}", .{ arg, @errorName(err) });
                     };
-                } else if (mem.startsWith(u8, arg, "--major-os-version=") or
-                    mem.startsWith(u8, arg, "--minor-os-version="))
-                {
-                    // These args do nothing.
                 } else {
                     warn("unsupported linker arg: {s}", .{arg});
                 }
@@ -1601,7 +1627,9 @@ fn buildOutputType(
             want_native_include_dirs = true;
     }
 
-    if (cross_target.isNativeOs() and (system_libs.items.len != 0 or want_native_include_dirs)) {
+    if (sysroot == null and cross_target.isNativeOs() and
+        (system_libs.items.len != 0 or want_native_include_dirs))
+    {
         const paths = std.zig.system.NativePaths.detect(arena, target_info) catch |err| {
             fatal("unable to detect native system paths: {s}", .{@errorName(err)});
         };
@@ -1611,8 +1639,8 @@ fn buildOutputType(
 
         const has_sysroot = if (comptime std.Target.current.isDarwin()) outer: {
             const min = target_info.target.os.getVersionRange().semver.min;
-            const at_least_catalina = min.major >= 11 or (min.major >= 10 and min.minor >= 15);
-            if (at_least_catalina) {
+            const at_least_mojave = min.major >= 11 or (min.major >= 10 and min.minor >= 14);
+            if (at_least_mojave) {
                 const sdk_path = try std.zig.system.getSDKPath(arena);
                 try clang_argv.ensureCapacity(clang_argv.items.len + 2);
                 clang_argv.appendAssumeCapacity("-isysroot");
@@ -1878,6 +1906,7 @@ fn buildOutputType(
         .is_native_os = cross_target.isNativeOs(),
         .is_native_abi = cross_target.isNativeAbi(),
         .dynamic_linker = target_info.dynamic_linker.get(),
+        .sysroot = sysroot,
         .output_mode = output_mode,
         .root_pkg = root_pkg,
         .emit_bin = emit_bin_loc,
@@ -2917,7 +2946,6 @@ const Fmt = struct {
 };
 
 pub fn cmdFmt(gpa: *Allocator, args: []const []const u8) !void {
-    const stderr_file = io.getStdErr();
     var color: Color = .auto;
     var stdin_flag: bool = false;
     var check_flag: bool = false;
@@ -2972,7 +3000,7 @@ pub fn cmdFmt(gpa: *Allocator, args: []const []const u8) !void {
         defer tree.deinit(gpa);
 
         for (tree.errors) |parse_error| {
-            try printErrMsgToFile(gpa, parse_error, tree, "<stdin>", stderr_file, color);
+            try printErrMsgToStdErr(gpa, parse_error, tree, "<stdin>", color);
         }
         if (tree.errors.len != 0) {
             process.exit(1);
@@ -3116,7 +3144,7 @@ fn fmtPathFile(
     defer tree.deinit(fmt.gpa);
 
     for (tree.errors) |parse_error| {
-        try printErrMsgToFile(fmt.gpa, parse_error, tree, file_path, std.io.getStdErr(), fmt.color);
+        try printErrMsgToStdErr(fmt.gpa, parse_error, tree, file_path, fmt.color);
     }
     if (tree.errors.len != 0) {
         fmt.any_error = true;
@@ -3146,25 +3174,16 @@ fn fmtPathFile(
     }
 }
 
-fn printErrMsgToFile(
+fn printErrMsgToStdErr(
     gpa: *mem.Allocator,
     parse_error: ast.Error,
     tree: ast.Tree,
     path: []const u8,
-    file: fs.File,
     color: Color,
 ) !void {
-    const color_on = switch (color) {
-        .auto => file.isTty(),
-        .on => true,
-        .off => false,
-    };
     const lok_token = parse_error.token;
-
-    const token_starts = tree.tokens.items(.start);
-    const token_tags = tree.tokens.items(.tag);
-    const first_token_start = token_starts[lok_token];
     const start_loc = tree.tokenLocation(0, lok_token);
+    const source_line = tree.source[start_loc.line_start..start_loc.line_end];
 
     var text_buf = std.ArrayList(u8).init(gpa);
     defer text_buf.deinit();
@@ -3172,26 +3191,24 @@ fn printErrMsgToFile(
     try tree.renderError(parse_error, writer);
     const text = text_buf.items;
 
-    const stream = file.writer();
-    try stream.print("{s}:{d}:{d}: error: {s}\n", .{ path, start_loc.line + 1, start_loc.column + 1, text });
+    const message: Compilation.AllErrors.Message = .{
+        .src = .{
+            .src_path = path,
+            .msg = text,
+            .byte_offset = @intCast(u32, start_loc.line_start),
+            .line = @intCast(u32, start_loc.line),
+            .column = @intCast(u32, start_loc.column),
+            .source_line = source_line,
+        },
+    };
 
-    if (!color_on) return;
+    const ttyconf: std.debug.TTY.Config = switch (color) {
+        .auto => std.debug.detectTTYConfig(),
+        .on => .escape_codes,
+        .off => .no_color,
+    };
 
-    // Print \r and \t as one space each so that column counts line up
-    for (tree.source[start_loc.line_start..start_loc.line_end]) |byte| {
-        try stream.writeByte(switch (byte) {
-            '\r', '\t' => ' ',
-            else => byte,
-        });
-    }
-    try stream.writeByte('\n');
-    try stream.writeByteNTimes(' ', start_loc.column);
-    if (token_tags[lok_token].lexeme()) |lexeme| {
-        try stream.writeByteNTimes('~', lexeme.len);
-        try stream.writeByte('\n');
-    } else {
-        try stream.writeAll("^\n");
-    }
+    message.renderToStdErr(ttyconf);
 }
 
 pub const info_zen =
@@ -3706,7 +3723,7 @@ pub fn cmdAstCheck(
     defer file.tree.deinit(gpa);
 
     for (file.tree.errors) |parse_error| {
-        try printErrMsgToFile(gpa, parse_error, file.tree, file.sub_file_path, io.getStdErr(), color);
+        try printErrMsgToStdErr(gpa, parse_error, file.tree, file.sub_file_path, color);
     }
     if (file.tree.errors.len != 0) {
         process.exit(1);
@@ -3827,7 +3844,7 @@ pub fn cmdChangelist(
     defer file.tree.deinit(gpa);
 
     for (file.tree.errors) |parse_error| {
-        try printErrMsgToFile(gpa, parse_error, file.tree, old_source_file, io.getStdErr(), .auto);
+        try printErrMsgToStdErr(gpa, parse_error, file.tree, old_source_file, .auto);
     }
     if (file.tree.errors.len != 0) {
         process.exit(1);
@@ -3864,7 +3881,7 @@ pub fn cmdChangelist(
     defer new_tree.deinit(gpa);
 
     for (new_tree.errors) |parse_error| {
-        try printErrMsgToFile(gpa, parse_error, new_tree, new_source_file, io.getStdErr(), .auto);
+        try printErrMsgToStdErr(gpa, parse_error, new_tree, new_source_file, .auto);
     }
     if (new_tree.errors.len != 0) {
         process.exit(1);

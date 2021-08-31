@@ -87,12 +87,24 @@ pub fn main() !void {
                     warn("Expected argument after {s}\n\n", .{arg});
                     return usageAndErr(builder, false, stderr_stream);
                 };
+            } else if (mem.eql(u8, arg, "--sysroot")) {
+                const sysroot = nextArg(args, &arg_idx) orelse {
+                    warn("Expected argument after --sysroot\n\n", .{});
+                    return usageAndErr(builder, false, stderr_stream);
+                };
+                builder.sysroot = sysroot;
             } else if (mem.eql(u8, arg, "--search-prefix")) {
                 const search_prefix = nextArg(args, &arg_idx) orelse {
                     warn("Expected argument after --search-prefix\n\n", .{});
                     return usageAndErr(builder, false, stderr_stream);
                 };
                 builder.addSearchPrefix(search_prefix);
+            } else if (mem.eql(u8, arg, "--libc")) {
+                const libc_file = nextArg(args, &arg_idx) orelse {
+                    warn("Expected argument after --libc\n\n", .{});
+                    return usageAndErr(builder, false, stderr_stream);
+                };
+                builder.libc_file = libc_file;
             } else if (mem.eql(u8, arg, "--color")) {
                 const next_arg = nextArg(args, &arg_idx) orelse {
                     warn("expected [auto|on|off] after --color", .{});
@@ -189,7 +201,9 @@ fn usage(builder: *Builder, already_ran_build: bool, out_stream: anytype) !void 
         \\  -h, --help                  Print this help and exit
         \\  --verbose                   Print commands before executing them
         \\  -p, --prefix [path]         Override default install prefix
+        \\  --sysroot [path]            Set the system root directory (usually /)
         \\  --search-prefix [path]      Add a path to look for binaries, libraries, headers
+        \\  --libc [file]               Provide a file which specifies libc paths
         \\  --color [auto|off|on]       Enable or disable colored error messages
         \\
         \\Project-Specific Options:

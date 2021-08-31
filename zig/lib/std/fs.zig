@@ -3,6 +3,7 @@
 // This file is part of [zig](https://ziglang.org/), which is MIT licensed.
 // The MIT license requires this copyright notice to be included in all copies
 // and substantial portions of the software.
+const root = @import("root");
 const builtin = std.builtin;
 const std = @import("std.zig");
 const os = std.os;
@@ -47,7 +48,10 @@ pub const MAX_PATH_BYTES = switch (builtin.os.tag) {
     .windows => os.windows.PATH_MAX_WIDE * 3 + 1,
     // TODO work out what a reasonable value we should use here
     .wasi => 4096,
-    else => @compileError("Unsupported OS"),
+    else => if (@hasDecl(root, "os") and @hasDecl(root.os, "PATH_MAX"))
+        root.os.PATH_MAX
+    else
+        @compileError("PATH_MAX not implemented for " ++ @tagName(builtin.os.tag)),
 };
 
 pub const base64_alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_".*;
@@ -879,24 +883,39 @@ pub const Dir = struct {
     /// [WTF-16](https://simonsapin.github.io/wtf-8/#potentially-ill-formed-utf-16) encoded.
     pub fn openFileW(self: Dir, sub_path_w: []const u16, flags: File.OpenFlags) File.OpenError!File {
         const w = os.windows;
-        return @as(File, .{
-            .handle = try os.windows.OpenFile(sub_path_w, .{
+        const file: File = .{
+            .handle = try w.OpenFile(sub_path_w, .{
                 .dir = self.fd,
                 .access_mask = w.SYNCHRONIZE |
                     (if (flags.read) @as(u32, w.GENERIC_READ) else 0) |
                     (if (flags.write) @as(u32, w.GENERIC_WRITE) else 0),
-                .share_access = switch (flags.lock) {
-                    .None => w.FILE_SHARE_WRITE | w.FILE_SHARE_READ | w.FILE_SHARE_DELETE,
-                    .Shared => w.FILE_SHARE_READ | w.FILE_SHARE_DELETE,
-                    .Exclusive => w.FILE_SHARE_DELETE,
-                },
-                .share_access_nonblocking = flags.lock_nonblocking,
                 .creation = w.FILE_OPEN,
                 .io_mode = flags.intended_io_mode,
             }),
             .capable_io_mode = std.io.default_mode,
             .intended_io_mode = flags.intended_io_mode,
-        });
+        };
+        var io: w.IO_STATUS_BLOCK = undefined;
+        const range_off: w.LARGE_INTEGER = 0;
+        const range_len: w.LARGE_INTEGER = 1;
+        const exclusive = switch (flags.lock) {
+            .None => return file,
+            .Shared => false,
+            .Exclusive => true,
+        };
+        try w.LockFile(
+            file.handle,
+            null,
+            null,
+            null,
+            &io,
+            &range_off,
+            &range_len,
+            null,
+            @boolToInt(flags.lock_nonblocking),
+            @boolToInt(exclusive),
+        );
+        return file;
     }
 
     /// Creates, opens, or overwrites a file with write access.
@@ -1015,16 +1034,10 @@ pub const Dir = struct {
     pub fn createFileW(self: Dir, sub_path_w: []const u16, flags: File.CreateFlags) File.OpenError!File {
         const w = os.windows;
         const read_flag = if (flags.read) @as(u32, w.GENERIC_READ) else 0;
-        return @as(File, .{
+        const file: File = .{
             .handle = try os.windows.OpenFile(sub_path_w, .{
                 .dir = self.fd,
                 .access_mask = w.SYNCHRONIZE | w.GENERIC_WRITE | read_flag,
-                .share_access = switch (flags.lock) {
-                    .None => w.FILE_SHARE_WRITE | w.FILE_SHARE_READ | w.FILE_SHARE_DELETE,
-                    .Shared => w.FILE_SHARE_READ | w.FILE_SHARE_DELETE,
-                    .Exclusive => w.FILE_SHARE_DELETE,
-                },
-                .share_access_nonblocking = flags.lock_nonblocking,
                 .creation = if (flags.exclusive)
                     @as(u32, w.FILE_CREATE)
                 else if (flags.truncate)
@@ -1035,7 +1048,28 @@ pub const Dir = struct {
             }),
             .capable_io_mode = std.io.default_mode,
             .intended_io_mode = flags.intended_io_mode,
-        });
+        };
+        var io: w.IO_STATUS_BLOCK = undefined;
+        const range_off: w.LARGE_INTEGER = 0;
+        const range_len: w.LARGE_INTEGER = 1;
+        const exclusive = switch (flags.lock) {
+            .None => return file,
+            .Shared => false,
+            .Exclusive => true,
+        };
+        try w.LockFile(
+            file.handle,
+            null,
+            null,
+            null,
+            &io,
+            &range_off,
+            &range_len,
+            null,
+            @boolToInt(flags.lock_nonblocking),
+            @boolToInt(exclusive),
+        );
+        return file;
     }
 
     pub const openRead = @compileError("deprecated in favor of openFile");
