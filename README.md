@@ -10,7 +10,7 @@ to find and inspect the patch diffs.
 
  * LLVM, LLD, Clang 12.0.1
  * zlib 1.2.11
- * Zig 0.8.x
+ * Zig 0.8.1
 
 For other versions, check the git tags of this repository.
 
