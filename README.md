@@ -75,7 +75,7 @@ is more portable across Linux distributions.
 | `aarch64_be-windows-gnu`   | not tested     |
 | `aarch64-linux-gnu`        | OK             |
 | `aarch64-linux-musl`       | OK             |
-| `aarch64-windows-gnu`      | not tested     |
+| `aarch64-windows-gnu`      | [#68](https://github.com/ziglang/zig-bootstrap/issues/68) |
 | `aarch64-macos-gnu`        | OK             |
 | `armeb-linux-gnueabi`      | not tested     |
 | `armeb-linux-gnueabihf`    | not tested     |
