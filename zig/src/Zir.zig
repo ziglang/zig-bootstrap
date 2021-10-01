@@ -1,7 +1,7 @@
 //! Zig Intermediate Representation. Astgen.zig converts AST nodes to these
-//! untyped IR instructions. Next, Sema.zig processes these into TZIR.
+//! untyped IR instructions. Next, Sema.zig processes these into AIR.
 //! The minimum amount of information needed to represent a list of ZIR instructions.
-//! Once this structure is completed, it can be used to generate TZIR, followed by
+//! Once this structure is completed, it can be used to generate AIR, followed by
 //! machine code, without any memory access into the AST tree token list, node list,
 //! or source bytes. Exceptions include:
 //!  * Compile errors, which may need to reach into these data structures to
@@ -16,13 +16,12 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const BigIntConst = std.math.big.int.Const;
 const BigIntMutable = std.math.big.int.Mutable;
-const ast = std.zig.ast;
+const Ast = std.zig.Ast;
 
 const Zir = @This();
 const Type = @import("type.zig").Type;
 const Value = @import("value.zig").Value;
 const TypedValue = @import("TypedValue.zig");
-const ir = @import("air.zig");
 const Module = @import("Module.zig");
 const LazySrcLoc = Module.LazySrcLoc;
 
@@ -50,8 +49,6 @@ pub const Header = extern struct {
 };
 
 pub const ExtraIndex = enum(u32) {
-    /// Ref. The main struct decl for this file.
-    main_struct,
     /// If this is 0, no compile errors. Otherwise there is a `CompileErrors`
     /// payload at this index.
     compile_errors,
@@ -61,11 +58,6 @@ pub const ExtraIndex = enum(u32) {
 
     _,
 };
-
-pub fn getMainStruct(zir: Zir) Zir.Inst.Index {
-    return zir.extra[@enumToInt(ExtraIndex.main_struct)] -
-        @intCast(u32, Inst.Ref.typed_value_map.len);
-}
 
 /// Returns the requested data, as well as the new index which is at the start of the
 /// trailers for the object.
@@ -78,6 +70,7 @@ pub fn extraData(code: Zir, comptime T: type, index: usize) struct { data: T, en
             u32 => code.extra[i],
             Inst.Ref => @intToEnum(Inst.Ref, code.extra[i]),
             i32 => @bitCast(i32, code.extra[i]),
+            Inst.Call.Flags => @bitCast(Inst.Call.Flags, code.extra[i]),
             else => @compileError("bad field type"),
         };
         i += 1;
@@ -113,38 +106,9 @@ pub fn deinit(code: *Zir, gpa: *Allocator) void {
     code.* = undefined;
 }
 
-/// Write human-readable, debug formatted ZIR code to a file.
-pub fn renderAsTextToFile(
-    gpa: *Allocator,
-    scope_file: *Module.Scope.File,
-    fs_file: std.fs.File,
-) !void {
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    defer arena.deinit();
-
-    var writer: Writer = .{
-        .gpa = gpa,
-        .arena = &arena.allocator,
-        .file = scope_file,
-        .code = scope_file.zir,
-        .indent = 0,
-        .parent_decl_node = 0,
-    };
-
-    const main_struct_inst = scope_file.zir.getMainStruct();
-    try fs_file.writer().print("%{d} ", .{main_struct_inst});
-    try writer.writeInstToStream(fs_file.writer(), main_struct_inst);
-    try fs_file.writeAll("\n");
-    const imports_index = scope_file.zir.extra[@enumToInt(ExtraIndex.imports)];
-    if (imports_index != 0) {
-        try fs_file.writeAll("Imports:\n");
-        const imports_len = scope_file.zir.extra[imports_index];
-        for (scope_file.zir.extra[imports_index + 1 ..][0..imports_len]) |str_index| {
-            const import_path = scope_file.zir.nullTerminatedString(str_index);
-            try fs_file.writer().print("  {s}\n", .{import_path});
-        }
-    }
-}
+/// ZIR is structured so that the outermost "main" struct of any file
+/// is always at index 0.
+pub const main_struct_inst: Inst.Index = 0;
 
 /// These are untyped instructions generated from an Abstract Syntax Tree.
 /// The data here is immutable because it is possible to have multiple
@@ -162,11 +126,80 @@ pub const Inst = struct {
         /// Twos complement wrapping integer addition.
         /// Uses the `pl_node` union field. Payload is `Bin`.
         addwrap,
-        /// Declares a parameter of the current function. Used for debug info and
-        /// for checking shadowing against declarations in the current namespace.
-        /// Uses the `str_tok` field. Token is the parameter name, string is the
-        /// parameter name.
-        arg,
+        /// Saturating addition.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        add_sat,
+        /// Arithmetic subtraction. Asserts no integer overflow.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        sub,
+        /// Twos complement wrapping integer subtraction.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        subwrap,
+        /// Saturating subtraction.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        sub_sat,
+        /// Arithmetic multiplication. Asserts no integer overflow.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        mul,
+        /// Twos complement wrapping integer multiplication.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        mulwrap,
+        /// Saturating multiplication.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        mul_sat,
+        /// Implements the `@divExact` builtin.
+        /// Uses the `pl_node` union field with payload `Bin`.
+        div_exact,
+        /// Implements the `@divFloor` builtin.
+        /// Uses the `pl_node` union field with payload `Bin`.
+        div_floor,
+        /// Implements the `@divTrunc` builtin.
+        /// Uses the `pl_node` union field with payload `Bin`.
+        div_trunc,
+        /// Implements the `@mod` builtin.
+        /// Uses the `pl_node` union field with payload `Bin`.
+        mod,
+        /// Implements the `@rem` builtin.
+        /// Uses the `pl_node` union field with payload `Bin`.
+        rem,
+        /// Ambiguously remainder division or modulus. If the computation would possibly have
+        /// a different value depending on whether the operation is remainder division or modulus,
+        /// a compile error is emitted. Otherwise the computation is performed.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        mod_rem,
+        /// Integer shift-left. Zeroes are shifted in from the right hand side.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        shl,
+        /// Implements the `@shlExact` builtin.
+        /// Uses the `pl_node` union field with payload `Bin`.
+        shl_exact,
+        /// Saturating shift-left.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        shl_sat,
+        /// Integer shift-right. Arithmetic or logical depending on the signedness of
+        /// the integer type.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
+        shr,
+        /// Implements the `@shrExact` builtin.
+        /// Uses the `pl_node` union field with payload `Bin`.
+        shr_exact,
+
+        /// Declares a parameter of the current function. Used for:
+        /// * debug info
+        /// * checking shadowing against declarations in the current namespace
+        /// * parameter type expressions referencing other parameters
+        /// These occur in the block outside a function body (the same block as
+        /// contains the func instruction).
+        /// Uses the `pl_tok` field. Token is the parameter name, payload is a `Param`.
+        param,
+        /// Same as `param` except the parameter is marked comptime.
+        param_comptime,
+        /// Same as `param` except the parameter is marked anytype.
+        /// Uses the `str_tok` field. Token is the parameter name. String is the parameter name.
+        param_anytype,
+        /// Same as `param` except the parameter is marked both comptime and anytype.
+        /// Uses the `str_tok` field. Token is the parameter name. String is the parameter name.
+        param_anytype_comptime,
         /// Array concatenation. `a ++ b`
         /// Uses the `pl_node` union field. Payload is `Bin`.
         array_cat,
@@ -202,7 +235,7 @@ pub const Inst = struct {
         as_node,
         /// Bitwise AND. `&`
         bit_and,
-        /// Bitcast a value to a different type.
+        /// Reinterpret the memory representation of a value as a different type.
         /// Uses the pl_node field with payload `Bin`.
         bitcast,
         /// A typed result location pointer is bitcasted to a new result location pointer.
@@ -225,15 +258,9 @@ pub const Inst = struct {
         /// Implements `suspend {...}`.
         /// Uses the `pl_node` union field. Payload is `Block`.
         suspend_block,
-        /// Boolean AND. See also `bit_and`.
-        /// Uses the `pl_node` union field. Payload is `Bin`.
-        bool_and,
         /// Boolean NOT. See also `bit_not`.
         /// Uses the `un_node` field.
         bool_not,
-        /// Boolean OR. See also `bit_or`.
-        /// Uses the `pl_node` union field. Payload is `Bin`.
-        bool_or,
         /// Short-circuiting boolean `and`. `lhs` is a boolean `Ref` and the other operand
         /// is a block, which is evaluated if `lhs` is `true`.
         /// Uses the `bool_br` union field.
@@ -254,17 +281,9 @@ pub const Inst = struct {
         break_inline,
         /// Uses the `node` union field.
         breakpoint,
-        /// Function call with modifier `.auto`.
+        /// Function call.
         /// Uses `pl_node`. AST node is the function call. Payload is `Call`.
         call,
-        /// Same as `call` but it also does `ensure_result_used` on the return value.
-        call_chkused,
-        /// Same as `call` but with modifier `.compile_time`.
-        call_compile_time,
-        /// Same as `call` but with modifier `.no_suspend`.
-        call_nosuspend,
-        /// Same as `call` but with modifier `.async_kw`.
-        call_async,
         /// `<`
         /// Uses the `pl_node` union field. Payload is `Bin`.
         cmp_lt,
@@ -296,11 +315,6 @@ pub const Inst = struct {
         /// only the taken branch is analyzed. The then block and else block must
         /// terminate with an "inline" variant of a noreturn instruction.
         condbr_inline,
-        /// An opaque type definition. Provides an AST node only.
-        /// Uses the `pl_node` union field. Payload is `OpaqueDecl`.
-        opaque_decl,
-        opaque_decl_anon,
-        opaque_decl_func,
         /// An error set type definition. Contains a list of field names.
         /// Uses the `pl_node` union field. Payload is `ErrorSetDecl`.
         error_set_decl,
@@ -347,9 +361,14 @@ pub const Inst = struct {
         error_union_type,
         /// `error.Foo` syntax. Uses the `str_tok` field of the Data union.
         error_value,
-        /// Implements the `@export` builtin function.
-        /// Uses the `pl_node` union field. Payload is `Bin`.
+        /// Implements the `@export` builtin function, based on either an identifier to a Decl,
+        /// or field access of a Decl. The thing being exported is the Decl.
+        /// Uses the `pl_node` union field. Payload is `Export`.
         @"export",
+        /// Implements the `@export` builtin function, based on a comptime-known value.
+        /// The thing being exported is the comptime-known value which is the operand.
+        /// Uses the `pl_node` union field. Payload is `ExportValue`.
+        export_value,
         /// Given a pointer to a struct or object that contains virtual fields, returns a pointer
         /// to the named field. The field name is stored in string_bytes. Used by a.b syntax.
         /// Uses `pl_node` field. The AST node is the a.b syntax. Payload is Field.
@@ -359,6 +378,15 @@ pub const Inst = struct {
         /// This instruction also accepts a pointer.
         /// Uses `pl_node` field. The AST node is the a.b syntax. Payload is Field.
         field_val,
+        /// Given a pointer to a struct or object that contains virtual fields, returns the
+        /// named field.  If there is no named field, searches in the type for a decl that
+        /// matches the field name.  The decl is resolved and we ensure that it's a function
+        /// which can accept the object as the first parameter, with one pointer fixup.  If
+        /// all of that works, this instruction produces a special "bound function" value
+        /// which contains both the function and the saved first parameter value.
+        /// Bound functions may only be used as the function parameter to a `call` or
+        /// `builtin_call` instruction.  Any other use is invalid zir and may crash the compiler.
+        field_call_bind,
         /// Given a pointer to a struct or object that contains virtual fields, returns a pointer
         /// to the named field. The field name is a comptime instruction. Used by @field.
         /// Uses `pl_node` field. The AST node is the builtin call. Payload is FieldNamed.
@@ -367,6 +395,15 @@ pub const Inst = struct {
         /// The field name is a comptime instruction. Used by @field.
         /// Uses `pl_node` field. The AST node is the builtin call. Payload is FieldNamed.
         field_val_named,
+        /// Given a pointer to a struct or object that contains virtual fields, returns the
+        /// named field.  If there is no named field, searches in the type for a decl that
+        /// matches the field name.  The decl is resolved and we ensure that it's a function
+        /// which can accept the object as the first parameter, with one pointer fixup.  If
+        /// all of that works, this instruction produces a special "bound function" value
+        /// which contains both the function and the saved first parameter value.
+        /// Bound functions may only be used as the function parameter to a `call` or
+        /// `builtin_call` instruction.  Any other use is invalid zir and may crash the compiler.
+        field_call_bind_named,
         /// Returns a function type, or a function instance, depending on whether
         /// the body_len is 0. Calling convention is auto.
         /// Uses the `pl_node` union field. `payload_index` points to a `Func`.
@@ -380,7 +417,7 @@ pub const Inst = struct {
         int,
         /// Arbitrary sized integer literal. Uses the `str` union field.
         int_big,
-        /// A float literal that fits in a f32. Uses the float union value.
+        /// A float literal that fits in a f64. Uses the float union value.
         float,
         /// A float literal that fits in a f128. Uses the `pl_node` union value.
         /// Payload is `Float128`.
@@ -391,26 +428,20 @@ pub const Inst = struct {
         /// Return a boolean false if an optional is null. `x != null`
         /// Uses the `un_node` field.
         is_non_null,
-        /// Return a boolean true if an optional is null. `x == null`
-        /// Uses the `un_node` field.
-        is_null,
         /// Return a boolean false if an optional is null. `x.* != null`
         /// Uses the `un_node` field.
         is_non_null_ptr,
-        /// Return a boolean true if an optional is null. `x.* == null`
+        /// Return a boolean false if value is an error
         /// Uses the `un_node` field.
-        is_null_ptr,
-        /// Return a boolean true if value is an error
+        is_non_err,
+        /// Return a boolean false if dereferenced pointer is an error
         /// Uses the `un_node` field.
-        is_err,
-        /// Return a boolean true if dereferenced pointer is an error
-        /// Uses the `un_node` field.
-        is_err_ptr,
+        is_non_err_ptr,
         /// A labeled block of code that loops forever. At the end of the body will have either
         /// a `repeat` instruction or a `repeat_inline` instruction.
         /// Uses the `pl_node` field. The AST node is either a for loop or while loop.
-        /// This ZIR instruction is needed because TZIR does not (yet?) match ZIR, and Sema
-        /// needs to emit more than 1 TZIR block for this instruction.
+        /// This ZIR instruction is needed because AIR does not (yet?) match ZIR, and Sema
+        /// needs to emit more than 1 AIR block for this instruction.
         /// The payload is `Block`.
         loop,
         /// Sends runtime control flow back to the beginning of the current block.
@@ -422,25 +453,6 @@ pub const Inst = struct {
         /// Merge two error sets into one, `E1 || E2`.
         /// Uses the `pl_node` field with payload `Bin`.
         merge_error_sets,
-        /// Ambiguously remainder division or modulus. If the computation would possibly have
-        /// a different value depending on whether the operation is remainder division or modulus,
-        /// a compile error is emitted. Otherwise the computation is performed.
-        /// Uses the `pl_node` union field. Payload is `Bin`.
-        mod_rem,
-        /// Arithmetic multiplication. Asserts no integer overflow.
-        /// Uses the `pl_node` union field. Payload is `Bin`.
-        mul,
-        /// Twos complement wrapping integer multiplication.
-        /// Uses the `pl_node` union field. Payload is `Bin`.
-        mulwrap,
-        /// Given a reference to a function and a parameter index, returns the
-        /// type of the parameter. The only usage of this instruction is for the
-        /// result location of parameters of function calls. In the case of a function's
-        /// parameter type being `anytype`, it is the type coercion's job to detect this
-        /// scenario and skip the coercion, so that semantic analysis of this instruction
-        /// is not in a position where it must create an invalid type.
-        /// Uses the `param_type` union field.
-        param_type,
         /// Turns an R-Value into a const L-Value. In other words, it takes a value,
         /// stores it in a memory location, and returns a const pointer to it. If the value
         /// is `comptime`, the memory location is global static constant data. Otherwise,
@@ -454,24 +466,45 @@ pub const Inst = struct {
         /// Uses the `un_node` union field.
         ret_node,
         /// Sends control flow back to the function's callee.
+        /// The operand is a `ret_ptr` instruction, where the return value can be found.
+        /// Includes an AST node source location.
+        /// Uses the `un_node` union field.
+        ret_load,
+        /// Sends control flow back to the function's callee.
         /// Includes an operand as the return value.
         /// Includes a token source location.
         /// Uses the `un_tok` union field.
         /// The operand needs to get coerced to the function's return type.
         ret_coerce,
-        /// Create a pointer type that does not have a sentinel, alignment, or bit range specified.
+        /// Sends control flow back to the function's callee.
+        /// The return operand is `error.foo` where `foo` is given by the string.
+        /// If the current function has an inferred error set, the error given by the
+        /// name is added to it.
+        /// Uses the `str_tok` union field.
+        ret_err_value,
+        /// A string name is provided which is an anonymous error set value.
+        /// If the current function has an inferred error set, the error given by the
+        /// name is added to it.
+        /// Results in the error code. Note that control flow is not diverted with
+        /// this instruction; a following 'ret' instruction will do the diversion.
+        /// Uses the `str_tok` union field.
+        ret_err_value_code,
+        /// Create a pointer type that does not have a sentinel, alignment, address space, or bit range specified.
         /// Uses the `ptr_type_simple` union field.
         ptr_type_simple,
-        /// Create a pointer type which can have a sentinel, alignment, and/or bit range.
+        /// Create a pointer type which can have a sentinel, alignment, address space, and/or bit range.
         /// Uses the `ptr_type` union field.
         ptr_type,
         /// Slice operation `lhs[rhs..]`. No sentinel and no end offset.
+        /// Returns a pointer to the subslice.
         /// Uses the `pl_node` field. AST node is the slice syntax. Payload is `SliceStart`.
         slice_start,
         /// Slice operation `array_ptr[start..end]`. No sentinel.
+        /// Returns a pointer to the subslice.
         /// Uses the `pl_node` field. AST node is the slice syntax. Payload is `SliceEnd`.
         slice_end,
         /// Slice operation `array_ptr[start..end:sentinel]`.
+        /// Returns a pointer to the subslice.
         /// Uses the `pl_node` field. AST node is the slice syntax. Payload is `SliceSentinel`.
         slice_sentinel,
         /// Write a value to a pointer. For loading, see `load`.
@@ -496,12 +529,6 @@ pub const Inst = struct {
         /// String Literal. Makes an anonymous Decl and then takes a pointer to it.
         /// Uses the `str` union field.
         str,
-        /// Arithmetic subtraction. Asserts no integer overflow.
-        /// Uses the `pl_node` union field. Payload is `Bin`.
-        sub,
-        /// Twos complement wrapping integer subtraction.
-        /// Uses the `pl_node` union field. Payload is `Bin`.
-        subwrap,
         /// Arithmetic negation. Asserts no integer overflow.
         /// Same as sub with a lhs of 0, split into a separate instruction to save memory.
         /// Uses `un_node`.
@@ -658,14 +685,14 @@ pub const Inst = struct {
         /// A struct literal with a specified type, with no fields.
         /// Uses the `un_node` field.
         struct_init_empty,
-        /// Given a struct, union, or enum, and a field name as a string index,
+        /// Given a struct or union, and a field name as a string index,
         /// returns the field type. Uses the `pl_node` field. Payload is `FieldType`.
         field_type,
-        /// Given a struct, union, or enum, and a field name as a Ref,
+        /// Given a struct or union, and a field name as a Ref,
         /// returns the field type. Uses the `pl_node` field. Payload is `FieldTypeRef`.
         field_type_ref,
-        /// Finalizes a typed struct initialization, performs validation, and returns the
-        /// struct value.
+        /// Finalizes a typed struct or union initialization, performs validation, and returns the
+        /// struct or union value.
         /// Uses the `pl_node` field. Payload is `StructInit`.
         struct_init,
         /// Struct initialization syntax, make the result a pointer.
@@ -699,7 +726,7 @@ pub const Inst = struct {
         size_of,
         /// Implements the `@bitSizeOf` builtin. Uses `un_node`.
         bit_size_of,
-        /// Implements the `@fence` builtin. Uses `node`.
+        /// Implements the `@fence` builtin. Uses `un_node`.
         fence,
 
         /// Implement builtin `@ptrToInt`. Uses `un_node`.
@@ -827,41 +854,12 @@ pub const Inst = struct {
         /// Implements the `@bitReverse` builtin. Uses the `un_node` union field.
         bit_reverse,
 
-        /// Implements the `@divExact` builtin.
-        /// Uses the `pl_node` union field with payload `Bin`.
-        div_exact,
-        /// Implements the `@divFloor` builtin.
-        /// Uses the `pl_node` union field with payload `Bin`.
-        div_floor,
-        /// Implements the `@divTrunc` builtin.
-        /// Uses the `pl_node` union field with payload `Bin`.
-        div_trunc,
-        /// Implements the `@mod` builtin.
-        /// Uses the `pl_node` union field with payload `Bin`.
-        mod,
-        /// Implements the `@rem` builtin.
-        /// Uses the `pl_node` union field with payload `Bin`.
-        rem,
-
-        /// Integer shift-left. Zeroes are shifted in from the right hand side.
-        /// Uses the `pl_node` union field. Payload is `Bin`.
-        shl,
-        /// Implements the `@shlExact` builtin.
-        /// Uses the `pl_node` union field with payload `Bin`.
-        shl_exact,
-        /// Integer shift-right. Arithmetic or logical depending on the signedness of the integer type.
-        /// Uses the `pl_node` union field. Payload is `Bin`.
-        shr,
-        /// Implements the `@shrExact` builtin.
-        /// Uses the `pl_node` union field with payload `Bin`.
-        shr_exact,
-
         /// Implements the `@bitOffsetOf` builtin.
         /// Uses the `pl_node` union field with payload `Bin`.
         bit_offset_of,
-        /// Implements the `@byteOffsetOf` builtin.
+        /// Implements the `@offsetOf` builtin.
         /// Uses the `pl_node` union field with payload `Bin`.
-        byte_offset_of,
+        offset_of,
         /// Implements the `@cmpxchgStrong` builtin.
         /// Uses the `pl_node` union field with payload `Cmpxchg`.
         cmpxchg_strong,
@@ -877,6 +875,9 @@ pub const Inst = struct {
         /// Implements the `@shuffle` builtin.
         /// Uses the `pl_node` union field with payload `Shuffle`.
         shuffle,
+        /// Implements the `@select` builtin.
+        /// Uses the `pl_node` union field with payload `Select`.
+        select,
         /// Implements the `@atomicLoad` builtin.
         /// Uses the `pl_node` union field with payload `Bin`.
         atomic_load,
@@ -899,12 +900,18 @@ pub const Inst = struct {
         /// Implements the `@fieldParentPtr` builtin.
         /// Uses the `pl_node` union field with payload `FieldParentPtr`.
         field_parent_ptr,
+        /// Implements the `@maximum` builtin.
+        /// Uses the `pl_node` union field with payload `Bin`
+        maximum,
         /// Implements the `@memcpy` builtin.
         /// Uses the `pl_node` union field with payload `Memcpy`.
         memcpy,
         /// Implements the `@memset` builtin.
         /// Uses the `pl_node` union field with payload `Memset`.
         memset,
+        /// Implements the `@minimum` builtin.
+        /// Uses the `pl_node` union field with payload `Bin`
+        minimum,
         /// Implements the `@asyncCall` builtin.
         /// Uses the `pl_node` union field with payload `AsyncCall`.
         builtin_async_call,
@@ -941,6 +948,17 @@ pub const Inst = struct {
         @"await",
         await_nosuspend,
 
+        /// When a type or function refers to a comptime value from an outer
+        /// scope, that forms a closure over comptime value.  The outer scope
+        /// will record a capture of that value, which encodes its current state
+        /// and marks it to persist.  Uses `un_tok` field.  Operand is the
+        /// instruction value to capture.
+        closure_capture,
+        /// The inner scope of a closure uses closure_get to retrieve the value
+        /// stored by the outer scope.  Uses `inst_node` field.  Operand is the
+        /// closure_capture instruction ref.
+        closure_get,
+
         /// The ZIR instruction tag is one of the `Extended` ones.
         /// Uses the `extended` union field.
         extended,
@@ -949,9 +967,13 @@ pub const Inst = struct {
         /// Function calls do not count.
         pub fn isNoReturn(tag: Tag) bool {
             return switch (tag) {
-                .arg,
+                .param,
+                .param_comptime,
+                .param_anytype,
+                .param_anytype_comptime,
                 .add,
                 .addwrap,
+                .add_sat,
                 .alloc,
                 .alloc_mut,
                 .alloc_comptime,
@@ -979,15 +1001,9 @@ pub const Inst = struct {
                 .bool_br_and,
                 .bool_br_or,
                 .bool_not,
-                .bool_and,
-                .bool_or,
                 .breakpoint,
                 .fence,
                 .call,
-                .call_chkused,
-                .call_compile_time,
-                .call_nosuspend,
-                .call_async,
                 .cmp_lt,
                 .cmp_lte,
                 .cmp_eq,
@@ -995,9 +1011,6 @@ pub const Inst = struct {
                 .cmp_gt,
                 .cmp_neq,
                 .coerce_result_ptr,
-                .opaque_decl,
-                .opaque_decl_anon,
-                .opaque_decl_func,
                 .error_set_decl,
                 .error_set_decl_anon,
                 .error_set_decl_func,
@@ -1013,10 +1026,13 @@ pub const Inst = struct {
                 .ensure_result_used,
                 .ensure_result_non_error,
                 .@"export",
+                .export_value,
                 .field_ptr,
                 .field_val,
+                .field_call_bind,
                 .field_ptr_named,
                 .field_val_named,
+                .field_call_bind_named,
                 .func,
                 .func_inferred,
                 .has_decl,
@@ -1026,17 +1042,16 @@ pub const Inst = struct {
                 .float128,
                 .int_type,
                 .is_non_null,
-                .is_null,
                 .is_non_null_ptr,
-                .is_null_ptr,
-                .is_err,
-                .is_err_ptr,
+                .is_non_err,
+                .is_non_err_ptr,
                 .mod_rem,
                 .mul,
                 .mulwrap,
-                .param_type,
+                .mul_sat,
                 .ref,
                 .shl,
+                .shl_sat,
                 .shr,
                 .store,
                 .store_node,
@@ -1045,6 +1060,7 @@ pub const Inst = struct {
                 .str,
                 .sub,
                 .subwrap,
+                .sub_sat,
                 .negate,
                 .negate_wrap,
                 .typeof,
@@ -1166,12 +1182,13 @@ pub const Inst = struct {
                 .shl_exact,
                 .shr_exact,
                 .bit_offset_of,
-                .byte_offset_of,
+                .offset_of,
                 .cmpxchg_strong,
                 .cmpxchg_weak,
                 .splat,
                 .reduce,
                 .shuffle,
+                .select,
                 .atomic_load,
                 .atomic_rmw,
                 .atomic_store,
@@ -1179,14 +1196,19 @@ pub const Inst = struct {
                 .builtin_call,
                 .field_ptr_type,
                 .field_parent_ptr,
+                .maximum,
                 .memcpy,
                 .memset,
+                .minimum,
                 .builtin_async_call,
                 .c_import,
                 .@"resume",
                 .@"await",
                 .await_nosuspend,
+                .ret_err_value_code,
                 .extended,
+                .closure_get,
+                .closure_capture,
                 => false,
 
                 .@"break",
@@ -1195,7 +1217,9 @@ pub const Inst = struct {
                 .condbr_inline,
                 .compile_error,
                 .ret_node,
+                .ret_load,
                 .ret_coerce,
+                .ret_err_value,
                 .@"unreachable",
                 .repeat,
                 .repeat_inline,
@@ -1210,7 +1234,18 @@ pub const Inst = struct {
             break :list std.enums.directEnumArray(Tag, Data.FieldEnum, 0, .{
                 .add = .pl_node,
                 .addwrap = .pl_node,
-                .arg = .str_tok,
+                .add_sat = .pl_node,
+                .sub = .pl_node,
+                .subwrap = .pl_node,
+                .sub_sat = .pl_node,
+                .mul = .pl_node,
+                .mulwrap = .pl_node,
+                .mul_sat = .pl_node,
+
+                .param = .pl_tok,
+                .param_comptime = .pl_tok,
+                .param_anytype = .str_tok,
+                .param_anytype_comptime = .str_tok,
                 .array_cat = .pl_node,
                 .array_mul = .pl_node,
                 .array_type = .bin,
@@ -1229,19 +1264,13 @@ pub const Inst = struct {
                 .block = .pl_node,
                 .block_inline = .pl_node,
                 .suspend_block = .pl_node,
-                .bool_and = .pl_node,
                 .bool_not = .un_node,
-                .bool_or = .pl_node,
                 .bool_br_and = .bool_br,
                 .bool_br_or = .bool_br,
                 .@"break" = .@"break",
                 .break_inline = .@"break",
                 .breakpoint = .node,
                 .call = .pl_node,
-                .call_chkused = .pl_node,
-                .call_compile_time = .pl_node,
-                .call_nosuspend = .pl_node,
-                .call_async = .pl_node,
                 .cmp_lt = .pl_node,
                 .cmp_lte = .pl_node,
                 .cmp_eq = .pl_node,
@@ -1251,9 +1280,6 @@ pub const Inst = struct {
                 .coerce_result_ptr = .bin,
                 .condbr = .pl_node,
                 .condbr_inline = .pl_node,
-                .opaque_decl = .pl_node,
-                .opaque_decl_anon = .pl_node,
-                .opaque_decl_func = .pl_node,
                 .error_set_decl = .pl_node,
                 .error_set_decl_anon = .pl_node,
                 .error_set_decl_func = .pl_node,
@@ -1271,10 +1297,13 @@ pub const Inst = struct {
                 .error_union_type = .pl_node,
                 .error_value = .str_tok,
                 .@"export" = .pl_node,
+                .export_value = .pl_node,
                 .field_ptr = .pl_node,
                 .field_val = .pl_node,
                 .field_ptr_named = .pl_node,
                 .field_val_named = .pl_node,
+                .field_call_bind = .pl_node,
+                .field_call_bind_named = .pl_node,
                 .func = .pl_node,
                 .func_inferred = .pl_node,
                 .import = .str_tok,
@@ -1284,22 +1313,20 @@ pub const Inst = struct {
                 .float128 = .pl_node,
                 .int_type = .int_type,
                 .is_non_null = .un_node,
-                .is_null = .un_node,
                 .is_non_null_ptr = .un_node,
-                .is_null_ptr = .un_node,
-                .is_err = .un_node,
-                .is_err_ptr = .un_node,
+                .is_non_err = .un_node,
+                .is_non_err_ptr = .un_node,
                 .loop = .pl_node,
                 .repeat = .node,
                 .repeat_inline = .node,
                 .merge_error_sets = .pl_node,
                 .mod_rem = .pl_node,
-                .mul = .pl_node,
-                .mulwrap = .pl_node,
-                .param_type = .param_type,
                 .ref = .un_tok,
                 .ret_node = .un_node,
+                .ret_load = .un_node,
                 .ret_coerce = .un_tok,
+                .ret_err_value = .str_tok,
+                .ret_err_value_code = .str_tok,
                 .ptr_type_simple = .ptr_type_simple,
                 .ptr_type = .ptr_type,
                 .slice_start = .pl_node,
@@ -1310,8 +1337,6 @@ pub const Inst = struct {
                 .store_to_block_ptr = .bin,
                 .store_to_inferred_ptr = .bin,
                 .str = .str,
-                .sub = .pl_node,
-                .subwrap = .pl_node,
                 .negate = .un_node,
                 .negate_wrap = .un_node,
                 .typeof = .un_node,
@@ -1368,7 +1393,7 @@ pub const Inst = struct {
                 .type_info = .un_node,
                 .size_of = .un_node,
                 .bit_size_of = .un_node,
-                .fence = .node,
+                .fence = .un_node,
 
                 .ptr_to_int = .un_node,
                 .error_to_int = .un_node,
@@ -1432,16 +1457,18 @@ pub const Inst = struct {
 
                 .shl = .pl_node,
                 .shl_exact = .pl_node,
+                .shl_sat = .pl_node,
                 .shr = .pl_node,
                 .shr_exact = .pl_node,
 
                 .bit_offset_of = .pl_node,
-                .byte_offset_of = .pl_node,
+                .offset_of = .pl_node,
                 .cmpxchg_strong = .pl_node,
                 .cmpxchg_weak = .pl_node,
                 .splat = .pl_node,
                 .reduce = .pl_node,
                 .shuffle = .pl_node,
+                .select = .pl_node,
                 .atomic_load = .pl_node,
                 .atomic_rmw = .pl_node,
                 .atomic_store = .pl_node,
@@ -1449,8 +1476,10 @@ pub const Inst = struct {
                 .builtin_call = .pl_node,
                 .field_ptr_type = .bin,
                 .field_parent_ptr = .pl_node,
+                .maximum = .pl_node,
                 .memcpy = .pl_node,
                 .memset = .pl_node,
+                .minimum = .pl_node,
                 .builtin_async_call = .pl_node,
                 .c_import = .pl_node,
 
@@ -1465,6 +1494,9 @@ pub const Inst = struct {
                 .@"resume" = .un_node,
                 .@"await" = .un_node,
                 .await_nosuspend = .un_node,
+
+                .closure_capture = .un_tok,
+                .closure_get = .inst_node,
 
                 .extended = .extended,
             });
@@ -1498,6 +1530,10 @@ pub const Inst = struct {
         /// `operand` is payload index to `UnionDecl`.
         /// `small` is `UnionDecl.Small`.
         union_decl,
+        /// An opaque type definition. Contains references to decls and captures.
+        /// `operand` is payload index to `OpaqueDecl`.
+        /// `small` is `OpaqueDecl.Small`.
+        opaque_decl,
         /// Obtains a pointer to the return value.
         /// `operand` is `src_node: i32`.
         ret_ptr,
@@ -1609,6 +1645,7 @@ pub const Inst = struct {
         /// value and may instead be used as a sentinel to indicate null.
         none,
 
+        u1_type,
         u8_type,
         i8_type,
         u16_type,
@@ -1646,14 +1683,16 @@ pub const Inst = struct {
         null_type,
         undefined_type,
         enum_literal_type,
-        atomic_ordering_type,
+        atomic_order_type,
         atomic_rmw_op_type,
         calling_convention_type,
+        address_space_type,
         float_mode_type,
         reduce_op_type,
         call_options_type,
         export_options_type,
         extern_options_type,
+        type_info_type,
         manyptr_u8_type,
         manyptr_const_u8_type,
         fn_noreturn_no_args_type,
@@ -1662,6 +1701,8 @@ pub const Inst = struct {
         fn_ccc_void_no_args_type,
         single_const_pointer_to_comptime_int_type,
         const_slice_u8_type,
+        anyerror_void_error_union_type,
+        generic_poison_type,
 
         /// `undefined` (untyped)
         undef,
@@ -1689,12 +1730,19 @@ pub const Inst = struct {
         calling_convention_c,
         /// `std.builtin.CallingConvention.Inline`
         calling_convention_inline,
+        /// Used for generic parameters where the type and value
+        /// is not known until generic function instantiation.
+        generic_poison,
 
         _,
 
         pub const typed_value_map = std.enums.directEnumArray(Ref, TypedValue, 0, .{
             .none = undefined,
 
+            .u1_type = .{
+                .ty = Type.initTag(.type),
+                .val = Value.initTag(.u1_type),
+            },
             .u8_type = .{
                 .ty = Type.initTag(.type),
                 .val = Value.initTag(.u8_type),
@@ -1863,6 +1911,14 @@ pub const Inst = struct {
                 .ty = Type.initTag(.type),
                 .val = Value.initTag(.const_slice_u8_type),
             },
+            .anyerror_void_error_union_type = .{
+                .ty = Type.initTag(.type),
+                .val = Value.initTag(.anyerror_void_error_union_type),
+            },
+            .generic_poison_type = .{
+                .ty = Type.initTag(.type),
+                .val = Value.initTag(.generic_poison_type),
+            },
             .enum_literal_type = .{
                 .ty = Type.initTag(.type),
                 .val = Value.initTag(.enum_literal_type),
@@ -1875,9 +1931,9 @@ pub const Inst = struct {
                 .ty = Type.initTag(.type),
                 .val = Value.initTag(.manyptr_const_u8_type),
             },
-            .atomic_ordering_type = .{
+            .atomic_order_type = .{
                 .ty = Type.initTag(.type),
-                .val = Value.initTag(.atomic_ordering_type),
+                .val = Value.initTag(.atomic_order_type),
             },
             .atomic_rmw_op_type = .{
                 .ty = Type.initTag(.type),
@@ -1886,6 +1942,10 @@ pub const Inst = struct {
             .calling_convention_type = .{
                 .ty = Type.initTag(.type),
                 .val = Value.initTag(.calling_convention_type),
+            },
+            .address_space_type = .{
+                .ty = Type.initTag(.type),
+                .val = Value.initTag(.address_space_type),
             },
             .float_mode_type = .{
                 .ty = Type.initTag(.type),
@@ -1906,6 +1966,10 @@ pub const Inst = struct {
             .extern_options_type = .{
                 .ty = Type.initTag(.type),
                 .val = Value.initTag(.extern_options_type),
+            },
+            .type_info_type = .{
+                .ty = Type.initTag(.type),
+                .val = Value.initTag(.type_info_type),
             },
 
             .undef = .{
@@ -1960,6 +2024,10 @@ pub const Inst = struct {
                 .ty = Type.initTag(.calling_convention),
                 .val = .{ .ptr_otherwise = &calling_convention_inline_payload.base },
             },
+            .generic_poison = .{
+                .ty = Type.initTag(.generic_poison),
+                .val = Value.initTag(.generic_poison),
+            },
         });
     };
 
@@ -1998,7 +2066,7 @@ pub const Inst = struct {
         /// Used for unary operators, with a token source location.
         un_tok: struct {
             /// Offset from Decl AST token index.
-            src_tok: ast.TokenIndex,
+            src_tok: Ast.TokenIndex,
             /// The meaning of this operand depends on the corresponding `Tag`.
             operand: Ref,
 
@@ -2016,6 +2084,17 @@ pub const Inst = struct {
 
             pub fn src(self: @This()) LazySrcLoc {
                 return .{ .node_offset = self.src_node };
+            }
+        },
+        pl_tok: struct {
+            /// Offset from Decl AST token index.
+            src_tok: Ast.TokenIndex,
+            /// index into extra.
+            /// `Tag` determines what lives there.
+            payload_index: u32,
+
+            pub fn src(self: @This()) LazySrcLoc {
+                return .{ .token_offset = self.src_tok };
             }
         },
         bin: Bin,
@@ -2045,20 +2124,11 @@ pub const Inst = struct {
             }
         },
         /// Offset from Decl AST token index.
-        tok: ast.TokenIndex,
+        tok: Ast.TokenIndex,
         /// Offset from Decl AST node index.
         node: i32,
         int: u64,
-        float: struct {
-            /// Offset from Decl AST node index.
-            /// `Tag` determines which kind of AST node this points to.
-            src_node: i32,
-            number: f32,
-
-            pub fn src(self: @This()) LazySrcLoc {
-                return .{ .node_offset = self.src_node };
-            }
-        },
+        float: f64,
         array_type_sentinel: struct {
             len: Ref,
             /// index into extra, points to an `ArrayTypeSentinel`
@@ -2078,8 +2148,9 @@ pub const Inst = struct {
                 is_volatile: bool,
                 has_sentinel: bool,
                 has_align: bool,
+                has_addrspace: bool,
                 has_bit_range: bool,
-                _: u2 = undefined,
+                _: u1 = undefined,
             },
             size: std.builtin.TypeInfo.Pointer.Size,
             /// Index into extra. See `PtrType`.
@@ -2100,10 +2171,6 @@ pub const Inst = struct {
             lhs: Ref,
             /// Points to a `Block`.
             payload_index: u32,
-        },
-        param_type: struct {
-            callee: Ref,
-            param_index: u32,
         },
         @"unreachable": struct {
             /// Offset from Decl AST node index.
@@ -2131,6 +2198,18 @@ pub const Inst = struct {
             line: u32,
             column: u32,
         },
+        /// Used for unary operators which reference an inst,
+        /// with an AST node source location.
+        inst_node: struct {
+            /// Offset from Decl AST node index.
+            src_node: i32,
+            /// The meaning of this operand depends on the corresponding `Tag`.
+            inst: Index,
+
+            pub fn src(self: @This()) LazySrcLoc {
+                return .{ .node_offset = self.src_node };
+            }
+        },
 
         // Make sure we don't accidentally add a field to make this union
         // bigger than expected. Note that in Debug builds, Zig is allowed
@@ -2150,6 +2229,7 @@ pub const Inst = struct {
             un_node,
             un_tok,
             pl_node,
+            pl_tok,
             bin,
             str,
             str_tok,
@@ -2162,11 +2242,11 @@ pub const Inst = struct {
             ptr_type,
             int_type,
             bool_br,
-            param_type,
             @"unreachable",
             @"break",
             switch_capture,
             dbg_stmt,
+            inst_node,
         };
     };
 
@@ -2176,7 +2256,8 @@ pub const Inst = struct {
     /// 2. clobber: u32 // index into string_bytes (null terminated) for every clobbers_len.
     pub const Asm = struct {
         src_node: i32,
-        asm_source: Ref,
+        // null-terminated string index
+        asm_source: u32,
         /// 1 bit for each outputs_len: whether it uses `-> T` or not.
         ///   0b0 - operand is a pointer to where to store the output.
         ///   0b1 - operand is a type; asm expression has the output as the result.
@@ -2205,13 +2286,15 @@ pub const Inst = struct {
     /// 0. lib_name: u32, // null terminated string index, if has_lib_name is set
     /// 1. cc: Ref, // if has_cc is set
     /// 2. align: Ref, // if has_align is set
-    /// 3. param_type: Ref // for each param_types_len
+    /// 3. return_type: Index // for each ret_body_len
     /// 4. body: Index // for each body_len
     /// 5. src_locs: Func.SrcLocs // if body_len != 0
     pub const ExtendedFunc = struct {
         src_node: i32,
-        return_type: Ref,
-        param_types_len: u32,
+        /// If this is 0 it means a void return type.
+        ret_body_len: u32,
+        /// Points to the block that contains the param instructions for this function.
+        param_block: Index,
         body_len: u32,
 
         pub const Small = packed struct {
@@ -2245,13 +2328,14 @@ pub const Inst = struct {
     };
 
     /// Trailing:
-    /// 0. param_type: Ref // for each param_types_len
-    ///    - `none` indicates that the param type is `anytype`.
+    /// 0. return_type: Index // for each ret_body_len
     /// 1. body: Index // for each body_len
     /// 2. src_locs: SrcLocs // if body_len != 0
     pub const Func = struct {
-        return_type: Ref,
-        param_types_len: u32,
+        /// If this is 0 it means a void return type.
+        ret_body_len: u32,
+        /// Points to the block that contains the param instructions for this function.
+        param_block: Index,
         body_len: u32,
 
         pub const SrcLocs = struct {
@@ -2285,8 +2369,27 @@ pub const Inst = struct {
     /// Stored inside extra, with trailing arguments according to `args_len`.
     /// Each argument is a `Ref`.
     pub const Call = struct {
+        // Note: Flags *must* come first so that unusedResultExpr
+        // can find it when it goes to modify them.
+        flags: Flags,
         callee: Ref,
-        args_len: u32,
+
+        pub const Flags = packed struct {
+            /// std.builtin.CallOptions.Modifier in packed form
+            pub const PackedModifier = u3;
+            pub const PackedArgsLen = u28;
+
+            packed_modifier: PackedModifier,
+            ensure_result_used: bool = false,
+            args_len: PackedArgsLen,
+
+            comptime {
+                if (@sizeOf(Flags) != 4 or @bitSizeOf(Flags) != 32)
+                    @compileError("Layout of Call.Flags needs to be updated!");
+                if (@bitSizeOf(std.builtin.CallOptions.Modifier) != @bitSizeOf(PackedModifier))
+                    @compileError("Call.Flags.PackedModifier needs to be updated!");
+            }
+        };
     };
 
     pub const BuiltinCall = struct {
@@ -2304,12 +2407,13 @@ pub const Inst = struct {
         else_body_len: u32,
     };
 
-    /// Stored in extra. Depending on the flags in Data, there will be up to 4
+    /// Stored in extra. Depending on the flags in Data, there will be up to 5
     /// trailing Ref fields:
     /// 0. sentinel: Ref // if `has_sentinel` flag is set
     /// 1. align: Ref // if `has_align` flag is set
-    /// 2. bit_start: Ref // if `has_bit_range` flag is set
-    /// 3. bit_end: Ref // if `has_bit_range` flag is set
+    /// 2. address_space: Ref // if `has_addrspace` flag is set
+    /// 3. bit_start: Ref // if `has_bit_range` flag is set
+    /// 4. bit_end: Ref // if `has_bit_range` flag is set
     pub const PtrType = struct {
         elem_type: Ref,
     };
@@ -2427,7 +2531,7 @@ pub const Inst = struct {
     ///      0b000X: whether corresponding decl is pub
     ///      0b00X0: whether corresponding decl is exported
     ///      0b0X00: whether corresponding decl has an align expression
-    ///      0bX000: whether corresponding decl has a linksection expression
+    ///      0bX000: whether corresponding decl has a linksection or an address space expression
     /// 5. decl: { // for every decls_len
     ///        src_hash: [4]u32, // hash of source bytes
     ///        line: u32, // line number of decl, relative to parent
@@ -2439,7 +2543,10 @@ pub const Inst = struct {
     ///          this is a test decl, and the name starts at `name+1`.
     ///        value: Index,
     ///        align: Ref, // if corresponding bit is set
-    ///        link_section: Ref, // if corresponding bit is set
+    ///        link_section_or_address_space: { // if corresponding bit is set.
+    ///            link_section: Ref,
+    ///            address_space: Ref,
+    ///        }
     ///    }
     /// 6. inst: Index // for every body_len
     /// 7. flags: u32 // for every 8 fields
@@ -2461,9 +2568,10 @@ pub const Inst = struct {
             has_body_len: bool,
             has_fields_len: bool,
             has_decls_len: bool,
+            known_has_bits: bool,
             name_strategy: NameStrategy,
             layout: std.builtin.TypeInfo.ContainerLayout,
-            _: u8 = undefined,
+            _: u7 = undefined,
         };
     };
 
@@ -2490,7 +2598,7 @@ pub const Inst = struct {
     ///      0b000X: whether corresponding decl is pub
     ///      0b00X0: whether corresponding decl is exported
     ///      0b0X00: whether corresponding decl has an align expression
-    ///      0bX000: whether corresponding decl has a linksection expression
+    ///      0bX000: whether corresponding decl has a linksection or an address space expression
     /// 6. decl: { // for every decls_len
     ///        src_hash: [4]u32, // hash of source bytes
     ///        line: u32, // line number of decl, relative to parent
@@ -2502,7 +2610,10 @@ pub const Inst = struct {
     ///          this is a test decl, and the name starts at `name+1`.
     ///        value: Index,
     ///        align: Ref, // if corresponding bit is set
-    ///        link_section: Ref, // if corresponding bit is set
+    ///        link_section_or_address_space: { // if corresponding bit is set.
+    ///            link_section: Ref,
+    ///            address_space: Ref,
+    ///        }
     ///    }
     /// 7. inst: Index // for every body_len
     /// 8. has_bits: u32 // for every 32 fields
@@ -2535,7 +2646,7 @@ pub const Inst = struct {
     ///      0b000X: whether corresponding decl is pub
     ///      0b00X0: whether corresponding decl is exported
     ///      0b0X00: whether corresponding decl has an align expression
-    ///      0bX000: whether corresponding decl has a linksection expression
+    ///      0bX000: whether corresponding decl has a linksection or an address space expression
     /// 6. decl: { // for every decls_len
     ///        src_hash: [4]u32, // hash of source bytes
     ///        line: u32, // line number of decl, relative to parent
@@ -2547,7 +2658,10 @@ pub const Inst = struct {
     ///          this is a test decl, and the name starts at `name+1`.
     ///        value: Index,
     ///        align: Ref, // if corresponding bit is set
-    ///        link_section: Ref, // if corresponding bit is set
+    ///        link_section_or_address_space: { // if corresponding bit is set.
+    ///            link_section: Ref,
+    ///            address_space: Ref,
+    ///        }
     ///    }
     /// 7. inst: Index // for every body_len
     /// 8. has_bits: u32 // for every 8 fields
@@ -2571,21 +2685,27 @@ pub const Inst = struct {
             has_decls_len: bool,
             name_strategy: NameStrategy,
             layout: std.builtin.TypeInfo.ContainerLayout,
-            /// false: union(tag_type)
-            ///  true: union(enum(tag_type))
+            /// has_tag_type | auto_enum_tag | result
+            /// -------------------------------------
+            ///    false     | false         |  union { }
+            ///    false     | true          |  union(enum) { }
+            ///    true      | true          |  union(enum(T)) { }
+            ///    true      | false         |  union(T) { }
             auto_enum_tag: bool,
             _: u6 = undefined,
         };
     };
 
     /// Trailing:
-    /// 0. decl_bits: u32 // for every 8 decls
+    /// 0. src_node: i32, // if has_src_node
+    /// 1. decls_len: u32, // if has_decls_len
+    /// 2. decl_bits: u32 // for every 8 decls
     ///    - sets of 4 bits:
     ///      0b000X: whether corresponding decl is pub
     ///      0b00X0: whether corresponding decl is exported
     ///      0b0X00: whether corresponding decl has an align expression
-    ///      0bX000: whether corresponding decl has a linksection expression
-    /// 1. decl: { // for every decls_len
+    ///      0bX000: whether corresponding decl has a linksection or an address space expression
+    /// 3. decl: { // for every decls_len
     ///        src_hash: [4]u32, // hash of source bytes
     ///        line: u32, // line number of decl, relative to parent
     ///        name: u32, // null terminated string index
@@ -2596,10 +2716,18 @@ pub const Inst = struct {
     ///          this is a test decl, and the name starts at `name+1`.
     ///        value: Index,
     ///        align: Ref, // if corresponding bit is set
-    ///        link_section: Ref, // if corresponding bit is set
+    ///        link_section_or_address_space: { // if corresponding bit is set.
+    ///            link_section: Ref,
+    ///            address_space: Ref,
+    ///        }
     ///    }
     pub const OpaqueDecl = struct {
-        decls_len: u32,
+        pub const Small = packed struct {
+            has_src_node: bool,
+            has_decls_len: bool,
+            name_strategy: NameStrategy,
+            _: u12 = undefined,
+        };
     };
 
     /// Trailing: field_name: u32 // for every field: null terminated string index
@@ -2670,7 +2798,7 @@ pub const Inst = struct {
         expected_value: Ref,
         new_value: Ref,
         success_order: Ref,
-        fail_order: Ref,
+        failure_order: Ref,
     };
 
     pub const AtomicRmw = struct {
@@ -2723,6 +2851,13 @@ pub const Inst = struct {
         mask: Ref,
     };
 
+    pub const Select = struct {
+        elem_type: Ref,
+        pred: Ref,
+        a: Ref,
+        b: Ref,
+    };
+
     pub const AsyncCall = struct {
         frame_buffer: Ref,
         result_ptr: Ref,
@@ -2730,16 +2865,41 @@ pub const Inst = struct {
         args: Ref,
     };
 
+    /// Trailing: inst: Index // for every body_len
+    pub const Param = struct {
+        /// Null-terminated string index.
+        name: u32,
+        /// The body contains the type of the parameter.
+        body_len: u32,
+    };
+
     /// Trailing:
     /// 0. type_inst: Ref,  // if small 0b000X is set
     /// 1. align_inst: Ref, // if small 0b00X0 is set
     pub const AllocExtended = struct {
         src_node: i32,
+
+        pub const Small = packed struct {
+            has_type: bool,
+            has_align: bool,
+            is_const: bool,
+            is_comptime: bool,
+            _: u12 = undefined,
+        };
     };
 
     pub const Export = struct {
+        /// If present, this is referring to a Decl via field access, e.g. `a.b`.
+        /// If omitted, this is referring to a Decl via identifier, e.g. `a`.
+        namespace: Ref,
         /// Null-terminated string index.
         decl_name: u32,
+        options: Ref,
+    };
+
+    pub const ExportValue = struct {
+        /// The comptime value to export.
+        operand: Ref,
         options: Ref,
     };
 
@@ -2752,9 +2912,9 @@ pub const Inst = struct {
         pub const Item = struct {
             /// null terminated string index
             msg: u32,
-            node: ast.Node.Index,
+            node: Ast.Node.Index,
             /// If node is 0 then this will be populated.
-            token: ast.TokenIndex,
+            token: Ast.TokenIndex,
             /// Can be used in combination with `token`.
             byte_offset: u32,
             /// 0 or a payload index of a `Block`, each is a payload
@@ -2763,1724 +2923,20 @@ pub const Inst = struct {
         };
     };
 
-    /// Trailing: for each `imports_len` there is a string table index.
+    /// Trailing: for each `imports_len` there is an Item
     pub const Imports = struct {
-        imports_len: u32,
+        imports_len: Zir.Inst.Index,
+
+        pub const Item = struct {
+            /// null terminated string index
+            name: u32,
+            /// points to the import name
+            token: Ast.TokenIndex,
+        };
     };
 };
 
 pub const SpecialProng = enum { none, @"else", under };
-
-const Writer = struct {
-    gpa: *Allocator,
-    arena: *Allocator,
-    file: *Module.Scope.File,
-    code: Zir,
-    indent: u32,
-    parent_decl_node: u32,
-
-    fn relativeToNodeIndex(self: *Writer, offset: i32) ast.Node.Index {
-        return @bitCast(ast.Node.Index, offset + @bitCast(i32, self.parent_decl_node));
-    }
-
-    fn writeInstToStream(
-        self: *Writer,
-        stream: anytype,
-        inst: Inst.Index,
-    ) (@TypeOf(stream).Error || error{OutOfMemory})!void {
-        const tags = self.code.instructions.items(.tag);
-        const tag = tags[inst];
-        try stream.print("= {s}(", .{@tagName(tags[inst])});
-        switch (tag) {
-            .array_type,
-            .as,
-            .coerce_result_ptr,
-            .elem_ptr,
-            .elem_val,
-            .store,
-            .store_to_block_ptr,
-            .store_to_inferred_ptr,
-            .field_ptr_type,
-            => try self.writeBin(stream, inst),
-
-            .alloc,
-            .alloc_mut,
-            .alloc_comptime,
-            .indexable_ptr_len,
-            .anyframe_type,
-            .bit_not,
-            .bool_not,
-            .negate,
-            .negate_wrap,
-            .load,
-            .ensure_result_used,
-            .ensure_result_non_error,
-            .ret_node,
-            .resolve_inferred_alloc,
-            .optional_type,
-            .optional_payload_safe,
-            .optional_payload_unsafe,
-            .optional_payload_safe_ptr,
-            .optional_payload_unsafe_ptr,
-            .err_union_payload_safe,
-            .err_union_payload_unsafe,
-            .err_union_payload_safe_ptr,
-            .err_union_payload_unsafe_ptr,
-            .err_union_code,
-            .err_union_code_ptr,
-            .is_non_null,
-            .is_null,
-            .is_non_null_ptr,
-            .is_null_ptr,
-            .is_err,
-            .is_err_ptr,
-            .typeof,
-            .typeof_elem,
-            .struct_init_empty,
-            .type_info,
-            .size_of,
-            .bit_size_of,
-            .typeof_log2_int_type,
-            .log2_int_type,
-            .ptr_to_int,
-            .error_to_int,
-            .int_to_error,
-            .compile_error,
-            .set_eval_branch_quota,
-            .enum_to_int,
-            .align_of,
-            .bool_to_int,
-            .embed_file,
-            .error_name,
-            .panic,
-            .set_align_stack,
-            .set_cold,
-            .set_float_mode,
-            .set_runtime_safety,
-            .sqrt,
-            .sin,
-            .cos,
-            .exp,
-            .exp2,
-            .log,
-            .log2,
-            .log10,
-            .fabs,
-            .floor,
-            .ceil,
-            .trunc,
-            .round,
-            .tag_name,
-            .reify,
-            .type_name,
-            .frame_type,
-            .frame_size,
-            .clz,
-            .ctz,
-            .pop_count,
-            .byte_swap,
-            .bit_reverse,
-            .elem_type,
-            .@"resume",
-            .@"await",
-            .await_nosuspend,
-            => try self.writeUnNode(stream, inst),
-
-            .ref,
-            .ret_coerce,
-            .ensure_err_payload_void,
-            => try self.writeUnTok(stream, inst),
-
-            .bool_br_and,
-            .bool_br_or,
-            => try self.writeBoolBr(stream, inst),
-
-            .array_type_sentinel => try self.writeArrayTypeSentinel(stream, inst),
-            .param_type => try self.writeParamType(stream, inst),
-            .ptr_type_simple => try self.writePtrTypeSimple(stream, inst),
-            .ptr_type => try self.writePtrType(stream, inst),
-            .int => try self.writeInt(stream, inst),
-            .int_big => try self.writeIntBig(stream, inst),
-            .float => try self.writeFloat(stream, inst),
-            .float128 => try self.writeFloat128(stream, inst),
-            .str => try self.writeStr(stream, inst),
-            .int_type => try self.writeIntType(stream, inst),
-
-            .@"break",
-            .break_inline,
-            => try self.writeBreak(stream, inst),
-
-            .elem_ptr_node,
-            .elem_val_node,
-            .field_ptr_named,
-            .field_val_named,
-            .slice_start,
-            .slice_end,
-            .slice_sentinel,
-            .array_init,
-            .array_init_anon,
-            .array_init_ref,
-            .array_init_anon_ref,
-            .union_init_ptr,
-            .cmpxchg_strong,
-            .cmpxchg_weak,
-            .shuffle,
-            .atomic_rmw,
-            .atomic_store,
-            .mul_add,
-            .builtin_call,
-            .field_parent_ptr,
-            .memcpy,
-            .memset,
-            .builtin_async_call,
-            => try self.writePlNode(stream, inst),
-
-            .struct_init,
-            .struct_init_ref,
-            => try self.writeStructInit(stream, inst),
-
-            .struct_init_anon,
-            .struct_init_anon_ref,
-            => try self.writeStructInitAnon(stream, inst),
-
-            .field_type => try self.writeFieldType(stream, inst),
-            .field_type_ref => try self.writeFieldTypeRef(stream, inst),
-
-            .add,
-            .addwrap,
-            .array_cat,
-            .array_mul,
-            .mul,
-            .mulwrap,
-            .sub,
-            .subwrap,
-            .bool_and,
-            .bool_or,
-            .cmp_lt,
-            .cmp_lte,
-            .cmp_eq,
-            .cmp_gte,
-            .cmp_gt,
-            .cmp_neq,
-            .div,
-            .has_decl,
-            .has_field,
-            .mod_rem,
-            .shl,
-            .shl_exact,
-            .shr,
-            .shr_exact,
-            .xor,
-            .store_node,
-            .error_union_type,
-            .merge_error_sets,
-            .bit_and,
-            .bit_or,
-            .float_to_int,
-            .int_to_float,
-            .int_to_ptr,
-            .int_to_enum,
-            .float_cast,
-            .int_cast,
-            .err_set_cast,
-            .ptr_cast,
-            .truncate,
-            .align_cast,
-            .div_exact,
-            .div_floor,
-            .div_trunc,
-            .mod,
-            .rem,
-            .bit_offset_of,
-            .byte_offset_of,
-            .splat,
-            .reduce,
-            .atomic_load,
-            .bitcast,
-            .bitcast_result_ptr,
-            .vector_type,
-            => try self.writePlNodeBin(stream, inst),
-
-            .@"export" => try self.writePlNodeExport(stream, inst),
-
-            .call,
-            .call_chkused,
-            .call_compile_time,
-            .call_nosuspend,
-            .call_async,
-            => try self.writePlNodeCall(stream, inst),
-
-            .block,
-            .block_inline,
-            .suspend_block,
-            .loop,
-            .validate_struct_init_ptr,
-            .validate_array_init_ptr,
-            .c_import,
-            => try self.writePlNodeBlock(stream, inst),
-
-            .condbr,
-            .condbr_inline,
-            => try self.writePlNodeCondBr(stream, inst),
-
-            .opaque_decl => try self.writeOpaqueDecl(stream, inst, .parent),
-            .opaque_decl_anon => try self.writeOpaqueDecl(stream, inst, .anon),
-            .opaque_decl_func => try self.writeOpaqueDecl(stream, inst, .func),
-
-            .error_set_decl => try self.writeErrorSetDecl(stream, inst, .parent),
-            .error_set_decl_anon => try self.writeErrorSetDecl(stream, inst, .anon),
-            .error_set_decl_func => try self.writeErrorSetDecl(stream, inst, .func),
-
-            .switch_block => try self.writePlNodeSwitchBr(stream, inst, .none),
-            .switch_block_else => try self.writePlNodeSwitchBr(stream, inst, .@"else"),
-            .switch_block_under => try self.writePlNodeSwitchBr(stream, inst, .under),
-            .switch_block_ref => try self.writePlNodeSwitchBr(stream, inst, .none),
-            .switch_block_ref_else => try self.writePlNodeSwitchBr(stream, inst, .@"else"),
-            .switch_block_ref_under => try self.writePlNodeSwitchBr(stream, inst, .under),
-
-            .switch_block_multi => try self.writePlNodeSwitchBlockMulti(stream, inst, .none),
-            .switch_block_else_multi => try self.writePlNodeSwitchBlockMulti(stream, inst, .@"else"),
-            .switch_block_under_multi => try self.writePlNodeSwitchBlockMulti(stream, inst, .under),
-            .switch_block_ref_multi => try self.writePlNodeSwitchBlockMulti(stream, inst, .none),
-            .switch_block_ref_else_multi => try self.writePlNodeSwitchBlockMulti(stream, inst, .@"else"),
-            .switch_block_ref_under_multi => try self.writePlNodeSwitchBlockMulti(stream, inst, .under),
-
-            .field_ptr,
-            .field_val,
-            => try self.writePlNodeField(stream, inst),
-
-            .as_node => try self.writeAs(stream, inst),
-
-            .breakpoint,
-            .fence,
-            .repeat,
-            .repeat_inline,
-            .alloc_inferred,
-            .alloc_inferred_mut,
-            .alloc_inferred_comptime,
-            => try self.writeNode(stream, inst),
-
-            .error_value,
-            .enum_literal,
-            .decl_ref,
-            .decl_val,
-            .import,
-            .arg,
-            => try self.writeStrTok(stream, inst),
-
-            .func => try self.writeFunc(stream, inst, false),
-            .func_inferred => try self.writeFunc(stream, inst, true),
-
-            .@"unreachable" => try self.writeUnreachable(stream, inst),
-
-            .switch_capture,
-            .switch_capture_ref,
-            .switch_capture_multi,
-            .switch_capture_multi_ref,
-            .switch_capture_else,
-            .switch_capture_else_ref,
-            => try self.writeSwitchCapture(stream, inst),
-
-            .dbg_stmt => try self.writeDbgStmt(stream, inst),
-
-            .extended => try self.writeExtended(stream, inst),
-        }
-    }
-
-    fn writeExtended(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const extended = self.code.instructions.items(.data)[inst].extended;
-        try stream.print("{s}(", .{@tagName(extended.opcode)});
-        switch (extended.opcode) {
-            .ret_ptr,
-            .ret_type,
-            .this,
-            .ret_addr,
-            .error_return_trace,
-            .frame,
-            .frame_address,
-            .builtin_src,
-            => try self.writeExtNode(stream, extended),
-
-            .@"asm" => try self.writeAsm(stream, extended),
-            .func => try self.writeFuncExtended(stream, extended),
-            .variable => try self.writeVarExtended(stream, extended),
-
-            .compile_log,
-            .typeof_peer,
-            => try self.writeNodeMultiOp(stream, extended),
-
-            .add_with_overflow,
-            .sub_with_overflow,
-            .mul_with_overflow,
-            .shl_with_overflow,
-            => try self.writeOverflowArithmetic(stream, extended),
-
-            .struct_decl => try self.writeStructDecl(stream, extended),
-            .union_decl => try self.writeUnionDecl(stream, extended),
-            .enum_decl => try self.writeEnumDecl(stream, extended),
-
-            .alloc,
-            .builtin_extern,
-            .c_undef,
-            .c_include,
-            .c_define,
-            .wasm_memory_size,
-            .wasm_memory_grow,
-            => try stream.writeAll("TODO))"),
-        }
-    }
-
-    fn writeExtNode(self: *Writer, stream: anytype, extended: Inst.Extended.InstData) !void {
-        const src: LazySrcLoc = .{ .node_offset = @bitCast(i32, extended.operand) };
-        try stream.writeAll(")) ");
-        try self.writeSrc(stream, src);
-    }
-
-    fn writeBin(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].bin;
-        try self.writeInstRef(stream, inst_data.lhs);
-        try stream.writeAll(", ");
-        try self.writeInstRef(stream, inst_data.rhs);
-        try stream.writeByte(')');
-    }
-
-    fn writeUnNode(
-        self: *Writer,
-        stream: anytype,
-        inst: Inst.Index,
-    ) (@TypeOf(stream).Error || error{OutOfMemory})!void {
-        const inst_data = self.code.instructions.items(.data)[inst].un_node;
-        try self.writeInstRef(stream, inst_data.operand);
-        try stream.writeAll(") ");
-        try self.writeSrc(stream, inst_data.src());
-    }
-
-    fn writeUnTok(
-        self: *Writer,
-        stream: anytype,
-        inst: Inst.Index,
-    ) (@TypeOf(stream).Error || error{OutOfMemory})!void {
-        const inst_data = self.code.instructions.items(.data)[inst].un_tok;
-        try self.writeInstRef(stream, inst_data.operand);
-        try stream.writeAll(") ");
-        try self.writeSrc(stream, inst_data.src());
-    }
-
-    fn writeArrayTypeSentinel(
-        self: *Writer,
-        stream: anytype,
-        inst: Inst.Index,
-    ) (@TypeOf(stream).Error || error{OutOfMemory})!void {
-        const inst_data = self.code.instructions.items(.data)[inst].array_type_sentinel;
-        try stream.writeAll("TODO)");
-    }
-
-    fn writeParamType(
-        self: *Writer,
-        stream: anytype,
-        inst: Inst.Index,
-    ) (@TypeOf(stream).Error || error{OutOfMemory})!void {
-        const inst_data = self.code.instructions.items(.data)[inst].param_type;
-        try self.writeInstRef(stream, inst_data.callee);
-        try stream.print(", {d})", .{inst_data.param_index});
-    }
-
-    fn writePtrTypeSimple(
-        self: *Writer,
-        stream: anytype,
-        inst: Inst.Index,
-    ) (@TypeOf(stream).Error || error{OutOfMemory})!void {
-        const inst_data = self.code.instructions.items(.data)[inst].ptr_type_simple;
-        const str_allowzero = if (inst_data.is_allowzero) "allowzero, " else "";
-        const str_const = if (!inst_data.is_mutable) "const, " else "";
-        const str_volatile = if (inst_data.is_volatile) "volatile, " else "";
-        try self.writeInstRef(stream, inst_data.elem_type);
-        try stream.print(", {s}{s}{s}{s})", .{
-            str_allowzero,
-            str_const,
-            str_volatile,
-            @tagName(inst_data.size),
-        });
-    }
-
-    fn writePtrType(
-        self: *Writer,
-        stream: anytype,
-        inst: Inst.Index,
-    ) (@TypeOf(stream).Error || error{OutOfMemory})!void {
-        const inst_data = self.code.instructions.items(.data)[inst].ptr_type;
-        try stream.writeAll("TODO)");
-    }
-
-    fn writeInt(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].int;
-        try stream.print("{d})", .{inst_data});
-    }
-
-    fn writeIntBig(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].str;
-        const byte_count = inst_data.len * @sizeOf(std.math.big.Limb);
-        const limb_bytes = self.code.string_bytes[inst_data.start..][0..byte_count];
-        // limb_bytes is not aligned properly; we must allocate and copy the bytes
-        // in order to accomplish this.
-        const limbs = try self.gpa.alloc(std.math.big.Limb, inst_data.len);
-        defer self.gpa.free(limbs);
-
-        mem.copy(u8, mem.sliceAsBytes(limbs), limb_bytes);
-        const big_int: std.math.big.int.Const = .{
-            .limbs = limbs,
-            .positive = true,
-        };
-        const as_string = try big_int.toStringAlloc(self.gpa, 10, false);
-        defer self.gpa.free(as_string);
-        try stream.print("{s})", .{as_string});
-    }
-
-    fn writeFloat(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].float;
-        const src = inst_data.src();
-        try stream.print("{d}) ", .{inst_data.number});
-        try self.writeSrc(stream, src);
-    }
-
-    fn writeFloat128(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
-        const extra = self.code.extraData(Inst.Float128, inst_data.payload_index).data;
-        const src = inst_data.src();
-        const number = extra.get();
-        // TODO improve std.format to be able to print f128 values
-        try stream.print("{d}) ", .{@floatCast(f64, number)});
-        try self.writeSrc(stream, src);
-    }
-
-    fn writeStr(
-        self: *Writer,
-        stream: anytype,
-        inst: Inst.Index,
-    ) (@TypeOf(stream).Error || error{OutOfMemory})!void {
-        const inst_data = self.code.instructions.items(.data)[inst].str;
-        const str = inst_data.get(self.code);
-        try stream.print("\"{}\")", .{std.zig.fmtEscapes(str)});
-    }
-
-    fn writePlNode(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
-        try stream.writeAll("TODO) ");
-        try self.writeSrc(stream, inst_data.src());
-    }
-
-    fn writePlNodeBin(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
-        const extra = self.code.extraData(Inst.Bin, inst_data.payload_index).data;
-        try self.writeInstRef(stream, extra.lhs);
-        try stream.writeAll(", ");
-        try self.writeInstRef(stream, extra.rhs);
-        try stream.writeAll(") ");
-        try self.writeSrc(stream, inst_data.src());
-    }
-
-    fn writePlNodeExport(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
-        const extra = self.code.extraData(Inst.Export, inst_data.payload_index).data;
-        const decl_name = self.code.nullTerminatedString(extra.decl_name);
-
-        try stream.print("{}, ", .{std.zig.fmtId(decl_name)});
-        try self.writeInstRef(stream, extra.options);
-        try stream.writeAll(") ");
-        try self.writeSrc(stream, inst_data.src());
-    }
-
-    fn writeStructInit(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
-        const extra = self.code.extraData(Inst.StructInit, inst_data.payload_index);
-        var field_i: u32 = 0;
-        var extra_index = extra.end;
-
-        while (field_i < extra.data.fields_len) : (field_i += 1) {
-            const item = self.code.extraData(Inst.StructInit.Item, extra_index);
-            extra_index = item.end;
-
-            if (field_i != 0) {
-                try stream.writeAll(", [");
-            } else {
-                try stream.writeAll("[");
-            }
-            try self.writeInstIndex(stream, item.data.field_type);
-            try stream.writeAll(", ");
-            try self.writeInstRef(stream, item.data.init);
-            try stream.writeAll("]");
-        }
-        try stream.writeAll(") ");
-        try self.writeSrc(stream, inst_data.src());
-    }
-
-    fn writeStructInitAnon(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
-        const extra = self.code.extraData(Inst.StructInitAnon, inst_data.payload_index);
-        var field_i: u32 = 0;
-        var extra_index = extra.end;
-
-        while (field_i < extra.data.fields_len) : (field_i += 1) {
-            const item = self.code.extraData(Inst.StructInitAnon.Item, extra_index);
-            extra_index = item.end;
-
-            const field_name = self.code.nullTerminatedString(item.data.field_name);
-
-            const prefix = if (field_i != 0) ", [" else "[";
-            try stream.print("{s}[{s}=", .{ prefix, field_name });
-            try self.writeInstRef(stream, item.data.init);
-            try stream.writeAll("]");
-        }
-        try stream.writeAll(") ");
-        try self.writeSrc(stream, inst_data.src());
-    }
-
-    fn writeFieldType(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
-        const extra = self.code.extraData(Inst.FieldType, inst_data.payload_index).data;
-        try self.writeInstRef(stream, extra.container_type);
-        const field_name = self.code.nullTerminatedString(extra.name_start);
-        try stream.print(", {s}) ", .{field_name});
-        try self.writeSrc(stream, inst_data.src());
-    }
-
-    fn writeFieldTypeRef(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
-        const extra = self.code.extraData(Inst.FieldTypeRef, inst_data.payload_index).data;
-        try self.writeInstRef(stream, extra.container_type);
-        try stream.writeAll(", ");
-        try self.writeInstRef(stream, extra.field_name);
-        try stream.writeAll(") ");
-        try self.writeSrc(stream, inst_data.src());
-    }
-
-    fn writeNodeMultiOp(self: *Writer, stream: anytype, extended: Inst.Extended.InstData) !void {
-        const extra = self.code.extraData(Inst.NodeMultiOp, extended.operand);
-        const src: LazySrcLoc = .{ .node_offset = extra.data.src_node };
-        const operands = self.code.refSlice(extra.end, extended.small);
-
-        for (operands) |operand, i| {
-            if (i != 0) try stream.writeAll(", ");
-            try self.writeInstRef(stream, operand);
-        }
-        try stream.writeAll(")) ");
-        try self.writeSrc(stream, src);
-    }
-
-    fn writeAsm(self: *Writer, stream: anytype, extended: Inst.Extended.InstData) !void {
-        const extra = self.code.extraData(Inst.Asm, extended.operand);
-        const src: LazySrcLoc = .{ .node_offset = extra.data.src_node };
-        const outputs_len = @truncate(u5, extended.small);
-        const inputs_len = @truncate(u5, extended.small >> 5);
-        const clobbers_len = @truncate(u5, extended.small >> 10);
-        const is_volatile = @truncate(u1, extended.small >> 15) != 0;
-
-        try self.writeFlag(stream, "volatile, ", is_volatile);
-        try self.writeInstRef(stream, extra.data.asm_source);
-        try stream.writeAll(", ");
-
-        var extra_i: usize = extra.end;
-        var output_type_bits = extra.data.output_type_bits;
-        {
-            var i: usize = 0;
-            while (i < outputs_len) : (i += 1) {
-                const output = self.code.extraData(Inst.Asm.Output, extra_i);
-                extra_i = output.end;
-
-                const is_type = @truncate(u1, output_type_bits) != 0;
-                output_type_bits >>= 1;
-
-                const name = self.code.nullTerminatedString(output.data.name);
-                const constraint = self.code.nullTerminatedString(output.data.constraint);
-                try stream.print("output({}, \"{}\", ", .{
-                    std.zig.fmtId(name), std.zig.fmtEscapes(constraint),
-                });
-                try self.writeFlag(stream, "->", is_type);
-                try self.writeInstRef(stream, output.data.operand);
-                try stream.writeAll(")");
-                if (i + 1 < outputs_len) {
-                    try stream.writeAll("), ");
-                }
-            }
-        }
-        {
-            var i: usize = 0;
-            while (i < inputs_len) : (i += 1) {
-                const input = self.code.extraData(Inst.Asm.Input, extra_i);
-                extra_i = input.end;
-
-                const name = self.code.nullTerminatedString(input.data.name);
-                const constraint = self.code.nullTerminatedString(input.data.constraint);
-                try stream.print("input({}, \"{}\", ", .{
-                    std.zig.fmtId(name), std.zig.fmtEscapes(constraint),
-                });
-                try self.writeInstRef(stream, input.data.operand);
-                try stream.writeAll(")");
-                if (i + 1 < inputs_len) {
-                    try stream.writeAll(", ");
-                }
-            }
-        }
-        {
-            var i: usize = 0;
-            while (i < clobbers_len) : (i += 1) {
-                const str_index = self.code.extra[extra_i];
-                extra_i += 1;
-                const clobber = self.code.nullTerminatedString(str_index);
-                try stream.print("{}", .{std.zig.fmtId(clobber)});
-                if (i + 1 < clobbers_len) {
-                    try stream.writeAll(", ");
-                }
-            }
-        }
-        try stream.writeAll(")) ");
-        try self.writeSrc(stream, src);
-    }
-
-    fn writeOverflowArithmetic(self: *Writer, stream: anytype, extended: Inst.Extended.InstData) !void {
-        const extra = self.code.extraData(Zir.Inst.OverflowArithmetic, extended.operand).data;
-        const src: LazySrcLoc = .{ .node_offset = extra.node };
-
-        try self.writeInstRef(stream, extra.lhs);
-        try stream.writeAll(", ");
-        try self.writeInstRef(stream, extra.rhs);
-        try stream.writeAll(", ");
-        try self.writeInstRef(stream, extra.ptr);
-        try stream.writeAll(")) ");
-        try self.writeSrc(stream, src);
-    }
-
-    fn writePlNodeCall(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
-        const extra = self.code.extraData(Inst.Call, inst_data.payload_index);
-        const args = self.code.refSlice(extra.end, extra.data.args_len);
-
-        try self.writeInstRef(stream, extra.data.callee);
-        try stream.writeAll(", [");
-        for (args) |arg, i| {
-            if (i != 0) try stream.writeAll(", ");
-            try self.writeInstRef(stream, arg);
-        }
-        try stream.writeAll("]) ");
-        try self.writeSrc(stream, inst_data.src());
-    }
-
-    fn writePlNodeBlock(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
-        try self.writePlNodeBlockWithoutSrc(stream, inst);
-        try self.writeSrc(stream, inst_data.src());
-    }
-
-    fn writePlNodeBlockWithoutSrc(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
-        const extra = self.code.extraData(Inst.Block, inst_data.payload_index);
-        const body = self.code.extra[extra.end..][0..extra.data.body_len];
-        try stream.writeAll("{\n");
-        self.indent += 2;
-        try self.writeBody(stream, body);
-        self.indent -= 2;
-        try stream.writeByteNTimes(' ', self.indent);
-        try stream.writeAll("}) ");
-    }
-
-    fn writePlNodeCondBr(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
-        const extra = self.code.extraData(Inst.CondBr, inst_data.payload_index);
-        const then_body = self.code.extra[extra.end..][0..extra.data.then_body_len];
-        const else_body = self.code.extra[extra.end + then_body.len ..][0..extra.data.else_body_len];
-        try self.writeInstRef(stream, extra.data.condition);
-        try stream.writeAll(", {\n");
-        self.indent += 2;
-        try self.writeBody(stream, then_body);
-        self.indent -= 2;
-        try stream.writeByteNTimes(' ', self.indent);
-        try stream.writeAll("}, {\n");
-        self.indent += 2;
-        try self.writeBody(stream, else_body);
-        self.indent -= 2;
-        try stream.writeByteNTimes(' ', self.indent);
-        try stream.writeAll("}) ");
-        try self.writeSrc(stream, inst_data.src());
-    }
-
-    fn writeStructDecl(self: *Writer, stream: anytype, extended: Inst.Extended.InstData) !void {
-        const small = @bitCast(Inst.StructDecl.Small, extended.small);
-
-        var extra_index: usize = extended.operand;
-
-        const src_node: ?i32 = if (small.has_src_node) blk: {
-            const src_node = @bitCast(i32, self.code.extra[extra_index]);
-            extra_index += 1;
-            break :blk src_node;
-        } else null;
-
-        const body_len = if (small.has_body_len) blk: {
-            const body_len = self.code.extra[extra_index];
-            extra_index += 1;
-            break :blk body_len;
-        } else 0;
-
-        const fields_len = if (small.has_fields_len) blk: {
-            const fields_len = self.code.extra[extra_index];
-            extra_index += 1;
-            break :blk fields_len;
-        } else 0;
-
-        const decls_len = if (small.has_decls_len) blk: {
-            const decls_len = self.code.extra[extra_index];
-            extra_index += 1;
-            break :blk decls_len;
-        } else 0;
-
-        try stream.print("{s}, {s}, ", .{
-            @tagName(small.name_strategy), @tagName(small.layout),
-        });
-
-        if (decls_len == 0) {
-            try stream.writeAll("{}, ");
-        } else {
-            try stream.writeAll("{\n");
-            self.indent += 2;
-            extra_index = try self.writeDecls(stream, decls_len, extra_index);
-            self.indent -= 2;
-            try stream.writeByteNTimes(' ', self.indent);
-            try stream.writeAll("}, ");
-        }
-
-        const body = self.code.extra[extra_index..][0..body_len];
-        extra_index += body.len;
-
-        if (fields_len == 0) {
-            assert(body.len == 0);
-            try stream.writeAll("{}, {})");
-        } else {
-            self.indent += 2;
-            if (body.len == 0) {
-                try stream.writeAll("{}, {\n");
-            } else {
-                try stream.writeAll("{\n");
-                try self.writeBody(stream, body);
-
-                try stream.writeByteNTimes(' ', self.indent - 2);
-                try stream.writeAll("}, {\n");
-            }
-
-            const bits_per_field = 4;
-            const fields_per_u32 = 32 / bits_per_field;
-            const bit_bags_count = std.math.divCeil(usize, fields_len, fields_per_u32) catch unreachable;
-            var bit_bag_index: usize = extra_index;
-            extra_index += bit_bags_count;
-            var cur_bit_bag: u32 = undefined;
-            var field_i: u32 = 0;
-            while (field_i < fields_len) : (field_i += 1) {
-                if (field_i % fields_per_u32 == 0) {
-                    cur_bit_bag = self.code.extra[bit_bag_index];
-                    bit_bag_index += 1;
-                }
-                const has_align = @truncate(u1, cur_bit_bag) != 0;
-                cur_bit_bag >>= 1;
-                const has_default = @truncate(u1, cur_bit_bag) != 0;
-                cur_bit_bag >>= 1;
-                const is_comptime = @truncate(u1, cur_bit_bag) != 0;
-                cur_bit_bag >>= 1;
-                const unused = @truncate(u1, cur_bit_bag) != 0;
-                cur_bit_bag >>= 1;
-
-                _ = unused;
-
-                const field_name = self.code.nullTerminatedString(self.code.extra[extra_index]);
-                extra_index += 1;
-                const field_type = @intToEnum(Inst.Ref, self.code.extra[extra_index]);
-                extra_index += 1;
-
-                try stream.writeByteNTimes(' ', self.indent);
-                try self.writeFlag(stream, "comptime ", is_comptime);
-                try stream.print("{}: ", .{std.zig.fmtId(field_name)});
-                try self.writeInstRef(stream, field_type);
-
-                if (has_align) {
-                    const align_ref = @intToEnum(Inst.Ref, self.code.extra[extra_index]);
-                    extra_index += 1;
-
-                    try stream.writeAll(" align(");
-                    try self.writeInstRef(stream, align_ref);
-                    try stream.writeAll(")");
-                }
-                if (has_default) {
-                    const default_ref = @intToEnum(Inst.Ref, self.code.extra[extra_index]);
-                    extra_index += 1;
-
-                    try stream.writeAll(" = ");
-                    try self.writeInstRef(stream, default_ref);
-                }
-                try stream.writeAll(",\n");
-            }
-
-            self.indent -= 2;
-            try stream.writeByteNTimes(' ', self.indent);
-            try stream.writeAll("})");
-        }
-        try self.writeSrcNode(stream, src_node);
-    }
-
-    fn writeUnionDecl(self: *Writer, stream: anytype, extended: Inst.Extended.InstData) !void {
-        const small = @bitCast(Inst.UnionDecl.Small, extended.small);
-
-        var extra_index: usize = extended.operand;
-
-        const src_node: ?i32 = if (small.has_src_node) blk: {
-            const src_node = @bitCast(i32, self.code.extra[extra_index]);
-            extra_index += 1;
-            break :blk src_node;
-        } else null;
-
-        const tag_type_ref = if (small.has_tag_type) blk: {
-            const tag_type_ref = @intToEnum(Zir.Inst.Ref, self.code.extra[extra_index]);
-            extra_index += 1;
-            break :blk tag_type_ref;
-        } else .none;
-
-        const body_len = if (small.has_body_len) blk: {
-            const body_len = self.code.extra[extra_index];
-            extra_index += 1;
-            break :blk body_len;
-        } else 0;
-
-        const fields_len = if (small.has_fields_len) blk: {
-            const fields_len = self.code.extra[extra_index];
-            extra_index += 1;
-            break :blk fields_len;
-        } else 0;
-
-        const decls_len = if (small.has_decls_len) blk: {
-            const decls_len = self.code.extra[extra_index];
-            extra_index += 1;
-            break :blk decls_len;
-        } else 0;
-
-        try stream.print("{s}, {s}, ", .{
-            @tagName(small.name_strategy), @tagName(small.layout),
-        });
-        try self.writeFlag(stream, "autoenum, ", small.auto_enum_tag);
-
-        if (decls_len == 0) {
-            try stream.writeAll("{}, ");
-        } else {
-            try stream.writeAll("{\n");
-            self.indent += 2;
-            extra_index = try self.writeDecls(stream, decls_len, extra_index);
-            self.indent -= 2;
-            try stream.writeByteNTimes(' ', self.indent);
-            try stream.writeAll("}, ");
-        }
-
-        assert(fields_len != 0);
-
-        if (tag_type_ref != .none) {
-            try self.writeInstRef(stream, tag_type_ref);
-            try stream.writeAll(", ");
-        }
-
-        const body = self.code.extra[extra_index..][0..body_len];
-        extra_index += body.len;
-
-        self.indent += 2;
-        if (body.len == 0) {
-            try stream.writeAll("{}, {\n");
-        } else {
-            try stream.writeAll("{\n");
-            try self.writeBody(stream, body);
-
-            try stream.writeByteNTimes(' ', self.indent - 2);
-            try stream.writeAll("}, {\n");
-        }
-
-        const bits_per_field = 4;
-        const fields_per_u32 = 32 / bits_per_field;
-        const bit_bags_count = std.math.divCeil(usize, fields_len, fields_per_u32) catch unreachable;
-        const body_end = extra_index;
-        extra_index += bit_bags_count;
-        var bit_bag_index: usize = body_end;
-        var cur_bit_bag: u32 = undefined;
-        var field_i: u32 = 0;
-        while (field_i < fields_len) : (field_i += 1) {
-            if (field_i % fields_per_u32 == 0) {
-                cur_bit_bag = self.code.extra[bit_bag_index];
-                bit_bag_index += 1;
-            }
-            const has_type = @truncate(u1, cur_bit_bag) != 0;
-            cur_bit_bag >>= 1;
-            const has_align = @truncate(u1, cur_bit_bag) != 0;
-            cur_bit_bag >>= 1;
-            const has_value = @truncate(u1, cur_bit_bag) != 0;
-            cur_bit_bag >>= 1;
-            const unused = @truncate(u1, cur_bit_bag) != 0;
-            cur_bit_bag >>= 1;
-
-            _ = unused;
-
-            const field_name = self.code.nullTerminatedString(self.code.extra[extra_index]);
-            extra_index += 1;
-            try stream.writeByteNTimes(' ', self.indent);
-            try stream.print("{}", .{std.zig.fmtId(field_name)});
-
-            if (has_type) {
-                const field_type = @intToEnum(Inst.Ref, self.code.extra[extra_index]);
-                extra_index += 1;
-
-                try stream.writeAll(": ");
-                try self.writeInstRef(stream, field_type);
-            }
-            if (has_align) {
-                const align_ref = @intToEnum(Inst.Ref, self.code.extra[extra_index]);
-                extra_index += 1;
-
-                try stream.writeAll(" align(");
-                try self.writeInstRef(stream, align_ref);
-                try stream.writeAll(")");
-            }
-            if (has_value) {
-                const default_ref = @intToEnum(Inst.Ref, self.code.extra[extra_index]);
-                extra_index += 1;
-
-                try stream.writeAll(" = ");
-                try self.writeInstRef(stream, default_ref);
-            }
-            try stream.writeAll(",\n");
-        }
-
-        self.indent -= 2;
-        try stream.writeByteNTimes(' ', self.indent);
-        try stream.writeAll("})");
-        try self.writeSrcNode(stream, src_node);
-    }
-
-    fn writeDecls(self: *Writer, stream: anytype, decls_len: u32, extra_start: usize) !usize {
-        const parent_decl_node = self.parent_decl_node;
-        const bit_bags_count = std.math.divCeil(usize, decls_len, 8) catch unreachable;
-        var extra_index = extra_start + bit_bags_count;
-        var bit_bag_index: usize = extra_start;
-        var cur_bit_bag: u32 = undefined;
-        var decl_i: u32 = 0;
-        while (decl_i < decls_len) : (decl_i += 1) {
-            if (decl_i % 8 == 0) {
-                cur_bit_bag = self.code.extra[bit_bag_index];
-                bit_bag_index += 1;
-            }
-            const is_pub = @truncate(u1, cur_bit_bag) != 0;
-            cur_bit_bag >>= 1;
-            const is_exported = @truncate(u1, cur_bit_bag) != 0;
-            cur_bit_bag >>= 1;
-            const has_align = @truncate(u1, cur_bit_bag) != 0;
-            cur_bit_bag >>= 1;
-            const has_section = @truncate(u1, cur_bit_bag) != 0;
-            cur_bit_bag >>= 1;
-
-            const sub_index = extra_index;
-
-            const hash_u32s = self.code.extra[extra_index..][0..4];
-            extra_index += 4;
-            const line = self.code.extra[extra_index];
-            extra_index += 1;
-            const decl_name_index = self.code.extra[extra_index];
-            extra_index += 1;
-            const decl_index = self.code.extra[extra_index];
-            extra_index += 1;
-            const align_inst: Inst.Ref = if (!has_align) .none else inst: {
-                const inst = @intToEnum(Inst.Ref, self.code.extra[extra_index]);
-                extra_index += 1;
-                break :inst inst;
-            };
-            const section_inst: Inst.Ref = if (!has_section) .none else inst: {
-                const inst = @intToEnum(Inst.Ref, self.code.extra[extra_index]);
-                extra_index += 1;
-                break :inst inst;
-            };
-
-            const pub_str = if (is_pub) "pub " else "";
-            const hash_bytes = @bitCast([16]u8, hash_u32s.*);
-            try stream.writeByteNTimes(' ', self.indent);
-            if (decl_name_index == 0) {
-                const name = if (is_exported) "usingnamespace" else "comptime";
-                try stream.writeAll(pub_str);
-                try stream.writeAll(name);
-            } else if (decl_name_index == 1) {
-                try stream.writeAll("test");
-            } else {
-                const raw_decl_name = self.code.nullTerminatedString(decl_name_index);
-                const decl_name = if (raw_decl_name.len == 0)
-                    self.code.nullTerminatedString(decl_name_index + 1)
-                else
-                    raw_decl_name;
-                const test_str = if (raw_decl_name.len == 0) "test " else "";
-                const export_str = if (is_exported) "export " else "";
-                try stream.print("[{d}] {s}{s}{s}{}", .{
-                    sub_index, pub_str, test_str, export_str, std.zig.fmtId(decl_name),
-                });
-                if (align_inst != .none) {
-                    try stream.writeAll(" align(");
-                    try self.writeInstRef(stream, align_inst);
-                    try stream.writeAll(")");
-                }
-                if (section_inst != .none) {
-                    try stream.writeAll(" linksection(");
-                    try self.writeInstRef(stream, section_inst);
-                    try stream.writeAll(")");
-                }
-            }
-            const tag = self.code.instructions.items(.tag)[decl_index];
-            try stream.print(" line({d}) hash({}): %{d} = {s}(", .{
-                line, std.fmt.fmtSliceHexLower(&hash_bytes), decl_index, @tagName(tag),
-            });
-
-            const decl_block_inst_data = self.code.instructions.items(.data)[decl_index].pl_node;
-            const sub_decl_node_off = decl_block_inst_data.src_node;
-            self.parent_decl_node = self.relativeToNodeIndex(sub_decl_node_off);
-            try self.writePlNodeBlockWithoutSrc(stream, decl_index);
-            self.parent_decl_node = parent_decl_node;
-            try self.writeSrc(stream, decl_block_inst_data.src());
-            try stream.writeAll("\n");
-        }
-        return extra_index;
-    }
-
-    fn writeEnumDecl(self: *Writer, stream: anytype, extended: Inst.Extended.InstData) !void {
-        const small = @bitCast(Inst.EnumDecl.Small, extended.small);
-        var extra_index: usize = extended.operand;
-
-        const src_node: ?i32 = if (small.has_src_node) blk: {
-            const src_node = @bitCast(i32, self.code.extra[extra_index]);
-            extra_index += 1;
-            break :blk src_node;
-        } else null;
-
-        const tag_type_ref = if (small.has_tag_type) blk: {
-            const tag_type_ref = @intToEnum(Zir.Inst.Ref, self.code.extra[extra_index]);
-            extra_index += 1;
-            break :blk tag_type_ref;
-        } else .none;
-
-        const body_len = if (small.has_body_len) blk: {
-            const body_len = self.code.extra[extra_index];
-            extra_index += 1;
-            break :blk body_len;
-        } else 0;
-
-        const fields_len = if (small.has_fields_len) blk: {
-            const fields_len = self.code.extra[extra_index];
-            extra_index += 1;
-            break :blk fields_len;
-        } else 0;
-
-        const decls_len = if (small.has_decls_len) blk: {
-            const decls_len = self.code.extra[extra_index];
-            extra_index += 1;
-            break :blk decls_len;
-        } else 0;
-
-        try stream.print("{s}, ", .{@tagName(small.name_strategy)});
-        try self.writeFlag(stream, "nonexhaustive, ", small.nonexhaustive);
-
-        if (decls_len == 0) {
-            try stream.writeAll("{}, ");
-        } else {
-            try stream.writeAll("{\n");
-            self.indent += 2;
-            extra_index = try self.writeDecls(stream, decls_len, extra_index);
-            self.indent -= 2;
-            try stream.writeByteNTimes(' ', self.indent);
-            try stream.writeAll("}, ");
-        }
-
-        if (tag_type_ref != .none) {
-            try self.writeInstRef(stream, tag_type_ref);
-            try stream.writeAll(", ");
-        }
-
-        const body = self.code.extra[extra_index..][0..body_len];
-        extra_index += body.len;
-
-        if (fields_len == 0) {
-            assert(body.len == 0);
-            try stream.writeAll("{}, {})");
-        } else {
-            self.indent += 2;
-            if (body.len == 0) {
-                try stream.writeAll("{}, {\n");
-            } else {
-                try stream.writeAll("{\n");
-                try self.writeBody(stream, body);
-
-                try stream.writeByteNTimes(' ', self.indent - 2);
-                try stream.writeAll("}, {\n");
-            }
-
-            const bit_bags_count = std.math.divCeil(usize, fields_len, 32) catch unreachable;
-            const body_end = extra_index;
-            extra_index += bit_bags_count;
-            var bit_bag_index: usize = body_end;
-            var cur_bit_bag: u32 = undefined;
-            var field_i: u32 = 0;
-            while (field_i < fields_len) : (field_i += 1) {
-                if (field_i % 32 == 0) {
-                    cur_bit_bag = self.code.extra[bit_bag_index];
-                    bit_bag_index += 1;
-                }
-                const has_tag_value = @truncate(u1, cur_bit_bag) != 0;
-                cur_bit_bag >>= 1;
-
-                const field_name = self.code.nullTerminatedString(self.code.extra[extra_index]);
-                extra_index += 1;
-
-                try stream.writeByteNTimes(' ', self.indent);
-                try stream.print("{}", .{std.zig.fmtId(field_name)});
-
-                if (has_tag_value) {
-                    const tag_value_ref = @intToEnum(Inst.Ref, self.code.extra[extra_index]);
-                    extra_index += 1;
-
-                    try stream.writeAll(" = ");
-                    try self.writeInstRef(stream, tag_value_ref);
-                }
-                try stream.writeAll(",\n");
-            }
-            self.indent -= 2;
-            try stream.writeByteNTimes(' ', self.indent);
-            try stream.writeAll("})");
-        }
-        try self.writeSrcNode(stream, src_node);
-    }
-
-    fn writeOpaqueDecl(
-        self: *Writer,
-        stream: anytype,
-        inst: Inst.Index,
-        name_strategy: Inst.NameStrategy,
-    ) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
-        const extra = self.code.extraData(Inst.OpaqueDecl, inst_data.payload_index);
-        const decls_len = extra.data.decls_len;
-
-        try stream.print("{s}, ", .{@tagName(name_strategy)});
-
-        if (decls_len == 0) {
-            try stream.writeAll("}) ");
-        } else {
-            try stream.writeAll("\n");
-            self.indent += 2;
-            _ = try self.writeDecls(stream, decls_len, extra.end);
-            self.indent -= 2;
-            try stream.writeByteNTimes(' ', self.indent);
-            try stream.writeAll("}) ");
-        }
-        try self.writeSrc(stream, inst_data.src());
-    }
-
-    fn writeErrorSetDecl(
-        self: *Writer,
-        stream: anytype,
-        inst: Inst.Index,
-        name_strategy: Inst.NameStrategy,
-    ) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
-        const extra = self.code.extraData(Inst.ErrorSetDecl, inst_data.payload_index);
-        const fields = self.code.extra[extra.end..][0..extra.data.fields_len];
-
-        try stream.print("{s}, ", .{@tagName(name_strategy)});
-
-        try stream.writeAll("{\n");
-        self.indent += 2;
-        for (fields) |str_index| {
-            const name = self.code.nullTerminatedString(str_index);
-            try stream.writeByteNTimes(' ', self.indent);
-            try stream.print("{},\n", .{std.zig.fmtId(name)});
-        }
-        self.indent -= 2;
-        try stream.writeByteNTimes(' ', self.indent);
-        try stream.writeAll("}) ");
-
-        try self.writeSrc(stream, inst_data.src());
-    }
-
-    fn writePlNodeSwitchBr(
-        self: *Writer,
-        stream: anytype,
-        inst: Inst.Index,
-        special_prong: SpecialProng,
-    ) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
-        const extra = self.code.extraData(Inst.SwitchBlock, inst_data.payload_index);
-        const special: struct {
-            body: []const Inst.Index,
-            end: usize,
-        } = switch (special_prong) {
-            .none => .{ .body = &.{}, .end = extra.end },
-            .under, .@"else" => blk: {
-                const body_len = self.code.extra[extra.end];
-                const extra_body_start = extra.end + 1;
-                break :blk .{
-                    .body = self.code.extra[extra_body_start..][0..body_len],
-                    .end = extra_body_start + body_len,
-                };
-            },
-        };
-
-        try self.writeInstRef(stream, extra.data.operand);
-
-        if (special.body.len != 0) {
-            const prong_name = switch (special_prong) {
-                .@"else" => "else",
-                .under => "_",
-                else => unreachable,
-            };
-            try stream.print(", {s} => {{\n", .{prong_name});
-            self.indent += 2;
-            try self.writeBody(stream, special.body);
-            self.indent -= 2;
-            try stream.writeByteNTimes(' ', self.indent);
-            try stream.writeAll("}");
-        }
-
-        var extra_index: usize = special.end;
-        {
-            var scalar_i: usize = 0;
-            while (scalar_i < extra.data.cases_len) : (scalar_i += 1) {
-                const item_ref = @intToEnum(Inst.Ref, self.code.extra[extra_index]);
-                extra_index += 1;
-                const body_len = self.code.extra[extra_index];
-                extra_index += 1;
-                const body = self.code.extra[extra_index..][0..body_len];
-                extra_index += body_len;
-
-                try stream.writeAll(", ");
-                try self.writeInstRef(stream, item_ref);
-                try stream.writeAll(" => {\n");
-                self.indent += 2;
-                try self.writeBody(stream, body);
-                self.indent -= 2;
-                try stream.writeByteNTimes(' ', self.indent);
-                try stream.writeAll("}");
-            }
-        }
-        try stream.writeAll(") ");
-        try self.writeSrc(stream, inst_data.src());
-    }
-
-    fn writePlNodeSwitchBlockMulti(
-        self: *Writer,
-        stream: anytype,
-        inst: Inst.Index,
-        special_prong: SpecialProng,
-    ) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
-        const extra = self.code.extraData(Inst.SwitchBlockMulti, inst_data.payload_index);
-        const special: struct {
-            body: []const Inst.Index,
-            end: usize,
-        } = switch (special_prong) {
-            .none => .{ .body = &.{}, .end = extra.end },
-            .under, .@"else" => blk: {
-                const body_len = self.code.extra[extra.end];
-                const extra_body_start = extra.end + 1;
-                break :blk .{
-                    .body = self.code.extra[extra_body_start..][0..body_len],
-                    .end = extra_body_start + body_len,
-                };
-            },
-        };
-
-        try self.writeInstRef(stream, extra.data.operand);
-
-        if (special.body.len != 0) {
-            const prong_name = switch (special_prong) {
-                .@"else" => "else",
-                .under => "_",
-                else => unreachable,
-            };
-            try stream.print(", {s} => {{\n", .{prong_name});
-            self.indent += 2;
-            try self.writeBody(stream, special.body);
-            self.indent -= 2;
-            try stream.writeByteNTimes(' ', self.indent);
-            try stream.writeAll("}");
-        }
-
-        var extra_index: usize = special.end;
-        {
-            var scalar_i: usize = 0;
-            while (scalar_i < extra.data.scalar_cases_len) : (scalar_i += 1) {
-                const item_ref = @intToEnum(Inst.Ref, self.code.extra[extra_index]);
-                extra_index += 1;
-                const body_len = self.code.extra[extra_index];
-                extra_index += 1;
-                const body = self.code.extra[extra_index..][0..body_len];
-                extra_index += body_len;
-
-                try stream.writeAll(", ");
-                try self.writeInstRef(stream, item_ref);
-                try stream.writeAll(" => {\n");
-                self.indent += 2;
-                try self.writeBody(stream, body);
-                self.indent -= 2;
-                try stream.writeByteNTimes(' ', self.indent);
-                try stream.writeAll("}");
-            }
-        }
-        {
-            var multi_i: usize = 0;
-            while (multi_i < extra.data.multi_cases_len) : (multi_i += 1) {
-                const items_len = self.code.extra[extra_index];
-                extra_index += 1;
-                const ranges_len = self.code.extra[extra_index];
-                extra_index += 1;
-                const body_len = self.code.extra[extra_index];
-                extra_index += 1;
-                const items = self.code.refSlice(extra_index, items_len);
-                extra_index += items_len;
-
-                for (items) |item_ref| {
-                    try stream.writeAll(", ");
-                    try self.writeInstRef(stream, item_ref);
-                }
-
-                var range_i: usize = 0;
-                while (range_i < ranges_len) : (range_i += 1) {
-                    const item_first = @intToEnum(Inst.Ref, self.code.extra[extra_index]);
-                    extra_index += 1;
-                    const item_last = @intToEnum(Inst.Ref, self.code.extra[extra_index]);
-                    extra_index += 1;
-
-                    try stream.writeAll(", ");
-                    try self.writeInstRef(stream, item_first);
-                    try stream.writeAll("...");
-                    try self.writeInstRef(stream, item_last);
-                }
-
-                const body = self.code.extra[extra_index..][0..body_len];
-                extra_index += body_len;
-                try stream.writeAll(" => {\n");
-                self.indent += 2;
-                try self.writeBody(stream, body);
-                self.indent -= 2;
-                try stream.writeByteNTimes(' ', self.indent);
-                try stream.writeAll("}");
-            }
-        }
-        try stream.writeAll(") ");
-        try self.writeSrc(stream, inst_data.src());
-    }
-
-    fn writePlNodeField(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
-        const extra = self.code.extraData(Inst.Field, inst_data.payload_index).data;
-        const name = self.code.nullTerminatedString(extra.field_name_start);
-        try self.writeInstRef(stream, extra.lhs);
-        try stream.print(", \"{}\") ", .{std.zig.fmtEscapes(name)});
-        try self.writeSrc(stream, inst_data.src());
-    }
-
-    fn writeAs(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
-        const extra = self.code.extraData(Inst.As, inst_data.payload_index).data;
-        try self.writeInstRef(stream, extra.dest_type);
-        try stream.writeAll(", ");
-        try self.writeInstRef(stream, extra.operand);
-        try stream.writeAll(") ");
-        try self.writeSrc(stream, inst_data.src());
-    }
-
-    fn writeNode(
-        self: *Writer,
-        stream: anytype,
-        inst: Inst.Index,
-    ) (@TypeOf(stream).Error || error{OutOfMemory})!void {
-        const src_node = self.code.instructions.items(.data)[inst].node;
-        const src: LazySrcLoc = .{ .node_offset = src_node };
-        try stream.writeAll(") ");
-        try self.writeSrc(stream, src);
-    }
-
-    fn writeStrTok(
-        self: *Writer,
-        stream: anytype,
-        inst: Inst.Index,
-    ) (@TypeOf(stream).Error || error{OutOfMemory})!void {
-        const inst_data = self.code.instructions.items(.data)[inst].str_tok;
-        const str = inst_data.get(self.code);
-        try stream.print("\"{}\") ", .{std.zig.fmtEscapes(str)});
-        try self.writeSrc(stream, inst_data.src());
-    }
-
-    fn writeFunc(
-        self: *Writer,
-        stream: anytype,
-        inst: Inst.Index,
-        inferred_error_set: bool,
-    ) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].pl_node;
-        const src = inst_data.src();
-        const extra = self.code.extraData(Inst.Func, inst_data.payload_index);
-        const param_types = self.code.refSlice(extra.end, extra.data.param_types_len);
-        const body = self.code.extra[extra.end + param_types.len ..][0..extra.data.body_len];
-        var src_locs: Zir.Inst.Func.SrcLocs = undefined;
-        if (body.len != 0) {
-            const extra_index = extra.end + param_types.len + body.len;
-            src_locs = self.code.extraData(Zir.Inst.Func.SrcLocs, extra_index).data;
-        }
-        return self.writeFuncCommon(
-            stream,
-            param_types,
-            extra.data.return_type,
-            inferred_error_set,
-            false,
-            false,
-            .none,
-            .none,
-            body,
-            src,
-            src_locs,
-        );
-    }
-
-    fn writeFuncExtended(self: *Writer, stream: anytype, extended: Inst.Extended.InstData) !void {
-        const extra = self.code.extraData(Inst.ExtendedFunc, extended.operand);
-        const src: LazySrcLoc = .{ .node_offset = extra.data.src_node };
-        const small = @bitCast(Inst.ExtendedFunc.Small, extended.small);
-
-        var extra_index: usize = extra.end;
-        if (small.has_lib_name) {
-            const lib_name = self.code.nullTerminatedString(self.code.extra[extra_index]);
-            extra_index += 1;
-            try stream.print("lib_name=\"{}\", ", .{std.zig.fmtEscapes(lib_name)});
-        }
-        try self.writeFlag(stream, "test, ", small.is_test);
-        const cc: Inst.Ref = if (!small.has_cc) .none else blk: {
-            const cc = @intToEnum(Zir.Inst.Ref, self.code.extra[extra_index]);
-            extra_index += 1;
-            break :blk cc;
-        };
-        const align_inst: Inst.Ref = if (!small.has_align) .none else blk: {
-            const align_inst = @intToEnum(Zir.Inst.Ref, self.code.extra[extra_index]);
-            extra_index += 1;
-            break :blk align_inst;
-        };
-
-        const param_types = self.code.refSlice(extra_index, extra.data.param_types_len);
-        extra_index += param_types.len;
-
-        const body = self.code.extra[extra_index..][0..extra.data.body_len];
-        extra_index += body.len;
-
-        var src_locs: Zir.Inst.Func.SrcLocs = undefined;
-        if (body.len != 0) {
-            src_locs = self.code.extraData(Zir.Inst.Func.SrcLocs, extra_index).data;
-        }
-        return self.writeFuncCommon(
-            stream,
-            param_types,
-            extra.data.return_type,
-            small.is_inferred_error,
-            small.is_var_args,
-            small.is_extern,
-            cc,
-            align_inst,
-            body,
-            src,
-            src_locs,
-        );
-    }
-
-    fn writeVarExtended(self: *Writer, stream: anytype, extended: Inst.Extended.InstData) !void {
-        const extra = self.code.extraData(Inst.ExtendedVar, extended.operand);
-        const small = @bitCast(Inst.ExtendedVar.Small, extended.small);
-
-        try self.writeInstRef(stream, extra.data.var_type);
-
-        var extra_index: usize = extra.end;
-        if (small.has_lib_name) {
-            const lib_name = self.code.nullTerminatedString(self.code.extra[extra_index]);
-            extra_index += 1;
-            try stream.print(", lib_name=\"{}\"", .{std.zig.fmtEscapes(lib_name)});
-        }
-        const align_inst: Inst.Ref = if (!small.has_align) .none else blk: {
-            const align_inst = @intToEnum(Zir.Inst.Ref, self.code.extra[extra_index]);
-            extra_index += 1;
-            break :blk align_inst;
-        };
-        const init_inst: Inst.Ref = if (!small.has_init) .none else blk: {
-            const init_inst = @intToEnum(Zir.Inst.Ref, self.code.extra[extra_index]);
-            extra_index += 1;
-            break :blk init_inst;
-        };
-        try self.writeFlag(stream, ", is_extern", small.is_extern);
-        try self.writeOptionalInstRef(stream, ", align=", align_inst);
-        try self.writeOptionalInstRef(stream, ", init=", init_inst);
-        try stream.writeAll("))");
-    }
-
-    fn writeBoolBr(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].bool_br;
-        const extra = self.code.extraData(Inst.Block, inst_data.payload_index);
-        const body = self.code.extra[extra.end..][0..extra.data.body_len];
-        try self.writeInstRef(stream, inst_data.lhs);
-        try stream.writeAll(", {\n");
-        self.indent += 2;
-        try self.writeBody(stream, body);
-        self.indent -= 2;
-        try stream.writeByteNTimes(' ', self.indent);
-        try stream.writeAll("})");
-    }
-
-    fn writeIntType(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const int_type = self.code.instructions.items(.data)[inst].int_type;
-        const prefix: u8 = switch (int_type.signedness) {
-            .signed => 'i',
-            .unsigned => 'u',
-        };
-        try stream.print("{c}{d}) ", .{ prefix, int_type.bit_count });
-        try self.writeSrc(stream, int_type.src());
-    }
-
-    fn writeBreak(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].@"break";
-
-        try self.writeInstIndex(stream, inst_data.block_inst);
-        try stream.writeAll(", ");
-        try self.writeInstRef(stream, inst_data.operand);
-        try stream.writeAll(")");
-    }
-
-    fn writeUnreachable(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].@"unreachable";
-        const safety_str = if (inst_data.safety) "safe" else "unsafe";
-        try stream.print("{s}) ", .{safety_str});
-        try self.writeSrc(stream, inst_data.src());
-    }
-
-    fn writeFuncCommon(
-        self: *Writer,
-        stream: anytype,
-        param_types: []const Inst.Ref,
-        ret_ty: Inst.Ref,
-        inferred_error_set: bool,
-        var_args: bool,
-        is_extern: bool,
-        cc: Inst.Ref,
-        align_inst: Inst.Ref,
-        body: []const Inst.Index,
-        src: LazySrcLoc,
-        src_locs: Zir.Inst.Func.SrcLocs,
-    ) !void {
-        try stream.writeAll("[");
-        for (param_types) |param_type, i| {
-            if (i != 0) try stream.writeAll(", ");
-            try self.writeInstRef(stream, param_type);
-        }
-        try stream.writeAll("], ");
-        try self.writeInstRef(stream, ret_ty);
-        try self.writeOptionalInstRef(stream, ", cc=", cc);
-        try self.writeOptionalInstRef(stream, ", align=", align_inst);
-        try self.writeFlag(stream, ", vargs", var_args);
-        try self.writeFlag(stream, ", extern", is_extern);
-        try self.writeFlag(stream, ", inferror", inferred_error_set);
-
-        if (body.len == 0) {
-            try stream.writeAll(", {}) ");
-        } else {
-            try stream.writeAll(", {\n");
-            self.indent += 2;
-            try self.writeBody(stream, body);
-            self.indent -= 2;
-            try stream.writeByteNTimes(' ', self.indent);
-            try stream.writeAll("}) ");
-        }
-        if (body.len != 0) {
-            try stream.print("(lbrace={d}:{d},rbrace={d}:{d}) ", .{
-                src_locs.lbrace_line, @truncate(u16, src_locs.columns),
-                src_locs.rbrace_line, @truncate(u16, src_locs.columns >> 16),
-            });
-        }
-        try self.writeSrc(stream, src);
-    }
-
-    fn writeSwitchCapture(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].switch_capture;
-        try self.writeInstIndex(stream, inst_data.switch_inst);
-        try stream.print(", {d})", .{inst_data.prong_index});
-    }
-
-    fn writeDbgStmt(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        const inst_data = self.code.instructions.items(.data)[inst].dbg_stmt;
-        try stream.print("{d}, {d})", .{ inst_data.line, inst_data.column });
-    }
-
-    fn writeInstRef(self: *Writer, stream: anytype, ref: Inst.Ref) !void {
-        var i: usize = @enumToInt(ref);
-
-        if (i < Inst.Ref.typed_value_map.len) {
-            return stream.print("@{}", .{ref});
-        }
-        i -= Inst.Ref.typed_value_map.len;
-
-        return self.writeInstIndex(stream, @intCast(Inst.Index, i));
-    }
-
-    fn writeInstIndex(self: *Writer, stream: anytype, inst: Inst.Index) !void {
-        return stream.print("%{d}", .{inst});
-    }
-
-    fn writeOptionalInstRef(
-        self: *Writer,
-        stream: anytype,
-        prefix: []const u8,
-        inst: Inst.Ref,
-    ) !void {
-        if (inst == .none) return;
-        try stream.writeAll(prefix);
-        try self.writeInstRef(stream, inst);
-    }
-
-    fn writeFlag(
-        self: *Writer,
-        stream: anytype,
-        name: []const u8,
-        flag: bool,
-    ) !void {
-        if (!flag) return;
-        try stream.writeAll(name);
-    }
-
-    fn writeSrc(self: *Writer, stream: anytype, src: LazySrcLoc) !void {
-        const tree = self.file.tree;
-        const src_loc: Module.SrcLoc = .{
-            .file_scope = self.file,
-            .parent_decl_node = self.parent_decl_node,
-            .lazy = src,
-        };
-        // Caller must ensure AST tree is loaded.
-        const abs_byte_off = src_loc.byteOffset(self.gpa) catch unreachable;
-        const delta_line = std.zig.findLineColumn(tree.source, abs_byte_off);
-        try stream.print("{s}:{d}:{d}", .{
-            @tagName(src), delta_line.line + 1, delta_line.column + 1,
-        });
-    }
-
-    fn writeSrcNode(self: *Writer, stream: anytype, src_node: ?i32) !void {
-        const node_offset = src_node orelse return;
-        const src: LazySrcLoc = .{ .node_offset = node_offset };
-        try stream.writeAll(" ");
-        return self.writeSrc(stream, src);
-    }
-
-    fn writeBody(self: *Writer, stream: anytype, body: []const Inst.Index) !void {
-        for (body) |inst| {
-            try stream.writeByteNTimes(' ', self.indent);
-            try stream.print("%{d} ", .{inst});
-            try self.writeInstToStream(stream, inst);
-            try stream.writeByte('\n');
-        }
-    }
-};
 
 pub const DeclIterator = struct {
     extra_index: usize,
@@ -4525,15 +2981,6 @@ pub fn declIterator(zir: Zir, decl_inst: u32) DeclIterator {
     const tags = zir.instructions.items(.tag);
     const datas = zir.instructions.items(.data);
     switch (tags[decl_inst]) {
-        .opaque_decl,
-        .opaque_decl_anon,
-        .opaque_decl_func,
-        => {
-            const inst_data = datas[decl_inst].pl_node;
-            const extra = zir.extraData(Inst.OpaqueDecl, inst_data.payload_index);
-            return declIteratorInner(zir, extra.end, extra.data.decls_len);
-        },
-
         // Functions are allowed and yield no iterations.
         // There is one case matching this in the extended instruction set below.
         .func,
@@ -4588,6 +3035,18 @@ pub fn declIterator(zir: Zir, decl_inst: u32) DeclIterator {
 
                     return declIteratorInner(zir, extra_index, decls_len);
                 },
+                .opaque_decl => {
+                    const small = @bitCast(Inst.OpaqueDecl.Small, extended.small);
+                    var extra_index: usize = extended.operand;
+                    extra_index += @boolToInt(small.has_src_node);
+                    const decls_len = if (small.has_decls_len) decls_len: {
+                        const decls_len = zir.extra[extra_index];
+                        extra_index += 1;
+                        break :decls_len decls_len;
+                    } else 0;
+
+                    return declIteratorInner(zir, extra_index, decls_len);
+                },
                 else => unreachable,
             }
         },
@@ -4625,13 +3084,6 @@ fn findDeclsInner(
     const datas = zir.instructions.items(.data);
 
     switch (tags[inst]) {
-        // Decl instructions are interesting but have no body.
-        // TODO yes they do have a body actually. recurse over them just like block instructions.
-        .opaque_decl,
-        .opaque_decl_anon,
-        .opaque_decl_func,
-        => return list.append(inst),
-
         // Functions instructions are interesting and have a body.
         .func,
         .func_inferred,
@@ -4640,8 +3092,7 @@ fn findDeclsInner(
 
             const inst_data = datas[inst].pl_node;
             const extra = zir.extraData(Inst.Func, inst_data.payload_index);
-            const param_types_len = extra.data.param_types_len;
-            const body = zir.extra[extra.end + param_types_len ..][0..extra.data.body_len];
+            const body = zir.extra[extra.end..][0..extra.data.body_len];
             return zir.findDeclsBody(list, body);
         },
         .extended => {
@@ -4656,14 +3107,16 @@ fn findDeclsInner(
                     extra_index += @boolToInt(small.has_lib_name);
                     extra_index += @boolToInt(small.has_cc);
                     extra_index += @boolToInt(small.has_align);
-                    extra_index += extra.data.param_types_len;
                     const body = zir.extra[extra_index..][0..extra.data.body_len];
                     return zir.findDeclsBody(list, body);
                 },
 
+                // Decl instructions are interesting but have no body.
+                // TODO yes they do have a body actually. recurse over them just like block instructions.
                 .struct_decl,
                 .union_decl,
                 .enum_decl,
+                .opaque_decl,
                 => return list.append(inst),
 
                 else => return,
@@ -4734,7 +3187,6 @@ fn findDeclsSwitch(
     var extra_index: usize = special.end;
     var scalar_i: usize = 0;
     while (scalar_i < extra.data.cases_len) : (scalar_i += 1) {
-        const item_ref = @intToEnum(Inst.Ref, zir.extra[extra_index]);
         extra_index += 1;
         const body_len = zir.extra[extra_index];
         extra_index += 1;
@@ -4774,7 +3226,6 @@ fn findDeclsSwitchMulti(
     {
         var scalar_i: usize = 0;
         while (scalar_i < extra.data.scalar_cases_len) : (scalar_i += 1) {
-            const item_ref = @intToEnum(Inst.Ref, zir.extra[extra_index]);
             extra_index += 1;
             const body_len = zir.extra[extra_index];
             extra_index += 1;
@@ -4795,12 +3246,11 @@ fn findDeclsSwitchMulti(
             extra_index += 1;
             const items = zir.refSlice(extra_index, items_len);
             extra_index += items_len;
+            _ = items;
 
             var range_i: usize = 0;
             while (range_i < ranges_len) : (range_i += 1) {
-                const item_first = @intToEnum(Inst.Ref, zir.extra[extra_index]);
                 extra_index += 1;
-                const item_last = @intToEnum(Inst.Ref, zir.extra[extra_index]);
                 extra_index += 1;
             }
 
@@ -4814,10 +3264,83 @@ fn findDeclsSwitchMulti(
 
 fn findDeclsBody(
     zir: Zir,
-    list: *std.ArrayList(Zir.Inst.Index),
-    body: []const Zir.Inst.Index,
+    list: *std.ArrayList(Inst.Index),
+    body: []const Inst.Index,
 ) Allocator.Error!void {
     for (body) |member| {
         try zir.findDeclsInner(list, member);
     }
+}
+
+pub const FnInfo = struct {
+    param_body: []const Inst.Index,
+    ret_ty_body: []const Inst.Index,
+    body: []const Inst.Index,
+    total_params_len: u32,
+};
+
+pub fn getFnInfo(zir: Zir, fn_inst: Inst.Index) FnInfo {
+    const tags = zir.instructions.items(.tag);
+    const datas = zir.instructions.items(.data);
+    const info: struct {
+        param_block: Inst.Index,
+        body: []const Inst.Index,
+        ret_ty_body: []const Inst.Index,
+    } = switch (tags[fn_inst]) {
+        .func, .func_inferred => blk: {
+            const inst_data = datas[fn_inst].pl_node;
+            const extra = zir.extraData(Inst.Func, inst_data.payload_index);
+            var extra_index: usize = extra.end;
+
+            const ret_ty_body = zir.extra[extra_index..][0..extra.data.ret_body_len];
+            extra_index += ret_ty_body.len;
+
+            const body = zir.extra[extra_index..][0..extra.data.body_len];
+            extra_index += body.len;
+
+            break :blk .{
+                .param_block = extra.data.param_block,
+                .ret_ty_body = ret_ty_body,
+                .body = body,
+            };
+        },
+        .extended => blk: {
+            const extended = datas[fn_inst].extended;
+            assert(extended.opcode == .func);
+            const extra = zir.extraData(Inst.ExtendedFunc, extended.operand);
+            const small = @bitCast(Inst.ExtendedFunc.Small, extended.small);
+            var extra_index: usize = extra.end;
+            extra_index += @boolToInt(small.has_lib_name);
+            extra_index += @boolToInt(small.has_cc);
+            extra_index += @boolToInt(small.has_align);
+            const ret_ty_body = zir.extra[extra_index..][0..extra.data.ret_body_len];
+            extra_index += ret_ty_body.len;
+            const body = zir.extra[extra_index..][0..extra.data.body_len];
+            extra_index += body.len;
+            break :blk .{
+                .param_block = extra.data.param_block,
+                .ret_ty_body = ret_ty_body,
+                .body = body,
+            };
+        },
+        else => unreachable,
+    };
+    assert(tags[info.param_block] == .block or tags[info.param_block] == .block_inline);
+    const param_block = zir.extraData(Inst.Block, datas[info.param_block].pl_node.payload_index);
+    const param_body = zir.extra[param_block.end..][0..param_block.data.body_len];
+    var total_params_len: u32 = 0;
+    for (param_body) |inst| {
+        switch (tags[inst]) {
+            .param, .param_comptime, .param_anytype, .param_anytype_comptime => {
+                total_params_len += 1;
+            },
+            else => continue,
+        }
+    }
+    return .{
+        .param_body = param_body,
+        .ret_ty_body = info.ret_ty_body,
+        .body = info.body,
+        .total_params_len = total_params_len,
+    };
 }

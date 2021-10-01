@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 // Based on Go stdlib implementation
 
 const std = @import("../../std.zig");
@@ -49,8 +44,6 @@ pub const Block = struct {
 
     /// Encrypt a block with a round key.
     pub inline fn encrypt(block: Block, round_key: Block) Block {
-        const src = &block.repr;
-
         const s0 = block.repr[0];
         const s1 = block.repr[1];
         const s2 = block.repr[2];
@@ -66,8 +59,6 @@ pub const Block = struct {
 
     /// Encrypt a block with the last round key.
     pub inline fn encryptLast(block: Block, round_key: Block) Block {
-        const src = &block.repr;
-
         const t0 = block.repr[0];
         const t1 = block.repr[1];
         const t2 = block.repr[2];
@@ -88,8 +79,6 @@ pub const Block = struct {
 
     /// Decrypt a block with a round key.
     pub inline fn decrypt(block: Block, round_key: Block) Block {
-        const src = &block.repr;
-
         const s0 = block.repr[0];
         const s1 = block.repr[1];
         const s2 = block.repr[2];
@@ -105,8 +94,6 @@ pub const Block = struct {
 
     /// Decrypt a block with the last round key.
     pub inline fn decryptLast(block: Block, round_key: Block) Block {
-        const src = &block.repr;
-
         const t0 = block.repr[0];
         const t1 = block.repr[1];
         const t2 = block.repr[2];

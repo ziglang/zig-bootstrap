@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("../std.zig");
 const builtin = std.builtin;
 const assert = std.debug.assert;
@@ -214,20 +209,20 @@ test "std.atomic.Queue" {
     } else {
         try expect(context.queue.isEmpty());
 
-        var putters: [put_thread_count]*std.Thread = undefined;
+        var putters: [put_thread_count]std.Thread = undefined;
         for (putters) |*t| {
-            t.* = try std.Thread.spawn(startPuts, &context);
+            t.* = try std.Thread.spawn(.{}, startPuts, .{&context});
         }
-        var getters: [put_thread_count]*std.Thread = undefined;
+        var getters: [put_thread_count]std.Thread = undefined;
         for (getters) |*t| {
-            t.* = try std.Thread.spawn(startGets, &context);
+            t.* = try std.Thread.spawn(.{}, startGets, .{&context});
         }
 
         for (putters) |t|
-            t.wait();
+            t.join();
         @atomicStore(bool, &context.puts_done, true, .SeqCst);
         for (getters) |t|
-            t.wait();
+            t.join();
 
         try expect(context.queue.isEmpty());
     }

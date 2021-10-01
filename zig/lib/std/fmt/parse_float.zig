@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 // Adapted from https://github.com/grzegorz-kraszewski/stringtofloat.
 
 // MIT License
@@ -34,7 +29,7 @@
 // - Only supports round-to-zero
 // - Does not handle denormals
 
-const std = @import("../std.zig");
+const std = @import("std");
 const ascii = std.ascii;
 
 // The mantissa field in FloatRepr is 64bit wide and holds only 19 digits
@@ -200,7 +195,6 @@ const ParseResult = enum {
 
 fn parseRepr(s: []const u8, n: *FloatRepr) !ParseResult {
     var digit_index: usize = 0;
-    var negative = false;
     var negative_exp = false;
     var exponent: i32 = 0;
 
@@ -231,6 +225,8 @@ fn parseRepr(s: []const u8, n: *FloatRepr) !ParseResult {
                 } else if (c == '.') {
                     i += 1;
                     state = .LeadingFractionalZeros;
+                } else if (c == '_') {
+                    i += 1;
                 } else {
                     state = .MantissaIntegral;
                 }
@@ -259,6 +255,8 @@ fn parseRepr(s: []const u8, n: *FloatRepr) !ParseResult {
                 } else if (c == '.') {
                     i += 1;
                     state = .MantissaFractional;
+                } else if (c == '_') {
+                    i += 1;
                 } else {
                     state = .MantissaFractional;
                 }
@@ -276,6 +274,8 @@ fn parseRepr(s: []const u8, n: *FloatRepr) !ParseResult {
                 } else if (c == 'e' or c == 'E') {
                     i += 1;
                     state = .ExponentSign;
+                } else if (c == '_') {
+                    i += 1;
                 } else {
                     state = .ExponentSign;
                 }
@@ -283,6 +283,8 @@ fn parseRepr(s: []const u8, n: *FloatRepr) !ParseResult {
             .ExponentSign => {
                 if (c == '+') {
                     i += 1;
+                } else if (c == '_') {
+                    return error.InvalidCharacter;
                 } else if (c == '-') {
                     negative_exp = true;
                     i += 1;
@@ -292,6 +294,8 @@ fn parseRepr(s: []const u8, n: *FloatRepr) !ParseResult {
             },
             .LeadingExponentZeros => {
                 if (c == '0') {
+                    i += 1;
+                } else if (c == '_') {
                     i += 1;
                 } else {
                     state = .Exponent;
@@ -304,6 +308,8 @@ fn parseRepr(s: []const u8, n: *FloatRepr) !ParseResult {
                         exponent += @intCast(i32, c - '0');
                     }
 
+                    i += 1;
+                } else if (c == '_') {
                     i += 1;
                 } else {
                     return error.InvalidCharacter;
@@ -338,7 +344,9 @@ fn caseInEql(a: []const u8, b: []const u8) bool {
     return true;
 }
 
-pub fn parseFloat(comptime T: type, s: []const u8) !T {
+pub const ParseFloatError = error{InvalidCharacter};
+
+pub fn parseFloat(comptime T: type, s: []const u8) ParseFloatError!T {
     if (s.len == 0 or (s.len == 1 and (s[0] == '+' or s[0] == '-'))) {
         return error.InvalidCharacter;
     }
@@ -405,6 +413,7 @@ test "fmt.parseFloat" {
         try expectEqual(try parseFloat(T, "-INF"), -std.math.inf(T));
 
         try expectEqual(try parseFloat(T, "0.4e0066999999999999999999999999999999999999999999999999999"), std.math.inf(T));
+        try expect(approxEqAbs(T, try parseFloat(T, "0_1_2_3_4_5_6.7_8_9_0_0_0e0_0_1_0"), @as(T, 123456.789000e10), epsilon));
 
         if (T != f16) {
             try expect(approxEqAbs(T, try parseFloat(T, "1e-2"), 0.01, epsilon));

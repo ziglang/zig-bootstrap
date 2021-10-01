@@ -64,7 +64,10 @@ pub const Feature = enum {
     save_restore,
 };
 
-pub usingnamespace CpuFeature.feature_set_fns(Feature);
+pub const featureSet = CpuFeature.feature_set_fns(Feature).featureSet;
+pub const featureSetHas = CpuFeature.feature_set_fns(Feature).featureSetHas;
+pub const featureSetHasAny = CpuFeature.feature_set_fns(Feature).featureSetHasAny;
+pub const featureSetHasAll = CpuFeature.feature_set_fns(Feature).featureSetHasAll;
 
 pub const all_features = blk: {
     const len = @typeInfo(Feature).Enum.fields.len;
@@ -182,7 +185,7 @@ pub const all_features = blk: {
     };
     result[@enumToInt(Feature.experimental_zvamo)] = .{
         .llvm_name = "experimental-zvamo",
-        .description = "'Zvamo'(Vector AMO Operations)",
+        .description = "'Zvamo' (Vector AMO Operations)",
         .dependencies = featureSet(&[_]Feature{
             .experimental_v,
         }),

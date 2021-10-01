@@ -1,9 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
-
 //! Similar to `StaticResetEvent` but on `set()` it also (atomically) does `reset()`.
 //! Unlike StaticResetEvent, `wait()` can only be called by one thread (MPSC-like).
 //!
@@ -220,9 +214,9 @@ test "basic usage" {
     };
 
     var context = Context{};
-    const send_thread = try std.Thread.spawn(Context.sender, &context);
-    const recv_thread = try std.Thread.spawn(Context.receiver, &context);
+    const send_thread = try std.Thread.spawn(.{}, Context.sender, .{&context});
+    const recv_thread = try std.Thread.spawn(.{}, Context.receiver, .{&context});
 
-    send_thread.wait();
-    recv_thread.wait();
+    send_thread.join();
+    recv_thread.join();
 }

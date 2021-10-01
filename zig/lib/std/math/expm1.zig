@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 // Ported from musl, which is licensed under the MIT license:
 // https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
 //
@@ -316,16 +311,12 @@ test "math.expm1_64" {
 }
 
 test "math.expm1_32.special" {
-    const epsilon = 0.000001;
-
     try expect(math.isPositiveInf(expm1_32(math.inf(f32))));
     try expect(expm1_32(-math.inf(f32)) == -1.0);
     try expect(math.isNan(expm1_32(math.nan(f32))));
 }
 
 test "math.expm1_64.special" {
-    const epsilon = 0.000001;
-
     try expect(math.isPositiveInf(expm1_64(math.inf(f64))));
     try expect(expm1_64(-math.inf(f64)) == -1.0);
     try expect(math.isNan(expm1_64(math.nan(f64))));

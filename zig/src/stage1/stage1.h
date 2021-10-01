@@ -97,6 +97,7 @@ enum Os {
     OsOpenCL,
     OsGLSL450,
     OsVulkan,
+    OsPlan9,
     OsOther,
 };
 
@@ -156,6 +157,9 @@ struct ZigStage1 {
     const char *emit_llvm_ir_ptr;
     size_t emit_llvm_ir_len;
 
+    const char *emit_bitcode_ptr;
+    size_t emit_bitcode_len;
+
     const char *emit_analysis_json_ptr;
     size_t emit_analysis_json_len;
 
@@ -172,7 +176,7 @@ struct ZigStage1 {
     size_t test_name_prefix_len;
 
     void *userdata;
-    struct ZigStage1Pkg *root_pkg;
+    struct ZigStage1Pkg *main_pkg;
     struct Stage2ProgressNode *main_progress_node;
 
     enum CodeModel code_model;
@@ -182,6 +186,7 @@ struct ZigStage1 {
     bool pic;
     bool pie;
     bool lto;
+    bool unwind_tables;
     bool link_libc;
     bool link_libcpp;
     bool strip;
@@ -191,13 +196,12 @@ struct ZigStage1 {
     bool valgrind_enabled;
     bool tsan_enabled;
     bool function_sections;
+    bool include_compiler_rt;
     bool enable_stack_probing;
     bool red_zone;
     bool enable_time_report;
     bool enable_stack_report;
     bool test_is_evented;
-    bool verbose_tokenize;
-    bool verbose_ast;
     bool verbose_ir;
     bool verbose_llvm_ir;
     bool verbose_cimport;

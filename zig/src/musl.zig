@@ -112,7 +112,7 @@ pub fn buildCRTFile(comp: *Compilation, crt_file: CRTFile) !void {
             var source_table = std.StringArrayHashMap(Ext).init(comp.gpa);
             defer source_table.deinit();
 
-            try source_table.ensureCapacity(compat_time32_files.len + src_files.len);
+            try source_table.ensureTotalCapacity(compat_time32_files.len + src_files.len);
 
             for (src_files) |src_file| {
                 try addSrcFile(arena, &source_table, src_file);
@@ -143,7 +143,6 @@ pub fn buildCRTFile(comp: *Compilation, crt_file: CRTFile) !void {
                 const dirname = path.dirname(src_file).?;
                 const basename = path.basename(src_file);
                 const noextbasename = basename[0 .. basename.len - std.fs.path.extension(basename).len];
-                const before_arch_dir = path.dirname(dirname).?;
                 const dirbasename = path.basename(dirname);
 
                 var is_arch_specific = false;
@@ -198,7 +197,7 @@ pub fn buildCRTFile(comp: *Compilation, crt_file: CRTFile) !void {
                 .zig_lib_directory = comp.zig_lib_directory,
                 .target = comp.getTarget(),
                 .root_name = "c",
-                .root_pkg = null,
+                .main_pkg = null,
                 .output_mode = .Lib,
                 .link_mode = .Dynamic,
                 .thread_pool = comp.thread_pool,
@@ -217,9 +216,7 @@ pub fn buildCRTFile(comp: *Compilation, crt_file: CRTFile) !void {
                 .self_exe_path = comp.self_exe_path,
                 .verbose_cc = comp.verbose_cc,
                 .verbose_link = comp.bin_file.options.verbose_link,
-                .verbose_tokenize = comp.verbose_tokenize,
-                .verbose_ast = comp.verbose_ast,
-                .verbose_ir = comp.verbose_ir,
+                .verbose_air = comp.verbose_air,
                 .verbose_llvm_ir = comp.verbose_llvm_ir,
                 .verbose_cimport = comp.verbose_cimport,
                 .verbose_llvm_cpu_features = comp.verbose_llvm_cpu_features,
@@ -234,7 +231,7 @@ pub fn buildCRTFile(comp: *Compilation, crt_file: CRTFile) !void {
 
             try sub_compilation.updateSubCompilation();
 
-            try comp.crt_files.ensureCapacity(comp.gpa, comp.crt_files.count() + 1);
+            try comp.crt_files.ensureUnusedCapacity(comp.gpa, 1);
 
             const basename = try comp.gpa.dupe(u8, "libc.so");
             errdefer comp.gpa.free(basename);

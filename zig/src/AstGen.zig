@@ -2,36 +2,49 @@
 const AstGen = @This();
 
 const std = @import("std");
-const ast = std.zig.ast;
+const Ast = std.zig.Ast;
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const ArrayListUnmanaged = std.ArrayListUnmanaged;
+const StringIndexAdapter = std.hash_map.StringIndexAdapter;
+const StringIndexContext = std.hash_map.StringIndexContext;
 
 const Zir = @import("Zir.zig");
 const trace = @import("tracy.zig").trace;
 const BuiltinFn = @import("BuiltinFn.zig");
 
 gpa: *Allocator,
-tree: *const ast.Tree,
+tree: *const Ast,
 instructions: std.MultiArrayList(Zir.Inst) = .{},
 extra: ArrayListUnmanaged(u32) = .{},
 string_bytes: ArrayListUnmanaged(u8) = .{},
+/// Tracks the current byte offset within the source file.
+/// Used to populate line deltas in the ZIR. AstGen maintains
+/// this "cursor" throughout the entire AST lowering process in order
+/// to avoid starting over the line/column scan for every declaration, which
+/// would be O(N^2).
+source_offset: u32 = 0,
+/// Tracks the current line of `source_offset`.
+source_line: u32 = 0,
+/// Tracks the current column of `source_offset`.
+source_column: u32 = 0,
 /// Used for temporary allocations; freed after AstGen is complete.
 /// The resulting ZIR code has no references to anything in this arena.
 arena: *Allocator,
-string_table: std.StringHashMapUnmanaged(u32) = .{},
+string_table: std.HashMapUnmanaged(u32, void, StringIndexContext, std.hash_map.default_max_load_percentage) = .{},
 compile_errors: ArrayListUnmanaged(Zir.Inst.CompileErrors.Item) = .{},
 /// The topmost block of the current function.
 fn_block: ?*GenZir = null,
-/// String table indexes, keeps track of all `@import` operands.
-imports: std.AutoArrayHashMapUnmanaged(u32, void) = .{},
+/// Maps string table indexes to the first `@import` ZIR instruction
+/// that uses this string as the operand.
+imports: std.AutoArrayHashMapUnmanaged(u32, Ast.TokenIndex) = .{},
 
 const InnerError = error{ OutOfMemory, AnalysisFail };
 
 fn addExtra(astgen: *AstGen, extra: anytype) Allocator.Error!u32 {
     const fields = std.meta.fields(@TypeOf(extra));
-    try astgen.extra.ensureCapacity(astgen.gpa, astgen.extra.items.len + fields.len);
+    try astgen.extra.ensureUnusedCapacity(astgen.gpa, fields.len);
     return addExtraAssumeCapacity(astgen, extra);
 }
 
@@ -43,6 +56,7 @@ fn addExtraAssumeCapacity(astgen: *AstGen, extra: anytype) u32 {
             u32 => @field(extra, field.name),
             Zir.Inst.Ref => @enumToInt(@field(extra, field.name)),
             i32 => @bitCast(u32, @field(extra, field.name)),
+            Zir.Inst.Call.Flags => @bitCast(u32, @field(extra, field.name)),
             else => @compileError("bad field type"),
         });
     }
@@ -59,7 +73,7 @@ fn appendRefsAssumeCapacity(astgen: *AstGen, refs: []const Zir.Inst.Ref) void {
     astgen.extra.appendSliceAssumeCapacity(coerced);
 }
 
-pub fn generate(gpa: *Allocator, tree: ast.Tree) InnerError!Zir {
+pub fn generate(gpa: *Allocator, tree: Ast) Allocator.Error!Zir {
     var arena = std.heap.ArenaAllocator.init(gpa);
     defer arena.deinit();
 
@@ -95,7 +109,7 @@ pub fn generate(gpa: *Allocator, tree: ast.Tree) InnerError!Zir {
     };
     defer gen_scope.instructions.deinit(gpa);
 
-    const container_decl: ast.full.ContainerDecl = .{
+    const container_decl: Ast.full.ContainerDecl = .{
         .layout_token = null,
         .ast = .{
             .main_token = undefined,
@@ -111,7 +125,7 @@ pub fn generate(gpa: *Allocator, tree: ast.Tree) InnerError!Zir {
         container_decl,
         .Auto,
     )) |struct_decl_ref| {
-        astgen.extra.items[@enumToInt(Zir.ExtraIndex.main_struct)] = @enumToInt(struct_decl_ref);
+        assert(refToIndex(struct_decl_ref).? == 0);
     } else |err| switch (err) {
         error.OutOfMemory => return error.OutOfMemory,
         error.AnalysisFail => {}, // Handled via compile_errors below.
@@ -121,8 +135,7 @@ pub fn generate(gpa: *Allocator, tree: ast.Tree) InnerError!Zir {
     if (astgen.compile_errors.items.len == 0) {
         astgen.extra.items[err_index] = 0;
     } else {
-        try astgen.extra.ensureCapacity(gpa, astgen.extra.items.len +
-            1 + astgen.compile_errors.items.len *
+        try astgen.extra.ensureUnusedCapacity(gpa, 1 + astgen.compile_errors.items.len *
             @typeInfo(Zir.Inst.CompileErrors.Item).Struct.fields.len);
 
         astgen.extra.items[err_index] = astgen.addExtraAssumeCapacity(Zir.Inst.CompileErrors{
@@ -138,13 +151,20 @@ pub fn generate(gpa: *Allocator, tree: ast.Tree) InnerError!Zir {
     if (astgen.imports.count() == 0) {
         astgen.extra.items[imports_index] = 0;
     } else {
-        try astgen.extra.ensureCapacity(gpa, astgen.extra.items.len +
-            @typeInfo(Zir.Inst.Imports).Struct.fields.len + astgen.imports.count());
+        try astgen.extra.ensureUnusedCapacity(gpa, @typeInfo(Zir.Inst.Imports).Struct.fields.len +
+            astgen.imports.count() * @typeInfo(Zir.Inst.Imports.Item).Struct.fields.len);
 
         astgen.extra.items[imports_index] = astgen.addExtraAssumeCapacity(Zir.Inst.Imports{
             .imports_len = @intCast(u32, astgen.imports.count()),
         });
-        astgen.extra.appendSliceAssumeCapacity(astgen.imports.keys());
+
+        var it = astgen.imports.iterator();
+        while (it.next()) |entry| {
+            _ = astgen.addExtraAssumeCapacity(Zir.Inst.Imports.Item{
+                .name = entry.key_ptr.*,
+                .token = entry.value_ptr.*,
+            });
+        }
     }
 
     return Zir{
@@ -178,6 +198,9 @@ pub const ResultLoc = union(enum) {
     none_or_ref,
     /// The expression will be coerced into this type, but it will be evaluated as an rvalue.
     ty: Zir.Inst.Ref,
+    /// Same as `ty` but it is guaranteed that Sema will additionally perform the coercion,
+    /// so no `as` instruction needs to be emitted.
+    coerced_ty: Zir.Inst.Ref,
     /// The expression must store its result into this typed pointer. The result instruction
     /// from the expression must be ignored.
     ptr: Zir.Inst.Ref,
@@ -206,10 +229,9 @@ pub const ResultLoc = union(enum) {
     };
 
     fn strategy(rl: ResultLoc, block_scope: *GenZir) Strategy {
-        var elide_store_to_block_ptr_instructions = false;
         switch (rl) {
             // In this branch there will not be any store_to_block_ptr instructions.
-            .discard, .none, .none_or_ref, .ty, .ref => return .{
+            .discard, .none, .none_or_ref, .ty, .coerced_ty, .ref => return .{
                 .tag = .break_operand,
                 .elide_store_to_block_ptr_instructions = false,
             },
@@ -243,16 +265,35 @@ pub const ResultLoc = union(enum) {
 
 pub const align_rl: ResultLoc = .{ .ty = .u16_type };
 pub const bool_rl: ResultLoc = .{ .ty = .bool_type };
+pub const type_rl: ResultLoc = .{ .ty = .type_type };
+pub const coerced_type_rl: ResultLoc = .{ .coerced_ty = .type_type };
 
-fn typeExpr(gz: *GenZir, scope: *Scope, type_node: ast.Node.Index) InnerError!Zir.Inst.Ref {
+fn typeExpr(gz: *GenZir, scope: *Scope, type_node: Ast.Node.Index) InnerError!Zir.Inst.Ref {
     const prev_force_comptime = gz.force_comptime;
     gz.force_comptime = true;
     defer gz.force_comptime = prev_force_comptime;
 
-    return expr(gz, scope, .{ .ty = .type_type }, type_node);
+    return expr(gz, scope, coerced_type_rl, type_node);
 }
 
-fn lvalExpr(gz: *GenZir, scope: *Scope, node: ast.Node.Index) InnerError!Zir.Inst.Ref {
+/// Same as `expr` but fails with a compile error if the result type is `noreturn`.
+fn reachableExpr(
+    gz: *GenZir,
+    scope: *Scope,
+    rl: ResultLoc,
+    node: Ast.Node.Index,
+    src_node: Ast.Node.Index,
+) InnerError!Zir.Inst.Ref {
+    const result_inst = try expr(gz, scope, rl, node);
+    if (gz.refIsNoReturn(result_inst)) {
+        return gz.astgen.failNodeNotes(src_node, "unreachable code", .{}, &[_]u32{
+            try gz.astgen.errNoteNode(node, "control flow is diverted here", .{}),
+        });
+    }
+    return result_inst;
+}
+
+fn lvalExpr(gz: *GenZir, scope: *Scope, node: Ast.Node.Index) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const tree = astgen.tree;
     const node_tags = tree.nodes.items(.tag);
@@ -276,29 +317,37 @@ fn lvalExpr(gz: *GenZir, scope: *Scope, node: ast.Node.Index) InnerError!Zir.Ins
         .assign,
         .assign_bit_and,
         .assign_bit_or,
-        .assign_bit_shift_left,
-        .assign_bit_shift_right,
+        .assign_shl,
+        .assign_shl_sat,
+        .assign_shr,
         .assign_bit_xor,
         .assign_div,
         .assign_sub,
         .assign_sub_wrap,
+        .assign_sub_sat,
         .assign_mod,
         .assign_add,
         .assign_add_wrap,
+        .assign_add_sat,
         .assign_mul,
         .assign_mul_wrap,
+        .assign_mul_sat,
         .add,
         .add_wrap,
+        .add_sat,
         .sub,
         .sub_wrap,
+        .sub_sat,
         .mul,
         .mul_wrap,
+        .mul_sat,
         .div,
         .mod,
         .bit_and,
         .bit_or,
-        .bit_shift_left,
-        .bit_shift_right,
+        .shl,
+        .shl_sat,
+        .shr,
         .bit_xor,
         .bang_equal,
         .equal_equal,
@@ -332,10 +381,6 @@ fn lvalExpr(gz: *GenZir, scope: *Scope, node: ast.Node.Index) InnerError!Zir.Ins
         .bool_not,
         .address_of,
         .float_literal,
-        .undefined_literal,
-        .true_literal,
-        .false_literal,
-        .null_literal,
         .optional_type,
         .block,
         .block_semicolon,
@@ -443,11 +488,11 @@ fn lvalExpr(gz: *GenZir, scope: *Scope, node: ast.Node.Index) InnerError!Zir.Ins
     return expr(gz, scope, .ref, node);
 }
 
-/// Turn Zig AST into untyped ZIR istructions.
+/// Turn Zig AST into untyped ZIR instructions.
 /// When `rl` is discard, ptr, inferred_ptr, or inferred_ptr, the
 /// result instruction can be used to inspect whether it is isNoReturn() but that is it,
 /// it must otherwise not be used.
-fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerError!Zir.Inst.Ref {
+fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: Ast.Node.Index) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const tree = astgen.tree;
     const main_tokens = tree.nodes.items(.main_token);
@@ -482,76 +527,113 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerEr
 
         .assign => {
             try assign(gz, scope, node);
-            return rvalue(gz, scope, rl, .void_value, node);
+            return rvalue(gz, rl, .void_value, node);
         },
 
-        .assign_bit_shift_left => {
+        .assign_shl => {
             try assignShift(gz, scope, node, .shl);
-            return rvalue(gz, scope, rl, .void_value, node);
+            return rvalue(gz, rl, .void_value, node);
         },
-        .assign_bit_shift_right => {
+        .assign_shl_sat => {
+            try assignShiftSat(gz, scope, node);
+            return rvalue(gz, rl, .void_value, node);
+        },
+        .assign_shr => {
             try assignShift(gz, scope, node, .shr);
-            return rvalue(gz, scope, rl, .void_value, node);
+            return rvalue(gz, rl, .void_value, node);
         },
 
         .assign_bit_and => {
             try assignOp(gz, scope, node, .bit_and);
-            return rvalue(gz, scope, rl, .void_value, node);
+            return rvalue(gz, rl, .void_value, node);
         },
         .assign_bit_or => {
             try assignOp(gz, scope, node, .bit_or);
-            return rvalue(gz, scope, rl, .void_value, node);
+            return rvalue(gz, rl, .void_value, node);
         },
         .assign_bit_xor => {
             try assignOp(gz, scope, node, .xor);
-            return rvalue(gz, scope, rl, .void_value, node);
+            return rvalue(gz, rl, .void_value, node);
         },
         .assign_div => {
             try assignOp(gz, scope, node, .div);
-            return rvalue(gz, scope, rl, .void_value, node);
+            return rvalue(gz, rl, .void_value, node);
         },
         .assign_sub => {
             try assignOp(gz, scope, node, .sub);
-            return rvalue(gz, scope, rl, .void_value, node);
+            return rvalue(gz, rl, .void_value, node);
         },
         .assign_sub_wrap => {
             try assignOp(gz, scope, node, .subwrap);
-            return rvalue(gz, scope, rl, .void_value, node);
+            return rvalue(gz, rl, .void_value, node);
+        },
+        .assign_sub_sat => {
+            try assignOp(gz, scope, node, .sub_sat);
+            return rvalue(gz, rl, .void_value, node);
         },
         .assign_mod => {
             try assignOp(gz, scope, node, .mod_rem);
-            return rvalue(gz, scope, rl, .void_value, node);
+            return rvalue(gz, rl, .void_value, node);
         },
         .assign_add => {
             try assignOp(gz, scope, node, .add);
-            return rvalue(gz, scope, rl, .void_value, node);
+            return rvalue(gz, rl, .void_value, node);
         },
         .assign_add_wrap => {
             try assignOp(gz, scope, node, .addwrap);
-            return rvalue(gz, scope, rl, .void_value, node);
+            return rvalue(gz, rl, .void_value, node);
+        },
+        .assign_add_sat => {
+            try assignOp(gz, scope, node, .add_sat);
+            return rvalue(gz, rl, .void_value, node);
         },
         .assign_mul => {
             try assignOp(gz, scope, node, .mul);
-            return rvalue(gz, scope, rl, .void_value, node);
+            return rvalue(gz, rl, .void_value, node);
         },
         .assign_mul_wrap => {
             try assignOp(gz, scope, node, .mulwrap);
-            return rvalue(gz, scope, rl, .void_value, node);
+            return rvalue(gz, rl, .void_value, node);
+        },
+        .assign_mul_sat => {
+            try assignOp(gz, scope, node, .mul_sat);
+            return rvalue(gz, rl, .void_value, node);
         },
 
         // zig fmt: off
-        .bit_shift_left  => return shiftOp(gz, scope, rl, node, node_datas[node].lhs, node_datas[node].rhs, .shl),
-        .bit_shift_right => return shiftOp(gz, scope, rl, node, node_datas[node].lhs, node_datas[node].rhs, .shr),
+        .shl => return shiftOp(gz, scope, rl, node, node_datas[node].lhs, node_datas[node].rhs, .shl),
+        .shr => return shiftOp(gz, scope, rl, node, node_datas[node].lhs, node_datas[node].rhs, .shr),
 
         .add      => return simpleBinOp(gz, scope, rl, node, .add),
         .add_wrap => return simpleBinOp(gz, scope, rl, node, .addwrap),
+        .add_sat  => return simpleBinOp(gz, scope, rl, node, .add_sat),
         .sub      => return simpleBinOp(gz, scope, rl, node, .sub),
         .sub_wrap => return simpleBinOp(gz, scope, rl, node, .subwrap),
+        .sub_sat  => return simpleBinOp(gz, scope, rl, node, .sub_sat),
         .mul      => return simpleBinOp(gz, scope, rl, node, .mul),
         .mul_wrap => return simpleBinOp(gz, scope, rl, node, .mulwrap),
+        .mul_sat  => return simpleBinOp(gz, scope, rl, node, .mul_sat),
         .div      => return simpleBinOp(gz, scope, rl, node, .div),
         .mod      => return simpleBinOp(gz, scope, rl, node, .mod_rem),
-        .bit_and  => return simpleBinOp(gz, scope, rl, node, .bit_and),
+        .shl_sat  => return simpleBinOp(gz, scope, rl, node, .shl_sat),
+
+        .bit_and  => {
+            const current_ampersand_token = main_tokens[node];
+            if (token_tags[current_ampersand_token + 1] == .ampersand) {
+                const token_starts = tree.tokens.items(.start);
+                const current_token_offset = token_starts[current_ampersand_token];
+                const next_token_offset = token_starts[current_ampersand_token + 1];
+                if (current_token_offset + 1 == next_token_offset) {
+                    return astgen.failTok(
+                        current_ampersand_token,
+                        "`&&` is invalid; note that `and` is boolean AND",
+                        .{},
+                    );
+                }
+            }
+
+            return simpleBinOp(gz, scope, rl, node, .bit_and);
+        },
         .bit_or   => return simpleBinOp(gz, scope, rl, node, .bit_or),
         .bit_xor  => return simpleBinOp(gz, scope, rl, node, .xor),
 
@@ -582,21 +664,21 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerEr
         .asm_simple => return asmExpr(gz, scope, rl, node, tree.asmSimple(node)),
         .@"asm"     => return asmExpr(gz, scope, rl, node, tree.asmFull(node)),
 
-        .string_literal           => return stringLiteral(gz, scope, rl, node),
-        .multiline_string_literal => return multilineStringLiteral(gz, scope, rl, node),
+        .string_literal           => return stringLiteral(gz, rl, node),
+        .multiline_string_literal => return multilineStringLiteral(gz, rl, node),
 
-        .integer_literal => return integerLiteral(gz, scope, rl, node),
+        .integer_literal => return integerLiteral(gz, rl, node),
         // zig fmt: on
 
         .builtin_call_two, .builtin_call_two_comma => {
             if (node_datas[node].lhs == 0) {
-                const params = [_]ast.Node.Index{};
+                const params = [_]Ast.Node.Index{};
                 return builtinCall(gz, scope, rl, node, &params);
             } else if (node_datas[node].rhs == 0) {
-                const params = [_]ast.Node.Index{node_datas[node].lhs};
+                const params = [_]Ast.Node.Index{node_datas[node].lhs};
                 return builtinCall(gz, scope, rl, node, &params);
             } else {
-                const params = [_]ast.Node.Index{ node_datas[node].lhs, node_datas[node].rhs };
+                const params = [_]Ast.Node.Index{ node_datas[node].lhs, node_datas[node].rhs };
                 return builtinCall(gz, scope, rl, node, &params);
             }
         },
@@ -606,7 +688,7 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerEr
         },
 
         .call_one, .call_one_comma, .async_call_one, .async_call_one_comma => {
-            var params: [1]ast.Node.Index = undefined;
+            var params: [1]Ast.Node.Index = undefined;
             return callExpr(gz, scope, rl, node, tree.callOne(&params, node));
         },
         .call, .call_comma, .async_call, .async_call_comma => {
@@ -625,7 +707,7 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerEr
         },
         .@"return" => return ret(gz, scope, node),
         .field_access => return fieldAccess(gz, scope, rl, node),
-        .float_literal => return floatLiteral(gz, scope, rl, node),
+        .float_literal => return floatLiteral(gz, rl, node),
 
         .if_simple => return ifExpr(gz, scope, rl, node, tree.ifSimple(node)),
         .@"if" => return ifExpr(gz, scope, rl, node, tree.ifFull(node)),
@@ -644,11 +726,17 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerEr
                 .lhs = lhs,
                 .start = start,
             });
-            return rvalue(gz, scope, rl, result, node);
+            switch (rl) {
+                .ref, .none_or_ref => return result,
+                else => {
+                    const dereffed = try gz.addUnNode(.load, result, node);
+                    return rvalue(gz, rl, dereffed, node);
+                },
+            }
         },
         .slice => {
             const lhs = try expr(gz, scope, .ref, node_datas[node].lhs);
-            const extra = tree.extraData(node_datas[node].rhs, ast.Node.Slice);
+            const extra = tree.extraData(node_datas[node].rhs, Ast.Node.Slice);
             const start = try expr(gz, scope, .{ .ty = .usize_type }, extra.start);
             const end = try expr(gz, scope, .{ .ty = .usize_type }, extra.end);
             const result = try gz.addPlNode(.slice_end, node, Zir.Inst.SliceEnd{
@@ -656,13 +744,19 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerEr
                 .start = start,
                 .end = end,
             });
-            return rvalue(gz, scope, rl, result, node);
+            switch (rl) {
+                .ref, .none_or_ref => return result,
+                else => {
+                    const dereffed = try gz.addUnNode(.load, result, node);
+                    return rvalue(gz, rl, dereffed, node);
+                },
+            }
         },
         .slice_sentinel => {
             const lhs = try expr(gz, scope, .ref, node_datas[node].lhs);
-            const extra = tree.extraData(node_datas[node].rhs, ast.Node.SliceSentinel);
+            const extra = tree.extraData(node_datas[node].rhs, Ast.Node.SliceSentinel);
             const start = try expr(gz, scope, .{ .ty = .usize_type }, extra.start);
-            const end = try expr(gz, scope, .{ .ty = .usize_type }, extra.end);
+            const end = if (extra.end != 0) try expr(gz, scope, .{ .ty = .usize_type }, extra.end) else .none;
             const sentinel = try expr(gz, scope, .{ .ty = .usize_type }, extra.sentinel);
             const result = try gz.addPlNode(.slice_sentinel, node, Zir.Inst.SliceSentinel{
                 .lhs = lhs,
@@ -670,7 +764,13 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerEr
                 .end = end,
                 .sentinel = sentinel,
             });
-            return rvalue(gz, scope, rl, result, node);
+            switch (rl) {
+                .ref, .none_or_ref => return result,
+                else => {
+                    const dereffed = try gz.addUnNode(.load, result, node);
+                    return rvalue(gz, rl, dereffed, node);
+                },
+            }
         },
 
         .deref => {
@@ -679,22 +779,18 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerEr
                 .ref, .none_or_ref => return lhs,
                 else => {
                     const result = try gz.addUnNode(.load, lhs, node);
-                    return rvalue(gz, scope, rl, result, node);
+                    return rvalue(gz, rl, result, node);
                 },
             }
         },
         .address_of => {
             const result = try expr(gz, scope, .ref, node_datas[node].lhs);
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
-        .undefined_literal => return rvalue(gz, scope, rl, .undef, node),
-        .true_literal => return rvalue(gz, scope, rl, .bool_true, node),
-        .false_literal => return rvalue(gz, scope, rl, .bool_false, node),
-        .null_literal => return rvalue(gz, scope, rl, .null_value, node),
         .optional_type => {
             const operand = try typeExpr(gz, scope, node_datas[node].lhs);
             const result = try gz.addUnNode(.optional_type, operand, node);
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
         .unwrap_optional => switch (rl) {
             .ref => return gz.addUnNode(
@@ -702,14 +798,14 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerEr
                 try expr(gz, scope, .ref, node_datas[node].lhs),
                 node,
             ),
-            else => return rvalue(gz, scope, rl, try gz.addUnNode(
+            else => return rvalue(gz, rl, try gz.addUnNode(
                 .optional_payload_safe,
                 try expr(gz, scope, .none, node_datas[node].lhs),
                 node,
             ), node),
         },
         .block_two, .block_two_semicolon => {
-            const statements = [2]ast.Node.Index{ node_datas[node].lhs, node_datas[node].rhs };
+            const statements = [2]Ast.Node.Index{ node_datas[node].lhs, node_datas[node].rhs };
             if (node_datas[node].lhs == 0) {
                 return blockExpr(gz, scope, rl, node, statements[0..0]);
             } else if (node_datas[node].rhs == 0) {
@@ -722,17 +818,17 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerEr
             const statements = tree.extra_data[node_datas[node].lhs..node_datas[node].rhs];
             return blockExpr(gz, scope, rl, node, statements);
         },
-        .enum_literal => return simpleStrTok(gz, scope, rl, main_tokens[node], node, .enum_literal),
-        .error_value => return simpleStrTok(gz, scope, rl, node_datas[node].rhs, node, .error_value),
-        .anyframe_literal => return rvalue(gz, scope, rl, .anyframe_type, node),
+        .enum_literal => return simpleStrTok(gz, rl, main_tokens[node], node, .enum_literal),
+        .error_value => return simpleStrTok(gz, rl, node_datas[node].rhs, node, .error_value),
+        .anyframe_literal => return rvalue(gz, rl, .anyframe_type, node),
         .anyframe_type => {
             const return_type = try typeExpr(gz, scope, node_datas[node].rhs);
             const result = try gz.addUnNode(.anyframe_type, return_type, node);
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
         .@"catch" => {
             const catch_token = main_tokens[node];
-            const payload_token: ?ast.TokenIndex = if (token_tags[catch_token + 1] == .pipe)
+            const payload_token: ?Ast.TokenIndex = if (token_tags[catch_token + 1] == .pipe)
                 catch_token + 2
             else
                 null;
@@ -743,7 +839,7 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerEr
                     rl,
                     node,
                     node_datas[node].lhs,
-                    .is_err_ptr,
+                    .is_non_err_ptr,
                     .err_union_payload_unsafe_ptr,
                     .err_union_code_ptr,
                     node_datas[node].rhs,
@@ -755,7 +851,7 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerEr
                     rl,
                     node,
                     node_datas[node].lhs,
-                    .is_err,
+                    .is_non_err,
                     .err_union_payload_unsafe,
                     .err_union_code,
                     node_datas[node].rhs,
@@ -770,7 +866,7 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerEr
                 rl,
                 node,
                 node_datas[node].lhs,
-                .is_null_ptr,
+                .is_non_null_ptr,
                 .optional_payload_unsafe_ptr,
                 undefined,
                 node_datas[node].rhs,
@@ -782,7 +878,7 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerEr
                 rl,
                 node,
                 node_datas[node].lhs,
-                .is_null,
+                .is_non_null,
                 .optional_payload_unsafe,
                 undefined,
                 node_datas[node].rhs,
@@ -799,7 +895,7 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerEr
         .container_decl_trailing,
         => return containerDecl(gz, scope, rl, node, tree.containerDecl(node)),
         .container_decl_two, .container_decl_two_trailing => {
-            var buffer: [2]ast.Node.Index = undefined;
+            var buffer: [2]Ast.Node.Index = undefined;
             return containerDecl(gz, scope, rl, node, tree.containerDeclTwo(&buffer, node));
         },
         .container_decl_arg,
@@ -810,7 +906,7 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerEr
         .tagged_union_trailing,
         => return containerDecl(gz, scope, rl, node, tree.taggedUnion(node)),
         .tagged_union_two, .tagged_union_two_trailing => {
-            var buffer: [2]ast.Node.Index = undefined;
+            var buffer: [2]Ast.Node.Index = undefined;
             return containerDecl(gz, scope, rl, node, tree.taggedUnionTwo(&buffer, node));
         },
         .tagged_union_enum_tag,
@@ -822,25 +918,25 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerEr
         .grouped_expression => return expr(gz, scope, rl, node_datas[node].lhs),
         .array_type => return arrayType(gz, scope, rl, node),
         .array_type_sentinel => return arrayTypeSentinel(gz, scope, rl, node),
-        .char_literal => return charLiteral(gz, scope, rl, node),
-        .error_set_decl => return errorSetDecl(gz, scope, rl, node),
+        .char_literal => return charLiteral(gz, rl, node),
+        .error_set_decl => return errorSetDecl(gz, rl, node),
         .array_access => return arrayAccess(gz, scope, rl, node),
         .@"comptime" => return comptimeExprAst(gz, scope, rl, node),
         .@"switch", .switch_comma => return switchExpr(gz, scope, rl, node),
 
         .@"nosuspend" => return nosuspendExpr(gz, scope, rl, node),
-        .@"suspend" => return suspendExpr(gz, scope, rl, node),
+        .@"suspend" => return suspendExpr(gz, scope, node),
         .@"await" => return awaitExpr(gz, scope, rl, node),
         .@"resume" => return resumeExpr(gz, scope, rl, node),
 
         .@"try" => return tryExpr(gz, scope, rl, node, node_datas[node].lhs),
 
         .array_init_one, .array_init_one_comma => {
-            var elements: [1]ast.Node.Index = undefined;
+            var elements: [1]Ast.Node.Index = undefined;
             return arrayInitExpr(gz, scope, rl, node, tree.arrayInitOne(&elements, node));
         },
         .array_init_dot_two, .array_init_dot_two_comma => {
-            var elements: [2]ast.Node.Index = undefined;
+            var elements: [2]Ast.Node.Index = undefined;
             return arrayInitExpr(gz, scope, rl, node, tree.arrayInitDotTwo(&elements, node));
         },
         .array_init_dot,
@@ -851,11 +947,11 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerEr
         => return arrayInitExpr(gz, scope, rl, node, tree.arrayInit(node)),
 
         .struct_init_one, .struct_init_one_comma => {
-            var fields: [1]ast.Node.Index = undefined;
+            var fields: [1]Ast.Node.Index = undefined;
             return structInitExpr(gz, scope, rl, node, tree.structInitOne(&fields, node));
         },
         .struct_init_dot_two, .struct_init_dot_two_comma => {
-            var fields: [2]ast.Node.Index = undefined;
+            var fields: [2]Ast.Node.Index = undefined;
             return structInitExpr(gz, scope, rl, node, tree.structInitDotTwo(&fields, node));
         },
         .struct_init_dot,
@@ -866,14 +962,14 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerEr
         => return structInitExpr(gz, scope, rl, node, tree.structInit(node)),
 
         .fn_proto_simple => {
-            var params: [1]ast.Node.Index = undefined;
+            var params: [1]Ast.Node.Index = undefined;
             return fnProtoExpr(gz, scope, rl, tree.fnProtoSimple(&params, node));
         },
         .fn_proto_multi => {
             return fnProtoExpr(gz, scope, rl, tree.fnProtoMulti(node));
         },
         .fn_proto_one => {
-            var params: [1]ast.Node.Index = undefined;
+            var params: [1]Ast.Node.Index = undefined;
             return fnProtoExpr(gz, scope, rl, tree.fnProtoOne(&params, node));
         },
         .fn_proto => {
@@ -886,10 +982,9 @@ fn nosuspendExpr(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
-    const gpa = astgen.gpa;
     const tree = astgen.tree;
     const node_datas = tree.nodes.items(.data);
     const body_node = node_datas[node].lhs;
@@ -902,14 +997,13 @@ fn nosuspendExpr(
     gz.nosuspend_node = node;
     const result = try expr(gz, scope, rl, body_node);
     gz.nosuspend_node = 0;
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn suspendExpr(
     gz: *GenZir,
     scope: *Scope,
-    rl: ResultLoc,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const gpa = astgen.gpa;
@@ -942,14 +1036,14 @@ fn suspendExpr(
     }
     try suspend_scope.setBlockBody(suspend_inst);
 
-    return gz.indexToRef(suspend_inst);
+    return indexToRef(suspend_inst);
 }
 
 fn awaitExpr(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const tree = astgen.tree;
@@ -964,14 +1058,14 @@ fn awaitExpr(
     const operand = try expr(gz, scope, .none, rhs_node);
     const tag: Zir.Inst.Tag = if (gz.nosuspend_node != 0) .await_nosuspend else .@"await";
     const result = try gz.addUnNode(tag, operand, node);
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn resumeExpr(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const tree = astgen.tree;
@@ -979,14 +1073,14 @@ fn resumeExpr(
     const rhs_node = node_datas[node].lhs;
     const operand = try expr(gz, scope, .none, rhs_node);
     const result = try gz.addUnNode(.@"resume", operand, node);
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn fnProtoExpr(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    fn_proto: ast.full.FnProto,
+    fn_proto: Ast.full.FnProto,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const gpa = astgen.gpa;
@@ -999,53 +1093,64 @@ fn fnProtoExpr(
     };
     assert(!is_extern);
 
-    // The AST params array does not contain anytype and ... parameters.
-    // We must iterate to count how many param types to allocate.
-    const param_count = blk: {
-        var count: usize = 0;
-        var it = fn_proto.iterate(tree.*);
-        while (it.next()) |param| {
-            if (param.anytype_ellipsis3) |token| switch (token_tags[token]) {
-                .ellipsis3 => break,
-                .keyword_anytype => {},
-                else => unreachable,
-            };
-            count += 1;
-        }
-        break :blk count;
-    };
-    const param_types = try gpa.alloc(Zir.Inst.Ref, param_count);
-    defer gpa.free(param_types);
-
-    var is_var_args = false;
-    {
+    const is_var_args = is_var_args: {
         var param_type_i: usize = 0;
         var it = fn_proto.iterate(tree.*);
         while (it.next()) |param| : (param_type_i += 1) {
-            if (param.anytype_ellipsis3) |token| {
+            const is_comptime = if (param.comptime_noalias) |token|
+                token_tags[token] == .keyword_comptime
+            else
+                false;
+
+            const is_anytype = if (param.anytype_ellipsis3) |token| blk: {
                 switch (token_tags[token]) {
-                    .keyword_anytype => {
-                        param_types[param_type_i] = .none;
-                        continue;
-                    },
-                    .ellipsis3 => {
-                        is_var_args = true;
-                        break;
-                    },
+                    .keyword_anytype => break :blk true,
+                    .ellipsis3 => break :is_var_args true,
                     else => unreachable,
                 }
+            } else false;
+
+            const param_name: u32 = if (param.name_token) |name_token| blk: {
+                if (mem.eql(u8, "_", tree.tokenSlice(name_token)))
+                    break :blk 0;
+
+                break :blk try astgen.identAsString(name_token);
+            } else 0;
+
+            if (is_anytype) {
+                const name_token = param.name_token orelse param.anytype_ellipsis3.?;
+
+                const tag: Zir.Inst.Tag = if (is_comptime)
+                    .param_anytype_comptime
+                else
+                    .param_anytype;
+                _ = try gz.addStrTok(tag, param_name, name_token);
+            } else {
+                const param_type_node = param.type_expr;
+                assert(param_type_node != 0);
+                var param_gz = gz.makeSubBlock(scope);
+                defer param_gz.instructions.deinit(gpa);
+                const param_type = try expr(&param_gz, scope, coerced_type_rl, param_type_node);
+                const param_inst_expected = @intCast(u32, astgen.instructions.len + 1);
+                _ = try param_gz.addBreak(.break_inline, param_inst_expected, param_type);
+                const main_tokens = tree.nodes.items(.main_token);
+                const name_token = param.name_token orelse main_tokens[param_type_node];
+                const tag: Zir.Inst.Tag = if (is_comptime) .param_comptime else .param;
+                const param_inst = try gz.addParam(tag, name_token, param_name, param_gz.instructions.items);
+                assert(param_inst_expected == param_inst);
             }
-            const param_type_node = param.type_expr;
-            assert(param_type_node != 0);
-            param_types[param_type_i] =
-                try expr(gz, scope, .{ .ty = .type_type }, param_type_node);
         }
-        assert(param_type_i == param_count);
-    }
+        break :is_var_args false;
+    };
 
     const align_inst: Zir.Inst.Ref = if (fn_proto.ast.align_expr == 0) .none else inst: {
         break :inst try expr(gz, scope, align_rl, fn_proto.ast.align_expr);
     };
+
+    if (fn_proto.ast.addrspace_expr != 0) {
+        return astgen.failNode(fn_proto.ast.addrspace_expr, "addrspace not allowed on function prototypes", .{});
+    }
+
     if (fn_proto.ast.section_expr != 0) {
         return astgen.failNode(fn_proto.ast.section_expr, "linksection not allowed on function prototypes", .{});
     }
@@ -1055,15 +1160,13 @@ fn fnProtoExpr(
     if (is_inferred_error) {
         return astgen.failTok(maybe_bang, "function prototype may not have inferred error set", .{});
     }
-    const return_type_inst = try AstGen.expr(
-        gz,
-        scope,
-        .{ .ty = .type_type },
-        fn_proto.ast.return_type,
-    );
+    var ret_gz = gz.makeSubBlock(scope);
+    defer ret_gz.instructions.deinit(gpa);
+    const ret_ty = try expr(&ret_gz, scope, coerced_type_rl, fn_proto.ast.return_type);
+    const ret_br = try ret_gz.addBreak(.break_inline, 0, ret_ty);
 
     const cc: Zir.Inst.Ref = if (fn_proto.ast.callconv_expr != 0)
-        try AstGen.expr(
+        try expr(
             gz,
             scope,
             .{ .ty = .calling_convention_type },
@@ -1074,8 +1177,9 @@ fn fnProtoExpr(
 
     const result = try gz.addFunc(.{
         .src_node = fn_proto.ast.proto_node,
-        .ret_ty = return_type_inst,
-        .param_types = param_types,
+        .param_block = 0,
+        .ret_ty = ret_gz.instructions.items,
+        .ret_br = ret_br,
         .body = &[0]Zir.Inst.Index{},
         .cc = cc,
         .align_inst = align_inst,
@@ -1085,19 +1189,18 @@ fn fnProtoExpr(
         .is_test = false,
         .is_extern = false,
     });
-    return rvalue(gz, scope, rl, result, fn_proto.ast.proto_node);
+    return rvalue(gz, rl, result, fn_proto.ast.proto_node);
 }
 
 fn arrayInitExpr(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    array_init: ast.full.ArrayInit,
+    node: Ast.Node.Index,
+    array_init: Ast.full.ArrayInit,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const tree = astgen.tree;
-    const gpa = astgen.gpa;
     const node_tags = tree.nodes.items(.tag);
     const main_tokens = tree.nodes.items(.main_token);
 
@@ -1113,7 +1216,7 @@ fn arrayInitExpr(
         };
 
         infer: {
-            const array_type: ast.full.ArrayType = switch (node_tags[array_init.ast.type_expr]) {
+            const array_type: Ast.full.ArrayType = switch (node_tags[array_init.ast.type_expr]) {
                 .array_type => tree.arrayType(array_init.ast.type_expr),
                 .array_type_sentinel => tree.arrayTypeSentinel(array_init.ast.type_expr),
                 else => break :infer,
@@ -1157,32 +1260,32 @@ fn arrayInitExpr(
         },
         .ref => {
             if (types.array != .none) {
-                return arrayInitExprRlTy(gz, scope, rl, node, array_init.ast.elements, types.array, types.elem, .array_init_ref);
+                return arrayInitExprRlTy(gz, scope, node, array_init.ast.elements, types.elem, .array_init_ref);
             } else {
-                return arrayInitExprRlNone(gz, scope, rl, node, array_init.ast.elements, .array_init_anon_ref);
+                return arrayInitExprRlNone(gz, scope, node, array_init.ast.elements, .array_init_anon_ref);
             }
         },
         .none, .none_or_ref => {
             if (types.array != .none) {
-                return arrayInitExprRlTy(gz, scope, rl, node, array_init.ast.elements, types.array, types.elem, .array_init);
+                return arrayInitExprRlTy(gz, scope, node, array_init.ast.elements, types.elem, .array_init);
             } else {
-                return arrayInitExprRlNone(gz, scope, rl, node, array_init.ast.elements, .array_init_anon);
+                return arrayInitExprRlNone(gz, scope, node, array_init.ast.elements, .array_init_anon);
             }
         },
-        .ty => |ty_inst| {
+        .ty, .coerced_ty => |ty_inst| {
             if (types.array != .none) {
-                const result = try arrayInitExprRlTy(gz, scope, rl, node, array_init.ast.elements, types.array, types.elem, .array_init);
-                return rvalue(gz, scope, rl, result, node);
+                const result = try arrayInitExprRlTy(gz, scope, node, array_init.ast.elements, types.elem, .array_init);
+                return rvalue(gz, rl, result, node);
             } else {
                 const elem_type = try gz.addUnNode(.elem_type, ty_inst, node);
-                return arrayInitExprRlTy(gz, scope, rl, node, array_init.ast.elements, ty_inst, elem_type, .array_init);
+                return arrayInitExprRlTy(gz, scope, node, array_init.ast.elements, elem_type, .array_init);
             }
         },
         .ptr, .inferred_ptr => |ptr_inst| {
-            return arrayInitExprRlPtr(gz, scope, rl, node, array_init.ast.elements, ptr_inst);
+            return arrayInitExprRlPtr(gz, scope, node, array_init.ast.elements, ptr_inst);
         },
         .block_ptr => |block_gz| {
-            return arrayInitExprRlPtr(gz, scope, rl, node, array_init.ast.elements, block_gz.rl_ptr);
+            return arrayInitExprRlPtr(gz, scope, node, array_init.ast.elements, block_gz.rl_ptr);
         },
     }
 }
@@ -1190,9 +1293,8 @@ fn arrayInitExpr(
 fn arrayInitExprRlNone(
     gz: *GenZir,
     scope: *Scope,
-    rl: ResultLoc,
-    node: ast.Node.Index,
-    elements: []const ast.Node.Index,
+    node: Ast.Node.Index,
+    elements: []const Ast.Node.Index,
     tag: Zir.Inst.Tag,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
@@ -1213,10 +1315,8 @@ fn arrayInitExprRlNone(
 fn arrayInitExprRlTy(
     gz: *GenZir,
     scope: *Scope,
-    rl: ResultLoc,
-    node: ast.Node.Index,
-    elements: []const ast.Node.Index,
-    array_ty_inst: Zir.Inst.Ref,
+    node: Ast.Node.Index,
+    elements: []const Ast.Node.Index,
     elem_ty_inst: Zir.Inst.Ref,
     tag: Zir.Inst.Tag,
 ) InnerError!Zir.Inst.Ref {
@@ -1241,9 +1341,8 @@ fn arrayInitExprRlTy(
 fn arrayInitExprRlPtr(
     gz: *GenZir,
     scope: *Scope,
-    rl: ResultLoc,
-    node: ast.Node.Index,
-    elements: []const ast.Node.Index,
+    node: Ast.Node.Index,
+    elements: []const Ast.Node.Index,
     result_ptr: Zir.Inst.Ref,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
@@ -1258,7 +1357,7 @@ fn arrayInitExprRlPtr(
             .lhs = result_ptr,
             .rhs = index_inst,
         });
-        elem_ptr_list[i] = gz.refToIndex(elem_ptr).?;
+        elem_ptr_list[i] = refToIndex(elem_ptr).?;
         _ = try expr(gz, scope, .{ .ptr = elem_ptr }, elem_init);
     }
     _ = try gz.addPlNode(.validate_array_init_ptr, node, Zir.Inst.Block{
@@ -1272,29 +1371,36 @@ fn structInitExpr(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    struct_init: ast.full.StructInit,
+    node: Ast.Node.Index,
+    struct_init: Ast.full.StructInit,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const tree = astgen.tree;
-    const gpa = astgen.gpa;
 
-    if (struct_init.ast.fields.len == 0) {
-        if (struct_init.ast.type_expr == 0) {
-            return rvalue(gz, scope, rl, .empty_struct, node);
+    if (struct_init.ast.type_expr == 0) {
+        if (struct_init.ast.fields.len == 0) {
+            return rvalue(gz, rl, .empty_struct, node);
         }
-        array: {
-            const node_tags = tree.nodes.items(.tag);
-            const main_tokens = tree.nodes.items(.main_token);
-            const array_type: ast.full.ArrayType = switch (node_tags[struct_init.ast.type_expr]) {
-                .array_type => tree.arrayType(struct_init.ast.type_expr),
-                .array_type_sentinel => tree.arrayTypeSentinel(struct_init.ast.type_expr),
-                else => break :array,
-            };
+    } else array: {
+        const node_tags = tree.nodes.items(.tag);
+        const main_tokens = tree.nodes.items(.main_token);
+        const array_type: Ast.full.ArrayType = switch (node_tags[struct_init.ast.type_expr]) {
+            .array_type => tree.arrayType(struct_init.ast.type_expr),
+            .array_type_sentinel => tree.arrayTypeSentinel(struct_init.ast.type_expr),
+            else => {
+                if (struct_init.ast.fields.len == 0) {
+                    const ty_inst = try typeExpr(gz, scope, struct_init.ast.type_expr);
+                    const result = try gz.addUnNode(.struct_init_empty, ty_inst, node);
+                    return rvalue(gz, rl, result, node);
+                }
+                break :array;
+            },
+        };
+        const is_inferred_array_len = node_tags[array_type.ast.elem_count] == .identifier and
             // This intentionally does not support `@"_"` syntax.
-            if (node_tags[array_type.ast.elem_count] == .identifier and
-                mem.eql(u8, tree.tokenSlice(main_tokens[array_type.ast.elem_count]), "_"))
-            {
+            mem.eql(u8, tree.tokenSlice(main_tokens[array_type.ast.elem_count]), "_");
+        if (struct_init.ast.fields.len == 0) {
+            if (is_inferred_array_len) {
                 const elem_type = try typeExpr(gz, scope, array_type.ast.elem_type);
                 const array_type_inst = if (array_type.ast.sentinel == 0) blk: {
                     break :blk try gz.addBin(.array_type, .zero_usize, elem_type);
@@ -1303,15 +1409,24 @@ fn structInitExpr(
                     break :blk try gz.addArrayTypeSentinel(.zero_usize, elem_type, sentinel);
                 };
                 const result = try gz.addUnNode(.struct_init_empty, array_type_inst, node);
-                return rvalue(gz, scope, rl, result, node);
+                return rvalue(gz, rl, result, node);
             }
+            const ty_inst = try typeExpr(gz, scope, struct_init.ast.type_expr);
+            const result = try gz.addUnNode(.struct_init_empty, ty_inst, node);
+            return rvalue(gz, rl, result, node);
+        } else {
+            return astgen.failNode(
+                struct_init.ast.type_expr,
+                "initializing array with struct syntax",
+                .{},
+            );
         }
-        const ty_inst = try typeExpr(gz, scope, struct_init.ast.type_expr);
-        const result = try gz.addUnNode(.struct_init_empty, ty_inst, node);
-        return rvalue(gz, scope, rl, result, node);
     }
+
     switch (rl) {
         .discard => {
+            if (struct_init.ast.type_expr != 0)
+                _ = try typeExpr(gz, scope, struct_init.ast.type_expr);
             for (struct_init.ast.fields) |field_init| {
                 _ = try expr(gz, scope, .discard, field_init);
             }
@@ -1320,26 +1435,26 @@ fn structInitExpr(
         .ref => {
             if (struct_init.ast.type_expr != 0) {
                 const ty_inst = try typeExpr(gz, scope, struct_init.ast.type_expr);
-                return structInitExprRlTy(gz, scope, rl, node, struct_init, ty_inst, .struct_init_ref);
+                return structInitExprRlTy(gz, scope, node, struct_init, ty_inst, .struct_init_ref);
             } else {
-                return structInitExprRlNone(gz, scope, rl, node, struct_init, .struct_init_anon_ref);
+                return structInitExprRlNone(gz, scope, node, struct_init, .struct_init_anon_ref);
             }
         },
         .none, .none_or_ref => {
             if (struct_init.ast.type_expr != 0) {
                 const ty_inst = try typeExpr(gz, scope, struct_init.ast.type_expr);
-                return structInitExprRlTy(gz, scope, rl, node, struct_init, ty_inst, .struct_init);
+                return structInitExprRlTy(gz, scope, node, struct_init, ty_inst, .struct_init);
             } else {
-                return structInitExprRlNone(gz, scope, rl, node, struct_init, .struct_init_anon);
+                return structInitExprRlNone(gz, scope, node, struct_init, .struct_init_anon);
             }
         },
-        .ty => |ty_inst| {
+        .ty, .coerced_ty => |ty_inst| {
             if (struct_init.ast.type_expr == 0) {
-                return structInitExprRlTy(gz, scope, rl, node, struct_init, ty_inst, .struct_init);
+                return structInitExprRlTy(gz, scope, node, struct_init, ty_inst, .struct_init);
             }
             const inner_ty_inst = try typeExpr(gz, scope, struct_init.ast.type_expr);
-            const result = try structInitExprRlTy(gz, scope, rl, node, struct_init, inner_ty_inst, .struct_init);
-            return rvalue(gz, scope, rl, result, node);
+            const result = try structInitExprRlTy(gz, scope, node, struct_init, inner_ty_inst, .struct_init);
+            return rvalue(gz, rl, result, node);
         },
         .ptr, .inferred_ptr => |ptr_inst| return structInitExprRlPtr(gz, scope, rl, node, struct_init, ptr_inst),
         .block_ptr => |block_gz| return structInitExprRlPtr(gz, scope, rl, node, struct_init, block_gz.rl_ptr),
@@ -1349,9 +1464,8 @@ fn structInitExpr(
 fn structInitExprRlNone(
     gz: *GenZir,
     scope: *Scope,
-    rl: ResultLoc,
-    node: ast.Node.Index,
-    struct_init: ast.full.StructInit,
+    node: Ast.Node.Index,
+    struct_init: Ast.full.StructInit,
     tag: Zir.Inst.Tag,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
@@ -1373,8 +1487,8 @@ fn structInitExprRlNone(
     const init_inst = try gz.addPlNode(tag, node, Zir.Inst.StructInitAnon{
         .fields_len = @intCast(u32, fields_list.len),
     });
-    try astgen.extra.ensureCapacity(gpa, astgen.extra.items.len +
-        fields_list.len * @typeInfo(Zir.Inst.StructInitAnon.Item).Struct.fields.len);
+    try astgen.extra.ensureUnusedCapacity(gpa, fields_list.len *
+        @typeInfo(Zir.Inst.StructInitAnon.Item).Struct.fields.len);
     for (fields_list) |field| {
         _ = gz.astgen.addExtraAssumeCapacity(field);
     }
@@ -1385,8 +1499,27 @@ fn structInitExprRlPtr(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    struct_init: ast.full.StructInit,
+    node: Ast.Node.Index,
+    struct_init: Ast.full.StructInit,
+    result_ptr: Zir.Inst.Ref,
+) InnerError!Zir.Inst.Ref {
+    if (struct_init.ast.type_expr == 0) {
+        return structInitExprRlPtrInner(gz, scope, node, struct_init, result_ptr);
+    }
+    const ty_inst = try typeExpr(gz, scope, struct_init.ast.type_expr);
+
+    var as_scope = try gz.makeCoercionScope(scope, ty_inst, result_ptr);
+    defer as_scope.instructions.deinit(gz.astgen.gpa);
+
+    const result = try structInitExprRlPtrInner(&as_scope, scope, node, struct_init, as_scope.rl_ptr);
+    return as_scope.finishCoercion(gz, rl, node, result, ty_inst);
+}
+
+fn structInitExprRlPtrInner(
+    gz: *GenZir,
+    scope: *Scope,
+    node: Ast.Node.Index,
+    struct_init: Ast.full.StructInit,
     result_ptr: Zir.Inst.Ref,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
@@ -1403,22 +1536,21 @@ fn structInitExprRlPtr(
             .lhs = result_ptr,
             .field_name_start = str_index,
         });
-        field_ptr_list[i] = gz.refToIndex(field_ptr).?;
+        field_ptr_list[i] = refToIndex(field_ptr).?;
         _ = try expr(gz, scope, .{ .ptr = field_ptr }, field_init);
     }
     _ = try gz.addPlNode(.validate_struct_init_ptr, node, Zir.Inst.Block{
         .body_len = @intCast(u32, field_ptr_list.len),
     });
     try astgen.extra.appendSlice(gpa, field_ptr_list);
-    return .void_value;
+    return Zir.Inst.Ref.void_value;
 }
 
 fn structInitExprRlTy(
     gz: *GenZir,
     scope: *Scope,
-    rl: ResultLoc,
-    node: ast.Node.Index,
-    struct_init: ast.full.StructInit,
+    node: Ast.Node.Index,
+    struct_init: Ast.full.StructInit,
     ty_inst: Zir.Inst.Ref,
     tag: Zir.Inst.Tag,
 ) InnerError!Zir.Inst.Ref {
@@ -1438,15 +1570,15 @@ fn structInitExprRlTy(
             .name_start = str_index,
         });
         fields_list[i] = .{
-            .field_type = gz.refToIndex(field_ty_inst).?,
+            .field_type = refToIndex(field_ty_inst).?,
             .init = try expr(gz, scope, .{ .ty = field_ty_inst }, field_init),
         };
     }
     const init_inst = try gz.addPlNode(tag, node, Zir.Inst.StructInit{
         .fields_len = @intCast(u32, fields_list.len),
     });
-    try astgen.extra.ensureCapacity(gpa, astgen.extra.items.len +
-        fields_list.len * @typeInfo(Zir.Inst.StructInit.Item).Struct.fields.len);
+    try astgen.extra.ensureUnusedCapacity(gpa, fields_list.len *
+        @typeInfo(Zir.Inst.StructInit.Item).Struct.fields.len);
     for (fields_list) |field| {
         _ = gz.astgen.addExtraAssumeCapacity(field);
     }
@@ -1459,7 +1591,7 @@ fn comptimeExpr(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     const prev_force_comptime = gz.force_comptime;
     gz.force_comptime = true;
@@ -1475,7 +1607,7 @@ fn comptimeExprAst(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     if (gz.force_comptime) {
@@ -1490,7 +1622,7 @@ fn comptimeExprAst(
     return result;
 }
 
-fn breakExpr(parent_gz: *GenZir, parent_scope: *Scope, node: ast.Node.Index) InnerError!Zir.Inst.Ref {
+fn breakExpr(parent_gz: *GenZir, parent_scope: *Scope, node: Ast.Node.Index) InnerError!Zir.Inst.Ref {
     const astgen = parent_gz.astgen;
     const tree = astgen.tree;
     const node_datas = tree.nodes.items(.data);
@@ -1551,7 +1683,7 @@ fn breakExpr(parent_gz: *GenZir, parent_scope: *Scope, node: ast.Node.Index) Inn
                 const defer_scope = scope.cast(Scope.Defer).?;
                 scope = defer_scope.parent;
                 const expr_node = node_datas[defer_scope.defer_node].rhs;
-                try unusedResultExpr(parent_gz, defer_scope.parent, expr_node);
+                _ = try unusedResultExpr(parent_gz, defer_scope.parent, expr_node);
             },
             .defer_error => scope = scope.cast(Scope.Defer).?.parent,
             .top => unreachable,
@@ -1565,7 +1697,7 @@ fn breakExpr(parent_gz: *GenZir, parent_scope: *Scope, node: ast.Node.Index) Inn
     }
 }
 
-fn continueExpr(parent_gz: *GenZir, parent_scope: *Scope, node: ast.Node.Index) InnerError!Zir.Inst.Ref {
+fn continueExpr(parent_gz: *GenZir, parent_scope: *Scope, node: Ast.Node.Index) InnerError!Zir.Inst.Ref {
     const astgen = parent_gz.astgen;
     const tree = astgen.tree;
     const node_datas = tree.nodes.items(.data);
@@ -1604,7 +1736,7 @@ fn continueExpr(parent_gz: *GenZir, parent_scope: *Scope, node: ast.Node.Index) 
                 const defer_scope = scope.cast(Scope.Defer).?;
                 scope = defer_scope.parent;
                 const expr_node = node_datas[defer_scope.defer_node].rhs;
-                try unusedResultExpr(parent_gz, defer_scope.parent, expr_node);
+                _ = try unusedResultExpr(parent_gz, defer_scope.parent, expr_node);
             },
             .defer_error => scope = scope.cast(Scope.Defer).?.parent,
             .namespace => break,
@@ -1623,8 +1755,8 @@ fn blockExpr(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    block_node: ast.Node.Index,
-    statements: []const ast.Node.Index,
+    block_node: Ast.Node.Index,
+    statements: []const Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     const tracy = trace(@src());
     defer tracy.end();
@@ -1641,11 +1773,11 @@ fn blockExpr(
         return labeledBlockExpr(gz, scope, rl, block_node, statements, .block);
     }
 
-    try blockExprStmts(gz, scope, block_node, statements);
-    return rvalue(gz, scope, rl, .void_value, block_node);
+    try blockExprStmts(gz, scope, statements);
+    return rvalue(gz, rl, .void_value, block_node);
 }
 
-fn checkLabelRedefinition(astgen: *AstGen, parent_scope: *Scope, label: ast.TokenIndex) !void {
+fn checkLabelRedefinition(astgen: *AstGen, parent_scope: *Scope, label: Ast.TokenIndex) !void {
     // Look for the label in the scope.
     var scope = parent_scope;
     while (true) {
@@ -1654,16 +1786,13 @@ fn checkLabelRedefinition(astgen: *AstGen, parent_scope: *Scope, label: ast.Toke
                 const gen_zir = scope.cast(GenZir).?;
                 if (gen_zir.label) |prev_label| {
                     if (try astgen.tokenIdentEql(label, prev_label.token)) {
-                        const tree = astgen.tree;
-                        const main_tokens = tree.nodes.items(.main_token);
-
                         const label_name = try astgen.identifierTokenString(label);
                         return astgen.failTokNotes(label, "redefinition of label '{s}'", .{
                             label_name,
                         }, &[_]u32{
                             try astgen.errNoteTok(
                                 prev_label.token,
-                                "previous definition is here",
+                                "previous definition here",
                                 .{},
                             ),
                         });
@@ -1684,8 +1813,8 @@ fn labeledBlockExpr(
     gz: *GenZir,
     parent_scope: *Scope,
     rl: ResultLoc,
-    block_node: ast.Node.Index,
-    statements: []const ast.Node.Index,
+    block_node: Ast.Node.Index,
+    statements: []const Ast.Node.Index,
     zir_tag: Zir.Inst.Tag,
 ) InnerError!Zir.Inst.Ref {
     const tracy = trace(@src());
@@ -1719,7 +1848,7 @@ fn labeledBlockExpr(
     defer block_scope.labeled_breaks.deinit(astgen.gpa);
     defer block_scope.labeled_store_to_block_ptr_list.deinit(astgen.gpa);
 
-    try blockExprStmts(&block_scope, &block_scope.base, block_node, statements);
+    try blockExprStmts(&block_scope, &block_scope.base, statements);
 
     if (!block_scope.label.?.used) {
         return astgen.failTok(label_token, "unused block label", .{});
@@ -1738,7 +1867,7 @@ fn labeledBlockExpr(
             }
             try block_scope.setBlockBody(block_inst);
 
-            return gz.indexToRef(block_inst);
+            return indexToRef(block_inst);
         },
         .break_operand => {
             // All break operands are values that did not use the result location pointer.
@@ -1752,31 +1881,40 @@ fn labeledBlockExpr(
             } else {
                 try block_scope.setBlockBody(block_inst);
             }
-            const block_ref = gz.indexToRef(block_inst);
+            const block_ref = indexToRef(block_inst);
             switch (rl) {
                 .ref => return block_ref,
-                else => return rvalue(gz, parent_scope, rl, block_ref, block_node),
+                else => return rvalue(gz, rl, block_ref, block_node),
             }
         },
     }
 }
 
-fn blockExprStmts(
-    gz: *GenZir,
-    parent_scope: *Scope,
-    node: ast.Node.Index,
-    statements: []const ast.Node.Index,
-) !void {
+fn blockExprStmts(gz: *GenZir, parent_scope: *Scope, statements: []const Ast.Node.Index) !void {
     const astgen = gz.astgen;
     const tree = astgen.tree;
-    const main_tokens = tree.nodes.items(.main_token);
     const node_tags = tree.nodes.items(.tag);
 
     var block_arena = std.heap.ArenaAllocator.init(gz.astgen.gpa);
     defer block_arena.deinit();
 
+    var noreturn_src_node: Ast.Node.Index = 0;
     var scope = parent_scope;
     for (statements) |statement| {
+        if (noreturn_src_node != 0) {
+            return astgen.failNodeNotes(
+                statement,
+                "unreachable code",
+                .{},
+                &[_]u32{
+                    try astgen.errNoteNode(
+                        noreturn_src_node,
+                        "control flow is diverted here",
+                        .{},
+                    ),
+                },
+            );
+        }
         switch (node_tags[statement]) {
             // zig fmt: off
             .global_var_decl  => scope = try varDecl(gz, scope, statement, &block_arena.allocator, tree.globalVarDecl(statement)),
@@ -1784,13 +1922,13 @@ fn blockExprStmts(
             .simple_var_decl  => scope = try varDecl(gz, scope, statement, &block_arena.allocator, tree.simpleVarDecl(statement)),
             .aligned_var_decl => scope = try varDecl(gz, scope, statement, &block_arena.allocator, tree.alignedVarDecl(statement)),
 
-            .@"defer"    => scope = try deferStmt(gz, scope, statement, &block_arena.allocator, .defer_normal),
-            .@"errdefer" => scope = try deferStmt(gz, scope, statement, &block_arena.allocator, .defer_error),
+            .@"defer"    => scope = try makeDeferScope(scope, statement, &block_arena.allocator, .defer_normal),
+            .@"errdefer" => scope = try makeDeferScope(scope, statement, &block_arena.allocator, .defer_error),
 
             .assign => try assign(gz, scope, statement),
 
-            .assign_bit_shift_left  => try assignShift(gz, scope, statement, .shl),
-            .assign_bit_shift_right => try assignShift(gz, scope, statement, .shr),
+            .assign_shl => try assignShift(gz, scope, statement, .shl),
+            .assign_shr => try assignShift(gz, scope, statement, .shr),
 
             .assign_bit_and  => try assignOp(gz, scope, statement, .bit_and),
             .assign_bit_or   => try assignOp(gz, scope, statement, .bit_or),
@@ -1804,36 +1942,47 @@ fn blockExprStmts(
             .assign_mul      => try assignOp(gz, scope, statement, .mul),
             .assign_mul_wrap => try assignOp(gz, scope, statement, .mulwrap),
 
-            else => try unusedResultExpr(gz, scope, statement),
+            else => noreturn_src_node = try unusedResultExpr(gz, scope, statement),
             // zig fmt: on
         }
     }
 
-    try genDefers(gz, parent_scope, scope, .none);
+    try genDefers(gz, parent_scope, scope, .normal_only);
+    try checkUsed(gz, parent_scope, scope);
 }
 
-fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: ast.Node.Index) InnerError!void {
+/// Returns AST source node of the thing that is noreturn if the statement is definitely `noreturn`.
+/// Otherwise returns 0.
+fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: Ast.Node.Index) InnerError!Ast.Node.Index {
     try emitDbgNode(gz, statement);
     // We need to emit an error if the result is not `noreturn` or `void`, but
     // we want to avoid adding the ZIR instruction if possible for performance.
     const maybe_unused_result = try expr(gz, scope, .none, statement);
-    const elide_check = if (gz.refToIndex(maybe_unused_result)) |inst| b: {
+    var noreturn_src_node: Ast.Node.Index = 0;
+    const elide_check = if (refToIndex(maybe_unused_result)) |inst| b: {
         // Note that this array becomes invalid after appending more items to it
         // in the above while loop.
         const zir_tags = gz.astgen.instructions.items(.tag);
         switch (zir_tags[inst]) {
-            // For some instructions, swap in a slightly different ZIR tag
+            // For some instructions, modify the zir data
             // so we can avoid a separate ensure_result_used instruction.
-            .call_chkused => unreachable,
             .call => {
-                zir_tags[inst] = .call_chkused;
+                const extra_index = gz.astgen.instructions.items(.data)[inst].pl_node.payload_index;
+                const slot = &gz.astgen.extra.items[extra_index];
+                var flags = @bitCast(Zir.Inst.Call.Flags, slot.*);
+                flags.ensure_result_used = true;
+                slot.* = @bitCast(u32, flags);
                 break :b true;
             },
 
             // ZIR instructions that might be a type other than `noreturn` or `void`.
             .add,
             .addwrap,
-            .arg,
+            .add_sat,
+            .param,
+            .param_comptime,
+            .param_anytype,
+            .param_anytype_comptime,
             .alloc,
             .alloc_mut,
             .alloc_comptime,
@@ -1861,11 +2010,6 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: ast.Node.Index) Inner
             .bool_br_and,
             .bool_br_or,
             .bool_not,
-            .bool_and,
-            .bool_or,
-            .call_compile_time,
-            .call_nosuspend,
-            .call_async,
             .cmp_lt,
             .cmp_lte,
             .cmp_eq,
@@ -1883,8 +2027,10 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: ast.Node.Index) Inner
             .elem_val_node,
             .field_ptr,
             .field_val,
+            .field_call_bind,
             .field_ptr_named,
             .field_val_named,
+            .field_call_bind_named,
             .func,
             .func_inferred,
             .int,
@@ -1893,21 +2039,21 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: ast.Node.Index) Inner
             .float128,
             .int_type,
             .is_non_null,
-            .is_null,
             .is_non_null_ptr,
-            .is_null_ptr,
-            .is_err,
-            .is_err_ptr,
+            .is_non_err,
+            .is_non_err_ptr,
             .mod_rem,
             .mul,
             .mulwrap,
-            .param_type,
+            .mul_sat,
             .ref,
             .shl,
+            .shl_sat,
             .shr,
             .str,
             .sub,
             .subwrap,
+            .sub_sat,
             .negate,
             .negate_wrap,
             .typeof,
@@ -1967,9 +2113,6 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: ast.Node.Index) Inner
             .union_init_ptr,
             .field_type,
             .field_type_ref,
-            .opaque_decl,
-            .opaque_decl_anon,
-            .opaque_decl_func,
             .error_set_decl,
             .error_set_decl_anon,
             .error_set_decl_func,
@@ -2027,81 +2170,151 @@ fn unusedResultExpr(gz: *GenZir, scope: *Scope, statement: ast.Node.Index) Inner
             .shl_exact,
             .shr_exact,
             .bit_offset_of,
-            .byte_offset_of,
+            .offset_of,
             .cmpxchg_strong,
             .cmpxchg_weak,
             .splat,
             .reduce,
             .shuffle,
+            .select,
             .atomic_load,
             .atomic_rmw,
-            .atomic_store,
             .mul_add,
             .builtin_call,
             .field_ptr_type,
             .field_parent_ptr,
-            .memcpy,
-            .memset,
+            .maximum,
+            .minimum,
             .builtin_async_call,
             .c_import,
             .@"resume",
             .@"await",
             .await_nosuspend,
+            .ret_err_value_code,
             .extended,
+            .closure_get,
             => break :b false,
 
-            // ZIR instructions that are always either `noreturn` or `void`.
-            .breakpoint,
-            .fence,
-            .dbg_stmt,
-            .ensure_result_used,
-            .ensure_result_non_error,
-            .@"export",
-            .set_eval_branch_quota,
-            .ensure_err_payload_void,
+            // ZIR instructions that are always `noreturn`.
             .@"break",
             .break_inline,
             .condbr,
             .condbr_inline,
             .compile_error,
             .ret_node,
+            .ret_load,
             .ret_coerce,
+            .ret_err_value,
             .@"unreachable",
+            .repeat,
+            .repeat_inline,
+            .panic,
+            => {
+                noreturn_src_node = statement;
+                break :b true;
+            },
+
+            // ZIR instructions that are always `void`.
+            .breakpoint,
+            .fence,
+            .dbg_stmt,
+            .ensure_result_used,
+            .ensure_result_non_error,
+            .@"export",
+            .export_value,
+            .set_eval_branch_quota,
+            .ensure_err_payload_void,
+            .atomic_store,
             .store,
             .store_node,
             .store_to_block_ptr,
             .store_to_inferred_ptr,
             .resolve_inferred_alloc,
-            .repeat,
-            .repeat_inline,
             .validate_struct_init_ptr,
             .validate_array_init_ptr,
-            .panic,
             .set_align_stack,
             .set_cold,
             .set_float_mode,
             .set_runtime_safety,
+            .closure_capture,
+            .memcpy,
+            .memset,
             => break :b true,
         }
     } else switch (maybe_unused_result) {
         .none => unreachable,
 
-        .void_value,
-        .unreachable_value,
-        => true,
+        .unreachable_value => b: {
+            noreturn_src_node = statement;
+            break :b true;
+        },
+
+        .void_value => true,
 
         else => false,
     };
     if (!elide_check) {
         _ = try gz.addUnNode(.ensure_result_used, maybe_unused_result, statement);
     }
+    return noreturn_src_node;
 }
+
+fn countDefers(astgen: *AstGen, outer_scope: *Scope, inner_scope: *Scope) struct {
+    have_any: bool,
+    have_normal: bool,
+    have_err: bool,
+    need_err_code: bool,
+} {
+    const tree = astgen.tree;
+    const node_datas = tree.nodes.items(.data);
+
+    var have_normal = false;
+    var have_err = false;
+    var need_err_code = false;
+    var scope = inner_scope;
+    while (scope != outer_scope) {
+        switch (scope.tag) {
+            .gen_zir => scope = scope.cast(GenZir).?.parent,
+            .local_val => scope = scope.cast(Scope.LocalVal).?.parent,
+            .local_ptr => scope = scope.cast(Scope.LocalPtr).?.parent,
+            .defer_normal => {
+                const defer_scope = scope.cast(Scope.Defer).?;
+                scope = defer_scope.parent;
+
+                have_normal = true;
+            },
+            .defer_error => {
+                const defer_scope = scope.cast(Scope.Defer).?;
+                scope = defer_scope.parent;
+
+                have_err = true;
+
+                const have_err_payload = node_datas[defer_scope.defer_node].lhs != 0;
+                need_err_code = need_err_code or have_err_payload;
+            },
+            .namespace => unreachable,
+            .top => unreachable,
+        }
+    }
+    return .{
+        .have_any = have_normal or have_err,
+        .have_normal = have_normal,
+        .have_err = have_err,
+        .need_err_code = need_err_code,
+    };
+}
+
+const DefersToEmit = union(enum) {
+    both: Zir.Inst.Ref, // err code
+    both_sans_err,
+    normal_only,
+};
 
 fn genDefers(
     gz: *GenZir,
     outer_scope: *Scope,
     inner_scope: *Scope,
-    err_code: Zir.Inst.Ref,
+    which_ones: DefersToEmit,
 ) InnerError!void {
     const astgen = gz.astgen;
     const tree = astgen.tree;
@@ -2120,17 +2333,42 @@ fn genDefers(
                 const prev_in_defer = gz.in_defer;
                 gz.in_defer = true;
                 defer gz.in_defer = prev_in_defer;
-                try unusedResultExpr(gz, defer_scope.parent, expr_node);
+                _ = try unusedResultExpr(gz, defer_scope.parent, expr_node);
             },
             .defer_error => {
                 const defer_scope = scope.cast(Scope.Defer).?;
                 scope = defer_scope.parent;
-                if (err_code == .none) continue;
-                const expr_node = node_datas[defer_scope.defer_node].rhs;
-                const prev_in_defer = gz.in_defer;
-                gz.in_defer = true;
-                defer gz.in_defer = prev_in_defer;
-                try unusedResultExpr(gz, defer_scope.parent, expr_node);
+                switch (which_ones) {
+                    .both_sans_err => {
+                        const expr_node = node_datas[defer_scope.defer_node].rhs;
+                        const prev_in_defer = gz.in_defer;
+                        gz.in_defer = true;
+                        defer gz.in_defer = prev_in_defer;
+                        _ = try unusedResultExpr(gz, defer_scope.parent, expr_node);
+                    },
+                    .both => |err_code| {
+                        const expr_node = node_datas[defer_scope.defer_node].rhs;
+                        const payload_token = node_datas[defer_scope.defer_node].lhs;
+                        const prev_in_defer = gz.in_defer;
+                        gz.in_defer = true;
+                        defer gz.in_defer = prev_in_defer;
+                        var local_val_scope: Scope.LocalVal = undefined;
+                        const sub_scope = if (payload_token == 0) defer_scope.parent else blk: {
+                            const ident_name = try astgen.identAsString(payload_token);
+                            local_val_scope = .{
+                                .parent = defer_scope.parent,
+                                .gen_zir = gz,
+                                .name = ident_name,
+                                .inst = err_code,
+                                .token_src = payload_token,
+                                .id_cat = .@"capture",
+                            };
+                            break :blk &local_val_scope.base;
+                        };
+                        _ = try unusedResultExpr(gz, sub_scope, expr_node);
+                    },
+                    .normal_only => continue,
+                }
             },
             .namespace => unreachable,
             .top => unreachable,
@@ -2138,10 +2376,41 @@ fn genDefers(
     }
 }
 
-fn deferStmt(
+fn checkUsed(
     gz: *GenZir,
+    outer_scope: *Scope,
+    inner_scope: *Scope,
+) InnerError!void {
+    const astgen = gz.astgen;
+
+    var scope = inner_scope;
+    while (scope != outer_scope) {
+        switch (scope.tag) {
+            .gen_zir => scope = scope.cast(GenZir).?.parent,
+            .local_val => {
+                const s = scope.cast(Scope.LocalVal).?;
+                if (!s.used) {
+                    return astgen.failTok(s.token_src, "unused {s}", .{@tagName(s.id_cat)});
+                }
+                scope = s.parent;
+            },
+            .local_ptr => {
+                const s = scope.cast(Scope.LocalPtr).?;
+                if (!s.used) {
+                    return astgen.failTok(s.token_src, "unused {s}", .{@tagName(s.id_cat)});
+                }
+                scope = s.parent;
+            },
+            .defer_normal, .defer_error => scope = scope.cast(Scope.Defer).?.parent,
+            .namespace => unreachable,
+            .top => unreachable,
+        }
+    }
+}
+
+fn makeDeferScope(
     scope: *Scope,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
     block_arena: *Allocator,
     scope_tag: Scope.Tag,
 ) InnerError!*Scope {
@@ -2157,79 +2426,36 @@ fn deferStmt(
 fn varDecl(
     gz: *GenZir,
     scope: *Scope,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
     block_arena: *Allocator,
-    var_decl: ast.full.VarDecl,
+    var_decl: Ast.full.VarDecl,
 ) InnerError!*Scope {
     try emitDbgNode(gz, node);
     const astgen = gz.astgen;
     const gpa = astgen.gpa;
     const tree = astgen.tree;
     const token_tags = tree.tokens.items(.tag);
+    const main_tokens = tree.nodes.items(.main_token);
 
     const name_token = var_decl.ast.mut_token + 1;
+    const ident_name_raw = tree.tokenSlice(name_token);
+    if (mem.eql(u8, ident_name_raw, "_")) {
+        return astgen.failTok(name_token, "'_' used as an identifier without @\"_\" syntax", .{});
+    }
     const ident_name = try astgen.identAsString(name_token);
 
-    // Local variables shadowing detection, including function parameters.
-    {
-        var s = scope;
-        while (true) switch (s.tag) {
-            .local_val => {
-                const local_val = s.cast(Scope.LocalVal).?;
-                if (local_val.name == ident_name) {
-                    const name = try gpa.dupe(u8, mem.spanZ(astgen.nullTerminatedString(ident_name)));
-                    defer gpa.free(name);
-                    return astgen.failTokNotes(name_token, "redeclaration of '{s}'", .{
-                        name,
-                    }, &[_]u32{
-                        try astgen.errNoteTok(
-                            local_val.token_src,
-                            "previously declared here",
-                            .{},
-                        ),
-                    });
-                }
-                s = local_val.parent;
-            },
-            .local_ptr => {
-                const local_ptr = s.cast(Scope.LocalPtr).?;
-                if (local_ptr.name == ident_name) {
-                    const name = try gpa.dupe(u8, mem.spanZ(astgen.nullTerminatedString(ident_name)));
-                    defer gpa.free(name);
-                    return astgen.failTokNotes(name_token, "redeclaration of '{s}'", .{
-                        name,
-                    }, &[_]u32{
-                        try astgen.errNoteTok(
-                            local_ptr.token_src,
-                            "previously declared here",
-                            .{},
-                        ),
-                    });
-                }
-                s = local_ptr.parent;
-            },
-            .namespace => {
-                const ns = s.cast(Scope.Namespace).?;
-                const decl_node = ns.decls.get(ident_name) orelse {
-                    s = ns.parent;
-                    continue;
-                };
-                const name = try gpa.dupe(u8, mem.spanZ(astgen.nullTerminatedString(ident_name)));
-                defer gpa.free(name);
-                return astgen.failTokNotes(name_token, "local shadows declaration of '{s}'", .{
-                    name,
-                }, &[_]u32{
-                    try astgen.errNoteNode(decl_node, "declared here", .{}),
-                });
-            },
-            .gen_zir => s = s.cast(GenZir).?.parent,
-            .defer_normal, .defer_error => s = s.cast(Scope.Defer).?.parent,
-            .top => break,
-        };
-    }
+    try astgen.detectLocalShadowing(scope, ident_name, name_token, ident_name_raw);
 
     if (var_decl.ast.init_node == 0) {
         return astgen.failNode(node, "variables must be initialized", .{});
+    }
+
+    if (var_decl.ast.addrspace_node != 0) {
+        return astgen.failTok(main_tokens[var_decl.ast.addrspace_node], "cannot set address space of local variable '{s}'", .{ident_name_raw});
+    }
+
+    if (var_decl.ast.section_node != 0) {
+        return astgen.failTok(main_tokens[var_decl.ast.section_node], "cannot set section of local variable '{s}'", .{ident_name_raw});
     }
 
     const align_inst: Zir.Inst.Ref = if (var_decl.ast.align_node != 0)
@@ -2250,7 +2476,8 @@ fn varDecl(
                 const result_loc: ResultLoc = if (var_decl.ast.type_node != 0) .{
                     .ty = try typeExpr(gz, scope, var_decl.ast.type_node),
                 } else .none;
-                const init_inst = try expr(gz, scope, result_loc, var_decl.ast.init_node);
+                const init_inst = try reachableExpr(gz, scope, result_loc, var_decl.ast.init_node, node);
+
                 const sub_scope = try block_arena.create(Scope.LocalVal);
                 sub_scope.* = .{
                     .parent = scope,
@@ -2258,6 +2485,7 @@ fn varDecl(
                     .name = ident_name,
                     .inst = init_inst,
                     .token_src = name_token,
+                    .id_cat = .@"local constant",
                 };
                 return &sub_scope.base;
             }
@@ -2299,7 +2527,8 @@ fn varDecl(
                 init_scope.rl_ptr = alloc;
             }
             const init_result_loc: ResultLoc = .{ .block_ptr = &init_scope };
-            const init_inst = try expr(&init_scope, &init_scope.base, init_result_loc, var_decl.ast.init_node);
+            const init_inst = try reachableExpr(&init_scope, &init_scope.base, init_result_loc, var_decl.ast.init_node, node);
+
             const zir_tags = astgen.instructions.items(.tag);
             const zir_datas = astgen.instructions.items(.data);
 
@@ -2311,7 +2540,7 @@ fn varDecl(
                 // the alloc instruction and the store_to_block_ptr instruction.
                 try parent_zir.ensureUnusedCapacity(gpa, init_scope.instructions.items.len);
                 for (init_scope.instructions.items) |src_inst| {
-                    if (gz.indexToRef(src_inst) == init_scope.rl_ptr) continue;
+                    if (indexToRef(src_inst) == init_scope.rl_ptr) continue;
                     if (zir_tags[src_inst] == .store_to_block_ptr) {
                         if (zir_datas[src_inst].bin.lhs == init_scope.rl_ptr) continue;
                     }
@@ -2325,6 +2554,7 @@ fn varDecl(
                     .name = ident_name,
                     .inst = init_inst,
                     .token_src = name_token,
+                    .id_cat = .@"local constant",
                 };
                 return &sub_scope.base;
             }
@@ -2333,11 +2563,15 @@ fn varDecl(
             // Move the init_scope instructions into the parent scope, swapping
             // store_to_block_ptr for store_to_inferred_ptr.
             const expected_len = parent_zir.items.len + init_scope.instructions.items.len;
-            try parent_zir.ensureCapacity(gpa, expected_len);
+            try parent_zir.ensureTotalCapacity(gpa, expected_len);
             for (init_scope.instructions.items) |src_inst| {
                 if (zir_tags[src_inst] == .store_to_block_ptr) {
                     if (zir_datas[src_inst].bin.lhs == init_scope.rl_ptr) {
-                        zir_tags[src_inst] = .store_to_inferred_ptr;
+                        if (var_decl.ast.type_node != 0) {
+                            zir_tags[src_inst] = .store;
+                        } else {
+                            zir_tags[src_inst] = .store_to_inferred_ptr;
+                        }
                     }
                 }
                 parent_zir.appendAssumeCapacity(src_inst);
@@ -2353,11 +2587,13 @@ fn varDecl(
                 .name = ident_name,
                 .ptr = init_scope.rl_ptr,
                 .token_src = name_token,
+                .maybe_comptime = true,
+                .id_cat = .@"local constant",
             };
             return &sub_scope.base;
         },
         .keyword_var => {
-            const is_comptime = var_decl.comptime_token != null;
+            const is_comptime = var_decl.comptime_token != null or gz.force_comptime;
             var resolve_inferred_alloc: Zir.Inst.Ref = .none;
             const var_data: struct {
                 result_loc: ResultLoc,
@@ -2397,7 +2633,7 @@ fn varDecl(
                 resolve_inferred_alloc = alloc;
                 break :a .{ .alloc = alloc, .result_loc = .{ .inferred_ptr = alloc } };
             };
-            const init_inst = try expr(gz, scope, var_data.result_loc, var_decl.ast.init_node);
+            _ = try reachableExpr(gz, scope, var_data.result_loc, var_decl.ast.init_node, node);
             if (resolve_inferred_alloc != .none) {
                 _ = try gz.addUnNode(.resolve_inferred_alloc, resolve_inferred_alloc, node);
             }
@@ -2408,6 +2644,8 @@ fn varDecl(
                 .name = ident_name,
                 .ptr = var_data.alloc,
                 .token_src = name_token,
+                .maybe_comptime = is_comptime,
+                .id_cat = .@"local variable",
             };
             return &sub_scope.base;
         },
@@ -2415,7 +2653,7 @@ fn varDecl(
     }
 }
 
-fn emitDbgNode(gz: *GenZir, node: ast.Node.Index) !void {
+fn emitDbgNode(gz: *GenZir, node: Ast.Node.Index) !void {
     // The instruction emitted here is for debugging runtime code.
     // If the current block will be evaluated only during semantic analysis
     // then no dbg_stmt ZIR instruction is needed.
@@ -2423,21 +2661,23 @@ fn emitDbgNode(gz: *GenZir, node: ast.Node.Index) !void {
 
     const astgen = gz.astgen;
     const tree = astgen.tree;
-    const node_tags = tree.nodes.items(.tag);
+    const source = tree.source;
     const token_starts = tree.tokens.items(.start);
-    const decl_start = token_starts[tree.firstToken(gz.decl_node_index)];
     const node_start = token_starts[tree.firstToken(node)];
-    const source = tree.source[decl_start..node_start];
-    const loc = std.zig.findLineColumn(source, source.len);
+
+    astgen.advanceSourceCursor(source, node_start);
+    const line = @intCast(u32, astgen.source_line);
+    const column = @intCast(u32, astgen.source_column);
+
     _ = try gz.add(.{ .tag = .dbg_stmt, .data = .{
         .dbg_stmt = .{
-            .line = @intCast(u32, loc.line),
-            .column = @intCast(u32, loc.column),
+            .line = line,
+            .column = column,
         },
     } });
 }
 
-fn assign(gz: *GenZir, scope: *Scope, infix_node: ast.Node.Index) InnerError!void {
+fn assign(gz: *GenZir, scope: *Scope, infix_node: Ast.Node.Index) InnerError!void {
     try emitDbgNode(gz, infix_node);
     const astgen = gz.astgen;
     const tree = astgen.tree;
@@ -2462,7 +2702,7 @@ fn assign(gz: *GenZir, scope: *Scope, infix_node: ast.Node.Index) InnerError!voi
 fn assignOp(
     gz: *GenZir,
     scope: *Scope,
-    infix_node: ast.Node.Index,
+    infix_node: Ast.Node.Index,
     op_inst_tag: Zir.Inst.Tag,
 ) InnerError!void {
     try emitDbgNode(gz, infix_node);
@@ -2473,7 +2713,7 @@ fn assignOp(
     const lhs_ptr = try lvalExpr(gz, scope, node_datas[infix_node].lhs);
     const lhs = try gz.addUnNode(.load, lhs_ptr, infix_node);
     const lhs_type = try gz.addUnNode(.typeof, lhs, infix_node);
-    const rhs = try expr(gz, scope, .{ .ty = lhs_type }, node_datas[infix_node].rhs);
+    const rhs = try expr(gz, scope, .{ .coerced_ty = lhs_type }, node_datas[infix_node].rhs);
 
     const result = try gz.addPlNode(op_inst_tag, infix_node, Zir.Inst.Bin{
         .lhs = lhs,
@@ -2485,7 +2725,7 @@ fn assignOp(
 fn assignShift(
     gz: *GenZir,
     scope: *Scope,
-    infix_node: ast.Node.Index,
+    infix_node: Ast.Node.Index,
     op_inst_tag: Zir.Inst.Tag,
 ) InnerError!void {
     try emitDbgNode(gz, infix_node);
@@ -2505,31 +2745,49 @@ fn assignShift(
     _ = try gz.addBin(.store, lhs_ptr, result);
 }
 
-fn boolNot(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerError!Zir.Inst.Ref {
+fn assignShiftSat(gz: *GenZir, scope: *Scope, infix_node: Ast.Node.Index) InnerError!void {
+    try emitDbgNode(gz, infix_node);
+    const astgen = gz.astgen;
+    const tree = astgen.tree;
+    const node_datas = tree.nodes.items(.data);
+
+    const lhs_ptr = try lvalExpr(gz, scope, node_datas[infix_node].lhs);
+    const lhs = try gz.addUnNode(.load, lhs_ptr, infix_node);
+    // Saturating shift-left allows any integer type for both the LHS and RHS.
+    const rhs = try expr(gz, scope, .none, node_datas[infix_node].rhs);
+
+    const result = try gz.addPlNode(.shl_sat, infix_node, Zir.Inst.Bin{
+        .lhs = lhs,
+        .rhs = rhs,
+    });
+    _ = try gz.addBin(.store, lhs_ptr, result);
+}
+
+fn boolNot(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: Ast.Node.Index) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const tree = astgen.tree;
     const node_datas = tree.nodes.items(.data);
 
     const operand = try expr(gz, scope, bool_rl, node_datas[node].lhs);
     const result = try gz.addUnNode(.bool_not, operand, node);
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
-fn bitNot(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) InnerError!Zir.Inst.Ref {
+fn bitNot(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: Ast.Node.Index) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const tree = astgen.tree;
     const node_datas = tree.nodes.items(.data);
 
     const operand = try expr(gz, scope, .none, node_datas[node].lhs);
     const result = try gz.addUnNode(.bit_not, operand, node);
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn negation(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
     tag: Zir.Inst.Tag,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
@@ -2538,22 +2796,20 @@ fn negation(
 
     const operand = try expr(gz, scope, .none, node_datas[node].lhs);
     const result = try gz.addUnNode(tag, operand, node);
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn ptrType(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    ptr_info: ast.full.PtrType,
+    node: Ast.Node.Index,
+    ptr_info: Ast.full.PtrType,
 ) InnerError!Zir.Inst.Ref {
-    const astgen = gz.astgen;
-    const tree = astgen.tree;
-
     const elem_type = try typeExpr(gz, scope, ptr_info.ast.child_type);
 
     const simple = ptr_info.ast.align_node == 0 and
+        ptr_info.ast.addrspace_node == 0 and
         ptr_info.ast.sentinel == 0 and
         ptr_info.ast.bit_range_start == 0;
 
@@ -2567,11 +2823,12 @@ fn ptrType(
                 .elem_type = elem_type,
             },
         } });
-        return rvalue(gz, scope, rl, result, node);
+        return rvalue(gz, rl, result, node);
     }
 
     var sentinel_ref: Zir.Inst.Ref = .none;
     var align_ref: Zir.Inst.Ref = .none;
+    var addrspace_ref: Zir.Inst.Ref = .none;
     var bit_start_ref: Zir.Inst.Ref = .none;
     var bit_end_ref: Zir.Inst.Ref = .none;
     var trailing_count: u32 = 0;
@@ -2584,6 +2841,10 @@ fn ptrType(
         align_ref = try expr(gz, scope, align_rl, ptr_info.ast.align_node);
         trailing_count += 1;
     }
+    if (ptr_info.ast.addrspace_node != 0) {
+        addrspace_ref = try expr(gz, scope, .{ .ty = .address_space_type }, ptr_info.ast.addrspace_node);
+        trailing_count += 1;
+    }
     if (ptr_info.ast.bit_range_start != 0) {
         assert(ptr_info.ast.bit_range_end != 0);
         bit_start_ref = try expr(gz, scope, .none, ptr_info.ast.bit_range_start);
@@ -2592,10 +2853,10 @@ fn ptrType(
     }
 
     const gpa = gz.astgen.gpa;
-    try gz.instructions.ensureCapacity(gpa, gz.instructions.items.len + 1);
-    try gz.astgen.instructions.ensureCapacity(gpa, gz.astgen.instructions.len + 1);
-    try gz.astgen.extra.ensureCapacity(gpa, gz.astgen.extra.items.len +
-        @typeInfo(Zir.Inst.PtrType).Struct.fields.len + trailing_count);
+    try gz.instructions.ensureUnusedCapacity(gpa, 1);
+    try gz.astgen.instructions.ensureUnusedCapacity(gpa, 1);
+    try gz.astgen.extra.ensureUnusedCapacity(gpa, @typeInfo(Zir.Inst.PtrType).Struct.fields.len +
+        trailing_count);
 
     const payload_index = gz.astgen.addExtraAssumeCapacity(Zir.Inst.PtrType{ .elem_type = elem_type });
     if (sentinel_ref != .none) {
@@ -2604,13 +2865,16 @@ fn ptrType(
     if (align_ref != .none) {
         gz.astgen.extra.appendAssumeCapacity(@enumToInt(align_ref));
     }
+    if (addrspace_ref != .none) {
+        gz.astgen.extra.appendAssumeCapacity(@enumToInt(addrspace_ref));
+    }
     if (bit_start_ref != .none) {
         gz.astgen.extra.appendAssumeCapacity(@enumToInt(bit_start_ref));
         gz.astgen.extra.appendAssumeCapacity(@enumToInt(bit_end_ref));
     }
 
     const new_index = @intCast(Zir.Inst.Index, gz.astgen.instructions.len);
-    const result = gz.indexToRef(new_index);
+    const result = indexToRef(new_index);
     gz.astgen.instructions.appendAssumeCapacity(.{ .tag = .ptr_type, .data = .{
         .ptr_type = .{
             .flags = .{
@@ -2619,6 +2883,7 @@ fn ptrType(
                 .is_volatile = ptr_info.volatile_token != null,
                 .has_sentinel = sentinel_ref != .none,
                 .has_align = align_ref != .none,
+                .has_addrspace = addrspace_ref != .none,
                 .has_bit_range = bit_start_ref != .none,
             },
             .size = ptr_info.size,
@@ -2627,10 +2892,10 @@ fn ptrType(
     } });
     gz.instructions.appendAssumeCapacity(new_index);
 
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
-fn arrayType(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) !Zir.Inst.Ref {
+fn arrayType(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: Ast.Node.Index) !Zir.Inst.Ref {
     const astgen = gz.astgen;
     const tree = astgen.tree;
     const node_datas = tree.nodes.items(.data);
@@ -2643,20 +2908,20 @@ fn arrayType(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) !Z
     {
         return astgen.failNode(len_node, "unable to infer array size", .{});
     }
-    const len = try expr(gz, scope, .{ .ty = .usize_type }, len_node);
+    const len = try expr(gz, scope, .{ .coerced_ty = .usize_type }, len_node);
     const elem_type = try typeExpr(gz, scope, node_datas[node].rhs);
 
     const result = try gz.addBin(.array_type, len, elem_type);
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
-fn arrayTypeSentinel(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) !Zir.Inst.Ref {
+fn arrayTypeSentinel(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: Ast.Node.Index) !Zir.Inst.Ref {
     const astgen = gz.astgen;
     const tree = astgen.tree;
     const node_datas = tree.nodes.items(.data);
     const node_tags = tree.nodes.items(.tag);
     const main_tokens = tree.nodes.items(.main_token);
-    const extra = tree.extraData(node_datas[node].rhs, ast.Node.ArrayTypeSentinel);
+    const extra = tree.extraData(node_datas[node].rhs, Ast.Node.ArrayTypeSentinel);
 
     const len_node = node_datas[node].lhs;
     if (node_tags[len_node] == .identifier and
@@ -2664,12 +2929,12 @@ fn arrayTypeSentinel(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.I
     {
         return astgen.failNode(len_node, "unable to infer array size", .{});
     }
-    const len = try expr(gz, scope, .{ .ty = .usize_type }, len_node);
+    const len = try expr(gz, scope, .{ .coerced_ty = .usize_type }, len_node);
     const elem_type = try typeExpr(gz, scope, extra.elem_type);
-    const sentinel = try expr(gz, scope, .{ .ty = elem_type }, extra.sentinel);
+    const sentinel = try expr(gz, scope, .{ .coerced_ty = elem_type }, extra.sentinel);
 
     const result = try gz.addArrayTypeSentinel(len, elem_type, sentinel);
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 const WipDecls = struct {
@@ -2687,7 +2952,7 @@ const WipDecls = struct {
         is_pub: bool,
         is_export: bool,
         has_align: bool,
-        has_section: bool,
+        has_section_or_addrspace: bool,
     ) Allocator.Error!void {
         if (wip_decls.decl_index % fields_per_u32 == 0 and wip_decls.decl_index != 0) {
             try wip_decls.bit_bag.append(gpa, wip_decls.cur_bit_bag);
@@ -2697,7 +2962,7 @@ const WipDecls = struct {
             (@as(u32, @boolToInt(is_pub)) << 28) |
             (@as(u32, @boolToInt(is_export)) << 29) |
             (@as(u32, @boolToInt(has_align)) << 30) |
-            (@as(u32, @boolToInt(has_section)) << 31);
+            (@as(u32, @boolToInt(has_section_or_addrspace)) << 31);
         wip_decls.decl_index += 1;
     }
 
@@ -2712,20 +2977,17 @@ fn fnDecl(
     gz: *GenZir,
     scope: *Scope,
     wip_decls: *WipDecls,
-    decl_node: ast.Node.Index,
-    body_node: ast.Node.Index,
-    fn_proto: ast.full.FnProto,
+    decl_node: Ast.Node.Index,
+    body_node: Ast.Node.Index,
+    fn_proto: Ast.full.FnProto,
 ) InnerError!void {
     const gpa = astgen.gpa;
     const tree = astgen.tree;
     const token_tags = tree.tokens.items(.tag);
 
-    const fn_name_token = fn_proto.name_token orelse {
-        return astgen.failTok(fn_proto.ast.fn_token, "missing function name", .{});
-    };
+    // missing function name already happened in scanDecls()
+    const fn_name_token = fn_proto.name_token orelse return error.AnalysisFail;
     const fn_name_str_index = try astgen.identAsString(fn_name_token);
-
-    try astgen.declareNewName(scope, fn_name_str_index, decl_node);
 
     // We insert this at the beginning so that its instruction index marks the
     // start of the top level declaration.
@@ -2741,6 +3003,16 @@ fn fnDecl(
     };
     defer decl_gz.instructions.deinit(gpa);
 
+    var fn_gz: GenZir = .{
+        .force_comptime = false,
+        .in_defer = false,
+        .decl_node_index = fn_proto.ast.proto_node,
+        .decl_line = decl_gz.decl_line,
+        .parent = &decl_gz.base,
+        .astgen = astgen,
+    };
+    defer fn_gz.instructions.deinit(gpa);
+
     // TODO: support noinline
     const is_pub = fn_proto.visib_token != null;
     const is_export = blk: {
@@ -2755,58 +3027,84 @@ fn fnDecl(
         const maybe_inline_token = fn_proto.extern_export_inline_token orelse break :blk false;
         break :blk token_tags[maybe_inline_token] == .keyword_inline;
     };
-    const align_inst: Zir.Inst.Ref = if (fn_proto.ast.align_expr == 0) .none else inst: {
-        break :inst try expr(&decl_gz, &decl_gz.base, align_rl, fn_proto.ast.align_expr);
-    };
-    const section_inst: Zir.Inst.Ref = if (fn_proto.ast.section_expr == 0) .none else inst: {
-        break :inst try comptimeExpr(&decl_gz, &decl_gz.base, .{ .ty = .const_slice_u8_type }, fn_proto.ast.section_expr);
-    };
+    const has_section_or_addrspace = fn_proto.ast.section_expr != 0 or fn_proto.ast.addrspace_expr != 0;
+    try wip_decls.next(gpa, is_pub, is_export, fn_proto.ast.align_expr != 0, has_section_or_addrspace);
 
-    try wip_decls.next(gpa, is_pub, is_export, align_inst != .none, section_inst != .none);
-
-    // The AST params array does not contain anytype and ... parameters.
-    // We must iterate to count how many param types to allocate.
-    const param_count = blk: {
-        var count: usize = 0;
-        var it = fn_proto.iterate(tree.*);
-        while (it.next()) |param| {
-            if (param.anytype_ellipsis3) |token| switch (token_tags[token]) {
-                .ellipsis3 => break,
-                .keyword_anytype => {},
-                else => unreachable,
-            };
-            count += 1;
-        }
-        break :blk count;
-    };
-    const param_types = try gpa.alloc(Zir.Inst.Ref, param_count);
-    defer gpa.free(param_types);
-
-    var is_var_args = false;
-    {
+    var params_scope = &fn_gz.base;
+    const is_var_args = is_var_args: {
         var param_type_i: usize = 0;
         var it = fn_proto.iterate(tree.*);
         while (it.next()) |param| : (param_type_i += 1) {
-            if (param.anytype_ellipsis3) |token| {
+            const is_comptime = if (param.comptime_noalias) |token|
+                token_tags[token] == .keyword_comptime
+            else
+                false;
+
+            const is_anytype = if (param.anytype_ellipsis3) |token| blk: {
                 switch (token_tags[token]) {
-                    .keyword_anytype => {
-                        param_types[param_type_i] = .none;
-                        continue;
-                    },
-                    .ellipsis3 => {
-                        is_var_args = true;
-                        break;
-                    },
+                    .keyword_anytype => break :blk true,
+                    .ellipsis3 => break :is_var_args true,
                     else => unreachable,
                 }
-            }
-            const param_type_node = param.type_expr;
-            assert(param_type_node != 0);
-            param_types[param_type_i] =
-                try expr(&decl_gz, &decl_gz.base, .{ .ty = .type_type }, param_type_node);
+            } else false;
+
+            const param_name: u32 = if (param.name_token) |name_token| blk: {
+                const name_bytes = tree.tokenSlice(name_token);
+                if (mem.eql(u8, "_", name_bytes))
+                    break :blk 0;
+
+                const param_name = try astgen.identAsString(name_token);
+                if (!is_extern) {
+                    try astgen.detectLocalShadowing(params_scope, param_name, name_token, name_bytes);
+                }
+                break :blk param_name;
+            } else if (!is_extern) {
+                if (param.anytype_ellipsis3) |tok| {
+                    return astgen.failTok(tok, "missing parameter name", .{});
+                } else {
+                    return astgen.failNode(param.type_expr, "missing parameter name", .{});
+                }
+            } else 0;
+
+            const param_inst = if (is_anytype) param: {
+                const name_token = param.name_token orelse param.anytype_ellipsis3.?;
+                const tag: Zir.Inst.Tag = if (is_comptime)
+                    .param_anytype_comptime
+                else
+                    .param_anytype;
+                break :param try decl_gz.addStrTok(tag, param_name, name_token);
+            } else param: {
+                const param_type_node = param.type_expr;
+                assert(param_type_node != 0);
+                var param_gz = decl_gz.makeSubBlock(scope);
+                defer param_gz.instructions.deinit(gpa);
+                const param_type = try expr(&param_gz, params_scope, coerced_type_rl, param_type_node);
+                const param_inst_expected = @intCast(u32, astgen.instructions.len + 1);
+                _ = try param_gz.addBreak(.break_inline, param_inst_expected, param_type);
+
+                const main_tokens = tree.nodes.items(.main_token);
+                const name_token = param.name_token orelse main_tokens[param_type_node];
+                const tag: Zir.Inst.Tag = if (is_comptime) .param_comptime else .param;
+                const param_inst = try decl_gz.addParam(tag, name_token, param_name, param_gz.instructions.items);
+                assert(param_inst_expected == param_inst);
+                break :param indexToRef(param_inst);
+            };
+
+            if (param_name == 0) continue;
+
+            const sub_scope = try astgen.arena.create(Scope.LocalVal);
+            sub_scope.* = .{
+                .parent = params_scope,
+                .gen_zir = &decl_gz,
+                .name = param_name,
+                .inst = param_inst,
+                .token_src = param.name_token.?,
+                .id_cat = .@"function parameter",
+            };
+            params_scope = &sub_scope.base;
         }
-        assert(param_type_i == param_count);
-    }
+        break :is_var_args false;
+    };
 
     const lib_name: u32 = if (fn_proto.lib_name) |lib_name_token| blk: {
         const lib_name_str = try astgen.strLitAsString(lib_name_token);
@@ -2816,12 +3114,20 @@ fn fnDecl(
     const maybe_bang = tree.firstToken(fn_proto.ast.return_type) - 1;
     const is_inferred_error = token_tags[maybe_bang] == .bang;
 
-    const return_type_inst = try AstGen.expr(
-        &decl_gz,
-        &decl_gz.base,
-        .{ .ty = .type_type },
-        fn_proto.ast.return_type,
-    );
+    const align_inst: Zir.Inst.Ref = if (fn_proto.ast.align_expr == 0) .none else inst: {
+        break :inst try expr(&decl_gz, params_scope, align_rl, fn_proto.ast.align_expr);
+    };
+    const addrspace_inst: Zir.Inst.Ref = if (fn_proto.ast.addrspace_expr == 0) .none else inst: {
+        break :inst try expr(&decl_gz, params_scope, .{ .ty = .address_space_type }, fn_proto.ast.addrspace_expr);
+    };
+    const section_inst: Zir.Inst.Ref = if (fn_proto.ast.section_expr == 0) .none else inst: {
+        break :inst try comptimeExpr(&decl_gz, params_scope, .{ .ty = .const_slice_u8_type }, fn_proto.ast.section_expr);
+    };
+
+    var ret_gz = decl_gz.makeSubBlock(params_scope);
+    defer ret_gz.instructions.deinit(gpa);
+    const ret_ty = try expr(&ret_gz, params_scope, coerced_type_rl, fn_proto.ast.return_type);
+    const ret_br = try ret_gz.addBreak(.break_inline, 0, ret_ty);
 
     const cc: Zir.Inst.Ref = blk: {
         if (fn_proto.ast.callconv_expr != 0) {
@@ -2832,9 +3138,9 @@ fn fnDecl(
                     .{},
                 );
             }
-            break :blk try AstGen.expr(
+            break :blk try expr(
                 &decl_gz,
-                &decl_gz.base,
+                params_scope,
                 .{ .ty = .calling_convention_type },
                 fn_proto.ast.callconv_expr,
             );
@@ -2857,8 +3163,9 @@ fn fnDecl(
         }
         break :func try decl_gz.addFunc(.{
             .src_node = decl_node,
-            .ret_ty = return_type_inst,
-            .param_types = param_types,
+            .ret_ty = ret_gz.instructions.items,
+            .ret_br = ret_br,
+            .param_block = block_inst,
             .body = &[0]Zir.Inst.Index{},
             .cc = cc,
             .align_inst = .none, // passed in the per-decl data
@@ -2873,56 +3180,12 @@ fn fnDecl(
             return astgen.failTok(fn_proto.ast.fn_token, "non-extern function is variadic", .{});
         }
 
-        var fn_gz: GenZir = .{
-            .force_comptime = false,
-            .in_defer = false,
-            .decl_node_index = fn_proto.ast.proto_node,
-            .decl_line = decl_gz.decl_line,
-            .parent = &decl_gz.base,
-            .astgen = astgen,
-        };
-        defer fn_gz.instructions.deinit(gpa);
-
         const prev_fn_block = astgen.fn_block;
         astgen.fn_block = &fn_gz;
         defer astgen.fn_block = prev_fn_block;
 
-        // Iterate over the parameters. We put the param names as the first N
-        // items inside `extra` so that debug info later can refer to the parameter names
-        // even while the respective source code is unloaded.
-        try astgen.extra.ensureUnusedCapacity(gpa, param_count);
-
-        {
-            var params_scope = &fn_gz.base;
-            var i: usize = 0;
-            var it = fn_proto.iterate(tree.*);
-            while (it.next()) |param| : (i += 1) {
-                const name_token = param.name_token orelse {
-                    return astgen.failNode(param.type_expr, "missing parameter name", .{});
-                };
-                const param_name = try astgen.identAsString(name_token);
-                // Create an arg instruction. This is needed to emit a semantic analysis
-                // error for shadowing decls.
-                // TODO emit a compile error here for shadowing locals.
-                const arg_inst = try fn_gz.addStrTok(.arg, param_name, name_token);
-                const sub_scope = try astgen.arena.create(Scope.LocalVal);
-                sub_scope.* = .{
-                    .parent = params_scope,
-                    .gen_zir = &fn_gz,
-                    .name = param_name,
-                    .inst = arg_inst,
-                    .token_src = name_token,
-                };
-                params_scope = &sub_scope.base;
-
-                // Additionally put the param name into `string_bytes` and reference it with
-                // `extra` so that we have access to the data in codegen, for debug info.
-                const str_index = try astgen.identAsString(name_token);
-                astgen.extra.appendAssumeCapacity(str_index);
-            }
-
-            _ = try expr(&fn_gz, params_scope, .none, body_node);
-        }
+        _ = try expr(&fn_gz, params_scope, .none, body_node);
+        try checkUsed(gz, &fn_gz.base, params_scope);
 
         const need_implicit_ret = blk: {
             if (fn_gz.instructions.items.len == 0)
@@ -2939,8 +3202,9 @@ fn fnDecl(
 
         break :func try decl_gz.addFunc(.{
             .src_node = decl_node,
-            .ret_ty = return_type_inst,
-            .param_types = param_types,
+            .param_block = block_inst,
+            .ret_ty = ret_gz.instructions.items,
+            .ret_br = ret_br,
             .body = fn_gz.instructions.items,
             .cc = cc,
             .align_inst = .none, // passed in the per-decl data
@@ -2957,7 +3221,7 @@ fn fnDecl(
     _ = try decl_gz.addBreak(.break_inline, block_inst, func_inst);
     try decl_gz.setBlockBody(block_inst);
 
-    try wip_decls.payload.ensureUnusedCapacity(gpa, 9);
+    try wip_decls.payload.ensureUnusedCapacity(gpa, 10);
     {
         const contents_hash = std.zig.hashSrc(tree.getNodeSource(decl_node));
         const casted = @bitCast([4]u32, contents_hash);
@@ -2972,8 +3236,10 @@ fn fnDecl(
     if (align_inst != .none) {
         wip_decls.payload.appendAssumeCapacity(@enumToInt(align_inst));
     }
-    if (section_inst != .none) {
+
+    if (has_section_or_addrspace) {
         wip_decls.payload.appendAssumeCapacity(@enumToInt(section_inst));
+        wip_decls.payload.appendAssumeCapacity(@enumToInt(addrspace_inst));
     }
 }
 
@@ -2982,8 +3248,8 @@ fn globalVarDecl(
     gz: *GenZir,
     scope: *Scope,
     wip_decls: *WipDecls,
-    node: ast.Node.Index,
-    var_decl: ast.full.VarDecl,
+    node: Ast.Node.Index,
+    var_decl: Ast.full.VarDecl,
 ) InnerError!void {
     const gpa = astgen.gpa;
     const tree = astgen.tree;
@@ -2996,8 +3262,6 @@ fn globalVarDecl(
 
     const name_token = var_decl.ast.mut_token + 1;
     const name_str_index = try astgen.identAsString(name_token);
-
-    try astgen.declareNewName(scope, name_str_index, node);
 
     var block_scope: GenZir = .{
         .parent = scope,
@@ -3022,10 +3286,14 @@ fn globalVarDecl(
     const align_inst: Zir.Inst.Ref = if (var_decl.ast.align_node == 0) .none else inst: {
         break :inst try expr(&block_scope, &block_scope.base, align_rl, var_decl.ast.align_node);
     };
+    const addrspace_inst: Zir.Inst.Ref = if (var_decl.ast.addrspace_node == 0) .none else inst: {
+        break :inst try expr(&block_scope, &block_scope.base, .{ .ty = .address_space_type }, var_decl.ast.addrspace_node);
+    };
     const section_inst: Zir.Inst.Ref = if (var_decl.ast.section_node == 0) .none else inst: {
         break :inst try comptimeExpr(&block_scope, &block_scope.base, .{ .ty = .const_slice_u8_type }, var_decl.ast.section_node);
     };
-    try wip_decls.next(gpa, is_pub, is_export, align_inst != .none, section_inst != .none);
+    const has_section_or_addrspace = section_inst != .none or addrspace_inst != .none;
+    try wip_decls.next(gpa, is_pub, is_export, align_inst != .none, has_section_or_addrspace);
 
     const is_threadlocal = if (var_decl.threadlocal_token) |tok| blk: {
         if (!is_mutable) {
@@ -3103,7 +3371,7 @@ fn globalVarDecl(
     _ = try block_scope.addBreak(.break_inline, block_inst, var_inst);
     try block_scope.setBlockBody(block_inst);
 
-    try wip_decls.payload.ensureUnusedCapacity(gpa, 9);
+    try wip_decls.payload.ensureUnusedCapacity(gpa, 10);
     {
         const contents_hash = std.zig.hashSrc(tree.getNodeSource(node));
         const casted = @bitCast([4]u32, contents_hash);
@@ -3118,8 +3386,9 @@ fn globalVarDecl(
     if (align_inst != .none) {
         wip_decls.payload.appendAssumeCapacity(@enumToInt(align_inst));
     }
-    if (section_inst != .none) {
+    if (has_section_or_addrspace) {
         wip_decls.payload.appendAssumeCapacity(@enumToInt(section_inst));
+        wip_decls.payload.appendAssumeCapacity(@enumToInt(addrspace_inst));
     }
 }
 
@@ -3128,7 +3397,7 @@ fn comptimeDecl(
     gz: *GenZir,
     scope: *Scope,
     wip_decls: *WipDecls,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
 ) InnerError!void {
     const gpa = astgen.gpa;
     const tree = astgen.tree;
@@ -3175,7 +3444,7 @@ fn usingnamespaceDecl(
     gz: *GenZir,
     scope: *Scope,
     wip_decls: *WipDecls,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
 ) InnerError!void {
     const gpa = astgen.gpa;
     const tree = astgen.tree;
@@ -3226,7 +3495,7 @@ fn testDecl(
     gz: *GenZir,
     scope: *Scope,
     wip_decls: *WipDecls,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
 ) InnerError!void {
     const gpa = astgen.gpa;
     const tree = astgen.tree;
@@ -3284,8 +3553,9 @@ fn testDecl(
 
     const func_inst = try decl_block.addFunc(.{
         .src_node = node,
-        .ret_ty = .void_type,
-        .param_types = &[0]Zir.Inst.Ref{},
+        .param_block = block_inst,
+        .ret_ty = &.{},
+        .ret_br = 0,
         .body = fn_block.instructions.items,
         .cc = .none,
         .align_inst = .none,
@@ -3316,20 +3586,22 @@ fn testDecl(
 fn structDeclInner(
     gz: *GenZir,
     scope: *Scope,
-    node: ast.Node.Index,
-    container_decl: ast.full.ContainerDecl,
+    node: Ast.Node.Index,
+    container_decl: Ast.full.ContainerDecl,
     layout: std.builtin.TypeInfo.ContainerLayout,
 ) InnerError!Zir.Inst.Ref {
+    const decl_inst = try gz.reserveInstructionIndex();
+
     if (container_decl.ast.members.len == 0) {
-        const decl_inst = try gz.reserveInstructionIndex();
         try gz.setStruct(decl_inst, .{
             .src_node = node,
             .layout = layout,
             .fields_len = 0,
             .body_len = 0,
             .decls_len = 0,
+            .known_has_bits = false,
         });
-        return gz.indexToRef(decl_inst);
+        return indexToRef(decl_inst);
     }
 
     const astgen = gz.astgen;
@@ -3338,28 +3610,34 @@ fn structDeclInner(
     const node_tags = tree.nodes.items(.tag);
     const node_datas = tree.nodes.items(.data);
 
+    var namespace: Scope.Namespace = .{
+        .parent = scope,
+        .node = node,
+        .inst = decl_inst,
+        .declaring_gz = gz,
+    };
+    defer namespace.deinit(gpa);
+
     // The struct_decl instruction introduces a scope in which the decls of the struct
     // are in scope, so that field types, alignments, and default value expressions
     // can refer to decls within the struct itself.
     var block_scope: GenZir = .{
-        .parent = scope,
+        .parent = &namespace.base,
         .decl_node_index = node,
         .decl_line = gz.calcLine(node),
         .astgen = astgen,
         .force_comptime = true,
         .in_defer = false,
-        .ref_start_index = gz.ref_start_index,
     };
     defer block_scope.instructions.deinit(gpa);
 
-    var namespace: Scope.Namespace = .{ .parent = &gz.base };
-    defer namespace.decls.deinit(gpa);
+    try astgen.scanDecls(&namespace, container_decl.ast.members);
 
     var wip_decls: WipDecls = .{};
     defer wip_decls.deinit(gpa);
 
     // We don't know which members are fields until we iterate, so cannot do
-    // an accurate ensureCapacity yet.
+    // an accurate ensureTotalCapacity yet.
     var fields_data = ArrayListUnmanaged(u32){};
     defer fields_data.deinit(gpa);
 
@@ -3369,6 +3647,7 @@ fn structDeclInner(
     var bit_bag = ArrayListUnmanaged(u32){};
     defer bit_bag.deinit(gpa);
 
+    var known_has_bits = false;
     var cur_bit_bag: u32 = 0;
     var field_index: usize = 0;
     for (container_decl.ast.members) |member_node| {
@@ -3382,7 +3661,7 @@ fn structDeclInner(
                 const body = node_datas[member_node].rhs;
                 switch (node_tags[fn_proto]) {
                     .fn_proto_simple => {
-                        var params: [1]ast.Node.Index = undefined;
+                        var params: [1]Ast.Node.Index = undefined;
                         astgen.fnDecl(gz, &namespace.base, &wip_decls, member_node, body, tree.fnProtoSimple(&params, fn_proto)) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
                             error.AnalysisFail => {},
@@ -3397,7 +3676,7 @@ fn structDeclInner(
                         continue;
                     },
                     .fn_proto_one => {
-                        var params: [1]ast.Node.Index = undefined;
+                        var params: [1]Ast.Node.Index = undefined;
                         astgen.fnDecl(gz, &namespace.base, &wip_decls, member_node, body, tree.fnProtoOne(&params, fn_proto)) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
                             error.AnalysisFail => {},
@@ -3415,7 +3694,7 @@ fn structDeclInner(
                 }
             },
             .fn_proto_simple => {
-                var params: [1]ast.Node.Index = undefined;
+                var params: [1]Ast.Node.Index = undefined;
                 astgen.fnDecl(gz, &namespace.base, &wip_decls, member_node, 0, tree.fnProtoSimple(&params, member_node)) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.AnalysisFail => {},
@@ -3430,7 +3709,7 @@ fn structDeclInner(
                 continue;
             },
             .fn_proto_one => {
-                var params: [1]ast.Node.Index = undefined;
+                var params: [1]Ast.Node.Index = undefined;
                 astgen.fnDecl(gz, &namespace.base, &wip_decls, member_node, 0, tree.fnProtoOne(&params, member_node)) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.AnalysisFail => {},
@@ -3506,11 +3785,17 @@ fn structDeclInner(
         const field_name = try astgen.identAsString(member.ast.name_token);
         fields_data.appendAssumeCapacity(field_name);
 
+        if (member.ast.type_expr == 0) {
+            return astgen.failTok(member.ast.name_token, "struct field missing type", .{});
+        }
+
         const field_type: Zir.Inst.Ref = if (node_tags[member.ast.type_expr] == .@"anytype")
             .none
         else
-            try typeExpr(&block_scope, &block_scope.base, member.ast.type_expr);
+            try typeExpr(&block_scope, &namespace.base, member.ast.type_expr);
         fields_data.appendAssumeCapacity(@enumToInt(field_type));
+
+        known_has_bits = known_has_bits or nodeImpliesRuntimeBits(tree, member.ast.type_expr);
 
         const have_align = member.ast.align_expr != 0;
         const have_value = member.ast.value_expr != 0;
@@ -3523,13 +3808,13 @@ fn structDeclInner(
             (@as(u32, @boolToInt(unused)) << 31);
 
         if (have_align) {
-            const align_inst = try expr(&block_scope, &block_scope.base, align_rl, member.ast.align_expr);
+            const align_inst = try expr(&block_scope, &namespace.base, align_rl, member.ast.align_expr);
             fields_data.appendAssumeCapacity(@enumToInt(align_inst));
         }
         if (have_value) {
             const rl: ResultLoc = if (field_type == .none) .none else .{ .ty = field_type };
 
-            const default_inst = try expr(&block_scope, &block_scope.base, rl, member.ast.value_expr);
+            const default_inst = try expr(&block_scope, &namespace.base, rl, member.ast.value_expr);
             fields_data.appendAssumeCapacity(@enumToInt(default_inst));
         } else if (member.comptime_token) |comptime_token| {
             return astgen.failTok(comptime_token, "comptime field without default initialization value", .{});
@@ -3550,7 +3835,6 @@ fn structDeclInner(
         }
     }
 
-    const decl_inst = try gz.reserveInstructionIndex();
     if (block_scope.instructions.items.len != 0) {
         _ = try block_scope.addBreak(.break_inline, decl_inst, .void_value);
     }
@@ -3561,13 +3845,21 @@ fn structDeclInner(
         .body_len = @intCast(u32, block_scope.instructions.items.len),
         .fields_len = @intCast(u32, field_index),
         .decls_len = @intCast(u32, wip_decls.decl_index),
+        .known_has_bits = known_has_bits,
     });
 
-    try astgen.extra.ensureUnusedCapacity(gpa, bit_bag.items.len +
-        @boolToInt(field_index != 0) + fields_data.items.len +
+    // zig fmt: off
+    try astgen.extra.ensureUnusedCapacity(gpa,
+        bit_bag.items.len +
+        @boolToInt(wip_decls.decl_index != 0) +
+        wip_decls.payload.items.len +
         block_scope.instructions.items.len +
-        wip_decls.bit_bag.items.len + @boolToInt(wip_decls.decl_index != 0) +
-        wip_decls.payload.items.len);
+        wip_decls.bit_bag.items.len +
+        @boolToInt(field_index != 0) +
+        fields_data.items.len
+    );
+    // zig fmt: on
+
     astgen.extra.appendSliceAssumeCapacity(wip_decls.bit_bag.items); // Likely empty.
     if (wip_decls.decl_index != 0) {
         astgen.extra.appendAssumeCapacity(wip_decls.cur_bit_bag);
@@ -3582,46 +3874,59 @@ fn structDeclInner(
     }
     astgen.extra.appendSliceAssumeCapacity(fields_data.items);
 
-    return gz.indexToRef(decl_inst);
+    return indexToRef(decl_inst);
 }
 
 fn unionDeclInner(
     gz: *GenZir,
     scope: *Scope,
-    node: ast.Node.Index,
-    members: []const ast.Node.Index,
+    node: Ast.Node.Index,
+    members: []const Ast.Node.Index,
     layout: std.builtin.TypeInfo.ContainerLayout,
-    arg_inst: Zir.Inst.Ref,
+    arg_node: Ast.Node.Index,
     have_auto_enum: bool,
 ) InnerError!Zir.Inst.Ref {
+    const decl_inst = try gz.reserveInstructionIndex();
+
     const astgen = gz.astgen;
     const gpa = astgen.gpa;
     const tree = astgen.tree;
     const node_tags = tree.nodes.items(.tag);
     const node_datas = tree.nodes.items(.data);
 
+    var namespace: Scope.Namespace = .{
+        .parent = scope,
+        .node = node,
+        .inst = decl_inst,
+        .declaring_gz = gz,
+    };
+    defer namespace.deinit(gpa);
+
     // The union_decl instruction introduces a scope in which the decls of the union
     // are in scope, so that field types, alignments, and default value expressions
     // can refer to decls within the union itself.
     var block_scope: GenZir = .{
-        .parent = scope,
+        .parent = &namespace.base,
         .decl_node_index = node,
         .decl_line = gz.calcLine(node),
         .astgen = astgen,
         .force_comptime = true,
         .in_defer = false,
-        .ref_start_index = gz.ref_start_index,
     };
     defer block_scope.instructions.deinit(gpa);
 
-    var namespace: Scope.Namespace = .{ .parent = &gz.base };
-    defer namespace.decls.deinit(gpa);
+    try astgen.scanDecls(&namespace, members);
+
+    const arg_inst: Zir.Inst.Ref = if (arg_node != 0)
+        try typeExpr(&block_scope, &namespace.base, arg_node)
+    else
+        .none;
 
     var wip_decls: WipDecls = .{};
     defer wip_decls.deinit(gpa);
 
     // We don't know which members are fields until we iterate, so cannot do
-    // an accurate ensureCapacity yet.
+    // an accurate ensureTotalCapacity yet.
     var fields_data = ArrayListUnmanaged(u32){};
     defer fields_data.deinit(gpa);
 
@@ -3644,7 +3949,7 @@ fn unionDeclInner(
                 const body = node_datas[member_node].rhs;
                 switch (node_tags[fn_proto]) {
                     .fn_proto_simple => {
-                        var params: [1]ast.Node.Index = undefined;
+                        var params: [1]Ast.Node.Index = undefined;
                         astgen.fnDecl(gz, &namespace.base, &wip_decls, member_node, body, tree.fnProtoSimple(&params, fn_proto)) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
                             error.AnalysisFail => {},
@@ -3659,7 +3964,7 @@ fn unionDeclInner(
                         continue;
                     },
                     .fn_proto_one => {
-                        var params: [1]ast.Node.Index = undefined;
+                        var params: [1]Ast.Node.Index = undefined;
                         astgen.fnDecl(gz, &namespace.base, &wip_decls, member_node, body, tree.fnProtoOne(&params, fn_proto)) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
                             error.AnalysisFail => {},
@@ -3677,7 +3982,7 @@ fn unionDeclInner(
                 }
             },
             .fn_proto_simple => {
-                var params: [1]ast.Node.Index = undefined;
+                var params: [1]Ast.Node.Index = undefined;
                 astgen.fnDecl(gz, &namespace.base, &wip_decls, member_node, 0, tree.fnProtoSimple(&params, member_node)) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.AnalysisFail => {},
@@ -3692,7 +3997,7 @@ fn unionDeclInner(
                 continue;
             },
             .fn_proto_one => {
-                var params: [1]ast.Node.Index = undefined;
+                var params: [1]Ast.Node.Index = undefined;
                 astgen.fnDecl(gz, &namespace.base, &wip_decls, member_node, 0, tree.fnProtoOne(&params, member_node)) catch |err| switch (err) {
                     error.OutOfMemory => return error.OutOfMemory,
                     error.AnalysisFail => {},
@@ -3766,7 +4071,7 @@ fn unionDeclInner(
         if (member.comptime_token) |comptime_token| {
             return astgen.failTok(comptime_token, "union fields cannot be marked comptime", .{});
         }
-        try fields_data.ensureUnusedCapacity(gpa, 4);
+        try fields_data.ensureUnusedCapacity(gpa, if (node_tags[member.ast.type_expr] != .@"anytype") 4 else 3);
 
         const field_name = try astgen.identAsString(member.ast.name_token);
         fields_data.appendAssumeCapacity(field_name);
@@ -3781,8 +4086,8 @@ fn unionDeclInner(
             (@as(u32, @boolToInt(have_value)) << 30) |
             (@as(u32, @boolToInt(unused)) << 31);
 
-        if (have_type) {
-            const field_type = try typeExpr(&block_scope, &block_scope.base, member.ast.type_expr);
+        if (have_type and node_tags[member.ast.type_expr] != .@"anytype") {
+            const field_type = try typeExpr(&block_scope, &namespace.base, member.ast.type_expr);
             fields_data.appendAssumeCapacity(@enumToInt(field_type));
         }
         if (have_align) {
@@ -3826,7 +4131,6 @@ fn unionDeclInner(
         }
     }
 
-    const decl_inst = try gz.reserveInstructionIndex();
     if (block_scope.instructions.items.len != 0) {
         _ = try block_scope.addBreak(.break_inline, decl_inst, .void_value);
     }
@@ -3841,11 +4145,18 @@ fn unionDeclInner(
         .auto_enum_tag = have_auto_enum,
     });
 
-    try astgen.extra.ensureUnusedCapacity(gpa, bit_bag.items.len +
-        1 + fields_data.items.len +
+    // zig fmt: off
+    try astgen.extra.ensureUnusedCapacity(gpa,
+        bit_bag.items.len +
+        @boolToInt(wip_decls.decl_index != 0) +
+        wip_decls.payload.items.len +
         block_scope.instructions.items.len +
-        wip_decls.bit_bag.items.len + @boolToInt(wip_decls.decl_index != 0) +
-        wip_decls.payload.items.len);
+        wip_decls.bit_bag.items.len +
+        1 + // cur_bit_bag
+        fields_data.items.len
+    );
+    // zig fmt: on
+
     astgen.extra.appendSliceAssumeCapacity(wip_decls.bit_bag.items); // Likely empty.
     if (wip_decls.decl_index != 0) {
         astgen.extra.appendAssumeCapacity(wip_decls.cur_bit_bag);
@@ -3858,15 +4169,15 @@ fn unionDeclInner(
     astgen.extra.appendAssumeCapacity(cur_bit_bag);
     astgen.extra.appendSliceAssumeCapacity(fields_data.items);
 
-    return gz.indexToRef(decl_inst);
+    return indexToRef(decl_inst);
 }
 
 fn containerDecl(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    container_decl: ast.full.ContainerDecl,
+    node: Ast.Node.Index,
+    container_decl: Ast.full.ContainerDecl,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const gpa = astgen.gpa;
@@ -3875,13 +4186,12 @@ fn containerDecl(
     const node_tags = tree.nodes.items(.tag);
     const node_datas = tree.nodes.items(.data);
 
+    const prev_fn_block = astgen.fn_block;
+    astgen.fn_block = null;
+    defer astgen.fn_block = prev_fn_block;
+
     // We must not create any types until Sema. Here the goal is only to generate
     // ZIR for all the field types, alignments, and default value expressions.
-
-    const arg_inst: Zir.Inst.Ref = if (container_decl.ast.arg != 0)
-        try comptimeExpr(gz, scope, .{ .ty = .type_type }, container_decl.ast.arg)
-    else
-        .none;
 
     switch (token_tags[container_decl.ast.main_token]) {
         .keyword_struct => {
@@ -3891,10 +4201,10 @@ fn containerDecl(
                 else => unreachable,
             } else std.builtin.TypeInfo.ContainerLayout.Auto;
 
-            assert(arg_inst == .none);
+            assert(container_decl.ast.arg == 0);
 
             const result = try structDeclInner(gz, scope, node, container_decl, layout);
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
         .keyword_union => {
             const layout = if (container_decl.layout_token) |t| switch (token_tags[t]) {
@@ -3905,8 +4215,8 @@ fn containerDecl(
 
             const have_auto_enum = container_decl.ast.enum_token != null;
 
-            const result = try unionDeclInner(gz, scope, node, container_decl.ast.members, layout, arg_inst, have_auto_enum);
-            return rvalue(gz, scope, rl, result, node);
+            const result = try unionDeclInner(gz, scope, node, container_decl.ast.members, layout, container_decl.ast.arg, have_auto_enum);
+            return rvalue(gz, rl, result, node);
         },
         .keyword_enum => {
             if (container_decl.layout_token) |t| {
@@ -3917,7 +4227,7 @@ fn containerDecl(
                 var values: usize = 0;
                 var total_fields: usize = 0;
                 var decls: usize = 0;
-                var nonexhaustive_node: ast.Node.Index = 0;
+                var nonexhaustive_node: Ast.Node.Index = 0;
                 for (container_decl.ast.members) |member_node| {
                     const member = switch (node_tags[member_node]) {
                         .container_field_init => tree.containerFieldInit(member_node),
@@ -3932,7 +4242,18 @@ fn containerDecl(
                         return astgen.failTok(comptime_token, "enum fields cannot be marked comptime", .{});
                     }
                     if (member.ast.type_expr != 0) {
-                        return astgen.failNode(member.ast.type_expr, "enum fields do not have types", .{});
+                        return astgen.failNodeNotes(
+                            member.ast.type_expr,
+                            "enum fields do not have types",
+                            .{},
+                            &[_]u32{
+                                try astgen.errNoteNode(
+                                    node,
+                                    "consider 'union(enum)' here to make it a tagged union",
+                                    .{},
+                                ),
+                            },
+                        );
                     }
                     // Alignment expressions in enums are caught by the parser.
                     assert(member.ast.align_expr == 0);
@@ -3961,7 +4282,7 @@ fn containerDecl(
                     }
                     total_fields += 1;
                     if (member.ast.value_expr != 0) {
-                        if (arg_inst == .none) {
+                        if (container_decl.ast.arg == 0) {
                             return astgen.failNode(member.ast.value_expr, "value assigned to enum tag with inferred tag type", .{});
                         }
                         values += 1;
@@ -3974,13 +4295,13 @@ fn containerDecl(
                     .nonexhaustive_node = nonexhaustive_node,
                 };
             };
-            if (counts.total_fields == 0) {
+            if (counts.total_fields == 0 and counts.nonexhaustive_node == 0) {
                 // One can construct an enum with no tags, and it functions the same as `noreturn`. But
                 // this is only useful for generic code; when explicitly using `enum {}` syntax, there
                 // must be at least one tag.
                 return astgen.failNode(node, "enum declarations must have at least one tag", .{});
             }
-            if (counts.nonexhaustive_node != 0 and arg_inst == .none) {
+            if (counts.nonexhaustive_node != 0 and container_decl.ast.arg == 0) {
                 return astgen.failNodeNotes(
                     node,
                     "non-exhaustive enum missing integer tag type",
@@ -3998,21 +4319,34 @@ fn containerDecl(
             // how structs are handled above.
             const nonexhaustive = counts.nonexhaustive_node != 0;
 
+            const decl_inst = try gz.reserveInstructionIndex();
+
+            var namespace: Scope.Namespace = .{
+                .parent = scope,
+                .node = node,
+                .inst = decl_inst,
+                .declaring_gz = gz,
+            };
+            defer namespace.deinit(gpa);
+
             // The enum_decl instruction introduces a scope in which the decls of the enum
             // are in scope, so that tag values can refer to decls within the enum itself.
             var block_scope: GenZir = .{
-                .parent = scope,
+                .parent = &namespace.base,
                 .decl_node_index = node,
                 .decl_line = gz.calcLine(node),
                 .astgen = astgen,
                 .force_comptime = true,
                 .in_defer = false,
-                .ref_start_index = gz.ref_start_index,
             };
             defer block_scope.instructions.deinit(gpa);
 
-            var namespace: Scope.Namespace = .{ .parent = &gz.base };
-            defer namespace.decls.deinit(gpa);
+            try astgen.scanDecls(&namespace, container_decl.ast.members);
+
+            const arg_inst: Zir.Inst.Ref = if (container_decl.ast.arg != 0)
+                try comptimeExpr(&block_scope, &namespace.base, .{ .ty = .type_type }, container_decl.ast.arg)
+            else
+                .none;
 
             var wip_decls: WipDecls = .{};
             defer wip_decls.deinit(gpa);
@@ -4020,7 +4354,7 @@ fn containerDecl(
             var fields_data = ArrayListUnmanaged(u32){};
             defer fields_data.deinit(gpa);
 
-            try fields_data.ensureCapacity(gpa, counts.total_fields + counts.values);
+            try fields_data.ensureTotalCapacity(gpa, counts.total_fields + counts.values);
 
             // We only need this if there are greater than 32 fields.
             var bit_bag = ArrayListUnmanaged(u32){};
@@ -4041,7 +4375,7 @@ fn containerDecl(
                         const body = node_datas[member_node].rhs;
                         switch (node_tags[fn_proto]) {
                             .fn_proto_simple => {
-                                var params: [1]ast.Node.Index = undefined;
+                                var params: [1]Ast.Node.Index = undefined;
                                 astgen.fnDecl(gz, &namespace.base, &wip_decls, member_node, body, tree.fnProtoSimple(&params, fn_proto)) catch |err| switch (err) {
                                     error.OutOfMemory => return error.OutOfMemory,
                                     error.AnalysisFail => {},
@@ -4056,7 +4390,7 @@ fn containerDecl(
                                 continue;
                             },
                             .fn_proto_one => {
-                                var params: [1]ast.Node.Index = undefined;
+                                var params: [1]Ast.Node.Index = undefined;
                                 astgen.fnDecl(gz, &namespace.base, &wip_decls, member_node, body, tree.fnProtoOne(&params, fn_proto)) catch |err| switch (err) {
                                     error.OutOfMemory => return error.OutOfMemory,
                                     error.AnalysisFail => {},
@@ -4074,7 +4408,7 @@ fn containerDecl(
                         }
                     },
                     .fn_proto_simple => {
-                        var params: [1]ast.Node.Index = undefined;
+                        var params: [1]Ast.Node.Index = undefined;
                         astgen.fnDecl(gz, &namespace.base, &wip_decls, member_node, 0, tree.fnProtoSimple(&params, member_node)) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
                             error.AnalysisFail => {},
@@ -4089,7 +4423,7 @@ fn containerDecl(
                         continue;
                     },
                     .fn_proto_one => {
-                        var params: [1]ast.Node.Index = undefined;
+                        var params: [1]Ast.Node.Index = undefined;
                         astgen.fnDecl(gz, &namespace.base, &wip_decls, member_node, 0, tree.fnProtoOne(&params, member_node)) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
                             error.AnalysisFail => {},
@@ -4186,7 +4520,7 @@ fn containerDecl(
                             },
                         );
                     }
-                    const tag_value_inst = try expr(&block_scope, &block_scope.base, .{ .ty = arg_inst }, member.ast.value_expr);
+                    const tag_value_inst = try expr(&block_scope, &namespace.base, .{ .ty = arg_inst }, member.ast.value_expr);
                     fields_data.appendAssumeCapacity(@enumToInt(tag_value_inst));
                 }
 
@@ -4205,7 +4539,6 @@ fn containerDecl(
                 }
             }
 
-            const decl_inst = try gz.reserveInstructionIndex();
             if (block_scope.instructions.items.len != 0) {
                 _ = try block_scope.addBreak(.break_inline, decl_inst, .void_value);
             }
@@ -4219,11 +4552,18 @@ fn containerDecl(
                 .decls_len = @intCast(u32, wip_decls.decl_index),
             });
 
-            try astgen.extra.ensureUnusedCapacity(gpa, bit_bag.items.len +
-                1 + fields_data.items.len +
+            // zig fmt: off
+            try astgen.extra.ensureUnusedCapacity(gpa,
+                bit_bag.items.len +
+                @boolToInt(wip_decls.decl_index != 0) +
+                wip_decls.payload.items.len +
                 block_scope.instructions.items.len +
-                wip_decls.bit_bag.items.len + @boolToInt(wip_decls.decl_index != 0) +
-                wip_decls.payload.items.len);
+                wip_decls.bit_bag.items.len +
+                1 + // cur_bit_bag
+                fields_data.items.len
+            );
+            // zig fmt: on
+
             astgen.extra.appendSliceAssumeCapacity(wip_decls.bit_bag.items); // Likely empty.
             if (wip_decls.decl_index != 0) {
                 astgen.extra.appendAssumeCapacity(wip_decls.cur_bit_bag);
@@ -4235,27 +4575,36 @@ fn containerDecl(
             astgen.extra.appendAssumeCapacity(cur_bit_bag);
             astgen.extra.appendSliceAssumeCapacity(fields_data.items);
 
-            return rvalue(gz, scope, rl, gz.indexToRef(decl_inst), node);
+            return rvalue(gz, rl, indexToRef(decl_inst), node);
         },
         .keyword_opaque => {
-            var namespace: Scope.Namespace = .{ .parent = &gz.base };
-            defer namespace.decls.deinit(gpa);
+            assert(container_decl.ast.arg == 0);
+
+            const decl_inst = try gz.reserveInstructionIndex();
+
+            var namespace: Scope.Namespace = .{
+                .parent = scope,
+                .node = node,
+                .inst = decl_inst,
+                .declaring_gz = gz,
+            };
+            defer namespace.deinit(gpa);
+
+            try astgen.scanDecls(&namespace, container_decl.ast.members);
 
             var wip_decls: WipDecls = .{};
             defer wip_decls.deinit(gpa);
 
             for (container_decl.ast.members) |member_node| {
-                const member = switch (node_tags[member_node]) {
-                    .container_field_init => tree.containerFieldInit(member_node),
-                    .container_field_align => tree.containerFieldAlign(member_node),
-                    .container_field => tree.containerField(member_node),
+                switch (node_tags[member_node]) {
+                    .container_field_init, .container_field_align, .container_field => {},
 
                     .fn_decl => {
                         const fn_proto = node_datas[member_node].lhs;
                         const body = node_datas[member_node].rhs;
                         switch (node_tags[fn_proto]) {
                             .fn_proto_simple => {
-                                var params: [1]ast.Node.Index = undefined;
+                                var params: [1]Ast.Node.Index = undefined;
                                 astgen.fnDecl(gz, &namespace.base, &wip_decls, member_node, body, tree.fnProtoSimple(&params, fn_proto)) catch |err| switch (err) {
                                     error.OutOfMemory => return error.OutOfMemory,
                                     error.AnalysisFail => {},
@@ -4270,7 +4619,7 @@ fn containerDecl(
                                 continue;
                             },
                             .fn_proto_one => {
-                                var params: [1]ast.Node.Index = undefined;
+                                var params: [1]Ast.Node.Index = undefined;
                                 astgen.fnDecl(gz, &namespace.base, &wip_decls, member_node, body, tree.fnProtoOne(&params, fn_proto)) catch |err| switch (err) {
                                     error.OutOfMemory => return error.OutOfMemory,
                                     error.AnalysisFail => {},
@@ -4288,7 +4637,7 @@ fn containerDecl(
                         }
                     },
                     .fn_proto_simple => {
-                        var params: [1]ast.Node.Index = undefined;
+                        var params: [1]Ast.Node.Index = undefined;
                         astgen.fnDecl(gz, &namespace.base, &wip_decls, member_node, 0, tree.fnProtoSimple(&params, member_node)) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
                             error.AnalysisFail => {},
@@ -4303,7 +4652,7 @@ fn containerDecl(
                         continue;
                     },
                     .fn_proto_one => {
-                        var params: [1]ast.Node.Index = undefined;
+                        var params: [1]Ast.Node.Index = undefined;
                         astgen.fnDecl(gz, &namespace.base, &wip_decls, member_node, 0, tree.fnProtoOne(&params, member_node)) catch |err| switch (err) {
                             error.OutOfMemory => return error.OutOfMemory,
                             error.AnalysisFail => {},
@@ -4369,7 +4718,7 @@ fn containerDecl(
                         continue;
                     },
                     else => unreachable,
-                };
+                }
             }
             {
                 const empty_slot_count = WipDecls.fields_per_u32 - (wip_decls.decl_index % WipDecls.fields_per_u32);
@@ -4377,39 +4726,33 @@ fn containerDecl(
                     wip_decls.cur_bit_bag >>= @intCast(u5, empty_slot_count * WipDecls.bits_per_field);
                 }
             }
-            const tag: Zir.Inst.Tag = switch (gz.anon_name_strategy) {
-                .parent => .opaque_decl,
-                .anon => .opaque_decl_anon,
-                .func => .opaque_decl_func,
-            };
-            const decl_inst = try gz.addBlock(tag, node);
-            try gz.instructions.append(gpa, decl_inst);
 
-            try astgen.extra.ensureUnusedCapacity(gpa, @typeInfo(Zir.Inst.OpaqueDecl).Struct.fields.len +
-                wip_decls.bit_bag.items.len + @boolToInt(wip_decls.decl_index != 0) +
-                wip_decls.payload.items.len);
-            const zir_datas = astgen.instructions.items(.data);
-            zir_datas[decl_inst].pl_node.payload_index = astgen.addExtraAssumeCapacity(Zir.Inst.OpaqueDecl{
+            try gz.setOpaque(decl_inst, .{
+                .src_node = node,
                 .decls_len = @intCast(u32, wip_decls.decl_index),
             });
+
+            // zig fmt: off
+            try astgen.extra.ensureUnusedCapacity(gpa,
+                wip_decls.bit_bag.items.len +
+                @boolToInt(wip_decls.decl_index != 0) +
+                wip_decls.payload.items.len
+            );
+            // zig fmt: on
+
             astgen.extra.appendSliceAssumeCapacity(wip_decls.bit_bag.items); // Likely empty.
             if (wip_decls.decl_index != 0) {
                 astgen.extra.appendAssumeCapacity(wip_decls.cur_bit_bag);
             }
             astgen.extra.appendSliceAssumeCapacity(wip_decls.payload.items);
 
-            return rvalue(gz, scope, rl, gz.indexToRef(decl_inst), node);
+            return rvalue(gz, rl, indexToRef(decl_inst), node);
         },
         else => unreachable,
     }
 }
 
-fn errorSetDecl(
-    gz: *GenZir,
-    scope: *Scope,
-    rl: ResultLoc,
-    node: ast.Node.Index,
-) InnerError!Zir.Inst.Ref {
+fn errorSetDecl(gz: *GenZir, rl: ResultLoc, node: Ast.Node.Index) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const gpa = astgen.gpa;
     const tree = astgen.tree;
@@ -4437,33 +4780,27 @@ fn errorSetDecl(
         }
     }
 
-    const tag: Zir.Inst.Tag = switch (gz.anon_name_strategy) {
-        .parent => .error_set_decl,
-        .anon => .error_set_decl_anon,
-        .func => .error_set_decl_func,
-    };
     const result = try gz.addPlNode(.error_set_decl, node, Zir.Inst.ErrorSetDecl{
         .fields_len = @intCast(u32, field_names.items.len),
     });
     try astgen.extra.appendSlice(gpa, field_names.items);
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn tryExpr(
     parent_gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    operand_node: ast.Node.Index,
+    node: Ast.Node.Index,
+    operand_node: Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     const astgen = parent_gz.astgen;
-    const tree = astgen.tree;
 
     const fn_block = astgen.fn_block orelse {
-        return astgen.failNode(node, "invalid 'try' outside function scope", .{});
+        return astgen.failNode(node, "'try' outside function scope", .{});
     };
 
-    if (parent_gz.in_defer) return astgen.failNode(node, "try is not allowed inside defer expression", .{});
+    if (parent_gz.in_defer) return astgen.failNode(node, "'try' not allowed inside defer expression", .{});
 
     var block_scope = parent_gz.makeSubBlock(scope);
     block_scope.setBreakResultLoc(rl);
@@ -4475,8 +4812,8 @@ fn tryExpr(
     };
     const err_ops = switch (rl) {
         // zig fmt: off
-        .ref => [3]Zir.Inst.Tag{ .is_err_ptr, .err_union_code_ptr, .err_union_payload_unsafe_ptr },
-        else => [3]Zir.Inst.Tag{ .is_err,     .err_union_code,     .err_union_payload_unsafe },
+        .ref => [3]Zir.Inst.Tag{ .is_non_err_ptr, .err_union_code_ptr, .err_union_payload_unsafe_ptr },
+        else => [3]Zir.Inst.Tag{ .is_non_err,     .err_union_code,     .err_union_payload_unsafe },
         // zig fmt: on
     };
     // This could be a pointer or value depending on the `operand_rl` parameter.
@@ -4494,24 +4831,23 @@ fn tryExpr(
     var then_scope = parent_gz.makeSubBlock(scope);
     defer then_scope.instructions.deinit(astgen.gpa);
 
-    const err_code = try then_scope.addUnNode(err_ops[1], operand, node);
-    try genDefers(&then_scope, &fn_block.base, scope, err_code);
-    const then_result = try then_scope.addUnNode(.ret_node, err_code, node);
+    block_scope.break_count += 1;
+    // This could be a pointer or value depending on `err_ops[2]`.
+    const unwrapped_payload = try then_scope.addUnNode(err_ops[2], operand, node);
+    const then_result = switch (rl) {
+        .ref => unwrapped_payload,
+        else => try rvalue(&then_scope, block_scope.break_result_loc, unwrapped_payload, node),
+    };
 
     var else_scope = parent_gz.makeSubBlock(scope);
     defer else_scope.instructions.deinit(astgen.gpa);
 
-    block_scope.break_count += 1;
-    // This could be a pointer or value depending on `err_ops[2]`.
-    const unwrapped_payload = try else_scope.addUnNode(err_ops[2], operand, node);
-    const else_result = switch (rl) {
-        .ref => unwrapped_payload,
-        else => try rvalue(&else_scope, &else_scope.base, block_scope.break_result_loc, unwrapped_payload, node),
-    };
+    const err_code = try else_scope.addUnNode(err_ops[1], operand, node);
+    try genDefers(&else_scope, &fn_block.base, scope, .{ .both = err_code });
+    const else_result = try else_scope.addUnNode(.ret_node, err_code, node);
 
     return finishThenElseBlock(
         parent_gz,
-        scope,
         rl,
         node,
         &block_scope,
@@ -4519,8 +4855,6 @@ fn tryExpr(
         &else_scope,
         condbr,
         cond,
-        node,
-        node,
         then_result,
         else_result,
         block,
@@ -4533,13 +4867,13 @@ fn orelseCatchExpr(
     parent_gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    lhs: ast.Node.Index,
+    node: Ast.Node.Index,
+    lhs: Ast.Node.Index,
     cond_op: Zir.Inst.Tag,
     unwrap_op: Zir.Inst.Tag,
     unwrap_code_op: Zir.Inst.Tag,
-    rhs: ast.Node.Index,
-    payload_token: ?ast.TokenIndex,
+    rhs: Ast.Node.Index,
+    payload_token: ?Ast.TokenIndex,
 ) InnerError!Zir.Inst.Ref {
     const astgen = parent_gz.astgen;
     const tree = astgen.tree;
@@ -4568,42 +4902,44 @@ fn orelseCatchExpr(
     var then_scope = parent_gz.makeSubBlock(scope);
     defer then_scope.instructions.deinit(astgen.gpa);
 
+    // This could be a pointer or value depending on `unwrap_op`.
+    const unwrapped_payload = try then_scope.addUnNode(unwrap_op, operand, node);
+    const then_result = switch (rl) {
+        .ref => unwrapped_payload,
+        else => try rvalue(&then_scope, block_scope.break_result_loc, unwrapped_payload, node),
+    };
+
+    var else_scope = parent_gz.makeSubBlock(scope);
+    defer else_scope.instructions.deinit(astgen.gpa);
+
     var err_val_scope: Scope.LocalVal = undefined;
-    const then_sub_scope = blk: {
-        const payload = payload_token orelse break :blk &then_scope.base;
+    const else_sub_scope = blk: {
+        const payload = payload_token orelse break :blk &else_scope.base;
         if (mem.eql(u8, tree.tokenSlice(payload), "_")) {
             return astgen.failTok(payload, "discard of error capture; omit it instead", .{});
         }
         const err_name = try astgen.identAsString(payload);
         err_val_scope = .{
-            .parent = &then_scope.base,
-            .gen_zir = &then_scope,
+            .parent = &else_scope.base,
+            .gen_zir = &else_scope,
             .name = err_name,
-            .inst = try then_scope.addUnNode(unwrap_code_op, operand, node),
+            .inst = try else_scope.addUnNode(unwrap_code_op, operand, node),
             .token_src = payload,
+            .id_cat = .@"capture",
         };
         break :blk &err_val_scope.base;
     };
 
     block_scope.break_count += 1;
-    const then_result = try expr(&then_scope, then_sub_scope, block_scope.break_result_loc, rhs);
+    const else_result = try expr(&else_scope, else_sub_scope, block_scope.break_result_loc, rhs);
+    try checkUsed(parent_gz, &else_scope.base, else_sub_scope);
+
     // We hold off on the break instructions as well as copying the then/else
     // instructions into place until we know whether to keep store_to_block_ptr
     // instructions or not.
 
-    var else_scope = parent_gz.makeSubBlock(scope);
-    defer else_scope.instructions.deinit(astgen.gpa);
-
-    // This could be a pointer or value depending on `unwrap_op`.
-    const unwrapped_payload = try else_scope.addUnNode(unwrap_op, operand, node);
-    const else_result = switch (rl) {
-        .ref => unwrapped_payload,
-        else => try rvalue(&else_scope, &else_scope.base, block_scope.break_result_loc, unwrapped_payload, node),
-    };
-
     return finishThenElseBlock(
         parent_gz,
-        scope,
         rl,
         node,
         &block_scope,
@@ -4611,8 +4947,6 @@ fn orelseCatchExpr(
         &else_scope,
         condbr,
         cond,
-        node,
-        node,
         then_result,
         else_result,
         block,
@@ -4623,16 +4957,13 @@ fn orelseCatchExpr(
 
 fn finishThenElseBlock(
     parent_gz: *GenZir,
-    parent_scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
     block_scope: *GenZir,
     then_scope: *GenZir,
     else_scope: *GenZir,
     condbr: Zir.Inst.Index,
     cond: Zir.Inst.Ref,
-    then_src: ast.Node.Index,
-    else_src: ast.Node.Index,
     then_result: Zir.Inst.Ref,
     else_result: Zir.Inst.Ref,
     main_block: Zir.Inst.Index,
@@ -4642,26 +4973,24 @@ fn finishThenElseBlock(
     // We now have enough information to decide whether the result instruction should
     // be communicated via result location pointer or break instructions.
     const strat = rl.strategy(block_scope);
-    const astgen = block_scope.astgen;
     switch (strat.tag) {
         .break_void => {
-            if (!parent_gz.refIsNoReturn(then_result)) {
+            if (!then_scope.endsWithNoReturn()) {
                 _ = try then_scope.addBreak(break_tag, then_break_block, .void_value);
             }
-            const elide_else = if (else_result != .none) parent_gz.refIsNoReturn(else_result) else false;
-            if (!elide_else) {
+            if (!else_scope.endsWithNoReturn()) {
                 _ = try else_scope.addBreak(break_tag, main_block, .void_value);
             }
             assert(!strat.elide_store_to_block_ptr_instructions);
             try setCondBrPayload(condbr, cond, then_scope, else_scope);
-            return parent_gz.indexToRef(main_block);
+            return indexToRef(main_block);
         },
         .break_operand => {
-            if (!parent_gz.refIsNoReturn(then_result)) {
+            if (!then_scope.endsWithNoReturn()) {
                 _ = try then_scope.addBreak(break_tag, then_break_block, then_result);
             }
             if (else_result != .none) {
-                if (!parent_gz.refIsNoReturn(else_result)) {
+                if (!else_scope.endsWithNoReturn()) {
                     _ = try else_scope.addBreak(break_tag, main_block, else_result);
                 }
             } else {
@@ -4672,10 +5001,10 @@ fn finishThenElseBlock(
             } else {
                 try setCondBrPayload(condbr, cond, then_scope, else_scope);
             }
-            const block_ref = parent_gz.indexToRef(main_block);
+            const block_ref = indexToRef(main_block);
             switch (rl) {
                 .ref => return block_ref,
-                else => return rvalue(parent_gz, parent_scope, rl, block_ref, node),
+                else => return rvalue(parent_gz, rl, block_ref, node),
             }
         },
     }
@@ -4685,7 +5014,7 @@ fn finishThenElseBlock(
 /// tokens without allocating.
 /// OK in theory it could do it without allocating. This implementation
 /// allocates when the @"" form is used.
-fn tokenIdentEql(astgen: *AstGen, token1: ast.TokenIndex, token2: ast.TokenIndex) !bool {
+fn tokenIdentEql(astgen: *AstGen, token1: Ast.TokenIndex, token2: Ast.TokenIndex) !bool {
     const ident_name_1 = try astgen.identifierTokenString(token1);
     const ident_name_2 = try astgen.identifierTokenString(token2);
     return mem.eql(u8, ident_name_1, ident_name_2);
@@ -4695,7 +5024,22 @@ fn fieldAccess(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
+) InnerError!Zir.Inst.Ref {
+    if (rl == .ref) {
+        return addFieldAccess(.field_ptr, gz, scope, .ref, node);
+    } else {
+        const access = try addFieldAccess(.field_val, gz, scope, .none_or_ref, node);
+        return rvalue(gz, rl, access, node);
+    }
+}
+
+fn addFieldAccess(
+    tag: Zir.Inst.Tag,
+    gz: *GenZir,
+    scope: *Scope,
+    lhs_rl: ResultLoc,
+    node: Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const tree = astgen.tree;
@@ -4706,27 +5050,21 @@ fn fieldAccess(
     const dot_token = main_tokens[node];
     const field_ident = dot_token + 1;
     const str_index = try astgen.identAsString(field_ident);
-    switch (rl) {
-        .ref => return gz.addPlNode(.field_ptr, node, Zir.Inst.Field{
-            .lhs = try expr(gz, scope, .ref, object_node),
-            .field_name_start = str_index,
-        }),
-        else => return rvalue(gz, scope, rl, try gz.addPlNode(.field_val, node, Zir.Inst.Field{
-            .lhs = try expr(gz, scope, .none_or_ref, object_node),
-            .field_name_start = str_index,
-        }), node),
-    }
+
+    return gz.addPlNode(tag, node, Zir.Inst.Field{
+        .lhs = try expr(gz, scope, lhs_rl, object_node),
+        .field_name_start = str_index,
+    });
 }
 
 fn arrayAccess(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const tree = astgen.tree;
-    const main_tokens = tree.nodes.items(.main_token);
     const node_datas = tree.nodes.items(.data);
     switch (rl) {
         .ref => return gz.addBin(
@@ -4734,7 +5072,7 @@ fn arrayAccess(
             try expr(gz, scope, .ref, node_datas[node].lhs),
             try expr(gz, scope, .{ .ty = .usize_type }, node_datas[node].rhs),
         ),
-        else => return rvalue(gz, scope, rl, try gz.addBin(
+        else => return rvalue(gz, rl, try gz.addBin(
             .elem_val,
             try expr(gz, scope, .none_or_ref, node_datas[node].lhs),
             try expr(gz, scope, .{ .ty = .usize_type }, node_datas[node].rhs),
@@ -4746,7 +5084,7 @@ fn simpleBinOp(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
     op_inst_tag: Zir.Inst.Tag,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
@@ -4757,28 +5095,27 @@ fn simpleBinOp(
         .lhs = try expr(gz, scope, .none, node_datas[node].lhs),
         .rhs = try expr(gz, scope, .none, node_datas[node].rhs),
     });
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn simpleStrTok(
     gz: *GenZir,
-    scope: *Scope,
     rl: ResultLoc,
-    ident_token: ast.TokenIndex,
-    node: ast.Node.Index,
+    ident_token: Ast.TokenIndex,
+    node: Ast.Node.Index,
     op_inst_tag: Zir.Inst.Tag,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const str_index = try astgen.identAsString(ident_token);
     const result = try gz.addStrTok(op_inst_tag, str_index, ident_token);
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn boolBinOp(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
     zir_tag: Zir.Inst.Tag,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
@@ -4796,16 +5133,16 @@ fn boolBinOp(
     }
     try rhs_scope.setBoolBrBody(bool_br);
 
-    const block_ref = gz.indexToRef(bool_br);
-    return rvalue(gz, scope, rl, block_ref, node);
+    const block_ref = indexToRef(bool_br);
+    return rvalue(gz, rl, block_ref, node);
 }
 
 fn ifExpr(
     parent_gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    if_full: ast.full.If,
+    node: Ast.Node.Index,
+    if_full: Ast.full.If,
 ) InnerError!Zir.Inst.Ref {
     const astgen = parent_gz.astgen;
     const tree = astgen.tree;
@@ -4824,15 +5161,15 @@ fn ifExpr(
         inst: Zir.Inst.Ref,
         bool_bit: Zir.Inst.Ref,
     } = c: {
-        if (if_full.error_token) |error_token| {
+        if (if_full.error_token) |_| {
             const cond_rl: ResultLoc = if (payload_is_ref) .ref else .none;
             const err_union = try expr(&block_scope, &block_scope.base, cond_rl, if_full.ast.cond_expr);
-            const tag: Zir.Inst.Tag = if (payload_is_ref) .is_err_ptr else .is_err;
+            const tag: Zir.Inst.Tag = if (payload_is_ref) .is_non_err_ptr else .is_non_err;
             break :c .{
                 .inst = err_union,
                 .bool_bit = try block_scope.addUnNode(tag, err_union, node),
             };
-        } else if (if_full.payload_token) |payload_token| {
+        } else if (if_full.payload_token) |_| {
             const cond_rl: ResultLoc = if (payload_is_ref) .ref else .none;
             const optional = try expr(&block_scope, &block_scope.base, cond_rl, if_full.ast.cond_expr);
             const tag: Zir.Inst.Tag = if (payload_is_ref) .is_non_null_ptr else .is_non_null;
@@ -4861,35 +5198,50 @@ fn ifExpr(
     var payload_val_scope: Scope.LocalVal = undefined;
 
     const then_sub_scope = s: {
-        if (if_full.error_token) |error_token| {
-            const tag: Zir.Inst.Tag = if (payload_is_ref)
-                .err_union_payload_unsafe_ptr
-            else
-                .err_union_payload_unsafe;
-            const payload_inst = try then_scope.addUnNode(tag, cond.inst, node);
-            const ident_name = try astgen.identAsString(error_token);
-            payload_val_scope = .{
-                .parent = &then_scope.base,
-                .gen_zir = &then_scope,
-                .name = ident_name,
-                .inst = payload_inst,
-                .token_src = error_token,
-            };
-            break :s &payload_val_scope.base;
+        if (if_full.error_token != null) {
+            if (if_full.payload_token) |payload_token| {
+                const tag: Zir.Inst.Tag = if (payload_is_ref)
+                    .err_union_payload_unsafe_ptr
+                else
+                    .err_union_payload_unsafe;
+                const payload_inst = try then_scope.addUnNode(tag, cond.inst, node);
+                const token_name_index = payload_token + @boolToInt(payload_is_ref);
+                const ident_name = try astgen.identAsString(token_name_index);
+                const token_name_str = tree.tokenSlice(token_name_index);
+                if (mem.eql(u8, "_", token_name_str))
+                    break :s &then_scope.base;
+                try astgen.detectLocalShadowing(&then_scope.base, ident_name, token_name_index, token_name_str);
+                payload_val_scope = .{
+                    .parent = &then_scope.base,
+                    .gen_zir = &then_scope,
+                    .name = ident_name,
+                    .inst = payload_inst,
+                    .token_src = payload_token,
+                    .id_cat = .@"capture",
+                };
+                break :s &payload_val_scope.base;
+            } else {
+                break :s &then_scope.base;
+            }
         } else if (if_full.payload_token) |payload_token| {
             const ident_token = if (payload_is_ref) payload_token + 1 else payload_token;
             const tag: Zir.Inst.Tag = if (payload_is_ref)
                 .optional_payload_unsafe_ptr
             else
                 .optional_payload_unsafe;
+            const ident_bytes = tree.tokenSlice(ident_token);
+            if (mem.eql(u8, "_", ident_bytes))
+                break :s &then_scope.base;
             const payload_inst = try then_scope.addUnNode(tag, cond.inst, node);
             const ident_name = try astgen.identAsString(ident_token);
+            try astgen.detectLocalShadowing(&then_scope.base, ident_name, ident_token, ident_bytes);
             payload_val_scope = .{
                 .parent = &then_scope.base,
                 .gen_zir = &then_scope,
                 .name = ident_name,
                 .inst = payload_inst,
                 .token_src = ident_token,
+                .id_cat = .@"capture",
             };
             break :s &payload_val_scope.base;
         } else {
@@ -4899,6 +5251,7 @@ fn ifExpr(
 
     block_scope.break_count += 1;
     const then_result = try expr(&then_scope, then_sub_scope, block_scope.break_result_loc, if_full.ast.then_expr);
+    try checkUsed(parent_gz, &then_scope.base, then_sub_scope);
     // We hold off on the break instructions as well as copying the then/else
     // instructions into place until we know whether to keep store_to_block_ptr
     // instructions or not.
@@ -4908,7 +5261,7 @@ fn ifExpr(
 
     const else_node = if_full.ast.else_expr;
     const else_info: struct {
-        src: ast.Node.Index,
+        src: Ast.Node.Index,
         result: Zir.Inst.Ref,
     } = if (else_node != 0) blk: {
         block_scope.break_count += 1;
@@ -4920,21 +5273,28 @@ fn ifExpr(
                     .err_union_code;
                 const payload_inst = try else_scope.addUnNode(tag, cond.inst, node);
                 const ident_name = try astgen.identAsString(error_token);
+                const error_token_str = tree.tokenSlice(error_token);
+                if (mem.eql(u8, "_", error_token_str))
+                    break :s &else_scope.base;
+                try astgen.detectLocalShadowing(&else_scope.base, ident_name, error_token, error_token_str);
                 payload_val_scope = .{
                     .parent = &else_scope.base,
                     .gen_zir = &else_scope,
                     .name = ident_name,
                     .inst = payload_inst,
                     .token_src = error_token,
+                    .id_cat = .@"capture",
                 };
                 break :s &payload_val_scope.base;
             } else {
                 break :s &else_scope.base;
             }
         };
+        const e = try expr(&else_scope, sub_scope, block_scope.break_result_loc, else_node);
+        try checkUsed(parent_gz, &else_scope.base, sub_scope);
         break :blk .{
             .src = else_node,
-            .result = try expr(&else_scope, sub_scope, block_scope.break_result_loc, else_node),
+            .result = e,
         };
     } else .{
         .src = if_full.ast.then_expr,
@@ -4943,7 +5303,6 @@ fn ifExpr(
 
     return finishThenElseBlock(
         parent_gz,
-        scope,
         rl,
         node,
         &block_scope,
@@ -4951,8 +5310,6 @@ fn ifExpr(
         &else_scope,
         condbr,
         cond.bool_bit,
-        if_full.ast.then_expr,
-        else_info.src,
         then_result,
         else_info.result,
         block,
@@ -4969,8 +5326,7 @@ fn setCondBrPayload(
 ) !void {
     const astgen = then_scope.astgen;
 
-    try astgen.extra.ensureCapacity(astgen.gpa, astgen.extra.items.len +
-        @typeInfo(Zir.Inst.CondBr).Struct.fields.len +
+    try astgen.extra.ensureUnusedCapacity(astgen.gpa, @typeInfo(Zir.Inst.CondBr).Struct.fields.len +
         then_scope.instructions.items.len + else_scope.instructions.items.len);
 
     const zir_datas = astgen.instructions.items(.data);
@@ -5031,8 +5387,8 @@ fn whileExpr(
     parent_gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    while_full: ast.full.While,
+    node: Ast.Node.Index,
+    while_full: Ast.full.While,
 ) InnerError!Zir.Inst.Ref {
     const astgen = parent_gz.astgen;
     const tree = astgen.tree;
@@ -5065,15 +5421,15 @@ fn whileExpr(
         inst: Zir.Inst.Ref,
         bool_bit: Zir.Inst.Ref,
     } = c: {
-        if (while_full.error_token) |error_token| {
+        if (while_full.error_token) |_| {
             const cond_rl: ResultLoc = if (payload_is_ref) .ref else .none;
             const err_union = try expr(&continue_scope, &continue_scope.base, cond_rl, while_full.ast.cond_expr);
-            const tag: Zir.Inst.Tag = if (payload_is_ref) .is_err_ptr else .is_err;
+            const tag: Zir.Inst.Tag = if (payload_is_ref) .is_non_err_ptr else .is_non_err;
             break :c .{
                 .inst = err_union,
                 .bool_bit = try continue_scope.addUnNode(tag, err_union, node),
             };
-        } else if (while_full.payload_token) |payload_token| {
+        } else if (while_full.payload_token) |_| {
             const cond_rl: ResultLoc = if (payload_is_ref) .ref else .none;
             const optional = try expr(&continue_scope, &continue_scope.base, cond_rl, while_full.ast.cond_expr);
             const tag: Zir.Inst.Tag = if (payload_is_ref) .is_non_null_ptr else .is_non_null;
@@ -5097,11 +5453,70 @@ fn whileExpr(
     try loop_scope.instructions.append(astgen.gpa, cond_block);
     try continue_scope.setBlockBody(cond_block);
 
-    // TODO avoid emitting the continue expr when there
+    var then_scope = parent_gz.makeSubBlock(&continue_scope.base);
+    defer then_scope.instructions.deinit(astgen.gpa);
+
+    var payload_val_scope: Scope.LocalVal = undefined;
+
+    const then_sub_scope = s: {
+        if (while_full.error_token != null) {
+            if (while_full.payload_token) |payload_token| {
+                const tag: Zir.Inst.Tag = if (payload_is_ref)
+                    .err_union_payload_unsafe_ptr
+                else
+                    .err_union_payload_unsafe;
+                const payload_inst = try then_scope.addUnNode(tag, cond.inst, node);
+                const ident_token = if (payload_is_ref) payload_token + 1 else payload_token;
+                const ident_bytes = tree.tokenSlice(ident_token);
+                if (mem.eql(u8, "_", ident_bytes))
+                    break :s &then_scope.base;
+                const payload_name_loc = payload_token + @boolToInt(payload_is_ref);
+                const ident_name = try astgen.identAsString(payload_name_loc);
+                try astgen.detectLocalShadowing(&then_scope.base, ident_name, payload_name_loc, ident_bytes);
+                payload_val_scope = .{
+                    .parent = &then_scope.base,
+                    .gen_zir = &then_scope,
+                    .name = ident_name,
+                    .inst = payload_inst,
+                    .token_src = payload_token,
+                    .id_cat = .@"capture",
+                };
+                break :s &payload_val_scope.base;
+            } else {
+                break :s &then_scope.base;
+            }
+        } else if (while_full.payload_token) |payload_token| {
+            const ident_token = if (payload_is_ref) payload_token + 1 else payload_token;
+            const tag: Zir.Inst.Tag = if (payload_is_ref)
+                .optional_payload_unsafe_ptr
+            else
+                .optional_payload_unsafe;
+            const payload_inst = try then_scope.addUnNode(tag, cond.inst, node);
+            const ident_name = try astgen.identAsString(ident_token);
+            const ident_bytes = tree.tokenSlice(ident_token);
+            if (mem.eql(u8, "_", ident_bytes))
+                break :s &then_scope.base;
+            try astgen.detectLocalShadowing(&then_scope.base, ident_name, ident_token, ident_bytes);
+            payload_val_scope = .{
+                .parent = &then_scope.base,
+                .gen_zir = &then_scope,
+                .name = ident_name,
+                .inst = payload_inst,
+                .token_src = ident_token,
+                .id_cat = .@"capture",
+            };
+            break :s &payload_val_scope.base;
+        } else {
+            break :s &then_scope.base;
+        }
+    };
+
+    // This code could be improved to avoid emitting the continue expr when there
     // are no jumps to it. This happens when the last statement of a while body is noreturn
     // and there are no `continue` statements.
+    // Tracking issue: https://github.com/ziglang/zig/issues/9185
     if (while_full.ast.cont_expr != 0) {
-        _ = try expr(&loop_scope, &loop_scope.base, .{ .ty = .void_type }, while_full.ast.cont_expr);
+        _ = try expr(&loop_scope, then_sub_scope, .{ .ty = .void_type }, while_full.ast.cont_expr);
     }
     const repeat_tag: Zir.Inst.Tag = if (is_inline) .repeat_inline else .repeat;
     _ = try loop_scope.addNode(repeat_tag, node);
@@ -5116,57 +5531,16 @@ fn whileExpr(
         });
     }
 
-    var then_scope = parent_gz.makeSubBlock(&continue_scope.base);
-    defer then_scope.instructions.deinit(astgen.gpa);
-
-    var payload_val_scope: Scope.LocalVal = undefined;
-
-    const then_sub_scope = s: {
-        if (while_full.error_token) |error_token| {
-            const tag: Zir.Inst.Tag = if (payload_is_ref)
-                .err_union_payload_unsafe_ptr
-            else
-                .err_union_payload_unsafe;
-            const payload_inst = try then_scope.addUnNode(tag, cond.inst, node);
-            const ident_name = try astgen.identAsString(error_token);
-            payload_val_scope = .{
-                .parent = &then_scope.base,
-                .gen_zir = &then_scope,
-                .name = ident_name,
-                .inst = payload_inst,
-                .token_src = error_token,
-            };
-            break :s &payload_val_scope.base;
-        } else if (while_full.payload_token) |payload_token| {
-            const ident_token = if (payload_is_ref) payload_token + 1 else payload_token;
-            const tag: Zir.Inst.Tag = if (payload_is_ref)
-                .optional_payload_unsafe_ptr
-            else
-                .optional_payload_unsafe;
-            const payload_inst = try then_scope.addUnNode(tag, cond.inst, node);
-            const ident_name = try astgen.identAsString(ident_token);
-            payload_val_scope = .{
-                .parent = &then_scope.base,
-                .gen_zir = &then_scope,
-                .name = ident_name,
-                .inst = payload_inst,
-                .token_src = ident_token,
-            };
-            break :s &payload_val_scope.base;
-        } else {
-            break :s &then_scope.base;
-        }
-    };
-
     loop_scope.break_count += 1;
     const then_result = try expr(&then_scope, then_sub_scope, loop_scope.break_result_loc, while_full.ast.then_expr);
+    try checkUsed(parent_gz, &then_scope.base, then_sub_scope);
 
     var else_scope = parent_gz.makeSubBlock(&continue_scope.base);
     defer else_scope.instructions.deinit(astgen.gpa);
 
     const else_node = while_full.ast.else_expr;
     const else_info: struct {
-        src: ast.Node.Index,
+        src: Ast.Node.Index,
         result: Zir.Inst.Ref,
     } = if (else_node != 0) blk: {
         loop_scope.break_count += 1;
@@ -5178,21 +5552,28 @@ fn whileExpr(
                     .err_union_code;
                 const payload_inst = try else_scope.addUnNode(tag, cond.inst, node);
                 const ident_name = try astgen.identAsString(error_token);
+                const ident_bytes = tree.tokenSlice(error_token);
+                if (mem.eql(u8, ident_bytes, "_"))
+                    break :s &else_scope.base;
+                try astgen.detectLocalShadowing(&else_scope.base, ident_name, error_token, ident_bytes);
                 payload_val_scope = .{
                     .parent = &else_scope.base,
                     .gen_zir = &else_scope,
                     .name = ident_name,
                     .inst = payload_inst,
                     .token_src = error_token,
+                    .id_cat = .@"capture",
                 };
                 break :s &payload_val_scope.base;
             } else {
                 break :s &else_scope.base;
             }
         };
+        const e = try expr(&else_scope, sub_scope, loop_scope.break_result_loc, else_node);
+        try checkUsed(parent_gz, &else_scope.base, sub_scope);
         break :blk .{
             .src = else_node,
-            .result = try expr(&else_scope, sub_scope, loop_scope.break_result_loc, else_node),
+            .result = e,
         };
     } else .{
         .src = while_full.ast.then_expr,
@@ -5207,7 +5588,6 @@ fn whileExpr(
     const break_tag: Zir.Inst.Tag = if (is_inline) .break_inline else .@"break";
     return finishThenElseBlock(
         parent_gz,
-        scope,
         rl,
         node,
         &loop_scope,
@@ -5215,8 +5595,6 @@ fn whileExpr(
         &else_scope,
         condbr,
         cond.bool_bit,
-        while_full.ast.then_expr,
-        else_info.src,
         then_result,
         else_info.result,
         loop_block,
@@ -5229,20 +5607,27 @@ fn forExpr(
     parent_gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    for_full: ast.full.While,
+    node: Ast.Node.Index,
+    for_full: Ast.full.While,
 ) InnerError!Zir.Inst.Ref {
     const astgen = parent_gz.astgen;
 
     if (for_full.label_token) |label_token| {
         try astgen.checkLabelRedefinition(scope, label_token);
     }
+
     // Set up variables and constants.
     const is_inline = parent_gz.force_comptime or for_full.inline_token != null;
     const tree = astgen.tree;
     const token_tags = tree.tokens.items(.tag);
 
-    const array_ptr = try expr(parent_gz, scope, .ref, for_full.ast.cond_expr);
+    const payload_is_ref = if (for_full.payload_token) |payload_token|
+        token_tags[payload_token] == .asterisk
+    else
+        false;
+
+    const cond_rl: ResultLoc = if (payload_is_ref) .ref else .none;
+    const array_ptr = try expr(parent_gz, scope, cond_rl, for_full.ast.cond_expr);
     const len = try parent_gz.addUnNode(.indexable_ptr_len, array_ptr, for_full.ast.cond_expr);
 
     const index_ptr = blk: {
@@ -5317,12 +5702,14 @@ fn forExpr(
             const name_str_index = try astgen.identAsString(ident);
             const tag: Zir.Inst.Tag = if (is_ptr) .elem_ptr else .elem_val;
             const payload_inst = try then_scope.addBin(tag, array_ptr, index);
+            try astgen.detectLocalShadowing(&then_scope.base, name_str_index, ident, value_name);
             payload_val_scope = .{
                 .parent = &then_scope.base,
                 .gen_zir = &then_scope,
                 .name = name_str_index,
                 .inst = payload_inst,
                 .token_src = ident,
+                .id_cat = .@"capture",
             };
             payload_sub_scope = &payload_val_scope.base;
         } else if (is_ptr) {
@@ -5335,29 +5722,34 @@ fn forExpr(
             ident + 2
         else
             break :blk payload_sub_scope;
-        if (mem.eql(u8, tree.tokenSlice(index_token), "_")) {
+        const token_bytes = tree.tokenSlice(index_token);
+        if (mem.eql(u8, token_bytes, "_")) {
             return astgen.failTok(index_token, "discard of index capture; omit it instead", .{});
         }
         const index_name = try astgen.identAsString(index_token);
+        try astgen.detectLocalShadowing(payload_sub_scope, index_name, index_token, token_bytes);
         index_scope = .{
             .parent = payload_sub_scope,
             .gen_zir = &then_scope,
             .name = index_name,
             .ptr = index_ptr,
             .token_src = index_token,
+            .maybe_comptime = is_inline,
+            .id_cat = .@"loop index capture",
         };
         break :blk &index_scope.base;
     };
 
     loop_scope.break_count += 1;
     const then_result = try expr(&then_scope, then_sub_scope, loop_scope.break_result_loc, for_full.ast.then_expr);
+    try checkUsed(parent_gz, &then_scope.base, then_sub_scope);
 
     var else_scope = parent_gz.makeSubBlock(&cond_scope.base);
     defer else_scope.instructions.deinit(astgen.gpa);
 
     const else_node = for_full.ast.else_expr;
     const else_info: struct {
-        src: ast.Node.Index,
+        src: Ast.Node.Index,
         result: Zir.Inst.Ref,
     } = if (else_node != 0) blk: {
         loop_scope.break_count += 1;
@@ -5379,7 +5771,6 @@ fn forExpr(
     const break_tag: Zir.Inst.Tag = if (is_inline) .break_inline else .@"break";
     return finishThenElseBlock(
         parent_gz,
-        scope,
         rl,
         node,
         &loop_scope,
@@ -5387,8 +5778,6 @@ fn forExpr(
         &else_scope,
         condbr,
         cond,
-        for_full.ast.then_expr,
-        else_info.src,
         then_result,
         else_info.result,
         loop_block,
@@ -5401,7 +5790,7 @@ fn switchExpr(
     parent_gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    switch_node: ast.Node.Index,
+    switch_node: Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     const astgen = parent_gz.astgen;
     const gpa = astgen.gpa;
@@ -5411,7 +5800,7 @@ fn switchExpr(
     const main_tokens = tree.nodes.items(.main_token);
     const token_tags = tree.tokens.items(.tag);
     const operand_node = node_datas[switch_node].lhs;
-    const extra = tree.extraData(node_datas[switch_node].rhs, ast.Node.SubRange);
+    const extra = tree.extraData(node_datas[switch_node].rhs, Ast.Node.SubRange);
     const case_nodes = tree.extra_data[extra.start..extra.end];
 
     // We perform two passes over the AST. This first pass is to collect information
@@ -5421,9 +5810,9 @@ fn switchExpr(
     var scalar_cases_len: u32 = 0;
     var multi_cases_len: u32 = 0;
     var special_prong: Zir.SpecialProng = .none;
-    var special_node: ast.Node.Index = 0;
-    var else_src: ?ast.TokenIndex = null;
-    var underscore_src: ?ast.TokenIndex = null;
+    var special_node: Ast.Node.Index = 0;
+    var else_src: ?Ast.TokenIndex = null;
+    var underscore_src: ?Ast.TokenIndex = null;
     for (case_nodes) |case_node| {
         const case = switch (node_tags[case_node]) {
             .switch_case_one => tree.switchCaseOne(case_node),
@@ -5446,7 +5835,7 @@ fn switchExpr(
                     &[_]u32{
                         try astgen.errNoteTok(
                             src,
-                            "previous else prong is here",
+                            "previous else prong here",
                             .{},
                         ),
                     },
@@ -5459,12 +5848,12 @@ fn switchExpr(
                     &[_]u32{
                         try astgen.errNoteTok(
                             case_src,
-                            "else prong is here",
+                            "else prong here",
                             .{},
                         ),
                         try astgen.errNoteTok(
                             some_underscore,
-                            "'_' prong is here",
+                            "'_' prong here",
                             .{},
                         ),
                     },
@@ -5487,7 +5876,7 @@ fn switchExpr(
                     &[_]u32{
                         try astgen.errNoteTok(
                             src,
-                            "previous '_' prong is here",
+                            "previous '_' prong here",
                             .{},
                         ),
                     },
@@ -5500,12 +5889,12 @@ fn switchExpr(
                     &[_]u32{
                         try astgen.errNoteTok(
                             some_else,
-                            "else prong is here",
+                            "else prong here",
                             .{},
                         ),
                         try astgen.errNoteTok(
                             case_src,
-                            "'_' prong is here",
+                            "'_' prong here",
                             .{},
                         ),
                     },
@@ -5591,19 +5980,20 @@ fn switchExpr(
                 .name = capture_name,
                 .inst = capture,
                 .token_src = payload_token,
+                .id_cat = .@"capture",
             };
             break :blk &capture_val_scope.base;
         };
         const case_result = try expr(&case_scope, sub_scope, block_scope.break_result_loc, case.ast.target_expr);
+        try checkUsed(parent_gz, &case_scope.base, sub_scope);
         if (!parent_gz.refIsNoReturn(case_result)) {
             block_scope.break_count += 1;
             _ = try case_scope.addBreak(.@"break", switch_block, case_result);
         }
         // Documentation for this: `Zir.Inst.SwitchBlock` and `Zir.Inst.SwitchBlockMulti`.
-        try scalar_cases_payload.ensureCapacity(gpa, scalar_cases_payload.items.len +
+        try scalar_cases_payload.ensureUnusedCapacity(gpa, case_scope.instructions.items.len +
             3 + // operand, scalar_cases_len, else body len
-            @boolToInt(multi_cases_len != 0) +
-            case_scope.instructions.items.len);
+            @boolToInt(multi_cases_len != 0));
         scalar_cases_payload.appendAssumeCapacity(@enumToInt(operand));
         scalar_cases_payload.appendAssumeCapacity(scalar_cases_len);
         if (multi_cases_len != 0) {
@@ -5613,9 +6003,11 @@ fn switchExpr(
         scalar_cases_payload.appendSliceAssumeCapacity(case_scope.instructions.items);
     } else {
         // Documentation for this: `Zir.Inst.SwitchBlock` and `Zir.Inst.SwitchBlockMulti`.
-        try scalar_cases_payload.ensureCapacity(gpa, scalar_cases_payload.items.len +
-            2 + // operand, scalar_cases_len
-            @boolToInt(multi_cases_len != 0));
+        try scalar_cases_payload.ensureUnusedCapacity(
+            gpa,
+            @as(usize, 2) + // operand, scalar_cases_len
+                @boolToInt(multi_cases_len != 0),
+        );
         scalar_cases_payload.appendAssumeCapacity(@enumToInt(operand));
         scalar_cases_payload.appendAssumeCapacity(scalar_cases_len);
         if (multi_cases_len != 0) {
@@ -5683,6 +6075,7 @@ fn switchExpr(
                 .name = capture_name,
                 .inst = capture,
                 .token_src = payload_token,
+                .id_cat = .@"capture",
             };
             break :blk &capture_val_scope.base;
         };
@@ -5716,6 +6109,7 @@ fn switchExpr(
             }
 
             const case_result = try expr(&case_scope, sub_scope, block_scope.break_result_loc, case.ast.target_expr);
+            try checkUsed(parent_gz, &case_scope.base, sub_scope);
             if (!parent_gz.refIsNoReturn(case_result)) {
                 block_scope.break_count += 1;
                 _ = try case_scope.addBreak(.@"break", switch_block, case_result);
@@ -5729,12 +6123,13 @@ fn switchExpr(
             const item_node = case.ast.values[0];
             const item_inst = try comptimeExpr(parent_gz, scope, item_rl, item_node);
             const case_result = try expr(&case_scope, sub_scope, block_scope.break_result_loc, case.ast.target_expr);
+            try checkUsed(parent_gz, &case_scope.base, sub_scope);
             if (!parent_gz.refIsNoReturn(case_result)) {
                 block_scope.break_count += 1;
                 _ = try case_scope.addBreak(.@"break", switch_block, case_result);
             }
-            try scalar_cases_payload.ensureCapacity(gpa, scalar_cases_payload.items.len +
-                2 + case_scope.instructions.items.len);
+            try scalar_cases_payload.ensureUnusedCapacity(gpa, 2 +
+                case_scope.instructions.items.len);
             scalar_cases_payload.appendAssumeCapacity(@enumToInt(item_inst));
             scalar_cases_payload.appendAssumeCapacity(@intCast(u32, case_scope.instructions.items.len));
             scalar_cases_payload.appendSliceAssumeCapacity(case_scope.instructions.items);
@@ -5770,8 +6165,8 @@ fn switchExpr(
     const payload_index = astgen.extra.items.len;
     const zir_datas = astgen.instructions.items(.data);
     zir_datas[switch_block].pl_node.payload_index = @intCast(u32, payload_index);
-    try astgen.extra.ensureCapacity(gpa, astgen.extra.items.len +
-        scalar_cases_payload.items.len + multi_cases_payload.items.len);
+    try astgen.extra.ensureUnusedCapacity(gpa, scalar_cases_payload.items.len +
+        multi_cases_payload.items.len);
     const strat = rl.strategy(&block_scope);
     switch (strat.tag) {
         .break_operand => {
@@ -5781,7 +6176,7 @@ fn switchExpr(
             if (!strat.elide_store_to_block_ptr_instructions) {
                 astgen.extra.appendSliceAssumeCapacity(scalar_cases_payload.items);
                 astgen.extra.appendSliceAssumeCapacity(multi_cases_payload.items);
-                return parent_gz.indexToRef(switch_block);
+                return indexToRef(switch_block);
             }
 
             // There will necessarily be a store_to_block_ptr for
@@ -5825,7 +6220,7 @@ fn switchExpr(
                         .lhs = block_scope.rl_ty_inst,
                         .rhs = zir_datas[break_inst].@"break".operand,
                     };
-                    zir_datas[break_inst].@"break".operand = parent_gz.indexToRef(store_inst);
+                    zir_datas[break_inst].@"break".operand = indexToRef(store_inst);
                 } else {
                     scalar_cases_payload.items[body_len_index] -= 1;
                     astgen.extra.appendSliceAssumeCapacity(scalar_cases_payload.items[0..extra_index]);
@@ -5867,7 +6262,7 @@ fn switchExpr(
                         .lhs = block_scope.rl_ty_inst,
                         .rhs = zir_datas[break_inst].@"break".operand,
                     };
-                    zir_datas[break_inst].@"break".operand = parent_gz.indexToRef(store_inst);
+                    zir_datas[break_inst].@"break".operand = indexToRef(store_inst);
                 } else {
                     scalar_cases_payload.items[body_len_index] -= 1;
                     astgen.extra.appendSliceAssumeCapacity(scalar_cases_payload.items[start_index..extra_index]);
@@ -5913,7 +6308,7 @@ fn switchExpr(
                         .lhs = block_scope.rl_ty_inst,
                         .rhs = zir_datas[break_inst].@"break".operand,
                     };
-                    zir_datas[break_inst].@"break".operand = parent_gz.indexToRef(store_inst);
+                    zir_datas[break_inst].@"break".operand = indexToRef(store_inst);
                 } else {
                     assert(zir_datas[store_inst].bin.lhs == block_scope.rl_ptr);
                     multi_cases_payload.items[body_len_index] -= 1;
@@ -5924,10 +6319,10 @@ fn switchExpr(
                 }
             }
 
-            const block_ref = parent_gz.indexToRef(switch_block);
+            const block_ref = indexToRef(switch_block);
             switch (rl) {
                 .ref => return block_ref,
-                else => return rvalue(parent_gz, scope, rl, block_ref, switch_node),
+                else => return rvalue(parent_gz, rl, block_ref, switch_node),
             }
         },
         .break_void => {
@@ -5984,136 +6379,292 @@ fn switchExpr(
                 }
             }
 
-            return parent_gz.indexToRef(switch_block);
+            return indexToRef(switch_block);
         },
     }
 }
 
-fn ret(gz: *GenZir, scope: *Scope, node: ast.Node.Index) InnerError!Zir.Inst.Ref {
+fn ret(gz: *GenZir, scope: *Scope, node: Ast.Node.Index) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const tree = astgen.tree;
     const node_datas = tree.nodes.items(.data);
-    const main_tokens = tree.nodes.items(.main_token);
+    const node_tags = tree.nodes.items(.tag);
+
+    if (astgen.fn_block == null) {
+        return astgen.failNode(node, "'return' outside function scope", .{});
+    }
 
     if (gz.in_defer) return astgen.failNode(node, "cannot return from defer expression", .{});
 
+    const defer_outer = &astgen.fn_block.?.base;
+
     const operand_node = node_datas[node].lhs;
-    if (operand_node != 0) {
-        const rl: ResultLoc = if (nodeMayNeedMemoryLocation(tree, operand_node)) .{
-            .ptr = try gz.addNodeExtended(.ret_ptr, node),
-        } else .{
-            .ty = try gz.addNodeExtended(.ret_type, node),
-        };
-        const operand = try expr(gz, scope, rl, operand_node);
-        // TODO check operand to see if we need to generate errdefers
-        try genDefers(gz, &astgen.fn_block.?.base, scope, .none);
-        _ = try gz.addUnNode(.ret_node, operand, node);
+    if (operand_node == 0) {
+        // Returning a void value; skip error defers.
+        try genDefers(gz, defer_outer, scope, .normal_only);
+        _ = try gz.addUnNode(.ret_node, .void_value, node);
         return Zir.Inst.Ref.unreachable_value;
     }
-    // Returning a void value; skip error defers.
-    try genDefers(gz, &astgen.fn_block.?.base, scope, .none);
-    _ = try gz.addUnNode(.ret_node, .void_value, node);
-    return Zir.Inst.Ref.unreachable_value;
+
+    if (node_tags[operand_node] == .error_value) {
+        // Hot path for `return error.Foo`. This bypasses result location logic as well as logic
+        // for detecting whether to add something to the function's inferred error set.
+        const ident_token = node_datas[operand_node].rhs;
+        const err_name_str_index = try astgen.identAsString(ident_token);
+        const defer_counts = countDefers(astgen, defer_outer, scope);
+        if (!defer_counts.need_err_code) {
+            try genDefers(gz, defer_outer, scope, .both_sans_err);
+            _ = try gz.addStrTok(.ret_err_value, err_name_str_index, ident_token);
+            return Zir.Inst.Ref.unreachable_value;
+        }
+        const err_code = try gz.addStrTok(.ret_err_value_code, err_name_str_index, ident_token);
+        try genDefers(gz, defer_outer, scope, .{ .both = err_code });
+        _ = try gz.addUnNode(.ret_node, err_code, node);
+        return Zir.Inst.Ref.unreachable_value;
+    }
+
+    const rl: ResultLoc = if (nodeMayNeedMemoryLocation(tree, operand_node)) .{
+        .ptr = try gz.addNodeExtended(.ret_ptr, node),
+    } else .{
+        .ty = try gz.addNodeExtended(.ret_type, node),
+    };
+    const operand = try expr(gz, scope, rl, operand_node);
+
+    switch (nodeMayEvalToError(tree, operand_node)) {
+        .never => {
+            // Returning a value that cannot be an error; skip error defers.
+            try genDefers(gz, defer_outer, scope, .normal_only);
+            _ = try gz.addUnNode(.ret_node, operand, node);
+            return Zir.Inst.Ref.unreachable_value;
+        },
+        .always => {
+            // Value is always an error. Emit both error defers and regular defers.
+            const err_code = try gz.addUnNode(.err_union_code, operand, node);
+            try genDefers(gz, defer_outer, scope, .{ .both = err_code });
+            try gz.addRet(rl, operand, node);
+            return Zir.Inst.Ref.unreachable_value;
+        },
+        .maybe => {
+            const defer_counts = countDefers(astgen, defer_outer, scope);
+            if (!defer_counts.have_err) {
+                // Only regular defers; no branch needed.
+                try genDefers(gz, defer_outer, scope, .normal_only);
+                try gz.addRet(rl, operand, node);
+                return Zir.Inst.Ref.unreachable_value;
+            }
+
+            // Emit conditional branch for generating errdefers.
+            const is_non_err = try gz.addUnNode(.is_non_err, operand, node);
+            const condbr = try gz.addCondBr(.condbr, node);
+
+            var then_scope = gz.makeSubBlock(scope);
+            defer then_scope.instructions.deinit(astgen.gpa);
+
+            try genDefers(&then_scope, defer_outer, scope, .normal_only);
+            try then_scope.addRet(rl, operand, node);
+
+            var else_scope = gz.makeSubBlock(scope);
+            defer else_scope.instructions.deinit(astgen.gpa);
+
+            const which_ones: DefersToEmit = if (!defer_counts.need_err_code) .both_sans_err else .{
+                .both = try else_scope.addUnNode(.err_union_code, operand, node),
+            };
+            try genDefers(&else_scope, defer_outer, scope, which_ones);
+            try else_scope.addRet(rl, operand, node);
+
+            try setCondBrPayload(condbr, is_non_err, &then_scope, &else_scope);
+
+            return Zir.Inst.Ref.unreachable_value;
+        },
+    }
 }
 
 fn identifier(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    ident: ast.Node.Index,
+    ident: Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     const tracy = trace(@src());
     defer tracy.end();
 
     const astgen = gz.astgen;
     const tree = astgen.tree;
+    const gpa = astgen.gpa;
     const main_tokens = tree.nodes.items(.main_token);
 
     const ident_token = main_tokens[ident];
+    const ident_name_raw = tree.tokenSlice(ident_token);
+    if (mem.eql(u8, ident_name_raw, "_")) {
+        return astgen.failNode(ident, "'_' used as an identifier without @\"_\" syntax", .{});
+    }
     const ident_name = try astgen.identifierTokenString(ident_token);
-    if (mem.eql(u8, ident_name, "_")) {
-        return astgen.failNode(ident, "'_' may not be used as an identifier", .{});
-    }
 
-    if (simple_types.get(ident_name)) |zir_const_ref| {
-        return rvalue(gz, scope, rl, zir_const_ref, ident);
-    }
+    if (ident_name_raw[0] != '@') {
+        if (simple_types.get(ident_name)) |zir_const_ref| {
+            return rvalue(gz, rl, zir_const_ref, ident);
+        }
 
-    if (ident_name.len >= 2) integer: {
-        const first_c = ident_name[0];
-        if (first_c == 'i' or first_c == 'u') {
-            const signedness: std.builtin.Signedness = switch (first_c == 'i') {
-                true => .signed,
-                false => .unsigned,
-            };
-            const bit_count = std.fmt.parseInt(u16, ident_name[1..], 10) catch |err| switch (err) {
-                error.Overflow => return astgen.failNode(
-                    ident,
-                    "primitive integer type '{s}' exceeds maximum bit width of 65535",
-                    .{ident_name},
-                ),
-                error.InvalidCharacter => break :integer,
-            };
-            const result = try gz.add(.{
-                .tag = .int_type,
-                .data = .{ .int_type = .{
-                    .src_node = gz.nodeIndexToRelative(ident),
-                    .signedness = signedness,
-                    .bit_count = bit_count,
-                } },
-            });
-            return rvalue(gz, scope, rl, result, ident);
+        if (ident_name.len >= 2) integer: {
+            const first_c = ident_name[0];
+            if (first_c == 'i' or first_c == 'u') {
+                const signedness: std.builtin.Signedness = switch (first_c == 'i') {
+                    true => .signed,
+                    false => .unsigned,
+                };
+                const bit_count = std.fmt.parseInt(u16, ident_name[1..], 10) catch |err| switch (err) {
+                    error.Overflow => return astgen.failNode(
+                        ident,
+                        "primitive integer type '{s}' exceeds maximum bit width of 65535",
+                        .{ident_name},
+                    ),
+                    error.InvalidCharacter => break :integer,
+                };
+                const result = try gz.add(.{
+                    .tag = .int_type,
+                    .data = .{ .int_type = .{
+                        .src_node = gz.nodeIndexToRelative(ident),
+                        .signedness = signedness,
+                        .bit_count = bit_count,
+                    } },
+                });
+                return rvalue(gz, rl, result, ident);
+            }
         }
     }
 
     // Local variables, including function parameters.
     const name_str_index = try astgen.identAsString(ident_token);
-    {
-        var s = scope;
-        while (true) switch (s.tag) {
-            .local_val => {
-                const local_val = s.cast(Scope.LocalVal).?;
-                if (local_val.name == name_str_index) {
-                    return rvalue(gz, scope, rl, local_val.inst, ident);
+    var s = scope;
+    var found_already: ?Ast.Node.Index = null; // we have found a decl with the same name already
+    var num_namespaces_out: u32 = 0;
+    var capturing_namespace: ?*Scope.Namespace = null;
+    while (true) switch (s.tag) {
+        .local_val => {
+            const local_val = s.cast(Scope.LocalVal).?;
+
+            if (local_val.name == name_str_index) {
+                // Locals cannot shadow anything, so we do not need to look for ambiguous
+                // references in this case.
+                local_val.used = true;
+
+                const value_inst = try tunnelThroughClosure(
+                    gz,
+                    ident,
+                    num_namespaces_out,
+                    capturing_namespace,
+                    local_val.inst,
+                    local_val.token_src,
+                    gpa,
+                );
+
+                return rvalue(gz, rl, value_inst, ident);
+            }
+            s = local_val.parent;
+        },
+        .local_ptr => {
+            const local_ptr = s.cast(Scope.LocalPtr).?;
+            if (local_ptr.name == name_str_index) {
+                local_ptr.used = true;
+
+                // Can't close over a runtime variable
+                if (num_namespaces_out != 0 and !local_ptr.maybe_comptime) {
+                    return astgen.failNodeNotes(ident, "mutable '{s}' not accessible from here", .{ident_name}, &.{
+                        try astgen.errNoteTok(local_ptr.token_src, "declared mutable here", .{}),
+                        try astgen.errNoteNode(capturing_namespace.?.node, "crosses namespace boundary here", .{}),
+                    });
                 }
-                s = local_val.parent;
-            },
-            .local_ptr => {
-                const local_ptr = s.cast(Scope.LocalPtr).?;
-                if (local_ptr.name == name_str_index) {
-                    switch (rl) {
-                        .ref, .none_or_ref => return local_ptr.ptr,
-                        else => {
-                            const loaded = try gz.addUnNode(.load, local_ptr.ptr, ident);
-                            return rvalue(gz, scope, rl, loaded, ident);
-                        },
-                    }
+
+                const ptr_inst = try tunnelThroughClosure(
+                    gz,
+                    ident,
+                    num_namespaces_out,
+                    capturing_namespace,
+                    local_ptr.ptr,
+                    local_ptr.token_src,
+                    gpa,
+                );
+
+                switch (rl) {
+                    .ref, .none_or_ref => return ptr_inst,
+                    else => {
+                        const loaded = try gz.addUnNode(.load, ptr_inst, ident);
+                        return rvalue(gz, rl, loaded, ident);
+                    },
                 }
-                s = local_ptr.parent;
-            },
-            .gen_zir => s = s.cast(GenZir).?.parent,
-            .defer_normal, .defer_error => s = s.cast(Scope.Defer).?.parent,
-            .namespace, .top => break, // TODO look for ambiguous references to decls
-        };
+            }
+            s = local_ptr.parent;
+        },
+        .gen_zir => s = s.cast(GenZir).?.parent,
+        .defer_normal, .defer_error => s = s.cast(Scope.Defer).?.parent,
+        .namespace => {
+            const ns = s.cast(Scope.Namespace).?;
+            if (ns.decls.get(name_str_index)) |i| {
+                if (found_already) |f| {
+                    return astgen.failNodeNotes(ident, "ambiguous reference", .{}, &.{
+                        try astgen.errNoteNode(f, "declared here", .{}),
+                        try astgen.errNoteNode(i, "also declared here", .{}),
+                    });
+                }
+                // We found a match but must continue looking for ambiguous references to decls.
+                found_already = i;
+            }
+            num_namespaces_out += 1;
+            capturing_namespace = ns;
+            s = ns.parent;
+        },
+        .top => break,
+    };
+    if (found_already == null) {
+        return astgen.failNode(ident, "use of undeclared identifier '{s}'", .{ident_name});
     }
 
-    // We can't look up Decls until Sema because the same ZIR code is supposed to be
-    // used for multiple generic instantiations, and this may refer to a different Decl
-    // depending on the scope, determined by the generic instantiation.
+    // Decl references happen by name rather than ZIR index so that when unrelated
+    // decls are modified, ZIR code containing references to them can be unmodified.
     switch (rl) {
         .ref, .none_or_ref => return gz.addStrTok(.decl_ref, name_str_index, ident_token),
         else => {
             const result = try gz.addStrTok(.decl_val, name_str_index, ident_token);
-            return rvalue(gz, scope, rl, result, ident);
+            return rvalue(gz, rl, result, ident);
         },
     }
 }
 
+/// Adds a capture to a namespace, if needed.
+/// Returns the index of the closure_capture instruction.
+fn tunnelThroughClosure(
+    gz: *GenZir,
+    inner_ref_node: Ast.Node.Index,
+    num_tunnels: u32,
+    ns: ?*Scope.Namespace,
+    value: Zir.Inst.Ref,
+    token: Ast.TokenIndex,
+    gpa: *Allocator,
+) !Zir.Inst.Ref {
+    // For trivial values, we don't need a tunnel.
+    // Just return the ref.
+    if (num_tunnels == 0 or refToIndex(value) == null) {
+        return value;
+    }
+
+    // Otherwise we need a tunnel.  Check if this namespace
+    // already has one for this value.
+    const gop = try ns.?.captures.getOrPut(gpa, refToIndex(value).?);
+    if (!gop.found_existing) {
+        // Make a new capture for this value
+        const capture_ref = try ns.?.declaring_gz.?.addUnTok(.closure_capture, value, token);
+        gop.value_ptr.* = refToIndex(capture_ref).?;
+    }
+
+    // Add an instruction to get the value from the closure into
+    // our current context
+    return try gz.addInstNode(.closure_get, gop.value_ptr.*, inner_ref_node);
+}
+
 fn stringLiteral(
     gz: *GenZir,
-    scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const tree = astgen.tree;
@@ -6127,82 +6678,106 @@ fn stringLiteral(
             .len = str.len,
         } },
     });
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn multilineStringLiteral(
     gz: *GenZir,
-    scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
-    const tree = astgen.tree;
-    const node_datas = tree.nodes.items(.data);
-    const main_tokens = tree.nodes.items(.main_token);
-
-    const start = node_datas[node].lhs;
-    const end = node_datas[node].rhs;
-
-    const gpa = gz.astgen.gpa;
-    const string_bytes = &gz.astgen.string_bytes;
-    const str_index = string_bytes.items.len;
-
-    // First line: do not append a newline.
-    var tok_i = start;
-    {
-        const slice = tree.tokenSlice(tok_i);
-        const line_bytes = slice[2 .. slice.len - 1];
-        try string_bytes.appendSlice(gpa, line_bytes);
-        tok_i += 1;
-    }
-    // Following lines: each line prepends a newline.
-    while (tok_i <= end) : (tok_i += 1) {
-        const slice = tree.tokenSlice(tok_i);
-        const line_bytes = slice[2 .. slice.len - 1];
-        try string_bytes.ensureCapacity(gpa, string_bytes.items.len + line_bytes.len + 1);
-        string_bytes.appendAssumeCapacity('\n');
-        string_bytes.appendSliceAssumeCapacity(line_bytes);
-    }
+    const str = try astgen.strLitNodeAsString(node);
     const result = try gz.add(.{
         .tag = .str,
         .data = .{ .str = .{
-            .start = @intCast(u32, str_index),
-            .len = @intCast(u32, string_bytes.items.len - str_index),
+            .start = str.index,
+            .len = str.len,
         } },
     });
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
-fn charLiteral(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: ast.Node.Index) !Zir.Inst.Ref {
+fn charLiteral(gz: *GenZir, rl: ResultLoc, node: Ast.Node.Index) !Zir.Inst.Ref {
     const astgen = gz.astgen;
     const tree = astgen.tree;
     const main_tokens = tree.nodes.items(.main_token);
     const main_token = main_tokens[node];
     const slice = tree.tokenSlice(main_token);
 
-    var bad_index: usize = undefined;
-    const value = std.zig.parseCharLiteral(slice, &bad_index) catch |err| switch (err) {
-        error.InvalidCharacter => {
-            const bad_byte = slice[bad_index];
+    switch (std.zig.parseCharLiteral(slice)) {
+        .success => |codepoint| {
+            const result = try gz.addInt(codepoint);
+            return rvalue(gz, rl, result, node);
+        },
+        .invalid_escape_character => |bad_index| {
             return astgen.failOff(
                 main_token,
                 @intCast(u32, bad_index),
-                "invalid character: '{c}'\n",
-                .{bad_byte},
+                "invalid escape character: '{c}'",
+                .{slice[bad_index]},
             );
         },
-    };
-    const result = try gz.addInt(value);
-    return rvalue(gz, scope, rl, result, node);
+        .expected_hex_digit => |bad_index| {
+            return astgen.failOff(
+                main_token,
+                @intCast(u32, bad_index),
+                "expected hex digit, found '{c}'",
+                .{slice[bad_index]},
+            );
+        },
+        .empty_unicode_escape_sequence => |bad_index| {
+            return astgen.failOff(
+                main_token,
+                @intCast(u32, bad_index),
+                "empty unicode escape sequence",
+                .{},
+            );
+        },
+        .expected_hex_digit_or_rbrace => |bad_index| {
+            return astgen.failOff(
+                main_token,
+                @intCast(u32, bad_index),
+                "expected hex digit or '}}', found '{c}'",
+                .{slice[bad_index]},
+            );
+        },
+        .unicode_escape_overflow => |bad_index| {
+            return astgen.failOff(
+                main_token,
+                @intCast(u32, bad_index),
+                "unicode escape too large to be a valid codepoint",
+                .{},
+            );
+        },
+        .expected_lbrace => |bad_index| {
+            return astgen.failOff(
+                main_token,
+                @intCast(u32, bad_index),
+                "expected '{{', found '{c}",
+                .{slice[bad_index]},
+            );
+        },
+        .expected_end => |bad_index| {
+            return astgen.failOff(
+                main_token,
+                @intCast(u32, bad_index),
+                "expected ending single quote ('), found '{c}",
+                .{slice[bad_index]},
+            );
+        },
+        .invalid_character => |bad_index| {
+            return astgen.failOff(
+                main_token,
+                @intCast(u32, bad_index),
+                "invalid byte in character literal: '{c}'",
+                .{slice[bad_index]},
+            );
+        },
+    }
 }
 
-fn integerLiteral(
-    gz: *GenZir,
-    scope: *Scope,
-    rl: ResultLoc,
-    node: ast.Node.Index,
-) InnerError!Zir.Inst.Ref {
+fn integerLiteral(gz: *GenZir, rl: ResultLoc, node: Ast.Node.Index) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const tree = astgen.tree;
     const main_tokens = tree.nodes.items(.main_token);
@@ -6214,7 +6789,7 @@ fn integerLiteral(
             1 => .one,
             else => try gz.addInt(small_int),
         };
-        return rvalue(gz, scope, rl, result, node);
+        return rvalue(gz, rl, result, node);
     } else |err| switch (err) {
         error.InvalidCharacter => unreachable, // Caught by the parser.
         error.Overflow => {},
@@ -6245,17 +6820,11 @@ fn integerLiteral(
     const limbs = big_int.limbs[0..big_int.len()];
     assert(big_int.isPositive());
     const result = try gz.addIntBig(limbs);
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
-fn floatLiteral(
-    gz: *GenZir,
-    scope: *Scope,
-    rl: ResultLoc,
-    node: ast.Node.Index,
-) InnerError!Zir.Inst.Ref {
+fn floatLiteral(gz: *GenZir, rl: ResultLoc, node: Ast.Node.Index) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
-    const arena = astgen.arena;
     const tree = astgen.tree;
     const main_tokens = tree.nodes.items(.main_token);
 
@@ -6270,13 +6839,13 @@ fn floatLiteral(
     } else std.fmt.parseFloat(f128, bytes) catch |err| switch (err) {
         error.InvalidCharacter => unreachable, // validated by tokenizer
     };
-    // If the value fits into a f32 without losing any precision, store it that way.
+    // If the value fits into a f64 without losing any precision, store it that way.
     @setFloatMode(.Strict);
-    const smaller_float = @floatCast(f32, float_number);
+    const smaller_float = @floatCast(f64, float_number);
     const bigger_again: f128 = smaller_float;
     if (bigger_again == float_number) {
-        const result = try gz.addFloat(smaller_float, node);
-        return rvalue(gz, scope, rl, result, node);
+        const result = try gz.addFloat(smaller_float);
+        return rvalue(gz, rl, result, node);
     }
     // We need to use 128 bits. Break the float into 4 u32 values so we can
     // put it into the `extra` array.
@@ -6287,29 +6856,43 @@ fn floatLiteral(
         .piece2 = @truncate(u32, int_bits >> 64),
         .piece3 = @truncate(u32, int_bits >> 96),
     });
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn asmExpr(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    full: ast.full.Asm,
+    node: Ast.Node.Index,
+    full: Ast.full.Asm,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
-    const arena = astgen.arena;
     const tree = astgen.tree;
     const main_tokens = tree.nodes.items(.main_token);
     const node_datas = tree.nodes.items(.data);
+    const node_tags = tree.nodes.items(.tag);
     const token_tags = tree.tokens.items(.tag);
 
-    const asm_source = try comptimeExpr(gz, scope, .{ .ty = .const_slice_u8_type }, full.ast.template);
+    const asm_source = switch (node_tags[full.ast.template]) {
+        .string_literal => try astgen.strLitAsString(main_tokens[full.ast.template]),
+        .multiline_string_literal => try astgen.strLitNodeAsString(full.ast.template),
+        else => return astgen.failNode(full.ast.template, "assembly code must use string literal syntax", .{}),
+    };
 
     // See https://github.com/ziglang/zig/issues/215 and related issues discussing
     // possible inline assembly improvements. Until then here is status quo AstGen
     // for assembly syntax. It's used by std lib crypto aesni.zig.
-
+    const is_container_asm = astgen.fn_block == null;
+    if (is_container_asm) {
+        if (full.volatile_token) |t|
+            return astgen.failTok(t, "volatile is meaningless on global assembly", .{});
+        if (full.outputs.len != 0 or full.inputs.len != 0 or full.first_clobber != null)
+            return astgen.failNode(node, "global assembly cannot have inputs, outputs, or clobbers", .{});
+    } else {
+        if (full.outputs.len == 0 and full.volatile_token == null) {
+            return astgen.failNode(node, "assembly expression with no output must be marked volatile", .{});
+        }
+    }
     if (full.outputs.len > 32) {
         return astgen.failNode(full.outputs[32], "too many asm outputs", .{});
     }
@@ -6340,6 +6923,33 @@ fn asmExpr(
             // issues and decide how to handle outputs. Do we want this to be identifiers?
             // Or maybe we want to force this to be expressions with a pointer type.
             // Until that is figured out this is only hooked up for referencing Decls.
+            // TODO we have put this as an identifier lookup just so that we don't get
+            // unused vars for outputs. We need to check if this is correct in the future ^^
+            // so we just put in this simple lookup. This is a workaround.
+            {
+                var s = scope;
+                while (true) switch (s.tag) {
+                    .local_val => {
+                        const local_val = s.cast(Scope.LocalVal).?;
+                        if (local_val.name == str_index) {
+                            local_val.used = true;
+                            break;
+                        }
+                        s = local_val.parent;
+                    },
+                    .local_ptr => {
+                        const local_ptr = s.cast(Scope.LocalPtr).?;
+                        if (local_ptr.name == str_index) {
+                            local_ptr.used = true;
+                            break;
+                        }
+                        s = local_ptr.parent;
+                    },
+                    .gen_zir => s = s.cast(GenZir).?.parent,
+                    .defer_normal, .defer_error => s = s.cast(Scope.Defer).?.parent,
+                    .namespace, .top => break,
+                };
+            }
             const operand = try gz.addStrTok(.decl_ref, str_index, ident_token);
             outputs[i] = .{
                 .name = name,
@@ -6360,7 +6970,6 @@ fn asmExpr(
         const name = try astgen.identAsString(symbolic_name);
         const constraint_token = symbolic_name + 2;
         const constraint = (try astgen.strLitAsString(constraint_token)).index;
-        const has_arrow = token_tags[symbolic_name + 4] == .arrow;
         const operand = try expr(gz, scope, .{ .ty = .usize_type }, node_datas[input_node].lhs);
         inputs[i] = .{
             .name = name,
@@ -6398,35 +7007,35 @@ fn asmExpr(
 
     const result = try gz.addAsm(.{
         .node = node,
-        .asm_source = asm_source,
+        .asm_source = asm_source.index,
         .is_volatile = full.volatile_token != null,
         .output_type_bits = output_type_bits,
         .outputs = outputs,
         .inputs = inputs,
         .clobbers = clobbers_buffer[0..clobber_i],
     });
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn as(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    lhs: ast.Node.Index,
-    rhs: ast.Node.Index,
+    node: Ast.Node.Index,
+    lhs: Ast.Node.Index,
+    rhs: Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     const dest_type = try typeExpr(gz, scope, lhs);
     switch (rl) {
-        .none, .none_or_ref, .discard, .ref, .ty => {
-            const result = try expr(gz, scope, .{ .ty = dest_type }, rhs);
-            return rvalue(gz, scope, rl, result, node);
+        .none, .none_or_ref, .discard, .ref, .ty, .coerced_ty => {
+            const result = try reachableExpr(gz, scope, .{ .ty = dest_type }, rhs, node);
+            return rvalue(gz, rl, result, node);
         },
         .ptr, .inferred_ptr => |result_ptr| {
-            return asRlPtr(gz, scope, rl, result_ptr, rhs, dest_type);
+            return asRlPtr(gz, scope, rl, node, result_ptr, rhs, dest_type);
         },
         .block_ptr => |block_scope| {
-            return asRlPtr(gz, scope, rl, block_scope.rl_ptr, rhs, dest_type);
+            return asRlPtr(gz, scope, rl, node, block_scope.rl_ptr, rhs, dest_type);
         },
     }
 }
@@ -6435,25 +7044,25 @@ fn unionInit(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    params: []const ast.Node.Index,
+    node: Ast.Node.Index,
+    params: []const Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     const union_type = try typeExpr(gz, scope, params[0]);
     const field_name = try comptimeExpr(gz, scope, .{ .ty = .const_slice_u8_type }, params[1]);
     switch (rl) {
-        .none, .none_or_ref, .discard, .ref, .ty, .inferred_ptr => {
-            const field_type = try gz.addPlNode(.field_type_ref, params[1], Zir.Inst.FieldTypeRef{
+        .none, .none_or_ref, .discard, .ref, .ty, .coerced_ty, .inferred_ptr => {
+            _ = try gz.addPlNode(.field_type_ref, params[1], Zir.Inst.FieldTypeRef{
                 .container_type = union_type,
                 .field_name = field_name,
             });
             const result = try expr(gz, scope, .{ .ty = union_type }, params[2]);
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
         .ptr => |result_ptr| {
-            return unionInitRlPtr(gz, scope, rl, node, result_ptr, params[2], union_type, field_name);
+            return unionInitRlPtr(gz, scope, node, result_ptr, params[2], union_type, field_name);
         },
         .block_ptr => |block_scope| {
-            return unionInitRlPtr(gz, scope, rl, node, block_scope.rl_ptr, params[2], union_type, field_name);
+            return unionInitRlPtr(gz, scope, node, block_scope.rl_ptr, params[2], union_type, field_name);
         },
     }
 }
@@ -6461,10 +7070,9 @@ fn unionInit(
 fn unionInitRlPtr(
     parent_gz: *GenZir,
     scope: *Scope,
-    rl: ResultLoc,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
     result_ptr: Zir.Inst.Ref,
-    expr_node: ast.Node.Index,
+    expr_node: Ast.Node.Index,
     union_type: Zir.Inst.Ref,
     field_name: Zir.Inst.Ref,
 ) InnerError!Zir.Inst.Ref {
@@ -6481,68 +7089,47 @@ fn asRlPtr(
     parent_gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
+    src_node: Ast.Node.Index,
     result_ptr: Zir.Inst.Ref,
-    operand_node: ast.Node.Index,
+    operand_node: Ast.Node.Index,
     dest_type: Zir.Inst.Ref,
 ) InnerError!Zir.Inst.Ref {
-    // Detect whether this expr() call goes into rvalue() to store the result into the
-    // result location. If it does, elide the coerce_result_ptr instruction
-    // as well as the store instruction, instead passing the result as an rvalue.
     const astgen = parent_gz.astgen;
 
-    var as_scope = parent_gz.makeSubBlock(scope);
+    var as_scope = try parent_gz.makeCoercionScope(scope, dest_type, result_ptr);
     defer as_scope.instructions.deinit(astgen.gpa);
 
-    as_scope.rl_ptr = try as_scope.addBin(.coerce_result_ptr, dest_type, result_ptr);
-    const result = try expr(&as_scope, &as_scope.base, .{ .block_ptr = &as_scope }, operand_node);
-    const parent_zir = &parent_gz.instructions;
-    if (as_scope.rvalue_rl_count == 1) {
-        // Busted! This expression didn't actually need a pointer.
-        const zir_tags = astgen.instructions.items(.tag);
-        const zir_datas = astgen.instructions.items(.data);
-        try parent_zir.ensureUnusedCapacity(astgen.gpa, as_scope.instructions.items.len);
-        for (as_scope.instructions.items) |src_inst| {
-            if (parent_gz.indexToRef(src_inst) == as_scope.rl_ptr) continue;
-            if (zir_tags[src_inst] == .store_to_block_ptr) {
-                if (zir_datas[src_inst].bin.lhs == as_scope.rl_ptr) continue;
-            }
-            parent_zir.appendAssumeCapacity(src_inst);
-        }
-        const casted_result = try parent_gz.addBin(.as, dest_type, result);
-        return rvalue(parent_gz, scope, rl, casted_result, operand_node);
-    } else {
-        try parent_zir.appendSlice(astgen.gpa, as_scope.instructions.items);
-        return result;
-    }
+    const result = try reachableExpr(&as_scope, &as_scope.base, .{ .block_ptr = &as_scope }, operand_node, src_node);
+    return as_scope.finishCoercion(parent_gz, rl, operand_node, result, dest_type);
 }
 
 fn bitCast(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    lhs: ast.Node.Index,
-    rhs: ast.Node.Index,
+    node: Ast.Node.Index,
+    lhs: Ast.Node.Index,
+    rhs: Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const dest_type = try typeExpr(gz, scope, lhs);
     switch (rl) {
-        .none, .none_or_ref, .discard, .ty => {
+        .none, .none_or_ref, .discard, .ty, .coerced_ty => {
             const operand = try expr(gz, scope, .none, rhs);
             const result = try gz.addPlNode(.bitcast, node, Zir.Inst.Bin{
                 .lhs = dest_type,
                 .rhs = operand,
             });
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
         .ref => {
             return astgen.failNode(node, "cannot take address of `@bitCast` result", .{});
         },
         .ptr, .inferred_ptr => |result_ptr| {
-            return bitCastRlPtr(gz, scope, rl, node, dest_type, result_ptr, rhs);
+            return bitCastRlPtr(gz, scope, node, dest_type, result_ptr, rhs);
         },
         .block_ptr => |block| {
-            return bitCastRlPtr(gz, scope, rl, node, dest_type, block.rl_ptr, rhs);
+            return bitCastRlPtr(gz, scope, node, dest_type, block.rl_ptr, rhs);
         },
     }
 }
@@ -6550,11 +7137,10 @@ fn bitCast(
 fn bitCastRlPtr(
     gz: *GenZir,
     scope: *Scope,
-    rl: ResultLoc,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
     dest_type: Zir.Inst.Ref,
     result_ptr: Zir.Inst.Ref,
-    rhs: ast.Node.Index,
+    rhs: Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     const casted_result_ptr = try gz.addPlNode(.bitcast_result_ptr, node, Zir.Inst.Bin{
         .lhs = dest_type,
@@ -6567,32 +7153,33 @@ fn typeOf(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    params: []const ast.Node.Index,
+    node: Ast.Node.Index,
+    params: []const Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     if (params.len < 1) {
         return gz.astgen.failNode(node, "expected at least 1 argument, found 0", .{});
     }
     if (params.len == 1) {
-        const result = try gz.addUnNode(.typeof, try expr(gz, scope, .none, params[0]), node);
-        return rvalue(gz, scope, rl, result, node);
+        const expr_result = try reachableExpr(gz, scope, .none, params[0], node);
+        const result = try gz.addUnNode(.typeof, expr_result, node);
+        return rvalue(gz, rl, result, node);
     }
     const arena = gz.astgen.arena;
     var items = try arena.alloc(Zir.Inst.Ref, params.len);
     for (params) |param, param_i| {
-        items[param_i] = try expr(gz, scope, .none, param);
+        items[param_i] = try reachableExpr(gz, scope, .none, param, node);
     }
 
     const result = try gz.addExtendedMultiOp(.typeof_peer, node, items);
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn builtinCall(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    params: []const ast.Node.Index,
+    node: Ast.Node.Index,
+    params: []const Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const tree = astgen.tree;
@@ -6614,7 +7201,7 @@ fn builtinCall(
     if (info.param_count) |expected| {
         if (expected != params.len) {
             const s = if (expected == 1) "" else "s";
-            return astgen.failNode(node, "expected {d} parameter{s}, found {d}", .{
+            return astgen.failNode(node, "expected {d} argument{s}, found {d}", .{
                 expected, s, params.len,
             });
         }
@@ -6624,7 +7211,6 @@ fn builtinCall(
     switch (info.tag) {
         .import => {
             const node_tags = tree.nodes.items(.tag);
-            const node_datas = tree.nodes.items(.data);
             const operand_node = params[0];
 
             if (node_tags[operand_node] != .string_literal) {
@@ -6633,9 +7219,12 @@ fn builtinCall(
             }
             const str_lit_token = main_tokens[operand_node];
             const str = try astgen.strLitAsString(str_lit_token);
-            try astgen.imports.put(astgen.gpa, str.index, {});
             const result = try gz.addStrTok(.import, str.index, str_lit_token);
-            return rvalue(gz, scope, rl, result, node);
+            const gop = try astgen.imports.getOrPut(astgen.gpa, str.index);
+            if (!gop.found_existing) {
+                gop.value_ptr.* = str_lit_token;
+            }
+            return rvalue(gz, rl, result, node);
         },
         .compile_log => {
             const arg_refs = try astgen.gpa.alloc(Zir.Inst.Ref, params.len);
@@ -6644,46 +7233,106 @@ fn builtinCall(
             for (params) |param, i| arg_refs[i] = try expr(gz, scope, .none, param);
 
             const result = try gz.addExtendedMultiOp(.compile_log, node, arg_refs);
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
         .field => {
-            const field_name = try comptimeExpr(gz, scope, .{ .ty = .const_slice_u8_type }, params[1]);
             if (rl == .ref) {
-                return try gz.addPlNode(.field_ptr_named, node, Zir.Inst.FieldNamed{
+                return gz.addPlNode(.field_ptr_named, node, Zir.Inst.FieldNamed{
                     .lhs = try expr(gz, scope, .ref, params[0]),
-                    .field_name = field_name,
+                    .field_name = try comptimeExpr(gz, scope, .{ .ty = .const_slice_u8_type }, params[1]),
                 });
             }
             const result = try gz.addPlNode(.field_val_named, node, Zir.Inst.FieldNamed{
                 .lhs = try expr(gz, scope, .none, params[0]),
-                .field_name = field_name,
+                .field_name = try comptimeExpr(gz, scope, .{ .ty = .const_slice_u8_type }, params[1]),
             });
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
         .as         => return as(       gz, scope, rl, node, params[0], params[1]),
         .bit_cast   => return bitCast(  gz, scope, rl, node, params[0], params[1]),
         .TypeOf     => return typeOf(   gz, scope, rl, node, params),
         .union_init => return unionInit(gz, scope, rl, node, params),
-        .c_import   => return cImport(  gz, scope, rl, node, params[0]),
+        .c_import   => return cImport(  gz, scope,     node, params[0]),
 
         .@"export" => {
             const node_tags = tree.nodes.items(.tag);
+            const node_datas = tree.nodes.items(.data);
             // This function causes a Decl to be exported. The first parameter is not an expression,
             // but an identifier of the Decl to be exported.
-            if (node_tags[params[0]] != .identifier) {
-                return astgen.failNode(params[0], "the first @export parameter must be an identifier", .{});
+            var namespace: Zir.Inst.Ref = .none;
+            var decl_name: u32 = 0;
+            switch (node_tags[params[0]]) {
+                .identifier => {
+                    const ident_token = main_tokens[params[0]];
+                    decl_name = try astgen.identAsString(ident_token);
+
+                    var s = scope;
+                    var found_already: ?Ast.Node.Index = null; // we have found a decl with the same name already
+                    while (true) switch (s.tag) {
+                        .local_val => {
+                            const local_val = s.cast(Scope.LocalVal).?;
+                            if (local_val.name == decl_name) {
+                                local_val.used = true;
+                                _ = try gz.addPlNode(.export_value, node, Zir.Inst.ExportValue{
+                                    .operand = local_val.inst,
+                                    .options = try comptimeExpr(gz, scope, .{ .coerced_ty = .export_options_type }, params[1]),
+                                });
+                                return rvalue(gz, rl, .void_value, node);
+                            }
+                            s = local_val.parent;
+                        },
+                        .local_ptr => {
+                            const local_ptr = s.cast(Scope.LocalPtr).?;
+                            if (local_ptr.name == decl_name) {
+                                if (!local_ptr.maybe_comptime)
+                                    return astgen.failNode(params[0], "unable to export runtime-known value", .{});
+                                local_ptr.used = true;
+                                const loaded = try gz.addUnNode(.load, local_ptr.ptr, node);
+                                _ = try gz.addPlNode(.export_value, node, Zir.Inst.ExportValue{
+                                    .operand = loaded,
+                                    .options = try comptimeExpr(gz, scope, .{ .coerced_ty = .export_options_type }, params[1]),
+                                });
+                                return rvalue(gz, rl, .void_value, node);
+                            }
+                            s = local_ptr.parent;
+                        },
+                        .gen_zir => s = s.cast(GenZir).?.parent,
+                        .defer_normal, .defer_error => s = s.cast(Scope.Defer).?.parent,
+                        .namespace => {
+                            const ns = s.cast(Scope.Namespace).?;
+                            if (ns.decls.get(decl_name)) |i| {
+                                if (found_already) |f| {
+                                    return astgen.failNodeNotes(node, "ambiguous reference", .{}, &.{
+                                        try astgen.errNoteNode(f, "declared here", .{}),
+                                        try astgen.errNoteNode(i, "also declared here", .{}),
+                                    });
+                                }
+                                // We found a match but must continue looking for ambiguous references to decls.
+                                found_already = i;
+                            }
+                            s = ns.parent;
+                        },
+                        .top => break,
+                    };
+                },
+                .field_access => {
+                    const namespace_node = node_datas[params[0]].lhs;
+                    namespace = try typeExpr(gz, scope, namespace_node);
+                    const dot_token = main_tokens[params[0]];
+                    const field_ident = dot_token + 1;
+                    decl_name = try astgen.identAsString(field_ident);
+                },
+                else => return astgen.failNode(
+                    params[0], "symbol to export must identify a declaration", .{},
+                ),
             }
-            const ident_token = main_tokens[params[0]];
-            const decl_name = try astgen.identAsString(ident_token);
-            // TODO look for local variables in scope matching `decl_name` and emit a compile
-            // error. Only top-level declarations can be exported. Until this is done, the
-            // compile error will end up being "use of undeclared identifier" in Sema.
             const options = try comptimeExpr(gz, scope, .{ .ty = .export_options_type }, params[1]);
             _ = try gz.addPlNode(.@"export", node, Zir.Inst.Export{
+                .namespace = namespace,
                 .decl_name = decl_name,
                 .options = options,
             });
-            return rvalue(gz, scope, rl, .void_value, node);
+            return rvalue(gz, rl, .void_value, node);
         },
         .@"extern" => {
             const type_inst = try typeExpr(gz, scope, params[0]);
@@ -6693,56 +7342,60 @@ fn builtinCall(
                 .lhs = type_inst,
                 .rhs = options,
             });
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
+        },
+        .fence => {
+            const order = try expr(gz, scope, .{ .coerced_ty = .atomic_order_type }, params[0]);
+            const result = try gz.addUnNode(.fence, order, node);
+            return rvalue(gz, rl, result, node);
         },
 
-        .breakpoint => return simpleNoOpVoid(gz, scope, rl, node, .breakpoint),
-        .fence      => return simpleNoOpVoid(gz, scope, rl, node, .fence),
+        .breakpoint => return simpleNoOpVoid(gz, rl, node, .breakpoint),
 
-        .This               => return rvalue(gz, scope, rl, try gz.addNodeExtended(.this,               node), node),
-        .return_address     => return rvalue(gz, scope, rl, try gz.addNodeExtended(.ret_addr,           node), node),
-        .src                => return rvalue(gz, scope, rl, try gz.addNodeExtended(.builtin_src,        node), node),
-        .error_return_trace => return rvalue(gz, scope, rl, try gz.addNodeExtended(.error_return_trace, node), node),
-        .frame              => return rvalue(gz, scope, rl, try gz.addNodeExtended(.frame,              node), node),
-        .frame_address      => return rvalue(gz, scope, rl, try gz.addNodeExtended(.frame_address,      node), node),
+        .This               => return rvalue(gz, rl, try gz.addNodeExtended(.this,               node), node),
+        .return_address     => return rvalue(gz, rl, try gz.addNodeExtended(.ret_addr,           node), node),
+        .src                => return rvalue(gz, rl, try gz.addNodeExtended(.builtin_src,        node), node),
+        .error_return_trace => return rvalue(gz, rl, try gz.addNodeExtended(.error_return_trace, node), node),
+        .frame              => return rvalue(gz, rl, try gz.addNodeExtended(.frame,              node), node),
+        .frame_address      => return rvalue(gz, rl, try gz.addNodeExtended(.frame_address,      node), node),
 
         .type_info   => return simpleUnOpType(gz, scope, rl, node, params[0], .type_info),
         .size_of     => return simpleUnOpType(gz, scope, rl, node, params[0], .size_of),
         .bit_size_of => return simpleUnOpType(gz, scope, rl, node, params[0], .bit_size_of),
         .align_of    => return simpleUnOpType(gz, scope, rl, node, params[0], .align_of),
 
-        .ptr_to_int            => return simpleUnOp(gz, scope, rl, node, .none,                           params[0], .ptr_to_int),
-        .error_to_int          => return simpleUnOp(gz, scope, rl, node, .none,                           params[0], .error_to_int),
-        .int_to_error          => return simpleUnOp(gz, scope, rl, node, .{ .ty = .u16_type },            params[0], .int_to_error),
-        .compile_error         => return simpleUnOp(gz, scope, rl, node, .{ .ty = .const_slice_u8_type }, params[0], .compile_error),
-        .set_eval_branch_quota => return simpleUnOp(gz, scope, rl, node, .{ .ty = .u32_type },            params[0], .set_eval_branch_quota),
-        .enum_to_int           => return simpleUnOp(gz, scope, rl, node, .none,                           params[0], .enum_to_int),
-        .bool_to_int           => return simpleUnOp(gz, scope, rl, node, bool_rl,                         params[0], .bool_to_int),
-        .embed_file            => return simpleUnOp(gz, scope, rl, node, .{ .ty = .const_slice_u8_type }, params[0], .embed_file),
-        .error_name            => return simpleUnOp(gz, scope, rl, node, .{ .ty = .anyerror_type },       params[0], .error_name),
-        .panic                 => return simpleUnOp(gz, scope, rl, node, .{ .ty = .const_slice_u8_type }, params[0], .panic),
-        .set_align_stack       => return simpleUnOp(gz, scope, rl, node, align_rl,                        params[0], .set_align_stack),
-        .set_cold              => return simpleUnOp(gz, scope, rl, node, bool_rl,                         params[0], .set_cold),
-        .set_float_mode        => return simpleUnOp(gz, scope, rl, node, .{ .ty = .float_mode_type },     params[0], .set_float_mode),
-        .set_runtime_safety    => return simpleUnOp(gz, scope, rl, node, bool_rl,                         params[0], .set_runtime_safety),
-        .sqrt                  => return simpleUnOp(gz, scope, rl, node, .none,                           params[0], .sqrt),
-        .sin                   => return simpleUnOp(gz, scope, rl, node, .none,                           params[0], .sin),
-        .cos                   => return simpleUnOp(gz, scope, rl, node, .none,                           params[0], .cos),
-        .exp                   => return simpleUnOp(gz, scope, rl, node, .none,                           params[0], .exp),
-        .exp2                  => return simpleUnOp(gz, scope, rl, node, .none,                           params[0], .exp2),
-        .log                   => return simpleUnOp(gz, scope, rl, node, .none,                           params[0], .log),
-        .log2                  => return simpleUnOp(gz, scope, rl, node, .none,                           params[0], .log2),
-        .log10                 => return simpleUnOp(gz, scope, rl, node, .none,                           params[0], .log10),
-        .fabs                  => return simpleUnOp(gz, scope, rl, node, .none,                           params[0], .fabs),
-        .floor                 => return simpleUnOp(gz, scope, rl, node, .none,                           params[0], .floor),
-        .ceil                  => return simpleUnOp(gz, scope, rl, node, .none,                           params[0], .ceil),
-        .trunc                 => return simpleUnOp(gz, scope, rl, node, .none,                           params[0], .trunc),
-        .round                 => return simpleUnOp(gz, scope, rl, node, .none,                           params[0], .round),
-        .tag_name              => return simpleUnOp(gz, scope, rl, node, .none,                           params[0], .tag_name),
-        .Type                  => return simpleUnOp(gz, scope, rl, node, .none,                           params[0], .reify),
-        .type_name             => return simpleUnOp(gz, scope, rl, node, .none,                           params[0], .type_name),
-        .Frame                 => return simpleUnOp(gz, scope, rl, node, .none,                           params[0], .frame_type),
-        .frame_size            => return simpleUnOp(gz, scope, rl, node, .none,                           params[0], .frame_size),
+        .ptr_to_int            => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .ptr_to_int),
+        .error_to_int          => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .error_to_int),
+        .int_to_error          => return simpleUnOp(gz, scope, rl, node, .{ .ty = .u16_type },                params[0], .int_to_error),
+        .compile_error         => return simpleUnOp(gz, scope, rl, node, .{ .ty = .const_slice_u8_type },     params[0], .compile_error),
+        .set_eval_branch_quota => return simpleUnOp(gz, scope, rl, node, .{ .ty = .u32_type },                params[0], .set_eval_branch_quota),
+        .enum_to_int           => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .enum_to_int),
+        .bool_to_int           => return simpleUnOp(gz, scope, rl, node, bool_rl,                             params[0], .bool_to_int),
+        .embed_file            => return simpleUnOp(gz, scope, rl, node, .{ .ty = .const_slice_u8_type },     params[0], .embed_file),
+        .error_name            => return simpleUnOp(gz, scope, rl, node, .{ .ty = .anyerror_type },           params[0], .error_name),
+        .panic                 => return simpleUnOp(gz, scope, rl, node, .{ .ty = .const_slice_u8_type },     params[0], .panic),
+        .set_align_stack       => return simpleUnOp(gz, scope, rl, node, align_rl,                            params[0], .set_align_stack),
+        .set_cold              => return simpleUnOp(gz, scope, rl, node, bool_rl,                             params[0], .set_cold),
+        .set_float_mode        => return simpleUnOp(gz, scope, rl, node, .{ .coerced_ty = .float_mode_type }, params[0], .set_float_mode),
+        .set_runtime_safety    => return simpleUnOp(gz, scope, rl, node, bool_rl,                             params[0], .set_runtime_safety),
+        .sqrt                  => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .sqrt),
+        .sin                   => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .sin),
+        .cos                   => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .cos),
+        .exp                   => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .exp),
+        .exp2                  => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .exp2),
+        .log                   => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .log),
+        .log2                  => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .log2),
+        .log10                 => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .log10),
+        .fabs                  => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .fabs),
+        .floor                 => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .floor),
+        .ceil                  => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .ceil),
+        .trunc                 => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .trunc),
+        .round                 => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .round),
+        .tag_name              => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .tag_name),
+        .Type                  => return simpleUnOp(gz, scope, rl, node, .{ .coerced_ty = .type_info_type },  params[0], .reify),
+        .type_name             => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .type_name),
+        .Frame                 => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .frame_type),
+        .frame_size            => return simpleUnOp(gz, scope, rl, node, .none,                               params[0], .frame_size),
 
         .float_to_int => return typeCast(gz, scope, rl, node, params[0], params[1], .float_to_int),
         .int_to_float => return typeCast(gz, scope, rl, node, params[0], params[1], .int_to_float),
@@ -6760,7 +7413,7 @@ fn builtinCall(
                 .lhs = dest_align,
                 .rhs = rhs,
             });
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
 
         .has_decl  => return hasDeclOrField(gz, scope, rl, node, params[0], params[1], .has_decl),
@@ -6782,7 +7435,7 @@ fn builtinCall(
         .shr_exact => return shiftOp(gz, scope, rl, node, params[0], params[1], .shr_exact),
 
         .bit_offset_of  => return offsetOf(gz, scope, rl, node, params[0], params[1], .bit_offset_of),
-        .byte_offset_of => return offsetOf(gz, scope, rl, node, params[0], params[1], .byte_offset_of),
+        .offset_of => return offsetOf(gz, scope, rl, node, params[0], params[1], .offset_of),
 
         .c_undef   => return simpleCBuiltin(gz, scope, rl, node, params[0], .c_undef),
         .c_include => return simpleCBuiltin(gz, scope, rl, node, params[0], .c_include),
@@ -6796,7 +7449,7 @@ fn builtinCall(
                 .node = gz.nodeIndexToRelative(node),
                 .operand = operand,
             });
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
         .wasm_memory_grow => {
             const index_arg = try expr(gz, scope, .{ .ty = .u32_type }, params[0]);
@@ -6806,9 +7459,10 @@ fn builtinCall(
                 .lhs = index_arg,
                 .rhs = delta_arg,
             });
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
         .c_define => {
+            if (!gz.c_import) return gz.astgen.failNode(node, "C define valid only inside C import block", .{});
             const name = try comptimeExpr(gz, scope, .{ .ty = .const_slice_u8_type }, params[0]);
             const value = try comptimeExpr(gz, scope, .none, params[1]);
             const result = try gz.addExtendedPayload(.c_define, Zir.Inst.BinNode{
@@ -6816,7 +7470,7 @@ fn builtinCall(
                 .lhs = name,
                 .rhs = value,
             });
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
 
         .splat => {
@@ -6826,7 +7480,7 @@ fn builtinCall(
                 .lhs = len,
                 .rhs = scalar,
             });
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
         .reduce => {
             const op = try expr(gz, scope, .{ .ty = .reduce_op_type }, params[0]);
@@ -6835,7 +7489,26 @@ fn builtinCall(
                 .lhs = op,
                 .rhs = scalar,
             });
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
+        },
+
+        .maximum => {
+            const a = try expr(gz, scope, .none, params[0]);
+            const b = try expr(gz, scope, .none, params[1]);
+            const result = try gz.addPlNode(.maximum, node, Zir.Inst.Bin{
+                .lhs = a,
+                .rhs = b,
+            });
+            return rvalue(gz, rl, result, node);
+        },
+        .minimum => {
+            const a = try expr(gz, scope, .none, params[0]);
+            const b = try expr(gz, scope, .none, params[1]);
+            const result = try gz.addPlNode(.minimum, node, Zir.Inst.Bin{
+                .lhs = a,
+                .rhs = b,
+            });
+            return rvalue(gz, rl, result, node);
         },
 
         .add_with_overflow => return overflowArithmetic(gz, scope, rl, node, params, .add_with_overflow),
@@ -6862,11 +7535,12 @@ fn builtinCall(
                 .rhs = rhs,
                 .ptr = ptr,
             });
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
 
         .atomic_load => {
             const int_type = try typeExpr(gz, scope, params[0]);
+            // TODO allow this pointer type to be volatile
             const ptr_type = try gz.add(.{ .tag = .ptr_type_simple, .data = .{
                 .ptr_type_simple = .{
                     .is_allowzero = false,
@@ -6876,16 +7550,17 @@ fn builtinCall(
                     .elem_type = int_type,
                 },
             } });
-            const ptr = try expr(gz, scope, .{ .ty = ptr_type }, params[1]);
-            const ordering = try expr(gz, scope, .{ .ty = .atomic_ordering_type }, params[2]);
             const result = try gz.addPlNode(.atomic_load, node, Zir.Inst.Bin{
-                .lhs = ptr,
-                .rhs = ordering,
+                // zig fmt: off
+                .lhs = try expr(gz, scope, .{ .coerced_ty = ptr_type },           params[1]),
+                .rhs = try expr(gz, scope, .{ .coerced_ty = .atomic_order_type }, params[2]),
+                // zig fmt: on
             });
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
         .atomic_rmw => {
             const int_type = try typeExpr(gz, scope, params[0]);
+            // TODO allow this pointer type to be volatile
             const ptr_type = try gz.add(.{ .tag = .ptr_type_simple, .data = .{
                 .ptr_type_simple = .{
                     .is_allowzero = false,
@@ -6895,20 +7570,19 @@ fn builtinCall(
                     .elem_type = int_type,
                 },
             } });
-            const ptr = try expr(gz, scope, .{ .ty = ptr_type }, params[1]);
-            const operation = try expr(gz, scope, .{ .ty = .atomic_rmw_op_type }, params[2]);
-            const operand = try expr(gz, scope, .{ .ty = int_type }, params[3]);
-            const ordering = try expr(gz, scope, .{ .ty = .atomic_ordering_type }, params[4]);
             const result = try gz.addPlNode(.atomic_rmw, node, Zir.Inst.AtomicRmw{
-                .ptr = ptr,
-                .operation = operation,
-                .operand = operand,
-                .ordering = ordering,
+                // zig fmt: off
+                .ptr       = try expr(gz, scope, .{ .coerced_ty = ptr_type },            params[1]),
+                .operation = try expr(gz, scope, .{ .coerced_ty = .atomic_rmw_op_type }, params[2]),
+                .operand   = try expr(gz, scope, .{ .coerced_ty = int_type },            params[3]),
+                .ordering  = try expr(gz, scope, .{ .coerced_ty = .atomic_order_type },  params[4]),
+                // zig fmt: on
             });
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
         .atomic_store => {
             const int_type = try typeExpr(gz, scope, params[0]);
+            // TODO allow this pointer type to be volatile
             const ptr_type = try gz.add(.{ .tag = .ptr_type_simple, .data = .{
                 .ptr_type_simple = .{
                     .is_allowzero = false,
@@ -6918,15 +7592,14 @@ fn builtinCall(
                     .elem_type = int_type,
                 },
             } });
-            const ptr = try expr(gz, scope, .{ .ty = ptr_type }, params[1]);
-            const operand = try expr(gz, scope, .{ .ty = int_type }, params[2]);
-            const ordering = try expr(gz, scope, .{ .ty = .atomic_ordering_type }, params[3]);
             const result = try gz.addPlNode(.atomic_store, node, Zir.Inst.AtomicStore{
-                .ptr = ptr,
-                .operand = operand,
-                .ordering = ordering,
+                // zig fmt: off
+                .ptr      = try expr(gz, scope, .{ .coerced_ty = ptr_type },           params[1]),
+                .operand  = try expr(gz, scope, .{ .coerced_ty = int_type },           params[2]),
+                .ordering = try expr(gz, scope, .{ .coerced_ty = .atomic_order_type }, params[3]),
+                // zig fmt: on
             });
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
         .mul_add => {
             const float_type = try typeExpr(gz, scope, params[0]);
@@ -6938,18 +7611,18 @@ fn builtinCall(
                 .mulend2 = mulend2,
                 .addend = addend,
             });
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
         .call => {
             const options = try comptimeExpr(gz, scope, .{ .ty = .call_options_type }, params[0]);
-            const callee = try expr(gz, scope, .none, params[1]);
+            const callee = try calleeExpr(gz, scope, params[1]);
             const args = try expr(gz, scope, .none, params[2]);
             const result = try gz.addPlNode(.builtin_call, node, Zir.Inst.BuiltinCall{
                 .options = options,
                 .callee = callee,
                 .args = args,
             });
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
         .field_parent_ptr => {
             const parent_type = try typeExpr(gz, scope, params[0]);
@@ -6960,23 +7633,23 @@ fn builtinCall(
                 .field_name = field_name,
                 .field_ptr = try expr(gz, scope, .{ .ty = field_ptr_type }, params[2]),
             });
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
         .memcpy => {
             const result = try gz.addPlNode(.memcpy, node, Zir.Inst.Memcpy{
-                .dest = try expr(gz, scope, .{ .ty = .manyptr_u8_type }, params[0]),
-                .source = try expr(gz, scope, .{ .ty = .manyptr_const_u8_type }, params[1]),
-                .byte_count = try expr(gz, scope, .{ .ty = .usize_type }, params[2]),
+                .dest = try expr(gz, scope, .{ .coerced_ty = .manyptr_u8_type }, params[0]),
+                .source = try expr(gz, scope, .{ .coerced_ty = .manyptr_const_u8_type }, params[1]),
+                .byte_count = try expr(gz, scope, .{ .coerced_ty = .usize_type }, params[2]),
             });
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
         .memset => {
             const result = try gz.addPlNode(.memset, node, Zir.Inst.Memset{
-                .dest = try expr(gz, scope, .{ .ty = .manyptr_u8_type }, params[0]),
-                .byte = try expr(gz, scope, .{ .ty = .u8_type }, params[1]),
-                .byte_count = try expr(gz, scope, .{ .ty = .usize_type }, params[2]),
+                .dest = try expr(gz, scope, .{ .coerced_ty = .manyptr_u8_type }, params[0]),
+                .byte = try expr(gz, scope, .{ .coerced_ty = .u8_type }, params[1]),
+                .byte_count = try expr(gz, scope, .{ .coerced_ty = .usize_type }, params[2]),
             });
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
         .shuffle => {
             const result = try gz.addPlNode(.shuffle, node, Zir.Inst.Shuffle{
@@ -6985,7 +7658,16 @@ fn builtinCall(
                 .b = try expr(gz, scope, .none, params[2]),
                 .mask = try comptimeExpr(gz, scope, .none, params[3]),
             });
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
+        },
+        .select => {
+            const result = try gz.addPlNode(.select, node, Zir.Inst.Select{
+                .elem_type = try typeExpr(gz, scope, params[0]),
+                .pred = try expr(gz, scope, .none, params[1]),
+                .a = try expr(gz, scope, .none, params[2]),
+                .b = try expr(gz, scope, .none, params[3]),
+            });
+            return rvalue(gz, rl, result, node);
         },
         .async_call => {
             const result = try gz.addPlNode(.builtin_async_call, node, Zir.Inst.AsyncCall{
@@ -6994,38 +7676,36 @@ fn builtinCall(
                 .fn_ptr = try expr(gz, scope, .none, params[2]),
                 .args = try expr(gz, scope, .none, params[3]),
             });
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
         .Vector => {
             const result = try gz.addPlNode(.vector_type, node, Zir.Inst.Bin{
-                .lhs = try comptimeExpr(gz, scope, .{.ty = .u32_type}, params[0]),
+                .lhs = try comptimeExpr(gz, scope, .{ .ty = .u32_type }, params[0]),
                 .rhs = try typeExpr(gz, scope, params[1]),
             });
-            return rvalue(gz, scope, rl, result, node);
+            return rvalue(gz, rl, result, node);
         },
-
     }
     // zig fmt: on
 }
 
 fn simpleNoOpVoid(
     gz: *GenZir,
-    scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
     tag: Zir.Inst.Tag,
 ) InnerError!Zir.Inst.Ref {
     _ = try gz.addNode(tag, node);
-    return rvalue(gz, scope, rl, .void_value, node);
+    return rvalue(gz, rl, .void_value, node);
 }
 
 fn hasDeclOrField(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    lhs_node: ast.Node.Index,
-    rhs_node: ast.Node.Index,
+    node: Ast.Node.Index,
+    lhs_node: Ast.Node.Index,
+    rhs_node: Ast.Node.Index,
     tag: Zir.Inst.Tag,
 ) InnerError!Zir.Inst.Ref {
     const container_type = try typeExpr(gz, scope, lhs_node);
@@ -7034,61 +7714,62 @@ fn hasDeclOrField(
         .lhs = container_type,
         .rhs = name,
     });
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn typeCast(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    lhs_node: ast.Node.Index,
-    rhs_node: ast.Node.Index,
+    node: Ast.Node.Index,
+    lhs_node: Ast.Node.Index,
+    rhs_node: Ast.Node.Index,
     tag: Zir.Inst.Tag,
 ) InnerError!Zir.Inst.Ref {
     const result = try gz.addPlNode(tag, node, Zir.Inst.Bin{
         .lhs = try typeExpr(gz, scope, lhs_node),
         .rhs = try expr(gz, scope, .none, rhs_node),
     });
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn simpleUnOpType(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    operand_node: ast.Node.Index,
+    node: Ast.Node.Index,
+    operand_node: Ast.Node.Index,
     tag: Zir.Inst.Tag,
 ) InnerError!Zir.Inst.Ref {
     const operand = try typeExpr(gz, scope, operand_node);
     const result = try gz.addUnNode(tag, operand, node);
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn simpleUnOp(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
     operand_rl: ResultLoc,
-    operand_node: ast.Node.Index,
+    operand_node: Ast.Node.Index,
     tag: Zir.Inst.Tag,
 ) InnerError!Zir.Inst.Ref {
     const operand = try expr(gz, scope, operand_rl, operand_node);
     const result = try gz.addUnNode(tag, operand, node);
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn cmpxchg(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    params: []const ast.Node.Index,
+    node: Ast.Node.Index,
+    params: []const Ast.Node.Index,
     tag: Zir.Inst.Tag,
 ) InnerError!Zir.Inst.Ref {
     const int_type = try typeExpr(gz, scope, params[0]);
+    // TODO: allow this to be volatile
     const ptr_type = try gz.add(.{ .tag = .ptr_type_simple, .data = .{
         .ptr_type_simple = .{
             .is_allowzero = false,
@@ -7100,70 +7781,72 @@ fn cmpxchg(
     } });
     const result = try gz.addPlNode(tag, node, Zir.Inst.Cmpxchg{
         // zig fmt: off
-        .ptr            = try expr(gz, scope, .{ .ty = ptr_type },              params[1]),
-        .expected_value = try expr(gz, scope, .{ .ty = int_type },              params[2]),
-        .new_value      = try expr(gz, scope, .{ .ty = int_type },              params[3]),
-        .success_order  = try expr(gz, scope, .{ .ty = .atomic_ordering_type }, params[4]),
-        .fail_order     = try expr(gz, scope, .{ .ty = .atomic_ordering_type }, params[5]),
+        .ptr            = try expr(gz, scope, .{ .coerced_ty = ptr_type },           params[1]),
+        .expected_value = try expr(gz, scope, .{ .coerced_ty = int_type },           params[2]),
+        .new_value      = try expr(gz, scope, .{ .coerced_ty = int_type },           params[3]),
+        .success_order  = try expr(gz, scope, .{ .coerced_ty = .atomic_order_type }, params[4]),
+        .failure_order  = try expr(gz, scope, .{ .coerced_ty = .atomic_order_type }, params[5]),
         // zig fmt: on
     });
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn bitBuiltin(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    int_type_node: ast.Node.Index,
-    operand_node: ast.Node.Index,
+    node: Ast.Node.Index,
+    int_type_node: Ast.Node.Index,
+    operand_node: Ast.Node.Index,
     tag: Zir.Inst.Tag,
 ) InnerError!Zir.Inst.Ref {
     const int_type = try typeExpr(gz, scope, int_type_node);
     const operand = try expr(gz, scope, .{ .ty = int_type }, operand_node);
     const result = try gz.addUnNode(tag, operand, node);
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn divBuiltin(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    lhs_node: ast.Node.Index,
-    rhs_node: ast.Node.Index,
+    node: Ast.Node.Index,
+    lhs_node: Ast.Node.Index,
+    rhs_node: Ast.Node.Index,
     tag: Zir.Inst.Tag,
 ) InnerError!Zir.Inst.Ref {
     const result = try gz.addPlNode(tag, node, Zir.Inst.Bin{
         .lhs = try expr(gz, scope, .none, lhs_node),
         .rhs = try expr(gz, scope, .none, rhs_node),
     });
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn simpleCBuiltin(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    operand_node: ast.Node.Index,
+    node: Ast.Node.Index,
+    operand_node: Ast.Node.Index,
     tag: Zir.Inst.Extended,
 ) InnerError!Zir.Inst.Ref {
+    const name: []const u8 = if (tag == .c_undef) "C undef" else "C include";
+    if (!gz.c_import) return gz.astgen.failNode(node, "{s} valid only inside C import block", .{name});
     const operand = try comptimeExpr(gz, scope, .{ .ty = .const_slice_u8_type }, operand_node);
     _ = try gz.addExtendedPayload(tag, Zir.Inst.UnNode{
         .node = gz.nodeIndexToRelative(node),
         .operand = operand,
     });
-    return rvalue(gz, scope, rl, .void_value, node);
+    return rvalue(gz, rl, .void_value, node);
 }
 
 fn offsetOf(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    lhs_node: ast.Node.Index,
-    rhs_node: ast.Node.Index,
+    node: Ast.Node.Index,
+    lhs_node: Ast.Node.Index,
+    rhs_node: Ast.Node.Index,
     tag: Zir.Inst.Tag,
 ) InnerError!Zir.Inst.Ref {
     const type_inst = try typeExpr(gz, scope, lhs_node);
@@ -7172,16 +7855,16 @@ fn offsetOf(
         .lhs = type_inst,
         .rhs = field_name,
     });
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn shiftOp(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    lhs_node: ast.Node.Index,
-    rhs_node: ast.Node.Index,
+    node: Ast.Node.Index,
+    lhs_node: Ast.Node.Index,
+    rhs_node: Ast.Node.Index,
     tag: Zir.Inst.Tag,
 ) InnerError!Zir.Inst.Ref {
     const lhs = try expr(gz, scope, .none, lhs_node);
@@ -7191,21 +7874,21 @@ fn shiftOp(
         .lhs = lhs,
         .rhs = rhs,
     });
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn cImport(
     gz: *GenZir,
     scope: *Scope,
-    rl: ResultLoc,
-    node: ast.Node.Index,
-    body_node: ast.Node.Index,
+    node: Ast.Node.Index,
+    body_node: Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const gpa = astgen.gpa;
 
     var block_scope = gz.makeSubBlock(scope);
     block_scope.force_comptime = true;
+    block_scope.c_import = true;
     defer block_scope.instructions.deinit(gpa);
 
     const block_inst = try gz.addBlock(.c_import, node);
@@ -7216,15 +7899,15 @@ fn cImport(
     try block_scope.setBlockBody(block_inst);
     try gz.instructions.append(gpa, block_inst);
 
-    return rvalue(gz, scope, rl, .void_value, node);
+    return indexToRef(block_inst);
 }
 
 fn overflowArithmetic(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    params: []const ast.Node.Index,
+    node: Ast.Node.Index,
+    params: []const Ast.Node.Index,
     tag: Zir.Inst.Extended,
 ) InnerError!Zir.Inst.Ref {
     const int_type = try typeExpr(gz, scope, params[0]);
@@ -7246,31 +7929,27 @@ fn overflowArithmetic(
         .rhs = rhs,
         .ptr = ptr,
     });
-    return rvalue(gz, scope, rl, result, node);
+    return rvalue(gz, rl, result, node);
 }
 
 fn callExpr(
     gz: *GenZir,
     scope: *Scope,
     rl: ResultLoc,
-    node: ast.Node.Index,
-    call: ast.full.Call,
+    node: Ast.Node.Index,
+    call: Ast.full.Call,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
-    const lhs = try expr(gz, scope, .none, call.ast.fn_expr);
+
+    const callee = try calleeExpr(gz, scope, call.ast.fn_expr);
 
     const args = try astgen.gpa.alloc(Zir.Inst.Ref, call.ast.params.len);
     defer astgen.gpa.free(args);
 
     for (call.ast.params) |param_node, i| {
-        const param_type = try gz.add(.{
-            .tag = .param_type,
-            .data = .{ .param_type = .{
-                .callee = lhs,
-                .param_index = @intCast(u32, i),
-            } },
-        });
-        args[i] = try expr(gz, scope, .{ .ty = param_type }, param_node);
+        // Parameters are always temporary values, they have no
+        // meaningful result location.  Sema will coerce them.
+        args[i] = try expr(gz, scope, .none, param_node);
     }
 
     const modifier: std.builtin.CallOptions.Modifier = blk: {
@@ -7285,20 +7964,72 @@ fn callExpr(
         }
         break :blk .auto;
     };
-    const result: Zir.Inst.Ref = res: {
-        const tag: Zir.Inst.Tag = switch (modifier) {
-            .auto => .call,
-            .async_kw => .call_async,
-            .never_tail => unreachable,
-            .never_inline => unreachable,
-            .no_async => .call_nosuspend,
-            .always_tail => unreachable,
-            .always_inline => unreachable,
-            .compile_time => .call_compile_time,
-        };
-        break :res try gz.addCall(tag, lhs, args, node);
-    };
-    return rvalue(gz, scope, rl, result, node); // TODO function call with result location
+    const call_inst = try gz.addCall(modifier, callee, args, node);
+    return rvalue(gz, rl, call_inst, node); // TODO function call with result location
+}
+
+/// calleeExpr generates the function part of a call expression (f in f(x)), or the
+/// callee argument to the @call() builtin. If the lhs is a field access or the
+/// @field() builtin, we need to generate a special field_call_bind instruction
+/// instead of the normal field_val or field_ptr.  If this is a inst.func() call,
+/// this instruction will capture the value of the first argument before evaluating
+/// the other arguments. We need to use .ref here to guarantee we will be able to
+/// promote an lvalue to an address if the first parameter requires it.  This
+/// unfortunately also means we need to take a reference to any types on the lhs.
+fn calleeExpr(
+    gz: *GenZir,
+    scope: *Scope,
+    node: Ast.Node.Index,
+) InnerError!Zir.Inst.Ref {
+    const astgen = gz.astgen;
+    const tree = astgen.tree;
+
+    const tag = tree.nodes.items(.tag)[node];
+    switch (tag) {
+        .field_access => return addFieldAccess(.field_call_bind, gz, scope, .ref, node),
+
+        .builtin_call_two,
+        .builtin_call_two_comma,
+        .builtin_call,
+        .builtin_call_comma,
+        => {
+            const node_datas = tree.nodes.items(.data);
+            const main_tokens = tree.nodes.items(.main_token);
+            const builtin_token = main_tokens[node];
+            const builtin_name = tree.tokenSlice(builtin_token);
+
+            var inline_params: [2]Ast.Node.Index = undefined;
+            var params: []Ast.Node.Index = switch (tag) {
+                .builtin_call,
+                .builtin_call_comma,
+                => tree.extra_data[node_datas[node].lhs..node_datas[node].rhs],
+
+                .builtin_call_two,
+                .builtin_call_two_comma,
+                => blk: {
+                    inline_params = .{ node_datas[node].lhs, node_datas[node].rhs };
+                    const len: usize = if (inline_params[0] == 0) @as(usize, 0) else if (inline_params[1] == 0) @as(usize, 1) else @as(usize, 2);
+                    break :blk inline_params[0..len];
+                },
+
+                else => unreachable,
+            };
+
+            // If anything is wrong, fall back to builtinCall.
+            // It will emit any necessary compile errors and notes.
+            if (std.mem.eql(u8, builtin_name, "@field") and params.len == 2) {
+                const lhs = try expr(gz, scope, .ref, params[0]);
+                const field_name = try comptimeExpr(gz, scope, .{ .ty = .const_slice_u8_type }, params[1]);
+                return gz.addPlNode(.field_call_bind_named, node, Zir.Inst.FieldNamed{
+                    .lhs = lhs,
+                    .field_name = field_name,
+                });
+            }
+
+            return builtinCall(gz, scope, .none, node, params);
+        },
+        else => return expr(gz, scope, .none, node),
+    }
 }
 
 pub const simple_types = std.ComptimeStringMap(Zir.Inst.Ref, .{
@@ -7336,13 +8067,14 @@ pub const simple_types = std.ComptimeStringMap(Zir.Inst.Ref, .{
     .{ "u32", .u32_type },
     .{ "u64", .u64_type },
     .{ "u128", .u128_type },
+    .{ "u1", .u1_type },
     .{ "u8", .u8_type },
     .{ "undefined", .undef },
     .{ "usize", .usize_type },
     .{ "void", .void_type },
 });
 
-fn nodeMayNeedMemoryLocation(tree: *const ast.Tree, start_node: ast.Node.Index) bool {
+fn nodeMayNeedMemoryLocation(tree: *const Ast, start_node: Ast.Node.Index) bool {
     const node_tags = tree.nodes.items(.tag);
     const node_datas = tree.nodes.items(.data);
     const main_tokens = tree.nodes.items(.main_token);
@@ -7400,10 +8132,6 @@ fn nodeMayNeedMemoryLocation(tree: *const ast.Tree, start_node: ast.Node.Index) 
             .string_literal,
             .multiline_string_literal,
             .char_literal,
-            .true_literal,
-            .false_literal,
-            .null_literal,
-            .undefined_literal,
             .unreachable_literal,
             .identifier,
             .error_set_decl,
@@ -7423,27 +8151,33 @@ fn nodeMayNeedMemoryLocation(tree: *const ast.Tree, start_node: ast.Node.Index) 
             .asm_simple,
             .add,
             .add_wrap,
+            .add_sat,
             .array_cat,
             .array_mult,
             .assign,
             .assign_bit_and,
             .assign_bit_or,
-            .assign_bit_shift_left,
-            .assign_bit_shift_right,
+            .assign_shl,
+            .assign_shl_sat,
+            .assign_shr,
             .assign_bit_xor,
             .assign_div,
             .assign_sub,
             .assign_sub_wrap,
+            .assign_sub_sat,
             .assign_mod,
             .assign_add,
             .assign_add_wrap,
+            .assign_add_sat,
             .assign_mul,
             .assign_mul_wrap,
+            .assign_mul_sat,
             .bang_equal,
             .bit_and,
             .bit_or,
-            .bit_shift_left,
-            .bit_shift_right,
+            .shl,
+            .shl_sat,
+            .shr,
             .bit_xor,
             .bool_and,
             .bool_or,
@@ -7458,10 +8192,12 @@ fn nodeMayNeedMemoryLocation(tree: *const ast.Tree, start_node: ast.Node.Index) 
             .mod,
             .mul,
             .mul_wrap,
+            .mul_sat,
             .switch_range,
             .field_access,
             .sub,
             .sub_wrap,
+            .sub_sat,
             .slice,
             .slice_open,
             .slice_sentinel,
@@ -7539,6 +8275,233 @@ fn nodeMayNeedMemoryLocation(tree: *const ast.Tree, start_node: ast.Node.Index) 
                 }
             },
 
+            .builtin_call_two, .builtin_call_two_comma => {
+                const builtin_token = main_tokens[node];
+                const builtin_name = tree.tokenSlice(builtin_token);
+                // If the builtin is an invalid name, we don't cause an error here; instead
+                // let it pass, and the error will be "invalid builtin function" later.
+                const builtin_info = BuiltinFn.list.get(builtin_name) orelse return false;
+                switch (builtin_info.needs_mem_loc) {
+                    .never => return false,
+                    .always => return true,
+                    .forward1 => node = node_datas[node].rhs,
+                }
+            },
+
+            .builtin_call, .builtin_call_comma => {
+                const params = tree.extra_data[node_datas[node].lhs..node_datas[node].rhs];
+                const builtin_token = main_tokens[node];
+                const builtin_name = tree.tokenSlice(builtin_token);
+                // If the builtin is an invalid name, we don't cause an error here; instead
+                // let it pass, and the error will be "invalid builtin function" later.
+                const builtin_info = BuiltinFn.list.get(builtin_name) orelse return false;
+                switch (builtin_info.needs_mem_loc) {
+                    .never => return false,
+                    .always => return true,
+                    .forward1 => node = params[1],
+                }
+            },
+        }
+    }
+}
+
+fn nodeMayEvalToError(tree: *const Ast, start_node: Ast.Node.Index) enum { never, always, maybe } {
+    const node_tags = tree.nodes.items(.tag);
+    const node_datas = tree.nodes.items(.data);
+    const main_tokens = tree.nodes.items(.main_token);
+    const token_tags = tree.tokens.items(.tag);
+
+    var node = start_node;
+    while (true) {
+        switch (node_tags[node]) {
+            .root,
+            .@"usingnamespace",
+            .test_decl,
+            .switch_case,
+            .switch_case_one,
+            .container_field_init,
+            .container_field_align,
+            .container_field,
+            .asm_output,
+            .asm_input,
+            => unreachable,
+
+            .error_value => return .always,
+
+            .@"asm",
+            .asm_simple,
+            .identifier,
+            .field_access,
+            .deref,
+            .array_access,
+            .while_simple,
+            .while_cont,
+            .for_simple,
+            .if_simple,
+            .@"while",
+            .@"if",
+            .@"for",
+            .@"switch",
+            .switch_comma,
+            .call_one,
+            .call_one_comma,
+            .async_call_one,
+            .async_call_one_comma,
+            .call,
+            .call_comma,
+            .async_call,
+            .async_call_comma,
+            => return .maybe,
+
+            .@"return",
+            .@"break",
+            .@"continue",
+            .bit_not,
+            .bool_not,
+            .global_var_decl,
+            .local_var_decl,
+            .simple_var_decl,
+            .aligned_var_decl,
+            .@"defer",
+            .@"errdefer",
+            .address_of,
+            .optional_type,
+            .negation,
+            .negation_wrap,
+            .@"resume",
+            .array_type,
+            .array_type_sentinel,
+            .ptr_type_aligned,
+            .ptr_type_sentinel,
+            .ptr_type,
+            .ptr_type_bit_range,
+            .@"suspend",
+            .@"anytype",
+            .fn_proto_simple,
+            .fn_proto_multi,
+            .fn_proto_one,
+            .fn_proto,
+            .fn_decl,
+            .anyframe_type,
+            .anyframe_literal,
+            .integer_literal,
+            .float_literal,
+            .enum_literal,
+            .string_literal,
+            .multiline_string_literal,
+            .char_literal,
+            .unreachable_literal,
+            .error_set_decl,
+            .container_decl,
+            .container_decl_trailing,
+            .container_decl_two,
+            .container_decl_two_trailing,
+            .container_decl_arg,
+            .container_decl_arg_trailing,
+            .tagged_union,
+            .tagged_union_trailing,
+            .tagged_union_two,
+            .tagged_union_two_trailing,
+            .tagged_union_enum_tag,
+            .tagged_union_enum_tag_trailing,
+            .add,
+            .add_wrap,
+            .add_sat,
+            .array_cat,
+            .array_mult,
+            .assign,
+            .assign_bit_and,
+            .assign_bit_or,
+            .assign_shl,
+            .assign_shl_sat,
+            .assign_shr,
+            .assign_bit_xor,
+            .assign_div,
+            .assign_sub,
+            .assign_sub_wrap,
+            .assign_sub_sat,
+            .assign_mod,
+            .assign_add,
+            .assign_add_wrap,
+            .assign_add_sat,
+            .assign_mul,
+            .assign_mul_wrap,
+            .assign_mul_sat,
+            .bang_equal,
+            .bit_and,
+            .bit_or,
+            .shl,
+            .shl_sat,
+            .shr,
+            .bit_xor,
+            .bool_and,
+            .bool_or,
+            .div,
+            .equal_equal,
+            .error_union,
+            .greater_or_equal,
+            .greater_than,
+            .less_or_equal,
+            .less_than,
+            .merge_error_sets,
+            .mod,
+            .mul,
+            .mul_wrap,
+            .mul_sat,
+            .switch_range,
+            .sub,
+            .sub_wrap,
+            .sub_sat,
+            .slice,
+            .slice_open,
+            .slice_sentinel,
+            .array_init_one,
+            .array_init_one_comma,
+            .array_init_dot_two,
+            .array_init_dot_two_comma,
+            .array_init_dot,
+            .array_init_dot_comma,
+            .array_init,
+            .array_init_comma,
+            .struct_init_one,
+            .struct_init_one_comma,
+            .struct_init_dot_two,
+            .struct_init_dot_two_comma,
+            .struct_init_dot,
+            .struct_init_dot_comma,
+            .struct_init,
+            .struct_init_comma,
+            => return .never,
+
+            // Forward the question to the LHS sub-expression.
+            .grouped_expression,
+            .@"try",
+            .@"await",
+            .@"comptime",
+            .@"nosuspend",
+            .unwrap_optional,
+            => node = node_datas[node].lhs,
+
+            // Forward the question to the RHS sub-expression.
+            .@"catch",
+            .@"orelse",
+            => node = node_datas[node].rhs,
+
+            .block_two,
+            .block_two_semicolon,
+            .block,
+            .block_semicolon,
+            => {
+                const lbrace = main_tokens[node];
+                if (token_tags[lbrace - 1] == .colon) {
+                    // Labeled blocks may need a memory location to forward
+                    // to their break statements.
+                    return .maybe;
+                } else {
+                    return .never;
+                }
+            },
+
             .builtin_call,
             .builtin_call_comma,
             .builtin_call_two,
@@ -7548,26 +8511,217 @@ fn nodeMayNeedMemoryLocation(tree: *const ast.Tree, start_node: ast.Node.Index) 
                 const builtin_name = tree.tokenSlice(builtin_token);
                 // If the builtin is an invalid name, we don't cause an error here; instead
                 // let it pass, and the error will be "invalid builtin function" later.
-                const builtin_info = BuiltinFn.list.get(builtin_name) orelse return false;
-                return builtin_info.needs_mem_loc;
+                const builtin_info = BuiltinFn.list.get(builtin_name) orelse return .maybe;
+                if (builtin_info.tag == .err_set_cast) {
+                    return .always;
+                } else {
+                    return .never;
+                }
             },
         }
     }
 }
 
-/// Applies `rl` semantics to `inst`. Expressions which do not do their own handling of
+fn nodeImpliesRuntimeBits(tree: *const Ast, start_node: Ast.Node.Index) bool {
+    const node_tags = tree.nodes.items(.tag);
+    const node_datas = tree.nodes.items(.data);
+
+    var node = start_node;
+    while (true) {
+        switch (node_tags[node]) {
+            .root,
+            .@"usingnamespace",
+            .test_decl,
+            .switch_case,
+            .switch_case_one,
+            .container_field_init,
+            .container_field_align,
+            .container_field,
+            .asm_output,
+            .asm_input,
+            .global_var_decl,
+            .local_var_decl,
+            .simple_var_decl,
+            .aligned_var_decl,
+            => unreachable,
+
+            .@"return",
+            .@"break",
+            .@"continue",
+            .bit_not,
+            .bool_not,
+            .@"defer",
+            .@"errdefer",
+            .address_of,
+            .negation,
+            .negation_wrap,
+            .@"resume",
+            .array_type,
+            .@"suspend",
+            .@"anytype",
+            .fn_decl,
+            .anyframe_literal,
+            .integer_literal,
+            .float_literal,
+            .enum_literal,
+            .string_literal,
+            .multiline_string_literal,
+            .char_literal,
+            .unreachable_literal,
+            .identifier,
+            .error_set_decl,
+            .container_decl,
+            .container_decl_trailing,
+            .container_decl_two,
+            .container_decl_two_trailing,
+            .container_decl_arg,
+            .container_decl_arg_trailing,
+            .tagged_union,
+            .tagged_union_trailing,
+            .tagged_union_two,
+            .tagged_union_two_trailing,
+            .tagged_union_enum_tag,
+            .tagged_union_enum_tag_trailing,
+            .@"asm",
+            .asm_simple,
+            .add,
+            .add_wrap,
+            .add_sat,
+            .array_cat,
+            .array_mult,
+            .assign,
+            .assign_bit_and,
+            .assign_bit_or,
+            .assign_shl,
+            .assign_shl_sat,
+            .assign_shr,
+            .assign_bit_xor,
+            .assign_div,
+            .assign_sub,
+            .assign_sub_wrap,
+            .assign_sub_sat,
+            .assign_mod,
+            .assign_add,
+            .assign_add_wrap,
+            .assign_add_sat,
+            .assign_mul,
+            .assign_mul_wrap,
+            .assign_mul_sat,
+            .bang_equal,
+            .bit_and,
+            .bit_or,
+            .shl,
+            .shl_sat,
+            .shr,
+            .bit_xor,
+            .bool_and,
+            .bool_or,
+            .div,
+            .equal_equal,
+            .error_union,
+            .greater_or_equal,
+            .greater_than,
+            .less_or_equal,
+            .less_than,
+            .merge_error_sets,
+            .mod,
+            .mul,
+            .mul_wrap,
+            .mul_sat,
+            .switch_range,
+            .field_access,
+            .sub,
+            .sub_wrap,
+            .sub_sat,
+            .slice,
+            .slice_open,
+            .slice_sentinel,
+            .deref,
+            .array_access,
+            .error_value,
+            .while_simple,
+            .while_cont,
+            .for_simple,
+            .if_simple,
+            .@"catch",
+            .@"orelse",
+            .array_init_one,
+            .array_init_one_comma,
+            .array_init_dot_two,
+            .array_init_dot_two_comma,
+            .array_init_dot,
+            .array_init_dot_comma,
+            .array_init,
+            .array_init_comma,
+            .struct_init_one,
+            .struct_init_one_comma,
+            .struct_init_dot_two,
+            .struct_init_dot_two_comma,
+            .struct_init_dot,
+            .struct_init_dot_comma,
+            .struct_init,
+            .struct_init_comma,
+            .@"while",
+            .@"if",
+            .@"for",
+            .@"switch",
+            .switch_comma,
+            .call_one,
+            .call_one_comma,
+            .async_call_one,
+            .async_call_one_comma,
+            .call,
+            .call_comma,
+            .async_call,
+            .async_call_comma,
+            .block_two,
+            .block_two_semicolon,
+            .block,
+            .block_semicolon,
+            .builtin_call,
+            .builtin_call_comma,
+            .builtin_call_two,
+            .builtin_call_two_comma,
+            => return false,
+
+            // Forward the question to the LHS sub-expression.
+            .grouped_expression,
+            .@"try",
+            .@"await",
+            .@"comptime",
+            .@"nosuspend",
+            .unwrap_optional,
+            => node = node_datas[node].lhs,
+
+            .fn_proto_simple,
+            .fn_proto_multi,
+            .fn_proto_one,
+            .fn_proto,
+            .ptr_type_aligned,
+            .ptr_type_sentinel,
+            .ptr_type,
+            .ptr_type_bit_range,
+            .optional_type,
+            .anyframe_type,
+            .array_type_sentinel,
+            => return true,
+        }
+    }
+}
+
+/// Applies `rl` semantics to `result`. Expressions which do not do their own handling of
 /// result locations must call this function on their result.
 /// As an example, if the `ResultLoc` is `ptr`, it will write the result to the pointer.
 /// If the `ResultLoc` is `ty`, it will coerce the result to the type.
 fn rvalue(
     gz: *GenZir,
-    scope: *Scope,
     rl: ResultLoc,
     result: Zir.Inst.Ref,
-    src_node: ast.Node.Index,
+    src_node: Ast.Node.Index,
 ) InnerError!Zir.Inst.Ref {
+    if (gz.endsWithNoReturn()) return result;
     switch (rl) {
-        .none, .none_or_ref => return result,
+        .none, .none_or_ref, .coerced_ty => return result,
         .discard => {
             // Emit a compile error for discarding error values.
             _ = try gz.addUnNode(.ensure_result_non_error, result, src_node);
@@ -7587,6 +8741,7 @@ fn rvalue(
             const as_usize = @as(u64, @enumToInt(Zir.Inst.Ref.usize_type)) << 32;
             const as_void = @as(u64, @enumToInt(Zir.Inst.Ref.void_type)) << 32;
             switch ((@as(u64, @enumToInt(ty_inst)) << 32) | @as(u64, @enumToInt(result))) {
+                as_ty | @enumToInt(Zir.Inst.Ref.u1_type),
                 as_ty | @enumToInt(Zir.Inst.Ref.u8_type),
                 as_ty | @enumToInt(Zir.Inst.Ref.i8_type),
                 as_ty | @enumToInt(Zir.Inst.Ref.u16_type),
@@ -7667,7 +8822,7 @@ fn rvalue(
 /// and allocates the result within `astgen.arena`.
 /// Otherwise, returns a reference to the source code bytes directly.
 /// See also `appendIdentStr` and `parseStrLit`.
-fn identifierTokenString(astgen: *AstGen, token: ast.TokenIndex) InnerError![]const u8 {
+fn identifierTokenString(astgen: *AstGen, token: Ast.TokenIndex) InnerError![]const u8 {
     const tree = astgen.tree;
     const token_tags = tree.tokens.items(.tag);
     assert(token_tags[token] == .identifier);
@@ -7687,7 +8842,7 @@ fn identifierTokenString(astgen: *AstGen, token: ast.TokenIndex) InnerError![]co
 /// See also `identifierTokenString` and `parseStrLit`.
 fn appendIdentStr(
     astgen: *AstGen,
-    token: ast.TokenIndex,
+    token: Ast.TokenIndex,
     buf: *ArrayListUnmanaged(u8),
 ) InnerError!void {
     const tree = astgen.tree;
@@ -7704,12 +8859,11 @@ fn appendIdentStr(
 /// Appends the result to `buf`.
 fn parseStrLit(
     astgen: *AstGen,
-    token: ast.TokenIndex,
+    token: Ast.TokenIndex,
     buf: *ArrayListUnmanaged(u8),
     bytes: []const u8,
     offset: u32,
 ) InnerError!void {
-    const tree = astgen.tree;
     const raw_string = bytes[offset..];
     var buf_managed = buf.toManaged(astgen.gpa);
     const result = std.zig.string_literal.parseAppend(&buf_managed, raw_string);
@@ -7769,7 +8923,7 @@ fn parseStrLit(
 
 fn failNode(
     astgen: *AstGen,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
     comptime format: []const u8,
     args: anytype,
 ) InnerError {
@@ -7778,7 +8932,7 @@ fn failNode(
 
 fn failNodeNotes(
     astgen: *AstGen,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
     comptime format: []const u8,
     args: anytype,
     notes: []const u32,
@@ -7793,7 +8947,7 @@ fn failNodeNotes(
     }
     const notes_index: u32 = if (notes.len != 0) blk: {
         const notes_start = astgen.extra.items.len;
-        try astgen.extra.ensureCapacity(astgen.gpa, notes_start + 1 + notes.len);
+        try astgen.extra.ensureTotalCapacity(astgen.gpa, notes_start + 1 + notes.len);
         astgen.extra.appendAssumeCapacity(@intCast(u32, notes.len));
         astgen.extra.appendSliceAssumeCapacity(notes);
         break :blk @intCast(u32, notes_start);
@@ -7810,7 +8964,7 @@ fn failNodeNotes(
 
 fn failTok(
     astgen: *AstGen,
-    token: ast.TokenIndex,
+    token: Ast.TokenIndex,
     comptime format: []const u8,
     args: anytype,
 ) InnerError {
@@ -7819,7 +8973,7 @@ fn failTok(
 
 fn failTokNotes(
     astgen: *AstGen,
-    token: ast.TokenIndex,
+    token: Ast.TokenIndex,
     comptime format: []const u8,
     args: anytype,
     notes: []const u32,
@@ -7834,7 +8988,7 @@ fn failTokNotes(
     }
     const notes_index: u32 = if (notes.len != 0) blk: {
         const notes_start = astgen.extra.items.len;
-        try astgen.extra.ensureCapacity(astgen.gpa, notes_start + 1 + notes.len);
+        try astgen.extra.ensureTotalCapacity(astgen.gpa, notes_start + 1 + notes.len);
         astgen.extra.appendAssumeCapacity(@intCast(u32, notes.len));
         astgen.extra.appendSliceAssumeCapacity(notes);
         break :blk @intCast(u32, notes_start);
@@ -7852,7 +9006,7 @@ fn failTokNotes(
 /// Same as `fail`, except given an absolute byte offset.
 fn failOff(
     astgen: *AstGen,
-    token: ast.TokenIndex,
+    token: Ast.TokenIndex,
     byte_offset: u32,
     comptime format: []const u8,
     args: anytype,
@@ -7877,7 +9031,7 @@ fn failOff(
 
 fn errNoteTok(
     astgen: *AstGen,
-    token: ast.TokenIndex,
+    token: Ast.TokenIndex,
     comptime format: []const u8,
     args: anytype,
 ) Allocator.Error!u32 {
@@ -7900,7 +9054,7 @@ fn errNoteTok(
 
 fn errNoteNode(
     astgen: *AstGen,
-    node: ast.Node.Index,
+    node: Ast.Node.Index,
     comptime format: []const u8,
     args: anytype,
 ) Allocator.Error!u32 {
@@ -7921,22 +9075,22 @@ fn errNoteNode(
     });
 }
 
-fn identAsString(astgen: *AstGen, ident_token: ast.TokenIndex) !u32 {
+fn identAsString(astgen: *AstGen, ident_token: Ast.TokenIndex) !u32 {
     const gpa = astgen.gpa;
     const string_bytes = &astgen.string_bytes;
     const str_index = @intCast(u32, string_bytes.items.len);
     try astgen.appendIdentStr(ident_token, string_bytes);
     const key = string_bytes.items[str_index..];
-    const gop = try astgen.string_table.getOrPut(gpa, key);
+    const gop = try astgen.string_table.getOrPutContextAdapted(gpa, @as([]const u8, key), StringIndexAdapter{
+        .bytes = string_bytes,
+    }, StringIndexContext{
+        .bytes = string_bytes,
+    });
     if (gop.found_existing) {
         string_bytes.shrinkRetainingCapacity(str_index);
-        return gop.value_ptr.*;
+        return gop.key_ptr.*;
     } else {
-        // We have to dupe the key into the arena, otherwise the memory
-        // becomes invalidated when string_bytes gets data appended.
-        // TODO https://github.com/ziglang/zig/issues/8528
-        gop.key_ptr.* = try astgen.arena.dupe(u8, key);
-        gop.value_ptr.* = str_index;
+        gop.key_ptr.* = str_index;
         try string_bytes.append(gpa, 0);
         return str_index;
     }
@@ -7944,26 +9098,26 @@ fn identAsString(astgen: *AstGen, ident_token: ast.TokenIndex) !u32 {
 
 const IndexSlice = struct { index: u32, len: u32 };
 
-fn strLitAsString(astgen: *AstGen, str_lit_token: ast.TokenIndex) !IndexSlice {
+fn strLitAsString(astgen: *AstGen, str_lit_token: Ast.TokenIndex) !IndexSlice {
     const gpa = astgen.gpa;
     const string_bytes = &astgen.string_bytes;
     const str_index = @intCast(u32, string_bytes.items.len);
     const token_bytes = astgen.tree.tokenSlice(str_lit_token);
     try astgen.parseStrLit(str_lit_token, string_bytes, token_bytes, 0);
     const key = string_bytes.items[str_index..];
-    const gop = try astgen.string_table.getOrPut(gpa, key);
+    const gop = try astgen.string_table.getOrPutContextAdapted(gpa, @as([]const u8, key), StringIndexAdapter{
+        .bytes = string_bytes,
+    }, StringIndexContext{
+        .bytes = string_bytes,
+    });
     if (gop.found_existing) {
         string_bytes.shrinkRetainingCapacity(str_index);
         return IndexSlice{
-            .index = gop.value_ptr.*,
+            .index = gop.key_ptr.*,
             .len = @intCast(u32, key.len),
         };
     } else {
-        // We have to dupe the key into the arena, otherwise the memory
-        // becomes invalidated when string_bytes gets data appended.
-        // TODO https://github.com/ziglang/zig/issues/8528
-        gop.key_ptr.* = try astgen.arena.dupe(u8, key);
-        gop.value_ptr.* = str_index;
+        gop.key_ptr.* = str_index;
         // Still need a null byte because we are using the same table
         // to lookup null terminated strings, so if we get a match, it has to
         // be null terminated for that to work.
@@ -7975,7 +9129,42 @@ fn strLitAsString(astgen: *AstGen, str_lit_token: ast.TokenIndex) !IndexSlice {
     }
 }
 
-fn testNameString(astgen: *AstGen, str_lit_token: ast.TokenIndex) !u32 {
+fn strLitNodeAsString(astgen: *AstGen, node: Ast.Node.Index) !IndexSlice {
+    const tree = astgen.tree;
+    const node_datas = tree.nodes.items(.data);
+
+    const start = node_datas[node].lhs;
+    const end = node_datas[node].rhs;
+
+    const gpa = astgen.gpa;
+    const string_bytes = &astgen.string_bytes;
+    const str_index = string_bytes.items.len;
+
+    // First line: do not append a newline.
+    var tok_i = start;
+    {
+        const slice = tree.tokenSlice(tok_i);
+        const line_bytes = slice[2 .. slice.len - 1];
+        try string_bytes.appendSlice(gpa, line_bytes);
+        tok_i += 1;
+    }
+    // Following lines: each line prepends a newline.
+    while (tok_i <= end) : (tok_i += 1) {
+        const slice = tree.tokenSlice(tok_i);
+        const line_bytes = slice[2 .. slice.len - 1];
+        try string_bytes.ensureUnusedCapacity(gpa, line_bytes.len + 1);
+        string_bytes.appendAssumeCapacity('\n');
+        string_bytes.appendSliceAssumeCapacity(line_bytes);
+    }
+    const len = string_bytes.items.len - str_index;
+    try string_bytes.append(gpa, 0);
+    return IndexSlice{
+        .index = @intCast(u32, str_index),
+        .len = @intCast(u32, len),
+    };
+}
+
+fn testNameString(astgen: *AstGen, str_lit_token: Ast.TokenIndex) !u32 {
     const gpa = astgen.gpa;
     const string_bytes = &astgen.string_bytes;
     const str_index = @intCast(u32, string_bytes.items.len);
@@ -8002,6 +9191,17 @@ const Scope = struct {
         return @fieldParentPtr(T, "base", base);
     }
 
+    fn parent(base: *Scope) ?*Scope {
+        return switch (base.tag) {
+            .gen_zir => base.cast(GenZir).?.parent,
+            .local_val => base.cast(LocalVal).?.parent,
+            .local_ptr => base.cast(LocalPtr).?.parent,
+            .defer_normal, .defer_error => base.cast(Defer).?.parent,
+            .namespace => base.cast(Namespace).?.parent,
+            .top => null,
+        };
+    }
+
     const Tag = enum {
         gen_zir,
         local_val,
@@ -8012,20 +9212,32 @@ const Scope = struct {
         top,
     };
 
+    /// The category of identifier. These tag names are user-visible in compile errors.
+    const IdCat = enum {
+        @"function parameter",
+        @"local constant",
+        @"local variable",
+        @"loop index capture",
+        @"capture",
+    };
+
     /// This is always a `const` local and importantly the `inst` is a value type, not a pointer.
     /// This structure lives as long as the AST generation of the Block
     /// node that contains the variable.
     const LocalVal = struct {
         const base_tag: Tag = .local_val;
         base: Scope = Scope{ .tag = base_tag },
-        /// Parents can be: `LocalVal`, `LocalPtr`, `GenZir`, `Defer`.
+        /// Parents can be: `LocalVal`, `LocalPtr`, `GenZir`, `Defer`, `Namespace`.
         parent: *Scope,
         gen_zir: *GenZir,
         inst: Zir.Inst.Ref,
         /// Source location of the corresponding variable declaration.
-        token_src: ast.TokenIndex,
+        token_src: Ast.TokenIndex,
         /// String table index.
         name: u32,
+        id_cat: IdCat,
+        /// Track whether the name has been referenced.
+        used: bool = false,
     };
 
     /// This could be a `const` or `var` local. It has a pointer instead of a value.
@@ -8034,21 +9246,27 @@ const Scope = struct {
     const LocalPtr = struct {
         const base_tag: Tag = .local_ptr;
         base: Scope = Scope{ .tag = base_tag },
-        /// Parents can be: `LocalVal`, `LocalPtr`, `GenZir`, `Defer`.
+        /// Parents can be: `LocalVal`, `LocalPtr`, `GenZir`, `Defer`, `Namespace`.
         parent: *Scope,
         gen_zir: *GenZir,
         ptr: Zir.Inst.Ref,
         /// Source location of the corresponding variable declaration.
-        token_src: ast.TokenIndex,
+        token_src: Ast.TokenIndex,
         /// String table index.
         name: u32,
+        id_cat: IdCat,
+        /// true means we find out during Sema whether the value is comptime.
+        /// false means it is already known at AstGen the value is runtime-known.
+        maybe_comptime: bool,
+        /// Track whether the name has been referenced.
+        used: bool = false,
     };
 
     const Defer = struct {
         base: Scope,
-        /// Parents can be: `LocalVal`, `LocalPtr`, `GenZir`, `Defer`.
+        /// Parents can be: `LocalVal`, `LocalPtr`, `GenZir`, `Defer`, `Namespace`.
         parent: *Scope,
-        defer_node: ast.Node.Index,
+        defer_node: Ast.Node.Index,
     };
 
     /// Represents a global scope that has any number of declarations in it.
@@ -8057,10 +9275,27 @@ const Scope = struct {
         const base_tag: Tag = .namespace;
         base: Scope = Scope{ .tag = base_tag },
 
+        /// Parents can be: `LocalVal`, `LocalPtr`, `GenZir`, `Defer`, `Namespace`.
         parent: *Scope,
         /// Maps string table index to the source location of declaration,
         /// for the purposes of reporting name shadowing compile errors.
-        decls: std.AutoHashMapUnmanaged(u32, ast.Node.Index) = .{},
+        decls: std.AutoHashMapUnmanaged(u32, Ast.Node.Index) = .{},
+        node: Ast.Node.Index,
+        inst: Zir.Inst.Index,
+
+        /// The astgen scope containing this namespace.
+        /// Only valid during astgen.
+        declaring_gz: ?*GenZir,
+
+        /// Map from the raw captured value to the instruction
+        /// ref of the capture for decls in this namespace
+        captures: std.AutoHashMapUnmanaged(Zir.Inst.Index, Zir.Inst.Index) = .{},
+
+        pub fn deinit(self: *Namespace, gpa: *Allocator) void {
+            self.decls.deinit(gpa);
+            self.captures.deinit(gpa);
+            self.* = undefined;
+        }
     };
 
     const Top = struct {
@@ -8076,15 +9311,14 @@ const GenZir = struct {
     base: Scope = Scope{ .tag = base_tag },
     force_comptime: bool,
     in_defer: bool,
+    c_import: bool = false,
     /// How decls created in this scope should be named.
     anon_name_strategy: Zir.Inst.NameStrategy = .anon,
-    /// The end of special indexes. `Zir.Inst.Ref` subtracts against this number to convert
-    /// to `Zir.Inst.Index`. The default here is correct if there are 0 parameters.
-    ref_start_index: u32 = Zir.Inst.Ref.typed_value_map.len,
     /// The containing decl AST node.
-    decl_node_index: ast.Node.Index,
+    decl_node_index: Ast.Node.Index,
     /// The containing decl line index, absolute.
     decl_line: u32,
+    /// Parents can be: `LocalVal`, `LocalPtr`, `GenZir`, `Defer`, `Namespace`.
     parent: *Scope,
     /// All `GenZir` scopes for the same ZIR share this.
     astgen: *AstGen,
@@ -8117,14 +9351,20 @@ const GenZir = struct {
     /// a result location pointer.
     labeled_store_to_block_ptr_list: ArrayListUnmanaged(Zir.Inst.Index) = .{},
 
-    suspend_node: ast.Node.Index = 0,
-    nosuspend_node: ast.Node.Index = 0,
+    suspend_node: Ast.Node.Index = 0,
+    nosuspend_node: Ast.Node.Index = 0,
+
+    /// Namespace members are lazy.  When executing a decl within a namespace,
+    /// any references to external instructions need to be treated specially.
+    /// This list tracks those references.  See also .closure_capture and .closure_get.
+    /// Keys are the raw instruction index, values are the closure_capture instruction.
+    captures: std.AutoHashMapUnmanaged(Zir.Inst.Index, Zir.Inst.Index) = .{},
 
     fn makeSubBlock(gz: *GenZir, scope: *Scope) GenZir {
         return .{
             .force_comptime = gz.force_comptime,
             .in_defer = gz.in_defer,
-            .ref_start_index = gz.ref_start_index,
+            .c_import = gz.c_import,
             .decl_node_index = gz.decl_node_index,
             .decl_line = gz.decl_line,
             .parent = scope,
@@ -8134,63 +9374,96 @@ const GenZir = struct {
         };
     }
 
+    fn makeCoercionScope(
+        parent_gz: *GenZir,
+        scope: *Scope,
+        dest_type: Zir.Inst.Ref,
+        result_ptr: Zir.Inst.Ref,
+    ) !GenZir {
+        // Detect whether this expr() call goes into rvalue() to store the result into the
+        // result location. If it does, elide the coerce_result_ptr instruction
+        // as well as the store instruction, instead passing the result as an rvalue.
+        var as_scope = parent_gz.makeSubBlock(scope);
+        errdefer as_scope.instructions.deinit(parent_gz.astgen.gpa);
+        as_scope.rl_ptr = try as_scope.addBin(.coerce_result_ptr, dest_type, result_ptr);
+
+        return as_scope;
+    }
+
+    fn finishCoercion(
+        as_scope: *GenZir,
+        parent_gz: *GenZir,
+        rl: ResultLoc,
+        src_node: Ast.Node.Index,
+        result: Zir.Inst.Ref,
+        dest_type: Zir.Inst.Ref,
+    ) !Zir.Inst.Ref {
+        const astgen = as_scope.astgen;
+        const parent_zir = &parent_gz.instructions;
+        if (as_scope.rvalue_rl_count == 1) {
+            // Busted! This expression didn't actually need a pointer.
+            const zir_tags = astgen.instructions.items(.tag);
+            const zir_datas = astgen.instructions.items(.data);
+            try parent_zir.ensureUnusedCapacity(astgen.gpa, as_scope.instructions.items.len);
+            for (as_scope.instructions.items) |src_inst| {
+                if (indexToRef(src_inst) == as_scope.rl_ptr) continue;
+                if (zir_tags[src_inst] == .store_to_block_ptr) {
+                    if (zir_datas[src_inst].bin.lhs == as_scope.rl_ptr) continue;
+                }
+                parent_zir.appendAssumeCapacity(src_inst);
+            }
+            const casted_result = try parent_gz.addBin(.as, dest_type, result);
+            return rvalue(parent_gz, rl, casted_result, src_node);
+        } else {
+            try parent_zir.appendSlice(astgen.gpa, as_scope.instructions.items);
+            return result;
+        }
+    }
+
     const Label = struct {
-        token: ast.TokenIndex,
+        token: Ast.TokenIndex,
         block_inst: Zir.Inst.Index,
         used: bool = false,
     };
 
+    fn endsWithNoReturn(gz: GenZir) bool {
+        const tags = gz.astgen.instructions.items(.tag);
+        if (gz.instructions.items.len == 0) return false;
+        const last_inst = gz.instructions.items[gz.instructions.items.len - 1];
+        return tags[last_inst].isNoReturn();
+    }
+
+    /// TODO all uses of this should be replaced with uses of `endsWithNoReturn`.
     fn refIsNoReturn(gz: GenZir, inst_ref: Zir.Inst.Ref) bool {
         if (inst_ref == .unreachable_value) return true;
-        if (gz.refToIndex(inst_ref)) |inst_index| {
+        if (refToIndex(inst_ref)) |inst_index| {
             return gz.astgen.instructions.items(.tag)[inst_index].isNoReturn();
         }
         return false;
     }
 
-    fn calcLine(gz: GenZir, node: ast.Node.Index) u32 {
+    fn calcLine(gz: GenZir, node: Ast.Node.Index) u32 {
         const astgen = gz.astgen;
         const tree = astgen.tree;
-        const node_tags = tree.nodes.items(.tag);
+        const source = tree.source;
         const token_starts = tree.tokens.items(.start);
-        const decl_start = token_starts[tree.firstToken(gz.decl_node_index)];
         const node_start = token_starts[tree.firstToken(node)];
-        const source = tree.source[decl_start..node_start];
-        const loc = std.zig.findLineColumn(source, source.len);
-        return @intCast(u32, gz.decl_line + loc.line);
+
+        astgen.advanceSourceCursor(source, node_start);
+
+        return @intCast(u32, gz.decl_line + astgen.source_line);
     }
 
-    fn tokSrcLoc(gz: GenZir, token_index: ast.TokenIndex) LazySrcLoc {
-        return .{ .token_offset = token_index - gz.srcToken() };
-    }
-
-    fn nodeSrcLoc(gz: GenZir, node_index: ast.Node.Index) LazySrcLoc {
-        return .{ .node_offset = gz.nodeIndexToRelative(node_index) };
-    }
-
-    fn nodeIndexToRelative(gz: GenZir, node_index: ast.Node.Index) i32 {
+    fn nodeIndexToRelative(gz: GenZir, node_index: Ast.Node.Index) i32 {
         return @bitCast(i32, node_index) - @bitCast(i32, gz.decl_node_index);
     }
 
-    fn tokenIndexToRelative(gz: GenZir, token: ast.TokenIndex) u32 {
+    fn tokenIndexToRelative(gz: GenZir, token: Ast.TokenIndex) u32 {
         return token - gz.srcToken();
     }
 
-    fn srcToken(gz: GenZir) ast.TokenIndex {
+    fn srcToken(gz: GenZir) Ast.TokenIndex {
         return gz.astgen.tree.firstToken(gz.decl_node_index);
-    }
-
-    fn indexToRef(gz: GenZir, inst: Zir.Inst.Index) Zir.Inst.Ref {
-        return @intToEnum(Zir.Inst.Ref, gz.ref_start_index + inst);
-    }
-
-    fn refToIndex(gz: GenZir, inst: Zir.Inst.Ref) ?Zir.Inst.Index {
-        const ref_int = @enumToInt(inst);
-        if (ref_int >= gz.ref_start_index) {
-            return ref_int - gz.ref_start_index;
-        } else {
-            return null;
-        }
     }
 
     fn setBreakResultLoc(gz: *GenZir, parent_rl: AstGen.ResultLoc) void {
@@ -8203,7 +9476,7 @@ const GenZir = struct {
         // we emit ZIR for the block break instructions to have the result values,
         // and then rvalue() on that to pass the value to the result location.
         switch (parent_rl) {
-            .ty => |ty_inst| {
+            .ty, .coerced_ty => |ty_inst| {
                 gz.rl_ty_inst = ty_inst;
                 gz.break_result_loc = parent_rl;
             },
@@ -8229,8 +9502,8 @@ const GenZir = struct {
 
     fn setBoolBrBody(gz: GenZir, inst: Zir.Inst.Index) !void {
         const gpa = gz.astgen.gpa;
-        try gz.astgen.extra.ensureCapacity(gpa, gz.astgen.extra.items.len +
-            @typeInfo(Zir.Inst.Block).Struct.fields.len + gz.instructions.items.len);
+        try gz.astgen.extra.ensureUnusedCapacity(gpa, @typeInfo(Zir.Inst.Block).Struct.fields.len +
+            gz.instructions.items.len);
         const zir_datas = gz.astgen.instructions.items(.data);
         zir_datas[inst].bool_br.payload_index = gz.astgen.addExtraAssumeCapacity(
             Zir.Inst.Block{ .body_len = @intCast(u32, gz.instructions.items.len) },
@@ -8240,8 +9513,8 @@ const GenZir = struct {
 
     fn setBlockBody(gz: GenZir, inst: Zir.Inst.Index) !void {
         const gpa = gz.astgen.gpa;
-        try gz.astgen.extra.ensureCapacity(gpa, gz.astgen.extra.items.len +
-            @typeInfo(Zir.Inst.Block).Struct.fields.len + gz.instructions.items.len);
+        try gz.astgen.extra.ensureUnusedCapacity(gpa, @typeInfo(Zir.Inst.Block).Struct.fields.len +
+            gz.instructions.items.len);
         const zir_datas = gz.astgen.instructions.items(.data);
         zir_datas[inst].pl_node.payload_index = gz.astgen.addExtraAssumeCapacity(
             Zir.Inst.Block{ .body_len = @intCast(u32, gz.instructions.items.len) },
@@ -8253,8 +9526,8 @@ const GenZir = struct {
     /// `store_to_block_ptr` instructions with lhs set to .none.
     fn setBlockBodyEliding(gz: GenZir, inst: Zir.Inst.Index) !void {
         const gpa = gz.astgen.gpa;
-        try gz.astgen.extra.ensureCapacity(gpa, gz.astgen.extra.items.len +
-            @typeInfo(Zir.Inst.Block).Struct.fields.len + gz.instructions.items.len);
+        try gz.astgen.extra.ensureUnusedCapacity(gpa, @typeInfo(Zir.Inst.Block).Struct.fields.len +
+            gz.instructions.items.len);
         const zir_datas = gz.astgen.instructions.items(.data);
         const zir_tags = gz.astgen.instructions.items(.tag);
         const block_pl_index = gz.astgen.addExtraAssumeCapacity(Zir.Inst.Block{
@@ -8274,10 +9547,11 @@ const GenZir = struct {
     }
 
     fn addFunc(gz: *GenZir, args: struct {
-        src_node: ast.Node.Index,
-        param_types: []const Zir.Inst.Ref,
+        src_node: Ast.Node.Index,
         body: []const Zir.Inst.Index,
-        ret_ty: Zir.Inst.Ref,
+        param_block: Zir.Inst.Index,
+        ret_ty: []const Zir.Inst.Index,
+        ret_br: Zir.Inst.Index,
         cc: Zir.Inst.Ref,
         align_inst: Zir.Inst.Ref,
         lib_name: u32,
@@ -8287,7 +9561,6 @@ const GenZir = struct {
         is_extern: bool,
     }) !Zir.Inst.Ref {
         assert(args.src_node != 0);
-        assert(args.ret_ty != .none);
         const astgen = gz.astgen;
         const gpa = astgen.gpa;
 
@@ -8301,20 +9574,21 @@ const GenZir = struct {
             const node_tags = tree.nodes.items(.tag);
             const node_datas = tree.nodes.items(.data);
             const token_starts = tree.tokens.items(.start);
-            const decl_start = token_starts[tree.firstToken(gz.decl_node_index)];
             const fn_decl = args.src_node;
             assert(node_tags[fn_decl] == .fn_decl or node_tags[fn_decl] == .test_decl);
             const block = node_datas[fn_decl].rhs;
             const lbrace_start = token_starts[tree.firstToken(block)];
             const rbrace_start = token_starts[tree.lastToken(block)];
-            const lbrace_source = tree.source[decl_start..lbrace_start];
-            const lbrace_loc = std.zig.findLineColumn(lbrace_source, lbrace_source.len);
-            const rbrace_source = tree.source[lbrace_start..rbrace_start];
-            const rbrace_loc = std.zig.findLineColumn(rbrace_source, rbrace_source.len);
-            const lbrace_line = @intCast(u32, lbrace_loc.line);
-            const rbrace_line = lbrace_line + @intCast(u32, rbrace_loc.line);
-            const columns = @intCast(u32, lbrace_loc.column) |
-                (@intCast(u32, rbrace_loc.column) << 16);
+
+            astgen.advanceSourceCursor(tree.source, lbrace_start);
+            const lbrace_line = @intCast(u32, astgen.source_line);
+            const lbrace_column = @intCast(u32, astgen.source_column);
+
+            astgen.advanceSourceCursor(tree.source, rbrace_start);
+            const rbrace_line = @intCast(u32, astgen.source_line);
+            const rbrace_column = @intCast(u32, astgen.source_column);
+
+            const columns = lbrace_column | (rbrace_column << 16);
             src_locs_buffer[0] = lbrace_line;
             src_locs_buffer[1] = rbrace_line;
             src_locs_buffer[2] = columns;
@@ -8328,15 +9602,15 @@ const GenZir = struct {
             try astgen.extra.ensureUnusedCapacity(
                 gpa,
                 @typeInfo(Zir.Inst.ExtendedFunc).Struct.fields.len +
-                    args.param_types.len + args.body.len + src_locs.len +
+                    args.ret_ty.len + args.body.len + src_locs.len +
                     @boolToInt(args.lib_name != 0) +
                     @boolToInt(args.align_inst != .none) +
                     @boolToInt(args.cc != .none),
             );
             const payload_index = astgen.addExtraAssumeCapacity(Zir.Inst.ExtendedFunc{
                 .src_node = gz.nodeIndexToRelative(args.src_node),
-                .return_type = args.ret_ty,
-                .param_types_len = @intCast(u32, args.param_types.len),
+                .param_block = args.param_block,
+                .ret_body_len = @intCast(u32, args.ret_ty.len),
                 .body_len = @intCast(u32, args.body.len),
             });
             if (args.lib_name != 0) {
@@ -8348,11 +9622,14 @@ const GenZir = struct {
             if (args.align_inst != .none) {
                 astgen.extra.appendAssumeCapacity(@enumToInt(args.align_inst));
             }
-            astgen.appendRefsAssumeCapacity(args.param_types);
+            astgen.extra.appendSliceAssumeCapacity(args.ret_ty);
             astgen.extra.appendSliceAssumeCapacity(args.body);
             astgen.extra.appendSliceAssumeCapacity(src_locs);
 
             const new_index = @intCast(Zir.Inst.Index, astgen.instructions.len);
+            if (args.ret_br != 0) {
+                astgen.instructions.items(.data)[args.ret_br].@"break".block_inst = new_index;
+            }
             astgen.instructions.appendAssumeCapacity(.{
                 .tag = .extended,
                 .data = .{ .extended = .{
@@ -8370,26 +9647,29 @@ const GenZir = struct {
                 } },
             });
             gz.instructions.appendAssumeCapacity(new_index);
-            return gz.indexToRef(new_index);
+            return indexToRef(new_index);
         } else {
-            try gz.astgen.extra.ensureUnusedCapacity(
+            try astgen.extra.ensureUnusedCapacity(
                 gpa,
                 @typeInfo(Zir.Inst.Func).Struct.fields.len +
-                    args.param_types.len + args.body.len + src_locs.len,
+                    args.ret_ty.len + args.body.len + src_locs.len,
             );
 
-            const payload_index = gz.astgen.addExtraAssumeCapacity(Zir.Inst.Func{
-                .return_type = args.ret_ty,
-                .param_types_len = @intCast(u32, args.param_types.len),
+            const payload_index = astgen.addExtraAssumeCapacity(Zir.Inst.Func{
+                .param_block = args.param_block,
+                .ret_body_len = @intCast(u32, args.ret_ty.len),
                 .body_len = @intCast(u32, args.body.len),
             });
-            gz.astgen.appendRefsAssumeCapacity(args.param_types);
-            gz.astgen.extra.appendSliceAssumeCapacity(args.body);
-            gz.astgen.extra.appendSliceAssumeCapacity(src_locs);
+            astgen.extra.appendSliceAssumeCapacity(args.ret_ty);
+            astgen.extra.appendSliceAssumeCapacity(args.body);
+            astgen.extra.appendSliceAssumeCapacity(src_locs);
 
             const tag: Zir.Inst.Tag = if (args.is_inferred_error) .func_inferred else .func;
-            const new_index = @intCast(Zir.Inst.Index, gz.astgen.instructions.len);
-            gz.astgen.instructions.appendAssumeCapacity(.{
+            const new_index = @intCast(Zir.Inst.Index, astgen.instructions.len);
+            if (args.ret_br != 0) {
+                astgen.instructions.items(.data)[args.ret_br].@"break".block_inst = new_index;
+            }
+            astgen.instructions.appendAssumeCapacity(.{
                 .tag = tag,
                 .data = .{ .pl_node = .{
                     .src_node = gz.nodeIndexToRelative(args.src_node),
@@ -8397,7 +9677,7 @@ const GenZir = struct {
                 } },
             });
             gz.instructions.appendAssumeCapacity(new_index);
-            return gz.indexToRef(new_index);
+            return indexToRef(new_index);
         }
     }
 
@@ -8451,41 +9731,45 @@ const GenZir = struct {
             } },
         });
         gz.instructions.appendAssumeCapacity(new_index);
-        return gz.indexToRef(new_index);
+        return indexToRef(new_index);
     }
 
     fn addCall(
         gz: *GenZir,
-        tag: Zir.Inst.Tag,
+        modifier: std.builtin.CallOptions.Modifier,
         callee: Zir.Inst.Ref,
         args: []const Zir.Inst.Ref,
         /// Absolute node index. This function does the conversion to offset from Decl.
-        src_node: ast.Node.Index,
+        src_node: Ast.Node.Index,
     ) !Zir.Inst.Ref {
         assert(callee != .none);
         assert(src_node != 0);
         const gpa = gz.astgen.gpa;
-        try gz.instructions.ensureCapacity(gpa, gz.instructions.items.len + 1);
-        try gz.astgen.instructions.ensureCapacity(gpa, gz.astgen.instructions.len + 1);
-        try gz.astgen.extra.ensureCapacity(gpa, gz.astgen.extra.items.len +
-            @typeInfo(Zir.Inst.Call).Struct.fields.len + args.len);
+        const Call = Zir.Inst.Call;
+        try gz.instructions.ensureUnusedCapacity(gpa, 1);
+        try gz.astgen.instructions.ensureUnusedCapacity(gpa, 1);
+        try gz.astgen.extra.ensureUnusedCapacity(gpa, @typeInfo(Call).Struct.fields.len +
+            args.len);
 
-        const payload_index = gz.astgen.addExtraAssumeCapacity(Zir.Inst.Call{
+        const payload_index = gz.astgen.addExtraAssumeCapacity(Call{
             .callee = callee,
-            .args_len = @intCast(u32, args.len),
+            .flags = .{
+                .packed_modifier = @intCast(Call.Flags.PackedModifier, @enumToInt(modifier)),
+                .args_len = @intCast(Call.Flags.PackedArgsLen, args.len),
+            },
         });
         gz.astgen.appendRefsAssumeCapacity(args);
 
         const new_index = @intCast(Zir.Inst.Index, gz.astgen.instructions.len);
         gz.astgen.instructions.appendAssumeCapacity(.{
-            .tag = tag,
+            .tag = .call,
             .data = .{ .pl_node = .{
                 .src_node = gz.nodeIndexToRelative(src_node),
                 .payload_index = payload_index,
             } },
         });
         gz.instructions.appendAssumeCapacity(new_index);
-        return gz.indexToRef(new_index);
+        return indexToRef(new_index);
     }
 
     /// Note that this returns a `Zir.Inst.Index` not a ref.
@@ -8497,8 +9781,8 @@ const GenZir = struct {
     ) !Zir.Inst.Index {
         assert(lhs != .none);
         const gpa = gz.astgen.gpa;
-        try gz.instructions.ensureCapacity(gpa, gz.instructions.items.len + 1);
-        try gz.astgen.instructions.ensureCapacity(gpa, gz.astgen.instructions.len + 1);
+        try gz.instructions.ensureUnusedCapacity(gpa, 1);
+        try gz.astgen.instructions.ensureUnusedCapacity(gpa, 1);
 
         const new_index = @intCast(Zir.Inst.Index, gz.astgen.instructions.len);
         gz.astgen.instructions.appendAssumeCapacity(.{
@@ -8536,16 +9820,13 @@ const GenZir = struct {
         });
         gz.instructions.appendAssumeCapacity(new_index);
         astgen.string_bytes.appendSliceAssumeCapacity(mem.sliceAsBytes(limbs));
-        return gz.indexToRef(new_index);
+        return indexToRef(new_index);
     }
 
-    fn addFloat(gz: *GenZir, number: f32, src_node: ast.Node.Index) !Zir.Inst.Ref {
+    fn addFloat(gz: *GenZir, number: f64) !Zir.Inst.Ref {
         return gz.add(.{
             .tag = .float,
-            .data = .{ .float = .{
-                .src_node = gz.nodeIndexToRelative(src_node),
-                .number = number,
-            } },
+            .data = .{ .float = number },
         });
     }
 
@@ -8554,7 +9835,7 @@ const GenZir = struct {
         tag: Zir.Inst.Tag,
         operand: Zir.Inst.Ref,
         /// Absolute node index. This function does the conversion to offset from Decl.
-        src_node: ast.Node.Index,
+        src_node: Ast.Node.Index,
     ) !Zir.Inst.Ref {
         assert(operand != .none);
         return gz.add(.{
@@ -8570,12 +9851,12 @@ const GenZir = struct {
         gz: *GenZir,
         tag: Zir.Inst.Tag,
         /// Absolute node index. This function does the conversion to offset from Decl.
-        src_node: ast.Node.Index,
+        src_node: Ast.Node.Index,
         extra: anytype,
     ) !Zir.Inst.Ref {
         const gpa = gz.astgen.gpa;
-        try gz.instructions.ensureCapacity(gpa, gz.instructions.items.len + 1);
-        try gz.astgen.instructions.ensureCapacity(gpa, gz.astgen.instructions.len + 1);
+        try gz.instructions.ensureUnusedCapacity(gpa, 1);
+        try gz.astgen.instructions.ensureUnusedCapacity(gpa, 1);
 
         const payload_index = try gz.astgen.addExtra(extra);
         const new_index = @intCast(Zir.Inst.Index, gz.astgen.instructions.len);
@@ -8587,7 +9868,39 @@ const GenZir = struct {
             } },
         });
         gz.instructions.appendAssumeCapacity(new_index);
-        return gz.indexToRef(new_index);
+        return indexToRef(new_index);
+    }
+
+    fn addParam(
+        gz: *GenZir,
+        tag: Zir.Inst.Tag,
+        /// Absolute token index. This function does the conversion to Decl offset.
+        abs_tok_index: Ast.TokenIndex,
+        name: u32,
+        body: []const u32,
+    ) !Zir.Inst.Index {
+        const gpa = gz.astgen.gpa;
+        try gz.instructions.ensureUnusedCapacity(gpa, 1);
+        try gz.astgen.instructions.ensureUnusedCapacity(gpa, 1);
+        try gz.astgen.extra.ensureUnusedCapacity(gpa, @typeInfo(Zir.Inst.Param).Struct.fields.len +
+            body.len);
+
+        const payload_index = gz.astgen.addExtraAssumeCapacity(Zir.Inst.Param{
+            .name = name,
+            .body_len = @intCast(u32, body.len),
+        });
+        gz.astgen.extra.appendSliceAssumeCapacity(body);
+
+        const new_index = @intCast(Zir.Inst.Index, gz.astgen.instructions.len);
+        gz.astgen.instructions.appendAssumeCapacity(.{
+            .tag = tag,
+            .data = .{ .pl_tok = .{
+                .src_tok = gz.tokenIndexToRelative(abs_tok_index),
+                .payload_index = payload_index,
+            } },
+        });
+        gz.instructions.appendAssumeCapacity(new_index);
+        return new_index;
     }
 
     fn addExtendedPayload(
@@ -8597,8 +9910,8 @@ const GenZir = struct {
     ) !Zir.Inst.Ref {
         const gpa = gz.astgen.gpa;
 
-        try gz.instructions.ensureCapacity(gpa, gz.instructions.items.len + 1);
-        try gz.astgen.instructions.ensureCapacity(gpa, gz.astgen.instructions.len + 1);
+        try gz.instructions.ensureUnusedCapacity(gpa, 1);
+        try gz.astgen.instructions.ensureUnusedCapacity(gpa, 1);
 
         const payload_index = try gz.astgen.addExtra(extra);
         const new_index = @intCast(Zir.Inst.Index, gz.astgen.instructions.len);
@@ -8611,13 +9924,13 @@ const GenZir = struct {
             } },
         });
         gz.instructions.appendAssumeCapacity(new_index);
-        return gz.indexToRef(new_index);
+        return indexToRef(new_index);
     }
 
     fn addExtendedMultiOp(
         gz: *GenZir,
         opcode: Zir.Inst.Extended,
-        node: ast.Node.Index,
+        node: Ast.Node.Index,
         operands: []const Zir.Inst.Ref,
     ) !Zir.Inst.Ref {
         const astgen = gz.astgen;
@@ -8644,7 +9957,7 @@ const GenZir = struct {
         });
         gz.instructions.appendAssumeCapacity(new_index);
         astgen.appendRefsAssumeCapacity(operands);
-        return gz.indexToRef(new_index);
+        return indexToRef(new_index);
     }
 
     fn addArrayTypeSentinel(
@@ -8654,8 +9967,8 @@ const GenZir = struct {
         elem_type: Zir.Inst.Ref,
     ) !Zir.Inst.Ref {
         const gpa = gz.astgen.gpa;
-        try gz.instructions.ensureCapacity(gpa, gz.instructions.items.len + 1);
-        try gz.astgen.instructions.ensureCapacity(gpa, gz.astgen.instructions.len + 1);
+        try gz.instructions.ensureUnusedCapacity(gpa, 1);
+        try gz.astgen.instructions.ensureUnusedCapacity(gpa, 1);
 
         const payload_index = try gz.astgen.addExtra(Zir.Inst.ArrayTypeSentinel{
             .sentinel = sentinel,
@@ -8670,7 +9983,7 @@ const GenZir = struct {
             } },
         });
         gz.instructions.appendAssumeCapacity(new_index);
-        return gz.indexToRef(new_index);
+        return indexToRef(new_index);
     }
 
     fn addUnTok(
@@ -8678,7 +9991,7 @@ const GenZir = struct {
         tag: Zir.Inst.Tag,
         operand: Zir.Inst.Ref,
         /// Absolute token index. This function does the conversion to Decl offset.
-        abs_tok_index: ast.TokenIndex,
+        abs_tok_index: Ast.TokenIndex,
     ) !Zir.Inst.Ref {
         assert(operand != .none);
         return gz.add(.{
@@ -8695,7 +10008,7 @@ const GenZir = struct {
         tag: Zir.Inst.Tag,
         str_index: u32,
         /// Absolute token index. This function does the conversion to Decl offset.
-        abs_tok_index: ast.TokenIndex,
+        abs_tok_index: Ast.TokenIndex,
     ) !Zir.Inst.Ref {
         return gz.add(.{
             .tag = tag,
@@ -8742,7 +10055,7 @@ const GenZir = struct {
         gz: *GenZir,
         tag: Zir.Inst.Tag,
         decl_index: u32,
-        src_node: ast.Node.Index,
+        src_node: Ast.Node.Index,
     ) !Zir.Inst.Ref {
         return gz.add(.{
             .tag = tag,
@@ -8757,7 +10070,7 @@ const GenZir = struct {
         gz: *GenZir,
         tag: Zir.Inst.Tag,
         /// Absolute node index. This function does the conversion to offset from Decl.
-        src_node: ast.Node.Index,
+        src_node: Ast.Node.Index,
     ) !Zir.Inst.Ref {
         return gz.add(.{
             .tag = tag,
@@ -8765,11 +10078,27 @@ const GenZir = struct {
         });
     }
 
+    fn addInstNode(
+        gz: *GenZir,
+        tag: Zir.Inst.Tag,
+        inst: Zir.Inst.Index,
+        /// Absolute node index. This function does the conversion to offset from Decl.
+        src_node: Ast.Node.Index,
+    ) !Zir.Inst.Ref {
+        return gz.add(.{
+            .tag = tag,
+            .data = .{ .inst_node = .{
+                .inst = inst,
+                .src_node = gz.nodeIndexToRelative(src_node),
+            } },
+        });
+    }
+
     fn addNodeExtended(
         gz: *GenZir,
         opcode: Zir.Inst.Extended,
         /// Absolute node index. This function does the conversion to offset from Decl.
-        src_node: ast.Node.Index,
+        src_node: Ast.Node.Index,
     ) !Zir.Inst.Ref {
         return gz.add(.{
             .tag = .extended,
@@ -8785,7 +10114,7 @@ const GenZir = struct {
         gz: *GenZir,
         args: struct {
             /// Absolute node index. This function does the conversion to offset from Decl.
-            node: ast.Node.Index,
+            node: Ast.Node.Index,
             type_inst: Zir.Inst.Ref,
             align_inst: Zir.Inst.Ref,
             is_const: bool,
@@ -8829,15 +10158,15 @@ const GenZir = struct {
             } },
         });
         gz.instructions.appendAssumeCapacity(new_index);
-        return gz.indexToRef(new_index);
+        return indexToRef(new_index);
     }
 
     fn addAsm(
         gz: *GenZir,
         args: struct {
             /// Absolute node index. This function does the conversion to offset from Decl.
-            node: ast.Node.Index,
-            asm_source: Zir.Inst.Ref,
+            node: Ast.Node.Index,
+            asm_source: u32,
             output_type_bits: u32,
             is_volatile: bool,
             outputs: []const Zir.Inst.Asm.Output,
@@ -8887,13 +10216,13 @@ const GenZir = struct {
             } },
         });
         gz.instructions.appendAssumeCapacity(new_index);
-        return gz.indexToRef(new_index);
+        return indexToRef(new_index);
     }
 
     /// Note that this returns a `Zir.Inst.Index` not a ref.
     /// Does *not* append the block instruction to the scope.
     /// Leaves the `payload_index` field undefined.
-    fn addBlock(gz: *GenZir, tag: Zir.Inst.Tag, node: ast.Node.Index) !Zir.Inst.Index {
+    fn addBlock(gz: *GenZir, tag: Zir.Inst.Tag, node: Ast.Node.Index) !Zir.Inst.Index {
         const new_index = @intCast(Zir.Inst.Index, gz.astgen.instructions.len);
         const gpa = gz.astgen.gpa;
         try gz.astgen.instructions.append(gpa, .{
@@ -8908,9 +10237,9 @@ const GenZir = struct {
 
     /// Note that this returns a `Zir.Inst.Index` not a ref.
     /// Leaves the `payload_index` field undefined.
-    fn addCondBr(gz: *GenZir, tag: Zir.Inst.Tag, node: ast.Node.Index) !Zir.Inst.Index {
+    fn addCondBr(gz: *GenZir, tag: Zir.Inst.Tag, node: Ast.Node.Index) !Zir.Inst.Index {
         const gpa = gz.astgen.gpa;
-        try gz.instructions.ensureCapacity(gpa, gz.instructions.items.len + 1);
+        try gz.instructions.ensureUnusedCapacity(gpa, 1);
         const new_index = @intCast(Zir.Inst.Index, gz.astgen.instructions.len);
         try gz.astgen.instructions.append(gpa, .{
             .tag = tag,
@@ -8924,11 +10253,12 @@ const GenZir = struct {
     }
 
     fn setStruct(gz: *GenZir, inst: Zir.Inst.Index, args: struct {
-        src_node: ast.Node.Index,
+        src_node: Ast.Node.Index,
         body_len: u32,
         fields_len: u32,
         decls_len: u32,
         layout: std.builtin.TypeInfo.ContainerLayout,
+        known_has_bits: bool,
     }) !void {
         const astgen = gz.astgen;
         const gpa = astgen.gpa;
@@ -8958,6 +10288,7 @@ const GenZir = struct {
                     .has_body_len = args.body_len != 0,
                     .has_fields_len = args.fields_len != 0,
                     .has_decls_len = args.decls_len != 0,
+                    .known_has_bits = args.known_has_bits,
                     .name_strategy = gz.anon_name_strategy,
                     .layout = args.layout,
                 }),
@@ -8967,7 +10298,7 @@ const GenZir = struct {
     }
 
     fn setUnion(gz: *GenZir, inst: Zir.Inst.Index, args: struct {
-        src_node: ast.Node.Index,
+        src_node: Ast.Node.Index,
         tag_type: Zir.Inst.Ref,
         body_len: u32,
         fields_len: u32,
@@ -9017,7 +10348,7 @@ const GenZir = struct {
     }
 
     fn setEnum(gz: *GenZir, inst: Zir.Inst.Index, args: struct {
-        src_node: ast.Node.Index,
+        src_node: Ast.Node.Index,
         tag_type: Zir.Inst.Ref,
         body_len: u32,
         fields_len: u32,
@@ -9064,8 +10395,39 @@ const GenZir = struct {
         });
     }
 
+    fn setOpaque(gz: *GenZir, inst: Zir.Inst.Index, args: struct {
+        src_node: Ast.Node.Index,
+        decls_len: u32,
+    }) !void {
+        const astgen = gz.astgen;
+        const gpa = astgen.gpa;
+
+        try astgen.extra.ensureUnusedCapacity(gpa, 2);
+        const payload_index = @intCast(u32, astgen.extra.items.len);
+
+        if (args.src_node != 0) {
+            const node_offset = gz.nodeIndexToRelative(args.src_node);
+            astgen.extra.appendAssumeCapacity(@bitCast(u32, node_offset));
+        }
+        if (args.decls_len != 0) {
+            astgen.extra.appendAssumeCapacity(args.decls_len);
+        }
+        astgen.instructions.set(inst, .{
+            .tag = .extended,
+            .data = .{ .extended = .{
+                .opcode = .opaque_decl,
+                .small = @bitCast(u16, Zir.Inst.OpaqueDecl.Small{
+                    .has_src_node = args.src_node != 0,
+                    .has_decls_len = args.decls_len != 0,
+                    .name_strategy = gz.anon_name_strategy,
+                }),
+                .operand = payload_index,
+            } },
+        });
+    }
+
     fn add(gz: *GenZir, inst: Zir.Inst) !Zir.Inst.Ref {
-        return gz.indexToRef(try gz.addAsIndex(inst));
+        return indexToRef(try gz.addAsIndex(inst));
     }
 
     fn addAsIndex(gz: *GenZir, inst: Zir.Inst) !Zir.Inst.Index {
@@ -9089,6 +10451,14 @@ const GenZir = struct {
         gz.instructions.appendAssumeCapacity(new_index);
         return new_index;
     }
+
+    fn addRet(gz: *GenZir, rl: ResultLoc, operand: Zir.Inst.Ref, node: Ast.Node.Index) !void {
+        switch (rl) {
+            .ptr => |ret_ptr| _ = try gz.addUnNode(.ret_load, ret_ptr, node),
+            .ty => _ = try gz.addUnNode(.ret_node, operand, node),
+            else => unreachable,
+        }
+    }
 };
 
 /// This can only be for short-lived references; the memory becomes invalidated
@@ -9097,36 +10467,189 @@ fn nullTerminatedString(astgen: AstGen, index: usize) [*:0]const u8 {
     return @ptrCast([*:0]const u8, astgen.string_bytes.items.ptr) + index;
 }
 
-fn declareNewName(
+fn isPrimitive(name: []const u8) bool {
+    if (simple_types.get(name) != null) return true;
+    if (name.len < 2) return false;
+    const first_c = name[0];
+    if (first_c != 'i' and first_c != 'u') return false;
+    if (std.fmt.parseInt(u16, name[1..], 10)) |_| {
+        return true;
+    } else |err| switch (err) {
+        error.Overflow => return true,
+        error.InvalidCharacter => return false,
+    }
+}
+
+/// Local variables shadowing detection, including function parameters.
+fn detectLocalShadowing(
     astgen: *AstGen,
-    start_scope: *Scope,
-    name_index: u32,
-    node: ast.Node.Index,
+    scope: *Scope,
+    ident_name: u32,
+    name_token: Ast.TokenIndex,
+    token_bytes: []const u8,
 ) !void {
     const gpa = astgen.gpa;
-    var scope = start_scope;
-    while (true) {
-        switch (scope.tag) {
-            .gen_zir => scope = scope.cast(GenZir).?.parent,
-            .local_val => scope = scope.cast(Scope.LocalVal).?.parent,
-            .local_ptr => scope = scope.cast(Scope.LocalPtr).?.parent,
-            .defer_normal, .defer_error => scope = scope.cast(Scope.Defer).?.parent,
-            .namespace => {
-                const ns = scope.cast(Scope.Namespace).?;
-                const gop = try ns.decls.getOrPut(gpa, name_index);
-                if (gop.found_existing) {
-                    const name = try gpa.dupe(u8, mem.spanZ(astgen.nullTerminatedString(name_index)));
-                    defer gpa.free(name);
-                    return astgen.failNodeNotes(node, "redeclaration of '{s}'", .{
-                        name,
-                    }, &[_]u32{
-                        try astgen.errNoteNode(gop.value_ptr.*, "other declaration here", .{}),
-                    });
-                }
-                gop.value_ptr.* = node;
-                break;
-            },
-            .top => break,
+    if (token_bytes[0] != '@' and isPrimitive(token_bytes)) {
+        return astgen.failTokNotes(name_token, "name shadows primitive '{s}'", .{
+            token_bytes,
+        }, &[_]u32{
+            try astgen.errNoteTok(name_token, "consider using @\"{s}\" to disambiguate", .{
+                token_bytes,
+            }),
+        });
+    }
+
+    var s = scope;
+    while (true) switch (s.tag) {
+        .local_val => {
+            const local_val = s.cast(Scope.LocalVal).?;
+            if (local_val.name == ident_name) {
+                const name_slice = mem.span(astgen.nullTerminatedString(ident_name));
+                const name = try gpa.dupe(u8, name_slice);
+                defer gpa.free(name);
+                return astgen.failTokNotes(name_token, "redeclaration of {s} '{s}'", .{
+                    @tagName(local_val.id_cat), name,
+                }, &[_]u32{
+                    try astgen.errNoteTok(
+                        local_val.token_src,
+                        "previous declaration here",
+                        .{},
+                    ),
+                });
+            }
+            s = local_val.parent;
+        },
+        .local_ptr => {
+            const local_ptr = s.cast(Scope.LocalPtr).?;
+            if (local_ptr.name == ident_name) {
+                const name_slice = mem.span(astgen.nullTerminatedString(ident_name));
+                const name = try gpa.dupe(u8, name_slice);
+                defer gpa.free(name);
+                return astgen.failTokNotes(name_token, "redeclaration of {s} '{s}'", .{
+                    @tagName(local_ptr.id_cat), name,
+                }, &[_]u32{
+                    try astgen.errNoteTok(
+                        local_ptr.token_src,
+                        "previous declaration here",
+                        .{},
+                    ),
+                });
+            }
+            s = local_ptr.parent;
+        },
+        .namespace => {
+            const ns = s.cast(Scope.Namespace).?;
+            const decl_node = ns.decls.get(ident_name) orelse {
+                s = ns.parent;
+                continue;
+            };
+            const name_slice = mem.span(astgen.nullTerminatedString(ident_name));
+            const name = try gpa.dupe(u8, name_slice);
+            defer gpa.free(name);
+            return astgen.failTokNotes(name_token, "local shadows declaration of '{s}'", .{
+                name,
+            }, &[_]u32{
+                try astgen.errNoteNode(decl_node, "declared here", .{}),
+            });
+        },
+        .gen_zir => s = s.cast(GenZir).?.parent,
+        .defer_normal, .defer_error => s = s.cast(Scope.Defer).?.parent,
+        .top => break,
+    };
+}
+
+fn advanceSourceCursor(astgen: *AstGen, source: []const u8, end: usize) void {
+    var i = astgen.source_offset;
+    var line = astgen.source_line;
+    var column = astgen.source_column;
+    while (i < end) : (i += 1) {
+        if (source[i] == '\n') {
+            line += 1;
+            column = 0;
+        } else {
+            column += 1;
         }
+    }
+    astgen.source_offset = i;
+    astgen.source_line = line;
+    astgen.source_column = column;
+}
+
+const ref_start_index: u32 = Zir.Inst.Ref.typed_value_map.len;
+
+fn indexToRef(inst: Zir.Inst.Index) Zir.Inst.Ref {
+    return @intToEnum(Zir.Inst.Ref, ref_start_index + inst);
+}
+
+fn refToIndex(inst: Zir.Inst.Ref) ?Zir.Inst.Index {
+    const ref_int = @enumToInt(inst);
+    if (ref_int >= ref_start_index) {
+        return ref_int - ref_start_index;
+    } else {
+        return null;
+    }
+}
+
+fn scanDecls(astgen: *AstGen, namespace: *Scope.Namespace, members: []const Ast.Node.Index) !void {
+    const gpa = astgen.gpa;
+    const tree = astgen.tree;
+    const node_tags = tree.nodes.items(.tag);
+    const main_tokens = tree.nodes.items(.main_token);
+    const token_tags = tree.tokens.items(.tag);
+    for (members) |member_node| {
+        const name_token = switch (node_tags[member_node]) {
+            .fn_proto_simple,
+            .fn_proto_multi,
+            .fn_proto_one,
+            .fn_proto,
+            .global_var_decl,
+            .local_var_decl,
+            .simple_var_decl,
+            .aligned_var_decl,
+            => main_tokens[member_node] + 1,
+
+            .fn_decl => blk: {
+                const ident = main_tokens[member_node] + 1;
+                if (token_tags[ident] != .identifier) {
+                    switch (astgen.failNode(member_node, "missing function name", .{})) {
+                        error.AnalysisFail => continue,
+                        error.OutOfMemory => return error.OutOfMemory,
+                    }
+                }
+                break :blk ident;
+            },
+
+            else => continue,
+        };
+
+        const token_bytes = astgen.tree.tokenSlice(name_token);
+        if (token_bytes[0] != '@' and isPrimitive(token_bytes)) {
+            switch (astgen.failTokNotes(name_token, "name shadows primitive '{s}'", .{
+                token_bytes,
+            }, &[_]u32{
+                try astgen.errNoteTok(name_token, "consider using @\"{s}\" to disambiguate", .{
+                    token_bytes,
+                }),
+            })) {
+                error.AnalysisFail => continue,
+                error.OutOfMemory => return error.OutOfMemory,
+            }
+        }
+
+        const name_str_index = try astgen.identAsString(name_token);
+        const gop = try namespace.decls.getOrPut(gpa, name_str_index);
+        if (gop.found_existing) {
+            const name = try gpa.dupe(u8, mem.span(astgen.nullTerminatedString(name_str_index)));
+            defer gpa.free(name);
+            switch (astgen.failNodeNotes(member_node, "redeclaration of '{s}'", .{
+                name,
+            }, &[_]u32{
+                try astgen.errNoteNode(gop.value_ptr.*, "other declaration here", .{}),
+            })) {
+                error.AnalysisFail => continue,
+                error.OutOfMemory => return error.OutOfMemory,
+            }
+        }
+        gop.value_ptr.* = member_node;
     }
 }

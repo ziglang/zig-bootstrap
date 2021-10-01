@@ -49,7 +49,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\export fn foo() callconv(y) c_int {
             \\    return 0;
             \\}
-            \\var y: i32 = 1234;
+            \\var y: @import("std").builtin.CallingConvention = .C;
         , &.{
             ":2:22: error: unable to resolve comptime value",
             ":5:26: error: unable to resolve comptime value",
@@ -93,16 +93,16 @@ pub fn addCases(ctx: *TestContext) !void {
         , "");
         case.addError(
             \\pub export fn main() c_int {
-            \\    const c = @intToError(0);
+            \\    _ = @intToError(0);
             \\    return 0;
             \\}
-        , &.{":2:27: error: integer value 0 represents no error"});
+        , &.{":2:21: error: integer value 0 represents no error"});
         case.addError(
             \\pub export fn main() c_int {
-            \\    const c = @intToError(3);
+            \\    _ = @intToError(3);
             \\    return 0;
             \\}
-        , &.{":2:27: error: integer value 3 represents no error"});
+        , &.{":2:21: error: integer value 3 represents no error"});
     }
 
     {
@@ -240,6 +240,10 @@ pub fn addCases(ctx: *TestContext) !void {
     if (host_supports_custom_stack_size) {
         var case = ctx.exeFromCompiledC("@setEvalBranchQuota", .{});
 
+        // TODO when adding result location support to function calls, revisit this test
+        // case. It can go back to what it was before, with `y` being comptime known.
+        // Because the ret_ptr will passed in with the inline fn call, and there will
+        // only be 1 store to it, and it will be comptime known.
         case.addCompareOutput(
             \\pub export fn main() i32 {
             \\    @setEvalBranchQuota(1001);
@@ -247,7 +251,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    return y - 1;
             \\}
             \\
-            \\fn rec(n: usize) callconv(.Inline) usize {
+            \\inline fn rec(n: i32) i32 {
             \\    if (n <= 1) return n;
             \\    return rec(n - 1);
             \\}
@@ -383,6 +387,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\        true => 2,
             \\        false => 3,
             \\    };
+            \\    _  = b;
             \\}
         , &.{
             ":6:9: error: duplicate switch value",
@@ -398,6 +403,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\        f64, i32 => 3,
             \\        else => 4,
             \\    };
+            \\    _ = b;
             \\}
         , &.{
             ":6:14: error: duplicate switch value",
@@ -414,6 +420,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\        f16...f64 => 3,
             \\        else => 4,
             \\    };
+            \\    _ = b;
             \\}
         , &.{
             ":3:30: error: ranges not allowed when switching on type 'type'",
@@ -431,6 +438,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\        3 => 40,
             \\        else => 50,
             \\    };
+            \\    _ = b;
             \\}
         , &.{
             ":8:14: error: unreachable else prong; all cases already handled",
@@ -521,7 +529,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\}
         , &.{
             ":3:21: error: missing struct field: x",
-            ":1:15: note: struct 'test_case.Point' declared here",
+            ":1:15: note: struct 'tmp.Point' declared here",
         });
         case.addError(
             \\const Point = struct { x: i32, y: i32 };
@@ -534,7 +542,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    return p.y - p.x - p.x;
             \\}
         , &.{
-            ":6:10: error: no field named 'z' in struct 'test_case.Point'",
+            ":6:10: error: no field named 'z' in struct 'tmp.Point'",
             ":1:15: note: struct declared here",
         });
         case.addCompareOutput(
@@ -547,6 +555,19 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    return p.y - p.x - p.x;
             \\}
         , "");
+        case.addCompareOutput(
+            \\const Point = struct { x: i32, y: i32, z: i32, a: i32, b: i32 };
+            \\pub export fn main() c_int {
+            \\    var p: Point = .{
+            \\        .x = 18,
+            \\        .y = 24,
+            \\        .z = 1,
+            \\        .a = 2,
+            \\        .b = 3,
+            \\    };
+            \\    return p.y - p.x - p.z - p.a - p.b;
+            \\}
+        , "");
     }
 
     {
@@ -556,10 +577,10 @@ pub fn addCases(ctx: *TestContext) !void {
             \\const E1 = packed enum { a, b, c };
             \\const E2 = extern enum { a, b, c };
             \\export fn foo() void {
-            \\    const x = E1.a;
+            \\    _ = E1.a;
             \\}
             \\export fn bar() void {
-            \\    const x = E2.a;
+            \\    _ = E2.a;
             \\}
         , &.{
             ":1:12: error: enums do not support 'packed' or 'extern'; instead provide an explicit integer tag type",
@@ -579,14 +600,15 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    c,
             \\};
             \\export fn foo() void {
-            \\    const x = E1.a;
+            \\    _ = E1.a;
             \\}
             \\export fn bar() void {
-            \\    const x = E2.a;
+            \\    _ = E2.a;
             \\}
         , &.{
             ":3:5: error: enum fields cannot be marked comptime",
             ":8:8: error: enum fields do not have types",
+            ":6:12: note: consider 'union(enum)' here to make it a tagged union",
         });
 
         // @enumToInt, @intToEnum, enum literal coercion, field access syntax, comparison, switch
@@ -621,7 +643,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    c,
             \\};
             \\export fn foo() void {
-            \\    const x = E1.a;
+            \\    _ = E1.a;
             \\}
         , &.{
             ":3:7: error: expected ',', found 'align'",
@@ -638,7 +660,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    _,
             \\};
             \\export fn foo() void {
-            \\    const x = E1.a;
+            \\    _ = E1.a;
             \\}
         , &.{
             ":6:5: error: redundant non-exhaustive enum mark",
@@ -653,7 +675,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    _ = 10,
             \\};
             \\export fn foo() void {
-            \\    const x = E1.a;
+            \\    _ = E1.a;
             \\}
         , &.{
             ":5:9: error: '_' is used to mark an enum as non-exhaustive and cannot be assigned a value",
@@ -662,7 +684,7 @@ pub fn addCases(ctx: *TestContext) !void {
         case.addError(
             \\const E1 = enum {};
             \\export fn foo() void {
-            \\    const x = E1.a;
+            \\    _ = E1.a;
             \\}
         , &.{
             ":1:12: error: enum declarations must have at least one tag",
@@ -671,7 +693,7 @@ pub fn addCases(ctx: *TestContext) !void {
         case.addError(
             \\const E1 = enum { a, b, _ };
             \\export fn foo() void {
-            \\    const x = E1.a;
+            \\    _ = E1.a;
             \\}
         , &.{
             ":1:12: error: non-exhaustive enum missing integer tag type",
@@ -681,7 +703,7 @@ pub fn addCases(ctx: *TestContext) !void {
         case.addError(
             \\const E1 = enum { a, b, c, b, d };
             \\pub export fn main() c_int {
-            \\    const x = E1.a;
+            \\    _ = E1.a;
             \\}
         , &.{
             ":1:28: error: duplicate enum tag",
@@ -691,28 +713,28 @@ pub fn addCases(ctx: *TestContext) !void {
         case.addError(
             \\pub export fn main() c_int {
             \\    const a = true;
-            \\    const b = @enumToInt(a);
+            \\    _ = @enumToInt(a);
             \\}
         , &.{
-            ":3:26: error: expected enum or tagged union, found bool",
+            ":3:20: error: expected enum or tagged union, found bool",
         });
 
         case.addError(
             \\pub export fn main() c_int {
             \\    const a = 1;
-            \\    const b = @intToEnum(bool, a);
+            \\    _ = @intToEnum(bool, a);
             \\}
         , &.{
-            ":3:26: error: expected enum, found bool",
+            ":3:20: error: expected enum, found bool",
         });
 
         case.addError(
             \\const E = enum { a, b, c };
             \\pub export fn main() c_int {
-            \\    const b = @intToEnum(E, 3);
+            \\    _ = @intToEnum(E, 3);
             \\}
         , &.{
-            ":3:15: error: enum 'test_case.E' has no tag with value 3",
+            ":3:9: error: enum 'tmp.E' has no tag with value 3",
             ":1:11: note: enum declared here",
         });
 
@@ -728,7 +750,7 @@ pub fn addCases(ctx: *TestContext) !void {
         , &.{
             ":4:5: error: switch must handle all possibilities",
             ":4:5: note: unhandled enumeration value: 'b'",
-            ":1:11: note: enum 'test_case.E' declared here",
+            ":1:11: note: enum 'tmp.E' declared here",
         });
 
         case.addError(
@@ -780,10 +802,10 @@ pub fn addCases(ctx: *TestContext) !void {
         case.addError(
             \\const E = enum { a, b, c };
             \\pub export fn main() c_int {
-            \\    var x = E.d;
+            \\    _ = E.d;
             \\}
         , &.{
-            ":3:14: error: enum 'test_case.E' has no member named 'd'",
+            ":3:10: error: enum 'tmp.E' has no member named 'd'",
             ":1:11: note: enum declared here",
         });
 
@@ -791,26 +813,126 @@ pub fn addCases(ctx: *TestContext) !void {
             \\const E = enum { a, b, c };
             \\pub export fn main() c_int {
             \\    var x: E = .d;
+            \\    _ = x;
             \\}
         , &.{
-            ":3:17: error: enum 'test_case.E' has no field named 'd'",
+            ":3:17: error: enum 'tmp.E' has no field named 'd'",
             ":1:11: note: enum declared here",
         });
     }
 
-    ctx.c("empty start function", linux_x64,
-        \\export fn _start() noreturn {
-        \\    unreachable;
-        \\}
-    ,
-        \\ZIG_EXTERN_C zig_noreturn void _start(void);
-        \\
-        \\zig_noreturn void _start(void) {
-        \\ zig_breakpoint();
-        \\ zig_unreachable();
-        \\}
-        \\
-    );
+    {
+        var case = ctx.exeFromCompiledC("shift right + left", .{});
+        case.addCompareOutput(
+            \\pub export fn main() c_int {
+            \\    var i: u32 = 16;
+            \\    assert(i >> 1, 8);
+            \\    return 0;
+            \\}
+            \\fn assert(a: u32, b: u32) void {
+            \\    if (a != b) unreachable;
+            \\}
+        , "");
+
+        case.addCompareOutput(
+            \\pub export fn main() c_int {
+            \\    var i: u32 = 16;
+            \\    assert(i << 1, 32);
+            \\    return 0;
+            \\}
+            \\fn assert(a: u32, b: u32) void {
+            \\    if (a != b) unreachable;
+            \\}
+        , "");
+    }
+
+    {
+        var case = ctx.exeFromCompiledC("inferred error sets", .{});
+
+        case.addCompareOutput(
+            \\pub export fn main() c_int {
+            \\    if (foo()) |_| {
+            \\        @panic("test fail");
+            \\    } else |err| {
+            \\        if (err != error.ItBroke) {
+            \\            @panic("test fail");
+            \\        }
+            \\    }
+            \\    return 0;
+            \\}
+            \\fn foo() !void {
+            \\    return error.ItBroke;
+            \\}
+        , "");
+    }
+
+    {
+        // TODO: add u64 tests, ran into issues with the literal generated for std.math.maxInt(u64)
+        var case = ctx.exeFromCompiledC("add/sub wrapping operations", .{});
+        case.addCompareOutput(
+            \\pub export fn main() c_int {
+            \\    // Addition
+            \\    if (!add_u3(1, 1, 2)) return 1;
+            \\    if (!add_u3(7, 1, 0)) return 1;
+            \\    if (!add_i3(1, 1, 2)) return 1;
+            \\    if (!add_i3(3, 2, -3)) return 1;
+            \\    if (!add_i3(-3, -2, 3)) return 1;
+            \\    if (!add_c_int(1, 1, 2)) return 1;
+            \\    // TODO enable these when stage2 supports std.math.maxInt
+            \\    //if (!add_c_int(maxInt(c_int), 2, minInt(c_int) + 1)) return 1;
+            \\    //if (!add_c_int(maxInt(c_int) + 1, -2, maxInt(c_int))) return 1;
+            \\
+            \\    // Subtraction
+            \\    if (!sub_u3(2, 1, 1)) return 1;
+            \\    if (!sub_u3(0, 1, 7)) return 1;
+            \\    if (!sub_i3(2, 1, 1)) return 1;
+            \\    if (!sub_i3(3, -2, -3)) return 1;
+            \\    if (!sub_i3(-3, 2, 3)) return 1;
+            \\    if (!sub_c_int(2, 1, 1)) return 1;
+            \\    // TODO enable these when stage2 supports std.math.maxInt
+            \\    //if (!sub_c_int(maxInt(c_int), -2, minInt(c_int) + 1)) return 1;
+            \\    //if (!sub_c_int(minInt(c_int) + 1, 2, maxInt(c_int))) return 1;
+            \\
+            \\    return 0;
+            \\}
+            \\fn add_u3(lhs: u3, rhs: u3, expected: u3) bool {
+            \\    return expected == lhs +% rhs;
+            \\}
+            \\fn add_i3(lhs: i3, rhs: i3, expected: i3) bool {
+            \\    return expected == lhs +% rhs;
+            \\}
+            \\fn add_c_int(lhs: c_int, rhs: c_int, expected: c_int) bool {
+            \\    return expected == lhs +% rhs;
+            \\}
+            \\fn sub_u3(lhs: u3, rhs: u3, expected: u3) bool {
+            \\    return expected == lhs -% rhs;
+            \\}
+            \\fn sub_i3(lhs: i3, rhs: i3, expected: i3) bool {
+            \\    return expected == lhs -% rhs;
+            \\}
+            \\fn sub_c_int(lhs: c_int, rhs: c_int, expected: c_int) bool {
+            \\    return expected == lhs -% rhs;
+            \\}
+        , "");
+    }
+
+    {
+        var case = ctx.exeFromCompiledC("@rem", linux_x64);
+        case.addCompareOutput(
+            \\fn assert(ok: bool) void {
+            \\    if (!ok) unreachable;
+            \\}
+            \\fn rem(lhs: i32, rhs: i32, expected: i32) bool {
+            \\    return @rem(lhs, rhs) == expected;
+            \\}
+            \\pub export fn main() c_int {
+            \\    assert(rem(-5, 3, -2));
+            \\    assert(rem(5, 3, 2));
+            \\    return 0;
+            \\}
+        , "");
+    }
+
     ctx.h("simple header", linux_x64,
         \\export fn start() void{}
     ,
@@ -818,31 +940,35 @@ pub fn addCases(ctx: *TestContext) !void {
         \\
     );
     ctx.h("header with single param function", linux_x64,
-        \\export fn start(a: u8) void{}
+        \\export fn start(a: u8) void{
+        \\    _ = a;
+        \\}
     ,
         \\ZIG_EXTERN_C void start(uint8_t a0);
         \\
     );
     ctx.h("header with multiple param function", linux_x64,
-        \\export fn start(a: u8, b: u8, c: u8) void{}
+        \\export fn start(a: u8, b: u8, c: u8) void{
+        \\  _ = a; _ = b; _ = c;
+        \\}
     ,
         \\ZIG_EXTERN_C void start(uint8_t a0, uint8_t a1, uint8_t a2);
         \\
     );
     ctx.h("header with u32 param function", linux_x64,
-        \\export fn start(a: u32) void{}
+        \\export fn start(a: u32) void{ _ = a; }
     ,
         \\ZIG_EXTERN_C void start(uint32_t a0);
         \\
     );
     ctx.h("header with usize param function", linux_x64,
-        \\export fn start(a: usize) void{}
+        \\export fn start(a: usize) void{ _ = a; }
     ,
         \\ZIG_EXTERN_C void start(uintptr_t a0);
         \\
     );
     ctx.h("header with bool param function", linux_x64,
-        \\export fn start(a: bool) void{}
+        \\export fn start(a: bool) void{_ = a;}
     ,
         \\ZIG_EXTERN_C void start(bool a0);
         \\
@@ -866,7 +992,7 @@ pub fn addCases(ctx: *TestContext) !void {
         \\
     );
     ctx.h("header with multiple includes", linux_x64,
-        \\export fn start(a: u32, b: usize) void{}
+        \\export fn start(a: u32, b: usize) void{ _ = a; _ = b; }
     ,
         \\ZIG_EXTERN_C void start(uint32_t a0, uintptr_t a1);
         \\

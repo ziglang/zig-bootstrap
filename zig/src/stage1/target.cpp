@@ -25,6 +25,7 @@ static const ZigLLVM_ArchType arch_list[] = {
     ZigLLVM_bpfeb,          // eBPF or extended BPF or 64-bit BPF (big endian)
     ZigLLVM_csky,           // CSKY: csky
     ZigLLVM_hexagon,        // Hexagon: hexagon
+    ZigLLVM_m68k,           // M68k: Motorola 680x0 family
     ZigLLVM_mips,           // MIPS: mips, mipsallegrex, mipsr6
     ZigLLVM_mipsel,         // MIPSEL: mipsel, mipsallegrexe, mipsr6el
     ZigLLVM_mips64,         // MIPS64: mips64, mips64r6, mipsn32, mipsn32r6
@@ -125,6 +126,7 @@ static const Os os_list[] = {
     OsOpenCL,
     OsGLSL450,
     OsVulkan,
+    OsPlan9,
     OsOther,
 };
 
@@ -146,6 +148,7 @@ static const ZigLLVM_EnvironmentType abi_list[] = {
     ZigLLVM_Musl,
     ZigLLVM_MuslEABI,
     ZigLLVM_MuslEABIHF,
+    ZigLLVM_MuslX32,
 
     ZigLLVM_MSVC,
     ZigLLVM_Itanium,
@@ -219,6 +222,7 @@ ZigLLVM_OSType get_llvm_os_type(Os os_type) {
         case OsOpenCL:
         case OsGLSL450:
         case OsVulkan:
+        case OsPlan9:
         case OsOther:
             return ZigLLVM_UnknownOS;
         case OsAnanas:
@@ -298,6 +302,8 @@ const char *target_os_name(Os os_type) {
     switch (os_type) {
         case OsFreestanding:
             return "freestanding";
+        case OsPlan9:
+            return "plan9";
         case OsUefi:
             return "uefi";
         case OsOther:
@@ -394,6 +400,9 @@ Error target_parse_os(Os *out_os, const char *os_ptr, size_t os_len) {
         return ErrorNone;
 #elif defined(ZIG_OS_HAIKU)
         *out_os = OsHaiku;
+        return ErrorNone;
+#elif defined(ZIG_OS_SOLARIS)
+        *out_os = OsSolaris;
         return ErrorNone;
 #else
         zig_panic("stage1 is unable to detect native target for this OS");
@@ -493,6 +502,7 @@ uint32_t target_arch_pointer_bit_width(ZigLLVM_ArchType arch) {
         case ZigLLVM_arm:
         case ZigLLVM_armeb:
         case ZigLLVM_hexagon:
+        case ZigLLVM_m68k:
         case ZigLLVM_le32:
         case ZigLLVM_mips:
         case ZigLLVM_mipsel:
@@ -560,6 +570,7 @@ uint32_t target_arch_largest_atomic_bits(ZigLLVM_ArchType arch) {
         case ZigLLVM_arm:
         case ZigLLVM_armeb:
         case ZigLLVM_hexagon:
+        case ZigLLVM_m68k:
         case ZigLLVM_le32:
         case ZigLLVM_mips:
         case ZigLLVM_mipsel:
@@ -666,7 +677,9 @@ uint32_t target_c_type_size_in_bits(const ZigTarget *target, CIntType id) {
         case OsOpenBSD:
         case OsWASI:
         case OsHaiku:
+        case OsSolaris:
         case OsEmscripten:
+        case OsPlan9:
             switch (id) {
                 case CIntTypeShort:
                 case CIntTypeUShort:
@@ -723,7 +736,6 @@ uint32_t target_c_type_size_in_bits(const ZigTarget *target, CIntType id) {
         case OsCloudABI:
         case OsKFreeBSD:
         case OsLv2:
-        case OsSolaris:
         case OsZOS:
         case OsMinix:
         case OsRTEMS:
@@ -793,6 +805,8 @@ const char *arch_stack_pointer_register_name(ZigLLVM_ArchType arch) {
         case ZigLLVM_aarch64_32:
         case ZigLLVM_riscv32:
         case ZigLLVM_riscv64:
+        case ZigLLVM_m68k:
+        case ZigLLVM_mips:
         case ZigLLVM_mipsel:
         case ZigLLVM_ppc:
         case ZigLLVM_ppcle:
@@ -819,7 +833,6 @@ const char *arch_stack_pointer_register_name(ZigLLVM_ArchType arch) {
         case ZigLLVM_kalimba:
         case ZigLLVM_le32:
         case ZigLLVM_le64:
-        case ZigLLVM_mips:
         case ZigLLVM_mips64:
         case ZigLLVM_mips64el:
         case ZigLLVM_msp430:
@@ -868,6 +881,7 @@ bool target_is_arm(const ZigTarget *target) {
         case ZigLLVM_bpfel:
         case ZigLLVM_csky:
         case ZigLLVM_hexagon:
+        case ZigLLVM_m68k:
         case ZigLLVM_lanai:
         case ZigLLVM_hsail:
         case ZigLLVM_hsail64:
@@ -914,7 +928,7 @@ bool target_has_valgrind_support(const ZigTarget *target) {
         case ZigLLVM_UnknownArch:
             zig_unreachable();
         case ZigLLVM_x86_64:
-            return (target->os == OsLinux || target_os_is_darwin(target->os) || target->os == OsSolaris ||
+            return (target->os == OsLinux || target->os == OsSolaris ||
                 (target->os == OsWindows && target->abi != ZigLLVM_MSVC));
         default:
             return false;
@@ -975,6 +989,7 @@ ZigLLVM_EnvironmentType target_default_abi(ZigLLVM_ArchType arch, Os os) {
         case OsOpenCL:
         case OsGLSL450:
         case OsVulkan:
+        case OsPlan9:
             return ZigLLVM_UnknownEnvironment;
     }
     zig_unreachable();

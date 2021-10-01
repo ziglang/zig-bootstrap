@@ -1,12 +1,30 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
-usingnamespace @import("bits.zig");
+const std = @import("../../std.zig");
+const windows = std.os.windows;
+
+const BOOL = windows.BOOL;
+const DWORD = windows.DWORD;
+const ULONG = windows.ULONG;
+const WINAPI = windows.WINAPI;
+const NTSTATUS = windows.NTSTATUS;
+const WORD = windows.WORD;
+const HANDLE = windows.HANDLE;
+const ACCESS_MASK = windows.ACCESS_MASK;
+const IO_APC_ROUTINE = windows.IO_APC_ROUTINE;
+const BOOLEAN = windows.BOOLEAN;
+const OBJECT_ATTRIBUTES = windows.OBJECT_ATTRIBUTES;
+const PVOID = windows.PVOID;
+const IO_STATUS_BLOCK = windows.IO_STATUS_BLOCK;
+const LARGE_INTEGER = windows.LARGE_INTEGER;
+const OBJECT_INFORMATION_CLASS = windows.OBJECT_INFORMATION_CLASS;
+const FILE_INFORMATION_CLASS = windows.FILE_INFORMATION_CLASS;
+const UNICODE_STRING = windows.UNICODE_STRING;
+const RTL_OSVERSIONINFOW = windows.RTL_OSVERSIONINFOW;
+const FILE_BASIC_INFORMATION = windows.FILE_BASIC_INFORMATION;
+const SIZE_T = windows.SIZE_T;
+const CURDIR = windows.CURDIR;
 
 pub extern "NtDll" fn RtlGetVersion(
-    lpVersionInformation: PRTL_OSVERSIONINFOW,
+    lpVersionInformation: *RTL_OSVERSIONINFOW,
 ) callconv(WINAPI) NTSTATUS;
 pub extern "NtDll" fn RtlCaptureStackBackTrace(
     FramesToSkip: DWORD,
@@ -93,23 +111,26 @@ pub extern "NtDll" fn NtQueryDirectoryFile(
     FileName: ?*UNICODE_STRING,
     RestartScan: BOOLEAN,
 ) callconv(WINAPI) NTSTATUS;
+
 pub extern "NtDll" fn NtCreateKeyedEvent(
     KeyedEventHandle: *HANDLE,
     DesiredAccess: ACCESS_MASK,
     ObjectAttributes: ?PVOID,
     Flags: ULONG,
 ) callconv(WINAPI) NTSTATUS;
+
 pub extern "NtDll" fn NtReleaseKeyedEvent(
-    EventHandle: HANDLE,
-    Key: *const c_void,
+    EventHandle: ?HANDLE,
+    Key: ?*const c_void,
     Alertable: BOOLEAN,
-    Timeout: ?*LARGE_INTEGER,
+    Timeout: ?*const LARGE_INTEGER,
 ) callconv(WINAPI) NTSTATUS;
+
 pub extern "NtDll" fn NtWaitForKeyedEvent(
-    EventHandle: HANDLE,
-    Key: *const c_void,
+    EventHandle: ?HANDLE,
+    Key: ?*const c_void,
     Alertable: BOOLEAN,
-    Timeout: ?*LARGE_INTEGER,
+    Timeout: ?*const LARGE_INTEGER,
 ) callconv(WINAPI) NTSTATUS;
 
 pub extern "NtDll" fn RtlSetCurrentDirectory_U(PathName: *UNICODE_STRING) callconv(WINAPI) NTSTATUS;
@@ -120,4 +141,40 @@ pub extern "NtDll" fn NtQueryObject(
     ObjectInformation: PVOID,
     ObjectInformationLength: ULONG,
     ReturnLength: ?*ULONG,
+) callconv(WINAPI) NTSTATUS;
+
+pub extern "NtDll" fn RtlWakeAddressAll(
+    Address: ?*const c_void,
+) callconv(WINAPI) void;
+
+pub extern "NtDll" fn RtlWakeAddressSingle(
+    Address: ?*const c_void,
+) callconv(WINAPI) void;
+
+pub extern "NtDll" fn RtlWaitOnAddress(
+    Address: ?*const c_void,
+    CompareAddress: ?*const c_void,
+    AddressSize: SIZE_T,
+    Timeout: ?*const LARGE_INTEGER,
+) callconv(WINAPI) NTSTATUS;
+
+pub extern "NtDll" fn NtLockFile(
+    FileHandle: HANDLE,
+    Event: ?HANDLE,
+    ApcRoutine: ?*IO_APC_ROUTINE,
+    ApcContext: ?*c_void,
+    IoStatusBlock: *IO_STATUS_BLOCK,
+    ByteOffset: *const LARGE_INTEGER,
+    Length: *const LARGE_INTEGER,
+    Key: ?*ULONG,
+    FailImmediately: BOOLEAN,
+    ExclusiveLock: BOOLEAN,
+) callconv(WINAPI) NTSTATUS;
+
+pub extern "NtDll" fn NtUnlockFile(
+    FileHandle: HANDLE,
+    IoStatusBlock: *IO_STATUS_BLOCK,
+    ByteOffset: *const LARGE_INTEGER,
+    Length: *const LARGE_INTEGER,
+    Key: ?*ULONG,
 ) callconv(WINAPI) NTSTATUS;

@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("../std.zig");
 const builtin = std.builtin;
 const net = std.net;
@@ -92,6 +87,20 @@ test "parse and render IPv4 addresses" {
     try testing.expectError(error.InvalidEnd, net.Address.parseIp4("127.0.0.1.1", 0));
     try testing.expectError(error.Incomplete, net.Address.parseIp4("127.0.0.", 0));
     try testing.expectError(error.InvalidCharacter, net.Address.parseIp4("100..0.1", 0));
+    try testing.expectError(error.NonCanonical, net.Address.parseIp4("127.01.0.1", 0));
+}
+
+test "parse and render UNIX addresses" {
+    if (builtin.os.tag == .wasi) return error.SkipZigTest;
+    if (!net.has_unix_sockets) return error.SkipZigTest;
+
+    var buffer: [14]u8 = undefined;
+    const addr = net.Address.initUnix("/tmp/testpath") catch unreachable;
+    const fmt_addr = std.fmt.bufPrint(buffer[0..], "{}", .{addr}) catch unreachable;
+    try std.testing.expectEqualSlices(u8, "/tmp/testpath", fmt_addr);
+
+    const too_long = [_]u8{'a'} ** (addr.un.path.len + 1);
+    try testing.expectError(error.NameTooLong, net.Address.initUnix(too_long[0..]));
 }
 
 test "resolve DNS" {
@@ -161,8 +170,8 @@ test "listen on a port, send bytes, receive bytes" {
         }
     };
 
-    const t = try std.Thread.spawn(S.clientFn, server.listen_address);
-    defer t.wait();
+    const t = try std.Thread.spawn(.{}, S.clientFn, .{server.listen_address});
+    defer t.join();
 
     var client = try server.accept();
     defer client.stream.close();
@@ -277,7 +286,7 @@ test "listen on a unix socket, send bytes, receive bytes" {
     try server.listen(socket_addr);
 
     const S = struct {
-        fn clientFn(_: void) !void {
+        fn clientFn() !void {
             const socket = try net.connectUnixSocket(socket_path);
             defer socket.close();
 
@@ -285,8 +294,8 @@ test "listen on a unix socket, send bytes, receive bytes" {
         }
     };
 
-    const t = try std.Thread.spawn(S.clientFn, {});
-    defer t.wait();
+    const t = try std.Thread.spawn(.{}, S.clientFn, .{});
+    defer t.join();
 
     var client = try server.accept();
     defer client.stream.close();

@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 // Ported from musl, which is licensed under the MIT license:
 // https://git.musl-libc.org/cgit/musl/tree/COPYRIGHT
 //
@@ -12,6 +7,7 @@
 const std = @import("../std.zig");
 const math = std.math;
 const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
 const maxInt = std.math.maxInt;
 
 fn modf_result(comptime T: type) type {
@@ -131,11 +127,7 @@ test "math.modf" {
     const a = modf(@as(f32, 1.0));
     const b = modf32(1.0);
     // NOTE: No struct comparison on generic return type function? non-named, makes sense, but still.
-    try expect(a.ipart == b.ipart and a.fpart == b.fpart);
-
-    const c = modf(@as(f64, 1.0));
-    const d = modf64(1.0);
-    try expect(a.ipart == b.ipart and a.fpart == b.fpart);
+    try expectEqual(a, b);
 }
 
 test "math.modf32" {

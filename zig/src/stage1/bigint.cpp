@@ -88,8 +88,11 @@ static void to_twos_complement(BigInt *dest, const BigInt *op, size_t bit_count)
     size_t digits_to_copy = bit_count / 64;
     size_t leftover_bits = bit_count % 64;
     dest->digit_count = digits_to_copy + ((leftover_bits == 0) ? 0 : 1);
-    if (dest->digit_count == 1 && leftover_bits == 0) {
+    if (dest->digit_count == 1) {
         dest->data.digit = op_digits[0];
+        if (leftover_bits != 0) {
+            dest->data.digit &= (1ULL << leftover_bits) - 1;
+        }
         if (dest->data.digit == 0) dest->digit_count = 0;
         return;
     }
@@ -444,6 +447,104 @@ bool mul_u64_overflow(uint64_t op1, uint64_t op2, uint64_t *result) {
             (unsigned long long *)result);
 }
 #endif
+
+void bigint_max(BigInt* dest, const BigInt *op1, const BigInt *op2) {
+    switch (bigint_cmp(op1, op2)) {
+        case CmpEQ:
+        case CmpLT:
+            return bigint_init_bigint(dest, op2);
+        case CmpGT:
+            return bigint_init_bigint(dest, op1);
+    }
+}
+
+void bigint_min(BigInt* dest, const BigInt *op1, const BigInt *op2) {
+    switch (bigint_cmp(op1, op2)) {
+        case CmpEQ:
+        case CmpLT:
+            return bigint_init_bigint(dest, op1);
+        case CmpGT:
+            return bigint_init_bigint(dest, op2);
+    }
+}
+
+/// clamps op within bit_count/signedness boundaries
+/// signed bounds are  [-2^(bit_count-1)..2^(bit_count-1)-1] 
+/// unsigned bounds are  [0..2^bit_count-1] 
+void bigint_clamp_by_bitcount(BigInt* dest, uint32_t bit_count, bool is_signed) {
+    // compute the number of bits required to store the value, and use that 
+    // to decide whether to clamp the result
+    bool is_negative = dest->is_negative;
+    // to workaround the fact this bits_needed calculation would yield 65 or more for 
+    // all negative numbers, set is_negative to false.  this is a cheap way to find 
+    // bits_needed(abs(dest)).  
+    dest->is_negative = false;
+    // because we've set is_negative to false, we have to account for the extra bit here
+    // by adding 1 additional bit_needed when (is_negative && !is_signed).  
+    size_t full_bits = dest->digit_count * 64;
+    size_t leading_zero_count = bigint_clz(dest, full_bits);
+    size_t bits_needed = full_bits - leading_zero_count + (is_negative && !is_signed);
+
+    bit_count -= is_signed;
+    if(bits_needed > bit_count) {
+        BigInt one;
+        bigint_init_unsigned(&one, 1);
+        BigInt bit_count_big;
+        bigint_init_unsigned(&bit_count_big, bit_count);
+        
+        if(is_signed) {
+            if(is_negative) {
+                BigInt bound;
+                bigint_shl(&bound, &one, &bit_count_big);
+                bigint_deinit(dest);
+                *dest = bound;
+            } else {
+                BigInt bound;
+                bigint_shl(&bound, &one, &bit_count_big);
+                BigInt bound_sub_one;
+                bigint_sub(&bound_sub_one, &bound, &one);
+                bigint_deinit(&bound);
+                bigint_deinit(dest);
+                *dest = bound_sub_one;
+            }
+        } else {
+            if(is_negative) {
+                bigint_deinit(dest);
+                bigint_init_unsigned(dest, 0);
+                return; // skips setting is_negative which would be invalid
+            } else {
+                BigInt bound;
+                bigint_shl(&bound, &one, &bit_count_big);
+                BigInt bound_sub_one;
+                bigint_sub(&bound_sub_one, &bound, &one);
+                bigint_deinit(&bound);
+                bigint_deinit(dest);
+                *dest = bound_sub_one;
+            }
+        }
+    }
+    dest->is_negative = is_negative;
+}
+
+void bigint_add_sat(BigInt* dest, const BigInt *op1, const BigInt *op2, uint32_t bit_count, bool is_signed) {
+    bigint_add(dest, op1, op2);
+    bigint_clamp_by_bitcount(dest, bit_count, is_signed);
+}
+
+void bigint_sub_sat(BigInt* dest, const BigInt *op1, const BigInt *op2, uint32_t bit_count, bool is_signed) {
+    bigint_sub(dest, op1, op2);
+    bigint_clamp_by_bitcount(dest, bit_count, is_signed);
+}
+
+void bigint_mul_sat(BigInt* dest, const BigInt *op1, const BigInt *op2, uint32_t bit_count, bool is_signed) {
+    bigint_mul(dest, op1, op2);
+    bigint_clamp_by_bitcount(dest, bit_count, is_signed);
+}
+
+void bigint_shl_sat(BigInt* dest, const BigInt *op1, const BigInt *op2, uint32_t bit_count, bool is_signed) {
+    bigint_shl(dest, op1, op2);
+    bigint_clamp_by_bitcount(dest, bit_count, is_signed);
+}
 
 void bigint_add(BigInt *dest, const BigInt *op1, const BigInt *op2) {
     if (op1->digit_count == 0) {
@@ -1349,7 +1450,7 @@ void bigint_shl(BigInt *dest, const BigInt *op1, const BigInt *op2) {
 
     if (op1->digit_count == 1 && shift_amt < 64) {
         dest->data.digit = op1_digits[0] << shift_amt;
-        if (dest->data.digit > op1_digits[0]) {
+        if (dest->data.digit >> shift_amt == op1_digits[0]) {
             dest->digit_count = 1;
             dest->is_negative = op1->is_negative;
             return;
@@ -1691,6 +1792,13 @@ uint32_t bigint_as_u32(const BigInt *bigint) {
     return value32;
 }
 
+uint8_t bigint_as_u8(const BigInt *bigint) {
+    uint64_t value64 = bigint_as_unsigned(bigint);
+    uint8_t value8 = (uint8_t)value64;
+    assert (value64 == value8);
+    return value8;
+}
+
 size_t bigint_as_usize(const BigInt *bigint) {
     uint64_t value64 = bigint_as_unsigned(bigint);
     size_t valueUsize = (size_t)value64;
@@ -1723,16 +1831,16 @@ Cmp bigint_cmp_zero(const BigInt *op) {
     return op->is_negative ? CmpLT : CmpGT;
 }
 
-uint32_t bigint_hash(BigInt x) {
-    if (x.digit_count == 0) {
+uint32_t bigint_hash(BigInt const *x) {
+    if (x->digit_count == 0) {
         return 0;
     } else {
-        return bigint_ptr(&x)[0];
+        return bigint_ptr(x)[0];
     }
 }
 
-bool bigint_eql(BigInt a, BigInt b) {
-    return bigint_cmp(&a, &b) == CmpEQ;
+bool bigint_eql(BigInt const *a, BigInt const *b) {
+    return bigint_cmp(a, b) == CmpEQ;
 }
 
 void bigint_incr(BigInt *x) {

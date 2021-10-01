@@ -39,9 +39,10 @@ static int print_full_usage(const char *arg0, FILE *file, int return_code) {
         "  --color [auto|off|on]        enable or disable colored error messages\n"
         "  --name [name]                override output name\n"
         "  -femit-bin=[path]            Output machine code\n"
+        "  -fcompiler-rt                Always include compiler-rt symbols in output\n"
         "  --pkg-begin [name] [path]    make pkg available to import and push current pkg\n"
         "  --pkg-end                    pop current pkg\n"
-        "  -ODebug                      build with optimizations on and safety off\n"
+        "  -ODebug                      build with optimizations off and safety on\n"
         "  -OReleaseFast                build with optimizations on and safety off\n"
         "  -OReleaseSafe                build with optimizations on and safety on\n"
         "  -OReleaseSmall               build with size optimizations on and safety off\n"
@@ -250,8 +251,6 @@ int main(int argc, char **argv) {
     const char *emit_bin_path = nullptr;
     bool strip = false;
     const char *out_name = nullptr;
-    bool verbose_tokenize = false;
-    bool verbose_ast = false;
     bool verbose_ir = false;
     bool verbose_llvm_ir = false;
     bool verbose_cimport = false;
@@ -267,6 +266,8 @@ int main(int argc, char **argv) {
     const char *override_lib_dir = nullptr;
     const char *mcpu = nullptr;
     bool single_threaded = false;
+    bool is_test_build = false;
+    bool include_compiler_rt = false;
 
     for (int i = 1; i < argc; i += 1) {
         char *arg = argv[i];
@@ -274,6 +275,8 @@ int main(int argc, char **argv) {
         if (arg[0] == '-') {
             if (strcmp(arg, "--") == 0) {
                 fprintf(stderr, "Unexpected end-of-parameter mark: %s\n", arg);
+            } else if (strcmp(arg, "--test") == 0) {
+                is_test_build = true;
             } else if (strcmp(arg, "-ODebug") == 0) {
                 optimize_mode = BuildModeDebug;
             } else if (strcmp(arg, "-OReleaseFast") == 0) {
@@ -288,10 +291,6 @@ int main(int argc, char **argv) {
                 return print_full_usage(arg0, stdout, EXIT_SUCCESS);
             } else if (strcmp(arg, "--strip") == 0) {
                 strip = true;
-            } else if (strcmp(arg, "--verbose-tokenize") == 0) {
-                verbose_tokenize = true;
-            } else if (strcmp(arg, "--verbose-ast") == 0) {
-                verbose_ast = true;
             } else if (strcmp(arg, "--verbose-ir") == 0) {
                 verbose_ir = true;
             } else if (strcmp(arg, "--verbose-llvm-ir") == 0) {
@@ -337,6 +336,8 @@ int main(int argc, char **argv) {
                 mcpu = arg + strlen("-mcpu=");
             } else if (str_starts_with(arg, "-femit-bin=")) {
                 emit_bin_path = arg + strlen("-femit-bin=");
+            } else if (strcmp(arg, "-fcompiler-rt") == 0) {
+                include_compiler_rt = true;
             } else if (i + 1 >= argc) {
                 fprintf(stderr, "Expected another argument after %s\n", arg);
                 return print_error_usage(arg0);
@@ -357,7 +358,7 @@ int main(int argc, char **argv) {
                     out_name = argv[i];
                 } else if (strcmp(arg, "--dynamic-linker") == 0) {
                     dynamic_linker = argv[i];
-                } else if (strcmp(arg, "--override-lib-dir") == 0) {
+                } else if (strcmp(arg, "--zig-lib-dir") == 0) {
                     override_lib_dir = argv[i];
                 } else if (strcmp(arg, "--library") == 0 || strcmp(arg, "-l") == 0) {
                     if (strcmp(argv[i], "c") == 0) {
@@ -439,7 +440,7 @@ int main(int argc, char **argv) {
     }
 
     if (override_lib_dir == nullptr) {
-        fprintf(stderr, "missing --override-lib-dir\n");
+        fprintf(stderr, "missing --zig-lib-dir\n");
         return print_error_usage(arg0);
     }
 
@@ -452,27 +453,26 @@ int main(int argc, char **argv) {
         nullptr, 0,
         in_file, strlen(in_file),
         override_lib_dir, strlen(override_lib_dir),
-        &target, false);
+        &target, is_test_build);
 
     stage1->main_progress_node = root_progress_node;
     stage1->root_name_ptr = out_name;
     stage1->root_name_len = strlen(out_name);
     stage1->strip = strip;
-    stage1->verbose_tokenize = verbose_tokenize;
-    stage1->verbose_ast = verbose_ast;
     stage1->verbose_ir = verbose_ir;
     stage1->verbose_llvm_ir = verbose_llvm_ir;
     stage1->verbose_cimport = verbose_cimport;
     stage1->verbose_llvm_cpu_features = verbose_llvm_cpu_features;
     stage1->emit_o_ptr = emit_bin_path;
     stage1->emit_o_len = strlen(emit_bin_path);
-    stage1->root_pkg = cur_pkg;
+    stage1->main_pkg = cur_pkg;
     stage1->err_color = color;
     stage1->link_libc = link_libc;
     stage1->link_libcpp = link_libcpp;
     stage1->subsystem = subsystem;
     stage1->pic = true;
     stage1->is_single_threaded = single_threaded;
+    stage1->include_compiler_rt = include_compiler_rt;
 
     zig_stage1_build_object(stage1);
 

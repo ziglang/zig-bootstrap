@@ -15,10 +15,12 @@ pub const Feature = enum {
     sign_ext,
     simd128,
     tail_call,
-    unimplemented_simd128,
 };
 
-pub usingnamespace CpuFeature.feature_set_fns(Feature);
+pub const featureSet = CpuFeature.feature_set_fns(Feature).featureSet;
+pub const featureSetHas = CpuFeature.feature_set_fns(Feature).featureSetHas;
+pub const featureSetHasAny = CpuFeature.feature_set_fns(Feature).featureSetHasAny;
+pub const featureSetHasAll = CpuFeature.feature_set_fns(Feature).featureSetHasAll;
 
 pub const all_features = blk: {
     const len = @typeInfo(Feature).Enum.fields.len;
@@ -73,13 +75,6 @@ pub const all_features = blk: {
         .llvm_name = "tail-call",
         .description = "Enable tail call instructions",
         .dependencies = featureSet(&[_]Feature{}),
-    };
-    result[@enumToInt(Feature.unimplemented_simd128)] = .{
-        .llvm_name = "unimplemented-simd128",
-        .description = "Enable 128-bit SIMD not yet implemented in engines",
-        .dependencies = featureSet(&[_]Feature{
-            .simd128,
-        }),
     };
     const ti = @typeInfo(Feature);
     for (result) |*elem, i| {

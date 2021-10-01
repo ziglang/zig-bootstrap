@@ -16,6 +16,7 @@ pub const Feature = enum {
     hvxv65,
     hvxv66,
     hvxv67,
+    hvxv68,
     long_calls,
     mem_noshuf,
     memops,
@@ -35,10 +36,14 @@ pub const Feature = enum {
     v65,
     v66,
     v67,
+    v68,
     zreg,
 };
 
-pub usingnamespace CpuFeature.feature_set_fns(Feature);
+pub const featureSet = CpuFeature.feature_set_fns(Feature).featureSet;
+pub const featureSetHas = CpuFeature.feature_set_fns(Feature).featureSetHas;
+pub const featureSetHasAny = CpuFeature.feature_set_fns(Feature).featureSetHasAny;
+pub const featureSetHasAll = CpuFeature.feature_set_fns(Feature).featureSetHasAll;
 
 pub const all_features = blk: {
     const len = @typeInfo(Feature).Enum.fields.len;
@@ -112,6 +117,13 @@ pub const all_features = blk: {
         .description = "Hexagon HVX instructions",
         .dependencies = featureSet(&[_]Feature{
             .hvxv66,
+        }),
+    };
+    result[@enumToInt(Feature.hvxv68)] = .{
+        .llvm_name = "hvxv68",
+        .description = "Hexagon HVX instructions",
+        .dependencies = featureSet(&[_]Feature{
+            .hvxv67,
         }),
     };
     result[@enumToInt(Feature.long_calls)] = .{
@@ -211,6 +223,11 @@ pub const all_features = blk: {
     result[@enumToInt(Feature.v67)] = .{
         .llvm_name = "v67",
         .description = "Enable Hexagon V67 architecture",
+        .dependencies = featureSet(&[_]Feature{}),
+    };
+    result[@enumToInt(Feature.v68)] = .{
+        .llvm_name = "v68",
+        .description = "Enable Hexagon V68 architecture",
         .dependencies = featureSet(&[_]Feature{}),
     };
     result[@enumToInt(Feature.zreg)] = .{
@@ -380,6 +397,27 @@ pub const cpu = struct {
             .v65,
             .v66,
             .v67,
+        }),
+    };
+    pub const hexagonv68 = CpuModel{
+        .name = "hexagonv68",
+        .llvm_name = "hexagonv68",
+        .features = featureSet(&[_]Feature{
+            .compound,
+            .duplex,
+            .mem_noshuf,
+            .memops,
+            .nvj,
+            .nvs,
+            .small_data,
+            .v5,
+            .v55,
+            .v60,
+            .v62,
+            .v65,
+            .v66,
+            .v67,
+            .v68,
         }),
     };
 };

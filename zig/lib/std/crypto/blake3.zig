@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 // Translated from BLAKE3 reference implementation.
 // Source: https://github.com/BLAKE3-team/BLAKE3
 
@@ -394,6 +389,7 @@ pub const Blake3 = struct {
     /// Construct a new `Blake3` for the key derivation function. The context
     /// string should be hardcoded, globally unique, and application-specific.
     pub fn initKdf(context: []const u8, options: KdfOptions) Blake3 {
+        _ = options;
         var context_hasher = Blake3.init_internal(IV, DERIVE_KEY_CONTEXT);
         context_hasher.update(context);
         var context_key: [KEY_LEN]u8 = undefined;
@@ -402,10 +398,10 @@ pub const Blake3 = struct {
         return Blake3.init_internal(context_key_words, DERIVE_KEY_MATERIAL);
     }
 
-    pub fn hash(in: []const u8, out: []u8, options: Options) void {
-        var hasher = Blake3.init(options);
-        hasher.update(in);
-        hasher.final(out);
+    pub fn hash(b: []const u8, out: []u8, options: Options) void {
+        var d = Blake3.init(options);
+        d.update(b);
+        d.final(out);
     }
 
     fn pushCv(self: *Blake3, cv: [8]u32) void {

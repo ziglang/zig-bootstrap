@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 // Based on public domain Supercop by Daniel J. Bernstein
 
 const std = @import("../std.zig");
@@ -444,7 +439,6 @@ fn ChaChaWith64BitNonce(comptime rounds_nb: usize) type {
                 if (comptime @sizeOf(usize) > 4) {
                     // A big block is giant: 256 GiB, but we can avoid this limitation
                     var remaining_blocks: u32 = @intCast(u32, (in.len / big_block));
-                    var i: u32 = 0;
                     while (remaining_blocks > 0) : (remaining_blocks -= 1) {
                         ChaChaImpl(rounds_nb).chacha20Xor(out[cursor .. cursor + big_block], in[cursor .. cursor + big_block], k, c);
                         c[1] += 1; // upper 32-bit of counter, generic chacha20Xor() doesn't know about this.

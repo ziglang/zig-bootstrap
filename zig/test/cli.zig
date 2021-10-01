@@ -45,13 +45,6 @@ pub fn main() !void {
     }
 }
 
-fn unwrapArg(arg: UnwrapArgError![]u8) UnwrapArgError![]u8 {
-    return arg catch |err| {
-        warn("Unable to parse command line: {}\n", .{err});
-        return err;
-    };
-}
-
 fn printCmd(cwd: []const u8, argv: []const []const u8) void {
     std.debug.warn("cd {s} && ", .{cwd});
     for (argv) |arg| {
@@ -116,6 +109,8 @@ fn testGodboltApi(zig_exe: []const u8, dir_path: []const u8) anyerror!void {
         \\}
         \\extern fn zig_panic() noreturn;
         \\pub fn panic(msg: []const u8, error_return_trace: ?*@import("std").builtin.StackTrace) noreturn {
+        \\    _ = msg;
+        \\    _ = error_return_trace;
         \\    zig_panic();
         \\}
     );

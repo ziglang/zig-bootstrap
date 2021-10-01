@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 //
 // Decompressor for ZLIB data streams (RFC1950)
 
@@ -35,6 +30,7 @@ pub fn ZlibStream(comptime ReaderType: type) type {
             const CM = @truncate(u4, header[0]);
             const CINFO = @truncate(u4, header[0] >> 4);
             const FCHECK = @truncate(u5, header[1]);
+            _ = FCHECK;
             const FDICT = @truncate(u1, header[1] >> 5);
 
             if ((@as(u16, header[0]) << 8 | header[1]) % 31 != 0)

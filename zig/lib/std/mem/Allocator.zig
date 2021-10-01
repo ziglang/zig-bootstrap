@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 //! The standard memory allocation interface.
 
 const std = @import("../std.zig");
@@ -55,6 +50,10 @@ pub fn noResize(
     len_align: u29,
     ret_addr: usize,
 ) Error!usize {
+    _ = self;
+    _ = buf_align;
+    _ = len_align;
+    _ = ret_addr;
     if (new_len > buf.len)
         return error.OutOfMemory;
     return new_len;
@@ -314,7 +313,7 @@ pub fn resize(self: *Allocator, old_mem: anytype, new_n: usize) Error!@TypeOf(ol
     const new_byte_count = math.mul(usize, @sizeOf(T), new_n) catch return Error.OutOfMemory;
     const rc = try self.resizeFn(self, old_byte_slice, Slice.alignment, new_byte_count, 0, @returnAddress());
     assert(rc == new_byte_count);
-    const new_byte_slice = old_mem.ptr[0..new_byte_count];
+    const new_byte_slice = old_byte_slice.ptr[0..new_byte_count];
     return mem.bytesAsSlice(T, new_byte_slice);
 }
 

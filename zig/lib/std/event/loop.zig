@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("../std.zig");
 const builtin = std.builtin;
 const root = @import("root");
@@ -21,12 +16,12 @@ pub const Loop = struct {
     os_data: OsData,
     final_resume_node: ResumeNode,
     pending_event_count: usize,
-    extra_threads: []*Thread,
+    extra_threads: []Thread,
     /// TODO change this to a pool of configurable number of threads
     /// and rename it to be not file-system-specific. it will become
     /// a thread pool for turning non-CPU-bound blocking things into
     /// async things. A fallback for any missing OS-specific API.
-    fs_thread: *Thread,
+    fs_thread: Thread,
     fs_queue: std.atomic.Queue(Request),
     fs_end_request: Request.Node,
     fs_thread_wakeup: std.Thread.ResetEvent,
@@ -54,8 +49,12 @@ pub const Loop = struct {
             .windows => windows.OVERLAPPED{
                 .Internal = 0,
                 .InternalHigh = 0,
-                .Offset = 0,
-                .OffsetHigh = 0,
+                .DUMMYUNIONNAME = .{
+                    .DUMMYSTRUCTNAME = .{
+                        .Offset = 0,
+                        .OffsetHigh = 0,
+                    },
+                },
                 .hEvent = null,
             },
             else => {},
@@ -133,7 +132,7 @@ pub const Loop = struct {
     }
 
     /// After initialization, call run().
-    /// This is the same as `initThreadPool` using `Thread.cpuCount` to determine the thread
+    /// This is the same as `initThreadPool` using `Thread.getCpuCount` to determine the thread
     /// pool size.
     /// TODO copy elision / named return values so that the threads referencing *Loop
     /// have the correct pointer value.
@@ -141,7 +140,7 @@ pub const Loop = struct {
     pub fn initMultiThreaded(self: *Loop) !void {
         if (builtin.single_threaded)
             @compileError("initMultiThreaded unavailable when building in single-threaded mode");
-        const core_count = try Thread.cpuCount();
+        const core_count = try Thread.getCpuCount();
         return self.initThreadPool(core_count);
     }
 
@@ -179,17 +178,17 @@ pub const Loop = struct {
             resume_node_count,
         );
 
-        self.extra_threads = try self.arena.allocator.alloc(*Thread, extra_thread_count);
+        self.extra_threads = try self.arena.allocator.alloc(Thread, extra_thread_count);
 
         try self.initOsData(extra_thread_count);
         errdefer self.deinitOsData();
 
         if (!builtin.single_threaded) {
-            self.fs_thread = try Thread.spawn(posixFsRun, self);
+            self.fs_thread = try Thread.spawn(.{}, posixFsRun, .{self});
         }
         errdefer if (!builtin.single_threaded) {
             self.posixFsRequest(&self.fs_end_request);
-            self.fs_thread.wait();
+            self.fs_thread.join();
         };
 
         if (!std.builtin.single_threaded)
@@ -223,27 +222,27 @@ pub const Loop = struct {
                                 .handle = undefined,
                                 .overlapped = ResumeNode.overlapped_init,
                             },
-                            .eventfd = try os.eventfd(1, os.EFD_CLOEXEC | os.EFD_NONBLOCK),
-                            .epoll_op = os.EPOLL_CTL_ADD,
+                            .eventfd = try os.eventfd(1, os.linux.EFD.CLOEXEC | os.linux.EFD.NONBLOCK),
+                            .epoll_op = os.linux.EPOLL.CTL_ADD,
                         },
                         .next = undefined,
                     };
                     self.available_eventfd_resume_nodes.push(eventfd_node);
                 }
 
-                self.os_data.epollfd = try os.epoll_create1(os.EPOLL_CLOEXEC);
+                self.os_data.epollfd = try os.epoll_create1(os.linux.EPOLL.CLOEXEC);
                 errdefer os.close(self.os_data.epollfd);
 
-                self.os_data.final_eventfd = try os.eventfd(0, os.EFD_CLOEXEC | os.EFD_NONBLOCK);
+                self.os_data.final_eventfd = try os.eventfd(0, os.linux.EFD.CLOEXEC | os.linux.EFD.NONBLOCK);
                 errdefer os.close(self.os_data.final_eventfd);
 
-                self.os_data.final_eventfd_event = os.epoll_event{
-                    .events = os.EPOLLIN,
-                    .data = os.epoll_data{ .ptr = @ptrToInt(&self.final_resume_node) },
+                self.os_data.final_eventfd_event = os.linux.epoll_event{
+                    .events = os.linux.EPOLL.IN,
+                    .data = os.linux.epoll_data{ .ptr = @ptrToInt(&self.final_resume_node) },
                 };
                 try os.epoll_ctl(
                     self.os_data.epollfd,
-                    os.EPOLL_CTL_ADD,
+                    os.linux.EPOLL.CTL_ADD,
                     self.os_data.final_eventfd,
                     &self.os_data.final_eventfd_event,
                 );
@@ -260,14 +259,14 @@ pub const Loop = struct {
                     assert(amt == wakeup_bytes.len);
                     while (extra_thread_index != 0) {
                         extra_thread_index -= 1;
-                        self.extra_threads[extra_thread_index].wait();
+                        self.extra_threads[extra_thread_index].join();
                     }
                 }
                 while (extra_thread_index < extra_thread_count) : (extra_thread_index += 1) {
-                    self.extra_threads[extra_thread_index] = try Thread.spawn(workerRun, self);
+                    self.extra_threads[extra_thread_index] = try Thread.spawn(.{}, workerRun, .{self});
                 }
             },
-            .macos, .freebsd, .netbsd, .dragonfly, .openbsd => {
+            .macos, .freebsd, .netbsd, .dragonfly => {
                 self.os_data.kqfd = try os.kqueue();
                 errdefer os.close(self.os_data.kqfd);
 
@@ -284,8 +283,8 @@ pub const Loop = struct {
                             // this one is for sending events
                             .kevent = os.Kevent{
                                 .ident = i,
-                                .filter = os.EVFILT_USER,
-                                .flags = os.EV_CLEAR | os.EV_ADD | os.EV_DISABLE,
+                                .filter = os.system.EVFILT_USER,
+                                .flags = os.system.EV_CLEAR | os.system.EV_ADD | os.system.EV_DISABLE,
                                 .fflags = 0,
                                 .data = 0,
                                 .udata = @ptrToInt(&eventfd_node.data.base),
@@ -296,24 +295,24 @@ pub const Loop = struct {
                     self.available_eventfd_resume_nodes.push(eventfd_node);
                     const kevent_array = @as(*const [1]os.Kevent, &eventfd_node.data.kevent);
                     _ = try os.kevent(self.os_data.kqfd, kevent_array, empty_kevs, null);
-                    eventfd_node.data.kevent.flags = os.EV_CLEAR | os.EV_ENABLE;
-                    eventfd_node.data.kevent.fflags = os.NOTE_TRIGGER;
+                    eventfd_node.data.kevent.flags = os.system.EV_CLEAR | os.system.EV_ENABLE;
+                    eventfd_node.data.kevent.fflags = os.system.NOTE_TRIGGER;
                 }
 
                 // Pre-add so that we cannot get error.SystemResources
                 // later when we try to activate it.
                 self.os_data.final_kevent = os.Kevent{
                     .ident = extra_thread_count,
-                    .filter = os.EVFILT_USER,
-                    .flags = os.EV_ADD | os.EV_DISABLE,
+                    .filter = os.system.EVFILT_USER,
+                    .flags = os.system.EV_ADD | os.system.EV_DISABLE,
                     .fflags = 0,
                     .data = 0,
                     .udata = @ptrToInt(&self.final_resume_node),
                 };
                 const final_kev_arr = @as(*const [1]os.Kevent, &self.os_data.final_kevent);
                 _ = try os.kevent(self.os_data.kqfd, final_kev_arr, empty_kevs, null);
-                self.os_data.final_kevent.flags = os.EV_ENABLE;
-                self.os_data.final_kevent.fflags = os.NOTE_TRIGGER;
+                self.os_data.final_kevent.flags = os.system.EV_ENABLE;
+                self.os_data.final_kevent.fflags = os.system.NOTE_TRIGGER;
 
                 if (builtin.single_threaded) {
                     assert(extra_thread_count == 0);
@@ -325,11 +324,74 @@ pub const Loop = struct {
                     _ = os.kevent(self.os_data.kqfd, final_kev_arr, empty_kevs, null) catch unreachable;
                     while (extra_thread_index != 0) {
                         extra_thread_index -= 1;
-                        self.extra_threads[extra_thread_index].wait();
+                        self.extra_threads[extra_thread_index].join();
                     }
                 }
                 while (extra_thread_index < extra_thread_count) : (extra_thread_index += 1) {
-                    self.extra_threads[extra_thread_index] = try Thread.spawn(workerRun, self);
+                    self.extra_threads[extra_thread_index] = try Thread.spawn(.{}, workerRun, .{self});
+                }
+            },
+            .openbsd => {
+                self.os_data.kqfd = try os.kqueue();
+                errdefer os.close(self.os_data.kqfd);
+
+                const empty_kevs = &[0]os.Kevent{};
+
+                for (self.eventfd_resume_nodes) |*eventfd_node, i| {
+                    eventfd_node.* = std.atomic.Stack(ResumeNode.EventFd).Node{
+                        .data = ResumeNode.EventFd{
+                            .base = ResumeNode{
+                                .id = ResumeNode.Id.EventFd,
+                                .handle = undefined,
+                                .overlapped = ResumeNode.overlapped_init,
+                            },
+                            // this one is for sending events
+                            .kevent = os.Kevent{
+                                .ident = i,
+                                .filter = os.system.EVFILT_TIMER,
+                                .flags = os.system.EV_CLEAR | os.system.EV_ADD | os.system.EV_DISABLE | os.system.EV_ONESHOT,
+                                .fflags = 0,
+                                .data = 0,
+                                .udata = @ptrToInt(&eventfd_node.data.base),
+                            },
+                        },
+                        .next = undefined,
+                    };
+                    self.available_eventfd_resume_nodes.push(eventfd_node);
+                    const kevent_array = @as(*const [1]os.Kevent, &eventfd_node.data.kevent);
+                    _ = try os.kevent(self.os_data.kqfd, kevent_array, empty_kevs, null);
+                    eventfd_node.data.kevent.flags = os.system.EV_CLEAR | os.system.EV_ENABLE;
+                }
+
+                // Pre-add so that we cannot get error.SystemResources
+                // later when we try to activate it.
+                self.os_data.final_kevent = os.Kevent{
+                    .ident = extra_thread_count,
+                    .filter = os.system.EVFILT_TIMER,
+                    .flags = os.system.EV_ADD | os.system.EV_ONESHOT | os.system.EV_DISABLE,
+                    .fflags = 0,
+                    .data = 0,
+                    .udata = @ptrToInt(&self.final_resume_node),
+                };
+                const final_kev_arr = @as(*const [1]os.Kevent, &self.os_data.final_kevent);
+                _ = try os.kevent(self.os_data.kqfd, final_kev_arr, empty_kevs, null);
+                self.os_data.final_kevent.flags = os.system.EV_ENABLE;
+
+                if (builtin.single_threaded) {
+                    assert(extra_thread_count == 0);
+                    return;
+                }
+
+                var extra_thread_index: usize = 0;
+                errdefer {
+                    _ = os.kevent(self.os_data.kqfd, final_kev_arr, empty_kevs, null) catch unreachable;
+                    while (extra_thread_index != 0) {
+                        extra_thread_index -= 1;
+                        self.extra_threads[extra_thread_index].join();
+                    }
+                }
+                while (extra_thread_index < extra_thread_count) : (extra_thread_index += 1) {
+                    self.extra_threads[extra_thread_index] = try Thread.spawn(.{}, workerRun, .{self});
                 }
             },
             .windows => {
@@ -341,7 +403,7 @@ pub const Loop = struct {
                 );
                 errdefer windows.CloseHandle(self.os_data.io_port);
 
-                for (self.eventfd_resume_nodes) |*eventfd_node, i| {
+                for (self.eventfd_resume_nodes) |*eventfd_node| {
                     eventfd_node.* = std.atomic.Stack(ResumeNode.EventFd).Node{
                         .data = ResumeNode.EventFd{
                             .base = ResumeNode{
@@ -374,11 +436,11 @@ pub const Loop = struct {
                     }
                     while (extra_thread_index != 0) {
                         extra_thread_index -= 1;
-                        self.extra_threads[extra_thread_index].wait();
+                        self.extra_threads[extra_thread_index].join();
                     }
                 }
                 while (extra_thread_index < extra_thread_count) : (extra_thread_index += 1) {
-                    self.extra_threads[extra_thread_index] = try Thread.spawn(workerRun, self);
+                    self.extra_threads[extra_thread_index] = try Thread.spawn(.{}, workerRun, .{self});
                 }
             },
             else => {},
@@ -405,19 +467,19 @@ pub const Loop = struct {
     /// resume_node must live longer than the anyframe that it holds a reference to.
     /// flags must contain EPOLLET
     pub fn linuxAddFd(self: *Loop, fd: i32, resume_node: *ResumeNode, flags: u32) !void {
-        assert(flags & os.EPOLLET == os.EPOLLET);
+        assert(flags & os.linux.EPOLL.ET == os.linux.EPOLL.ET);
         self.beginOneEvent();
         errdefer self.finishOneEvent();
         try self.linuxModFd(
             fd,
-            os.EPOLL_CTL_ADD,
+            os.linux.EPOLL.CTL_ADD,
             flags,
             resume_node,
         );
     }
 
     pub fn linuxModFd(self: *Loop, fd: i32, op: u32, flags: u32, resume_node: *ResumeNode) !void {
-        assert(flags & os.EPOLLET == os.EPOLLET);
+        assert(flags & os.linux.EPOLL.ET == os.linux.EPOLL.ET);
         var ev = os.linux.epoll_event{
             .events = flags,
             .data = os.linux.epoll_data{ .ptr = @ptrToInt(resume_node) },
@@ -426,13 +488,13 @@ pub const Loop = struct {
     }
 
     pub fn linuxRemoveFd(self: *Loop, fd: i32) void {
-        os.epoll_ctl(self.os_data.epollfd, os.linux.EPOLL_CTL_DEL, fd, null) catch {};
+        os.epoll_ctl(self.os_data.epollfd, os.linux.EPOLL.CTL_DEL, fd, null) catch {};
         self.finishOneEvent();
     }
 
     pub fn linuxWaitFd(self: *Loop, fd: i32, flags: u32) void {
-        assert(flags & os.EPOLLET == os.EPOLLET);
-        assert(flags & os.EPOLLONESHOT == os.EPOLLONESHOT);
+        assert(flags & os.linux.EPOLL.ET == os.linux.EPOLL.ET);
+        assert(flags & os.linux.EPOLL.ONESHOT == os.linux.EPOLL.ONESHOT);
         var resume_node = ResumeNode.Basic{
             .base = ResumeNode{
                 .id = .Basic,
@@ -458,8 +520,8 @@ pub const Loop = struct {
                     // Fall back to a blocking poll(). Ideally this codepath is never hit, since
                     // epoll should be just fine. But this is better than incorrect behavior.
                     var poll_flags: i16 = 0;
-                    if ((flags & os.EPOLLIN) != 0) poll_flags |= os.POLLIN;
-                    if ((flags & os.EPOLLOUT) != 0) poll_flags |= os.POLLOUT;
+                    if ((flags & os.linux.EPOLL.IN) != 0) poll_flags |= os.POLL.IN;
+                    if ((flags & os.linux.EPOLL.OUT) != 0) poll_flags |= os.POLL.OUT;
                     var pfd = [1]os.pollfd{os.pollfd{
                         .fd = fd,
                         .events = poll_flags,
@@ -485,10 +547,10 @@ pub const Loop = struct {
     pub fn waitUntilFdReadable(self: *Loop, fd: os.fd_t) void {
         switch (builtin.os.tag) {
             .linux => {
-                self.linuxWaitFd(fd, os.EPOLLET | os.EPOLLONESHOT | os.EPOLLIN);
+                self.linuxWaitFd(fd, os.linux.EPOLL.ET | os.linux.EPOLL.ONESHOT | os.linux.EPOLL.IN);
             },
             .macos, .freebsd, .netbsd, .dragonfly, .openbsd => {
-                self.bsdWaitKev(@intCast(usize, fd), os.EVFILT_READ, os.EV_ONESHOT);
+                self.bsdWaitKev(@intCast(usize, fd), os.system.EVFILT_READ, os.system.EV_ONESHOT);
             },
             else => @compileError("Unsupported OS"),
         }
@@ -497,10 +559,10 @@ pub const Loop = struct {
     pub fn waitUntilFdWritable(self: *Loop, fd: os.fd_t) void {
         switch (builtin.os.tag) {
             .linux => {
-                self.linuxWaitFd(fd, os.EPOLLET | os.EPOLLONESHOT | os.EPOLLOUT);
+                self.linuxWaitFd(fd, os.linux.EPOLL.ET | os.linux.EPOLL.ONESHOT | os.linux.EPOLL.OUT);
             },
             .macos, .freebsd, .netbsd, .dragonfly, .openbsd => {
-                self.bsdWaitKev(@intCast(usize, fd), os.EVFILT_WRITE, os.EV_ONESHOT);
+                self.bsdWaitKev(@intCast(usize, fd), os.system.EVFILT_WRITE, os.system.EV_ONESHOT);
             },
             else => @compileError("Unsupported OS"),
         }
@@ -509,11 +571,11 @@ pub const Loop = struct {
     pub fn waitUntilFdWritableOrReadable(self: *Loop, fd: os.fd_t) void {
         switch (builtin.os.tag) {
             .linux => {
-                self.linuxWaitFd(fd, os.EPOLLET | os.EPOLLONESHOT | os.EPOLLOUT | os.EPOLLIN);
+                self.linuxWaitFd(fd, os.linux.EPOLL.ET | os.linux.EPOLL.ONESHOT | os.linux.EPOLL.OUT | os.linux.EPOLL.IN);
             },
             .macos, .freebsd, .netbsd, .dragonfly, .openbsd => {
-                self.bsdWaitKev(@intCast(usize, fd), os.EVFILT_READ, os.EV_ONESHOT);
-                self.bsdWaitKev(@intCast(usize, fd), os.EVFILT_WRITE, os.EV_ONESHOT);
+                self.bsdWaitKev(@intCast(usize, fd), os.system.EVFILT_READ, os.system.EV_ONESHOT);
+                self.bsdWaitKev(@intCast(usize, fd), os.system.EVFILT_WRITE, os.system.EV_ONESHOT);
             },
             else => @compileError("Unsupported OS"),
         }
@@ -531,7 +593,7 @@ pub const Loop = struct {
 
         defer {
             // If the kevent was set to be ONESHOT, it doesn't need to be deleted manually.
-            if (flags & os.EV_ONESHOT != 0) {
+            if (flags & os.system.EV_ONESHOT != 0) {
                 self.bsdRemoveKev(ident, filter);
             }
         }
@@ -548,7 +610,7 @@ pub const Loop = struct {
         var kev = [1]os.Kevent{os.Kevent{
             .ident = ident,
             .filter = filter,
-            .flags = os.EV_ADD | os.EV_ENABLE | os.EV_CLEAR | flags,
+            .flags = os.system.EV_ADD | os.system.EV_ENABLE | os.system.EV_CLEAR | flags,
             .fflags = 0,
             .data = 0,
             .udata = @ptrToInt(&resume_node.base),
@@ -561,7 +623,7 @@ pub const Loop = struct {
         var kev = [1]os.Kevent{os.Kevent{
             .ident = ident,
             .filter = filter,
-            .flags = os.EV_DELETE,
+            .flags = os.system.EV_DELETE,
             .fflags = 0,
             .data = 0,
             .udata = 0,
@@ -591,8 +653,8 @@ pub const Loop = struct {
                 },
                 .linux => {
                     // the pending count is already accounted for
-                    const epoll_events = os.EPOLLONESHOT | os.linux.EPOLLIN | os.linux.EPOLLOUT |
-                        os.linux.EPOLLET;
+                    const epoll_events = os.linux.EPOLL.ONESHOT | os.linux.EPOLL.IN | os.linux.EPOLL.OUT |
+                        os.linux.EPOLL.ET;
                     self.linuxModFd(
                         eventfd_node.eventfd,
                         eventfd_node.epoll_op,
@@ -647,18 +709,18 @@ pub const Loop = struct {
                 .netbsd,
                 .dragonfly,
                 .openbsd,
-                => self.fs_thread.wait(),
+                => self.fs_thread.join(),
                 else => {},
             }
         }
 
         for (self.extra_threads) |extra_thread| {
-            extra_thread.wait();
+            extra_thread.join();
         }
 
         @atomicStore(bool, &self.delay_queue.is_running, false, .SeqCst);
         self.delay_queue.event.set();
-        self.delay_queue.thread.wait();
+        self.delay_queue.thread.join();
     }
 
     /// Runs the provided function asynchronously. The function's frame is allocated
@@ -676,7 +738,7 @@ pub const Loop = struct {
             fn run(func_args: Args, loop: *Loop, allocator: *mem.Allocator) void {
                 loop.beginOneEvent();
                 loop.yield();
-                const result = @call(.{}, func, func_args);
+                @call(.{}, func, func_args); // compile error when called with non-void ret type
                 suspend {
                     loop.finishOneEvent();
                     allocator.destroy(@frame());
@@ -783,7 +845,7 @@ pub const Loop = struct {
     const DelayQueue = struct {
         timer: std.time.Timer,
         waiters: Waiters,
-        thread: *std.Thread,
+        thread: std.Thread,
         event: std.Thread.AutoResetEvent,
         is_running: bool,
 
@@ -798,7 +860,7 @@ pub const Loop = struct {
                 .event = std.Thread.AutoResetEvent{},
                 .is_running = true,
                 // Must be last so that it can read the other state, such as `is_running`.
-                .thread = try std.Thread.spawn(DelayQueue.run, self),
+                .thread = try std.Thread.spawn(.{}, DelayQueue.run, .{self}),
             };
         }
 
@@ -890,7 +952,7 @@ pub const Loop = struct {
         self: *Loop,
         /// This argument is a socket that has been created with `socket`, bound to a local address
         /// with `bind`, and is listening for connections after a `listen`.
-        sockfd: os.fd_t,
+        sockfd: os.socket_t,
         /// This argument is a pointer to a sockaddr structure.  This structure is filled in with  the
         /// address  of  the  peer  socket, as known to the communications layer.  The exact format of the
         /// address returned addr is determined by the socket's address  family  (see  `socket`  and  the
@@ -904,12 +966,12 @@ pub const Loop = struct {
         /// will return a value greater than was supplied to the call.
         addr_size: *os.socklen_t,
         /// The following values can be bitwise ORed in flags to obtain different behavior:
-        /// * `SOCK_CLOEXEC`  - Set the close-on-exec (`FD_CLOEXEC`) flag on the new file descriptor.   See  the
-        ///   description  of the `O_CLOEXEC` flag in `open` for reasons why this may be useful.
+        /// * `SOCK.CLOEXEC`  - Set the close-on-exec (`FD_CLOEXEC`) flag on the new file descriptor.   See  the
+        ///   description  of the `O.CLOEXEC` flag in `open` for reasons why this may be useful.
         flags: u32,
-    ) os.AcceptError!os.fd_t {
+    ) os.AcceptError!os.socket_t {
         while (true) {
-            return os.accept(sockfd, addr, addr_size, flags | os.SOCK_NONBLOCK) catch |err| switch (err) {
+            return os.accept(sockfd, addr, addr_size, flags | os.SOCK.NONBLOCK) catch |err| switch (err) {
                 error.WouldBlock => {
                     self.waitUntilFdReadable(sockfd);
                     continue;
@@ -1345,7 +1407,7 @@ pub const Loop = struct {
                             .Stop => return,
                             .EventFd => {
                                 const event_fd_node = @fieldParentPtr(ResumeNode.EventFd, "base", resume_node);
-                                event_fd_node.epoll_op = os.EPOLL_CTL_MOD;
+                                event_fd_node.epoll_op = os.linux.EPOLL.CTL_MOD;
                                 const stack_node = @fieldParentPtr(std.atomic.Stack(ResumeNode.EventFd).Node, "data", event_fd_node);
                                 self.available_eventfd_resume_nodes.push(stack_node);
                             },

@@ -51,6 +51,7 @@ pub const Feature = enum {
     fuse_aes,
     fuse_literals,
     harden_sls_blr,
+    harden_sls_nocomdat,
     harden_sls_retbr,
     has_v4t,
     has_v5t,
@@ -179,7 +180,10 @@ pub const Feature = enum {
     zcz,
 };
 
-pub usingnamespace CpuFeature.feature_set_fns(Feature);
+pub const featureSet = CpuFeature.feature_set_fns(Feature).featureSet;
+pub const featureSetHas = CpuFeature.feature_set_fns(Feature).featureSetHas;
+pub const featureSetHasAny = CpuFeature.feature_set_fns(Feature).featureSetHasAny;
+pub const featureSetHasAll = CpuFeature.feature_set_fns(Feature).featureSetHasAll;
 
 pub const all_features = blk: {
     @setEvalBranchQuota(10000);
@@ -482,6 +486,11 @@ pub const all_features = blk: {
     result[@enumToInt(Feature.harden_sls_blr)] = .{
         .llvm_name = "harden-sls-blr",
         .description = "Harden against straight line speculation across indirect calls",
+        .dependencies = featureSet(&[_]Feature{}),
+    };
+    result[@enumToInt(Feature.harden_sls_nocomdat)] = .{
+        .llvm_name = "harden-sls-nocomdat",
+        .description = "Generate thunk code for SLS mitigation in the normal text section",
         .dependencies = featureSet(&[_]Feature{}),
     };
     result[@enumToInt(Feature.harden_sls_retbr)] = .{
@@ -1242,7 +1251,7 @@ pub const all_features = blk: {
     };
     result[@enumToInt(Feature.v8_7a)] = .{
         .llvm_name = "armv8.7-a",
-        .description = "ARMv86a architecture",
+        .description = "ARMv87a architecture",
         .dependencies = featureSet(&[_]Feature{
             .aclass,
             .crc,
@@ -1512,13 +1521,6 @@ pub const cpu = struct {
             .slowfpvmlx,
             .v6t2,
             .vfp2,
-        }),
-    };
-    pub const arm1176j_s = CpuModel{
-        .name = "arm1176j_s",
-        .llvm_name = "arm1176j-s",
-        .features = featureSet(&[_]Feature{
-            .v6kz,
         }),
     };
     pub const arm1176jz_s = CpuModel{
@@ -1886,6 +1888,7 @@ pub const cpu = struct {
         .name = "cortex_m0",
         .llvm_name = "cortex-m0",
         .features = featureSet(&[_]Feature{
+            .no_branch_predictor,
             .v6m,
         }),
     };
@@ -1893,6 +1896,7 @@ pub const cpu = struct {
         .name = "cortex_m0plus",
         .llvm_name = "cortex-m0plus",
         .features = featureSet(&[_]Feature{
+            .no_branch_predictor,
             .v6m,
         }),
     };
@@ -1900,6 +1904,7 @@ pub const cpu = struct {
         .name = "cortex_m1",
         .llvm_name = "cortex-m1",
         .features = featureSet(&[_]Feature{
+            .no_branch_predictor,
             .v6m,
         }),
     };
@@ -1907,6 +1912,7 @@ pub const cpu = struct {
         .name = "cortex_m23",
         .llvm_name = "cortex-m23",
         .features = featureSet(&[_]Feature{
+            .no_branch_predictor,
             .no_movt,
             .v8m,
         }),
@@ -2222,6 +2228,7 @@ pub const cpu = struct {
         .name = "sc000",
         .llvm_name = "sc000",
         .features = featureSet(&[_]Feature{
+            .no_branch_predictor,
             .v6m,
         }),
     };

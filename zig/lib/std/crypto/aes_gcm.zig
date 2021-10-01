@@ -1,9 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
-
 const std = @import("std");
 const assert = std.debug.assert;
 const builtin = std.builtin;
@@ -114,7 +108,6 @@ test "Aes256Gcm - Empty message and no associated data" {
     const ad = "";
     const m = "";
     var c: [m.len]u8 = undefined;
-    var m2: [m.len]u8 = undefined;
     var tag: [Aes256Gcm.tag_length]u8 = undefined;
 
     Aes256Gcm.encrypt(&c, &tag, m, ad, nonce, key);

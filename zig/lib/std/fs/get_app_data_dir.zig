@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("../std.zig");
 const builtin = std.builtin;
 const unicode = std.unicode;
@@ -49,7 +44,7 @@ pub fn getAppDataDir(allocator: *mem.Allocator, appname: []const u8) GetAppDataD
             };
             return fs.path.join(allocator, &[_][]const u8{ home_dir, "Library", "Application Support", appname });
         },
-        .linux, .freebsd, .netbsd, .dragonfly, .openbsd => {
+        .linux, .freebsd, .netbsd, .dragonfly, .openbsd, .solaris => {
             const home_dir = os.getenv("HOME") orelse {
                 // TODO look in /etc/passwd
                 return error.AppDataDirUnavailable;

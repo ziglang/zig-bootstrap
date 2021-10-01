@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("std");
 const builtin = @import("builtin");
 
@@ -12,7 +7,6 @@ const wideMultiply = @import("divdf3.zig").wideMultiply;
 pub fn __divtf3(a: f128, b: f128) callconv(.C) f128 {
     @setRuntimeSafety(builtin.is_test);
     const Z = std.meta.Int(.unsigned, 128);
-    const SignedZ = std.meta.Int(.signed, 128);
 
     const significandBits = std.math.floatMantissaBits(f128);
     const exponentBits = std.math.floatExponentBits(f128);
@@ -227,6 +221,6 @@ pub fn __divtf3(a: f128, b: f128) callconv(.C) f128 {
     }
 }
 
-test "import divtf3" {
+test {
     _ = @import("divtf3_test.zig");
 }

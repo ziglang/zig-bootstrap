@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("std");
 const os = std.os;
 const mem = std.mem;
@@ -136,18 +131,18 @@ pub fn setThreadPointer(addr: usize) void {
             // Update the %gs selector
             asm volatile ("movl %[gs_val], %%gs"
                 :
-                : [gs_val] "r" (gdt_entry_number << 3 | 3)
+                : [gs_val] "r" (gdt_entry_number << 3 | 3),
             );
         },
         .x86_64 => {
-            const rc = std.os.linux.syscall2(.arch_prctl, std.os.linux.ARCH_SET_FS, addr);
+            const rc = std.os.linux.syscall2(.arch_prctl, std.os.linux.ARCH.SET_FS, addr);
             assert(rc == 0);
         },
         .aarch64 => {
             asm volatile (
                 \\ msr tpidr_el0, %[addr]
                 :
-                : [addr] "r" (addr)
+                : [addr] "r" (addr),
             );
         },
         .arm, .thumb => {
@@ -158,7 +153,7 @@ pub fn setThreadPointer(addr: usize) void {
             asm volatile (
                 \\ mv tp, %[addr]
                 :
-                : [addr] "r" (addr)
+                : [addr] "r" (addr),
             );
         },
         .mips, .mipsel => {
@@ -169,71 +164,36 @@ pub fn setThreadPointer(addr: usize) void {
             asm volatile (
                 \\ mr 2, %[addr]
                 :
-                : [addr] "r" (addr)
+                : [addr] "r" (addr),
             );
         },
         .powerpc64, .powerpc64le => {
             asm volatile (
                 \\ mr 13, %[addr]
                 :
-                : [addr] "r" (addr)
+                : [addr] "r" (addr),
             );
         },
         .sparcv9 => {
             asm volatile (
                 \\ mov %[addr], %%g7
                 :
-                : [addr] "r" (addr)
+                : [addr] "r" (addr),
             );
         },
         else => @compileError("Unsupported architecture"),
     }
 }
 
-fn initTLS() void {
+fn initTLS(phdrs: []elf.Phdr) void {
     var tls_phdr: ?*elf.Phdr = null;
     var img_base: usize = 0;
 
-    const auxv = std.os.linux.elf_aux_maybe.?;
-    var at_phent: usize = undefined;
-    var at_phnum: usize = undefined;
-    var at_phdr: usize = undefined;
-    var at_hwcap: usize = undefined;
-
-    var i: usize = 0;
-    while (auxv[i].a_type != std.elf.AT_NULL) : (i += 1) {
-        switch (auxv[i].a_type) {
-            elf.AT_PHENT => at_phent = auxv[i].a_un.a_val,
-            elf.AT_PHNUM => at_phnum = auxv[i].a_un.a_val,
-            elf.AT_PHDR => at_phdr = auxv[i].a_un.a_val,
-            elf.AT_HWCAP => at_hwcap = auxv[i].a_un.a_val,
-            else => continue,
-        }
-    }
-
-    // Sanity check
-    assert(at_phent == @sizeOf(elf.Phdr));
-
-    // Find the TLS section
-    const phdrs = (@intToPtr([*]elf.Phdr, at_phdr))[0..at_phnum];
-
     for (phdrs) |*phdr| {
         switch (phdr.p_type) {
-            elf.PT_PHDR => img_base = at_phdr - phdr.p_vaddr,
+            elf.PT_PHDR => img_base = @ptrToInt(phdrs.ptr) - phdr.p_vaddr,
             elf.PT_TLS => tls_phdr = phdr,
             else => {},
-        }
-    }
-
-    // ARMv6 targets (and earlier) have no support for TLS in hardware
-    // FIXME: Elide the check for targets >= ARMv7 when the target feature API
-    // becomes less verbose (and more usable).
-    if (comptime native_arch.isARM()) {
-        if (at_hwcap & std.os.linux.HWCAP_TLS == 0) {
-            // FIXME: Make __aeabi_read_tp call the kernel helper kuser_get_tls
-            // For the time being use a simple abort instead of a @panic call to
-            // keep the binary bloat under control.
-            std.os.abort();
         }
     }
 
@@ -344,8 +304,8 @@ pub fn prepareTLS(area: []u8) usize {
 // overhead.
 var main_thread_tls_buffer: [0x2100]u8 align(mem.page_size) = undefined;
 
-pub fn initStaticTLS() void {
-    initTLS();
+pub fn initStaticTLS(phdrs: []elf.Phdr) void {
+    initTLS(phdrs);
 
     const tls_area = blk: {
         // Fast path for the common case where the TLS data is really small,
@@ -359,8 +319,8 @@ pub fn initStaticTLS() void {
         const alloc_tls_area = os.mmap(
             null,
             tls_image.alloc_size + tls_image.alloc_align - 1,
-            os.PROT_READ | os.PROT_WRITE,
-            os.MAP_PRIVATE | os.MAP_ANONYMOUS,
+            os.PROT.READ | os.PROT.WRITE,
+            os.MAP.PRIVATE | os.MAP.ANONYMOUS,
             -1,
             0,
         ) catch os.abort();

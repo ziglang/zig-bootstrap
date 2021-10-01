@@ -3,7 +3,7 @@
 set -e
 
 rootdir="$(pwd)"
-zig_version=$(cat "$rootdir/zig-version")
+zig_version="0.9.0-dev.1240+3eb729b44"
 
 target="x86_64-windows-gnu"
 target_and_cpu=$target-baseline

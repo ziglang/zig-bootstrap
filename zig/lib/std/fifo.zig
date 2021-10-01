@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 // FIFO of fixed size items
 // Usually used for e.g. byte buffers
 
@@ -124,8 +119,11 @@ pub fn LinearFifo(
             }
         }
 
+        /// Deprecated: call `ensureUnusedCapacity` or `ensureTotalCapacity`.
+        pub const ensureCapacity = ensureTotalCapacity;
+
         /// Ensure that the buffer can fit at least `size` items
-        pub fn ensureCapacity(self: *Self, size: usize) !void {
+        pub fn ensureTotalCapacity(self: *Self, size: usize) !void {
             if (self.buf.len >= size) return;
             if (buffer_type == .Dynamic) {
                 self.realign();
@@ -140,7 +138,7 @@ pub fn LinearFifo(
         pub fn ensureUnusedCapacity(self: *Self, size: usize) error{OutOfMemory}!void {
             if (self.writableLength() >= size) return;
 
-            return try self.ensureCapacity(math.add(usize, self.count, size) catch return error.OutOfMemory);
+            return try self.ensureTotalCapacity(math.add(usize, self.count, size) catch return error.OutOfMemory);
         }
 
         /// Returns number of items currently in fifo
@@ -476,7 +474,7 @@ test "LinearFifo(u8, .Dynamic)" {
     }
 
     {
-        try fifo.ensureCapacity(1);
+        try fifo.ensureTotalCapacity(1);
         var in_fbs = std.io.fixedBufferStream("pump test");
         var out_buf: [50]u8 = undefined;
         var out_fbs = std.io.fixedBufferStream(&out_buf);

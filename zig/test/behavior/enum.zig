@@ -2,26 +2,6 @@ const expect = @import("std").testing.expect;
 const mem = @import("std").mem;
 const Tag = @import("std").meta.Tag;
 
-test "extern enum" {
-    const S = struct {
-        const i = extern enum {
-            n = 0,
-            o = 2,
-            p = 4,
-            q = 4,
-        };
-        fn doTheTest(y: c_int) void {
-            var x = i.o;
-            switch (x) {
-                .n, .p => unreachable,
-                .o => {},
-            }
-        }
-    };
-    S.doTheTest(52);
-    comptime S.doTheTest(52);
-}
-
 test "non-exhaustive enum" {
     const S = struct {
         const E = enum(u8) {
@@ -131,6 +111,8 @@ test "enum type" {
             .y = 5678,
         },
     };
+    try expect(foo1.One == 13);
+    try expect(foo2.Two.x == 1234 and foo2.Two.y == 5678);
     const bar = Bar.B;
 
     try expect(bar == Bar.B);
@@ -221,7 +203,7 @@ test "int to enum" {
     try testIntToEnumEval(3);
 }
 fn testIntToEnumEval(x: i32) !void {
-    try expect(@intToEnum(IntToEnumNumber, @intCast(u3, x)) == IntToEnumNumber.Three);
+    try expect(@intToEnum(IntToEnumNumber, x) == IntToEnumNumber.Three);
 }
 const IntToEnumNumber = enum {
     Zero,
@@ -234,11 +216,6 @@ const IntToEnumNumber = enum {
 test "@tagName" {
     try expect(mem.eql(u8, testEnumTagNameBare(BareNumber.Three), "Three"));
     comptime try expect(mem.eql(u8, testEnumTagNameBare(BareNumber.Three), "Three"));
-}
-
-test "@tagName extern enum with duplicates" {
-    try expect(mem.eql(u8, testEnumTagNameBare(ExternDuplicates.B), "A"));
-    comptime try expect(mem.eql(u8, testEnumTagNameBare(ExternDuplicates.B), "A"));
 }
 
 test "@tagName non-exhaustive enum" {
@@ -254,11 +231,6 @@ const BareNumber = enum {
     One,
     Two,
     Three,
-};
-
-const ExternDuplicates = extern enum(u8) {
-    A = 1,
-    B = 1,
 };
 
 const NonExhaustive = enum(u8) {
@@ -1018,17 +990,8 @@ test "enum with 1 field but explicit tag type should still have the tag type" {
     comptime try expect(@sizeOf(Enum) == @sizeOf(u8));
 }
 
-test "empty extern enum with members" {
-    const E = extern enum {
-        A,
-        B,
-        C,
-    };
-    try expect(@sizeOf(E) == @sizeOf(c_int));
-}
-
 test "tag name with assigned enum values" {
-    const LocalFoo = enum {
+    const LocalFoo = enum(u8) {
         A = 1,
         B = 0,
     };

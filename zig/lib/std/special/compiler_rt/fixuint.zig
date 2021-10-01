@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const is_test = @import("builtin").is_test;
 const Log2Int = @import("std").math.Log2Int;
 
@@ -16,7 +11,6 @@ pub fn fixuint(comptime fp_t: type, comptime fixuint_t: type, a: fp_t) fixuint_t
         else => unreachable,
     };
     const typeWidth = @typeInfo(rep_t).Int.bits;
-    const srep_t = @import("std").meta.Int(.signed, typeWidth);
     const significandBits = switch (fp_t) {
         f32 => 23,
         f64 => 52,

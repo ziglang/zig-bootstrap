@@ -45,7 +45,7 @@ pub const APValueLValueBase = extern struct {
     extern fn ZigClangAPValueLValueBase_dyn_cast_Expr(APValueLValueBase) ?*const Expr;
 };
 
-pub const APValueKind = extern enum {
+pub const APValueKind = enum(c_int) {
     None,
     Indeterminate,
     Int,
@@ -105,7 +105,7 @@ pub const APFloat = opaque {
     extern fn ZigClangAPFloat_toString(*const APFloat, precision: c_uint, maxPadding: c_uint, truncateZero: bool) [*:0]const u8;
 };
 
-pub const APFloatBaseSemantics = extern enum {
+pub const APFloatBaseSemantics = enum(c_int) {
     IEEEhalf,
     BFloat,
     IEEEsingle,
@@ -181,6 +181,14 @@ pub const ArraySubscriptExpr = opaque {
 pub const ArrayType = opaque {
     pub const getElementType = ZigClangArrayType_getElementType;
     extern fn ZigClangArrayType_getElementType(*const ArrayType) QualType;
+};
+
+pub const ASTRecordLayout = opaque {
+    pub const getFieldOffset = ZigClangASTRecordLayout_getFieldOffset;
+    extern fn ZigClangASTRecordLayout_getFieldOffset(*const ASTRecordLayout, c_uint) u64;
+
+    pub const getAlignment = ZigClangASTRecordLayout_getAlignment;
+    extern fn ZigClangASTRecordLayout_getAlignment(*const ASTRecordLayout) i64;
 };
 
 pub const AttributedType = opaque {
@@ -259,6 +267,11 @@ pub const CharacterLiteral = opaque {
 
     pub const getValue = ZigClangCharacterLiteral_getValue;
     extern fn ZigClangCharacterLiteral_getValue(*const CharacterLiteral) c_uint;
+};
+
+pub const ChooseExpr = opaque {
+    pub const getChosenSubExpr = ZigClangChooseExpr_getChosenSubExpr;
+    extern fn ZigClangChooseExpr_getChosenSubExpr(*const ChooseExpr) *const Expr;
 };
 
 pub const CompoundAssignOperator = opaque {
@@ -381,9 +394,6 @@ pub const ElaboratedType = opaque {
 };
 
 pub const EnumConstantDecl = opaque {
-    pub const getInitExpr = ZigClangEnumConstantDecl_getInitExpr;
-    extern fn ZigClangEnumConstantDecl_getInitExpr(*const EnumConstantDecl) ?*const Expr;
-
     pub const getInitVal = ZigClangEnumConstantDecl_getInitVal;
     extern fn ZigClangEnumConstantDecl_getInitVal(*const EnumConstantDecl) *const APSInt;
 };
@@ -461,6 +471,9 @@ pub const FieldDecl = opaque {
 
     pub const getParent = ZigClangFieldDecl_getParent;
     extern fn ZigClangFieldDecl_getParent(*const FieldDecl) ?*const RecordDecl;
+
+    pub const getFieldIndex = ZigClangFieldDecl_getFieldIndex;
+    extern fn ZigClangFieldDecl_getFieldIndex(*const FieldDecl) c_uint;
 };
 
 pub const FileID = opaque {};
@@ -603,8 +616,8 @@ pub const IntegerLiteral = opaque {
     pub const getBeginLoc = ZigClangIntegerLiteral_getBeginLoc;
     extern fn ZigClangIntegerLiteral_getBeginLoc(*const IntegerLiteral) SourceLocation;
 
-    pub const isZero = ZigClangIntegerLiteral_isZero;
-    extern fn ZigClangIntegerLiteral_isZero(*const IntegerLiteral, *bool, *const ASTContext) bool;
+    pub const getSignum = ZigClangIntegerLiteral_getSignum;
+    extern fn ZigClangIntegerLiteral_getSignum(*const IntegerLiteral, *c_int, *const ASTContext) bool;
 };
 
 /// This is just used as a namespace for a static method on clang's Lexer class; we don't directly
@@ -751,6 +764,9 @@ pub const RecordDecl = opaque {
 
     pub const getLocation = ZigClangRecordDecl_getLocation;
     extern fn ZigClangRecordDecl_getLocation(*const RecordDecl) SourceLocation;
+
+    pub const getASTRecordLayout = ZigClangRecordDecl_getASTRecordLayout;
+    extern fn ZigClangRecordDecl_getASTRecordLayout(*const RecordDecl, *const ASTContext) *const ASTRecordLayout;
 
     pub const field_begin = ZigClangRecordDecl_field_begin;
     extern fn ZigClangRecordDecl_field_begin(*const RecordDecl) field_iterator;
@@ -988,6 +1004,9 @@ pub const VarDecl = opaque {
 
     pub const getTypeSourceInfo_getType = ZigClangVarDecl_getTypeSourceInfo_getType;
     extern fn ZigClangVarDecl_getTypeSourceInfo_getType(*const VarDecl) QualType;
+
+    pub const isStaticLocal = ZigClangVarDecl_isStaticLocal;
+    extern fn ZigClangVarDecl_isStaticLocal(*const VarDecl) bool;
 };
 
 pub const VectorType = opaque {
@@ -1020,7 +1039,7 @@ pub const InitListExpr = opaque {
     extern fn ZigClangInitListExpr_getInitializedFieldInUnion(*const InitListExpr) ?*FieldDecl;
 };
 
-pub const BO = extern enum {
+pub const BO = enum(c_int) {
     PtrMemD,
     PtrMemI,
     Mul,
@@ -1056,7 +1075,7 @@ pub const BO = extern enum {
     Comma,
 };
 
-pub const UO = extern enum {
+pub const UO = enum(c_int) {
     PostInc,
     PostDec,
     PreInc,
@@ -1073,7 +1092,7 @@ pub const UO = extern enum {
     Coawait,
 };
 
-pub const TypeClass = extern enum {
+pub const TypeClass = enum(c_int) {
     Adjusted,
     Decayed,
     ConstantArray,
@@ -1128,7 +1147,7 @@ pub const TypeClass = extern enum {
     ExtVector,
 };
 
-const StmtClass = extern enum {
+const StmtClass = enum(c_int) {
     NoStmtClass,
     GCCAsmStmtClass,
     MSAsmStmtClass,
@@ -1149,13 +1168,16 @@ const StmtClass = extern enum {
     IndirectGotoStmtClass,
     MSDependentExistsStmtClass,
     NullStmtClass,
+    OMPCanonicalLoopClass,
     OMPAtomicDirectiveClass,
     OMPBarrierDirectiveClass,
     OMPCancelDirectiveClass,
     OMPCancellationPointDirectiveClass,
     OMPCriticalDirectiveClass,
     OMPDepobjDirectiveClass,
+    OMPDispatchDirectiveClass,
     OMPFlushDirectiveClass,
+    OMPInteropDirectiveClass,
     OMPDistributeDirectiveClass,
     OMPDistributeParallelForDirectiveClass,
     OMPDistributeParallelForSimdDirectiveClass,
@@ -1181,6 +1203,9 @@ const StmtClass = extern enum {
     OMPTeamsDistributeParallelForDirectiveClass,
     OMPTeamsDistributeParallelForSimdDirectiveClass,
     OMPTeamsDistributeSimdDirectiveClass,
+    OMPTileDirectiveClass,
+    OMPUnrollDirectiveClass,
+    OMPMaskedDirectiveClass,
     OMPMasterDirectiveClass,
     OMPOrderedDirectiveClass,
     OMPParallelDirectiveClass,
@@ -1329,6 +1354,7 @@ const StmtClass = extern enum {
     PseudoObjectExprClass,
     RecoveryExprClass,
     RequiresExprClass,
+    SYCLUniqueStableNameExprClass,
     ShuffleVectorExprClass,
     SizeOfPackExprClass,
     SourceLocExprClass,
@@ -1345,7 +1371,7 @@ const StmtClass = extern enum {
     WhileStmtClass,
 };
 
-pub const CK = extern enum {
+pub const CK = enum(c_int) {
     Dependent,
     BitCast,
     LValueBitCast,
@@ -1371,6 +1397,7 @@ pub const CK = extern enum {
     PointerToIntegral,
     PointerToBoolean,
     ToVoid,
+    MatrixCast,
     VectorSplat,
     IntegralCast,
     IntegralToBoolean,
@@ -1412,7 +1439,7 @@ pub const CK = extern enum {
     IntToOCLSampler,
 };
 
-pub const DeclKind = extern enum {
+pub const DeclKind = enum(c_int) {
     AccessSpec,
     Block,
     Captured,
@@ -1426,6 +1453,8 @@ pub const DeclKind = extern enum {
     Import,
     LifetimeExtendedTemporary,
     LinkageSpec,
+    Using,
+    UsingEnum,
     Label,
     Namespace,
     NamespaceAlias,
@@ -1454,7 +1483,7 @@ pub const DeclKind = extern enum {
     TypeAlias,
     Typedef,
     UnresolvedUsingTypename,
-    Using,
+    UnresolvedUsingIfExists,
     UsingDirective,
     UsingPack,
     UsingShadow,
@@ -1496,7 +1525,7 @@ pub const DeclKind = extern enum {
     TranslationUnit,
 };
 
-pub const BuiltinTypeKind = extern enum {
+pub const BuiltinTypeKind = enum(c_int) {
     OCLImage1dRO,
     OCLImage1dArrayRO,
     OCLImage1dBufferRO,
@@ -1596,6 +1625,72 @@ pub const BuiltinTypeKind = extern enum {
     SveBool,
     VectorQuad,
     VectorPair,
+    RvvInt8mf8,
+    RvvInt8mf4,
+    RvvInt8mf2,
+    RvvInt8m1,
+    RvvInt8m2,
+    RvvInt8m4,
+    RvvInt8m8,
+    RvvUint8mf8,
+    RvvUint8mf4,
+    RvvUint8mf2,
+    RvvUint8m1,
+    RvvUint8m2,
+    RvvUint8m4,
+    RvvUint8m8,
+    RvvInt16mf4,
+    RvvInt16mf2,
+    RvvInt16m1,
+    RvvInt16m2,
+    RvvInt16m4,
+    RvvInt16m8,
+    RvvUint16mf4,
+    RvvUint16mf2,
+    RvvUint16m1,
+    RvvUint16m2,
+    RvvUint16m4,
+    RvvUint16m8,
+    RvvInt32mf2,
+    RvvInt32m1,
+    RvvInt32m2,
+    RvvInt32m4,
+    RvvInt32m8,
+    RvvUint32mf2,
+    RvvUint32m1,
+    RvvUint32m2,
+    RvvUint32m4,
+    RvvUint32m8,
+    RvvInt64m1,
+    RvvInt64m2,
+    RvvInt64m4,
+    RvvInt64m8,
+    RvvUint64m1,
+    RvvUint64m2,
+    RvvUint64m4,
+    RvvUint64m8,
+    RvvFloat16mf4,
+    RvvFloat16mf2,
+    RvvFloat16m1,
+    RvvFloat16m2,
+    RvvFloat16m4,
+    RvvFloat16m8,
+    RvvFloat32mf2,
+    RvvFloat32m1,
+    RvvFloat32m2,
+    RvvFloat32m4,
+    RvvFloat32m8,
+    RvvFloat64m1,
+    RvvFloat64m2,
+    RvvFloat64m4,
+    RvvFloat64m8,
+    RvvBool1,
+    RvvBool2,
+    RvvBool4,
+    RvvBool8,
+    RvvBool16,
+    RvvBool32,
+    RvvBool64,
     Void,
     Bool,
     Char_U,
@@ -1670,7 +1765,7 @@ pub const BuiltinTypeKind = extern enum {
     OMPIterator,
 };
 
-pub const CallingConv = extern enum {
+pub const CallingConv = enum(c_int) {
     C,
     X86StdCall,
     X86FastCall,
@@ -1686,12 +1781,13 @@ pub const CallingConv = extern enum {
     SpirFunction,
     OpenCLKernel,
     Swift,
+    SwiftAsync,
     PreserveMost,
     PreserveAll,
     AArch64VectorCall,
 };
 
-pub const StorageClass = extern enum {
+pub const StorageClass = enum(c_int) {
     None,
     Extern,
     Static,
@@ -1700,7 +1796,7 @@ pub const StorageClass = extern enum {
     Register,
 };
 
-pub const APFloat_roundingMode = extern enum(i8) {
+pub const APFloat_roundingMode = enum(i8) {
     TowardZero = 0,
     NearestTiesToEven = 1,
     TowardPositive = 2,
@@ -1710,7 +1806,7 @@ pub const APFloat_roundingMode = extern enum(i8) {
     Invalid = -1,
 };
 
-pub const StringLiteral_StringKind = extern enum {
+pub const StringLiteral_StringKind = enum(c_int) {
     Ascii,
     Wide,
     UTF8,
@@ -1718,7 +1814,7 @@ pub const StringLiteral_StringKind = extern enum {
     UTF32,
 };
 
-pub const CharacterLiteral_CharacterKind = extern enum {
+pub const CharacterLiteral_CharacterKind = enum(c_int) {
     Ascii,
     Wide,
     UTF8,
@@ -1726,13 +1822,13 @@ pub const CharacterLiteral_CharacterKind = extern enum {
     UTF32,
 };
 
-pub const VarDecl_TLSKind = extern enum {
+pub const VarDecl_TLSKind = enum(c_int) {
     None,
     Static,
     Dynamic,
 };
 
-pub const ElaboratedTypeKeyword = extern enum {
+pub const ElaboratedTypeKeyword = enum(c_int) {
     Struct,
     Interface,
     Union,
@@ -1742,21 +1838,21 @@ pub const ElaboratedTypeKeyword = extern enum {
     None,
 };
 
-pub const PreprocessedEntity_EntityKind = extern enum {
+pub const PreprocessedEntity_EntityKind = enum(c_int) {
     InvalidKind,
     MacroExpansionKind,
     MacroDefinitionKind,
     InclusionDirectiveKind,
 };
 
-pub const Expr_ConstantExprKind = extern enum {
+pub const Expr_ConstantExprKind = enum(c_int) {
     Normal,
     NonClassTemplateArgument,
     ClassTemplateArgument,
     ImmediateInvocation,
 };
 
-pub const UnaryExprOrTypeTrait_Kind = extern enum {
+pub const UnaryExprOrTypeTrait_Kind = enum(c_int) {
     SizeOf,
     AlignOf,
     VecStep,
@@ -1764,7 +1860,7 @@ pub const UnaryExprOrTypeTrait_Kind = extern enum {
     PreferredAlignOf,
 };
 
-pub const OffsetOfNode_Kind = extern enum {
+pub const OffsetOfNode_Kind = enum(c_int) {
     Array,
     Field,
     Identifier,

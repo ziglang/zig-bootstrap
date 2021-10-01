@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("../../std.zig");
 const elf = std.elf;
 const linux = std.os.linux;
@@ -15,7 +10,6 @@ pub fn lookup(vername: []const u8, name: []const u8) usize {
 
     const eh = @intToPtr(*elf.Ehdr, vdso_addr);
     var ph_addr: usize = vdso_addr + eh.e_phoff;
-    const ph = @intToPtr(*elf.Phdr, ph_addr);
 
     var maybe_dynv: ?[*]usize = null;
     var base: usize = maxInt(usize);

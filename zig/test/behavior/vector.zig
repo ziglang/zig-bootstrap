@@ -113,12 +113,10 @@ test "array to vector" {
     var foo: f32 = 3.14;
     var arr = [4]f32{ foo, 1.5, 0.0, 0.0 };
     var vec: Vector(4, f32) = arr;
+    _ = vec;
 }
 
-test "vector casts of sizes not divisable by 8" {
-    // https://github.com/ziglang/zig/issues/3563
-    if (std.Target.current.os.tag == .dragonfly) return error.SkipZigTest;
-
+test "vector casts of sizes not divisible by 8" {
     const S = struct {
         fn doTheTest() !void {
             {
@@ -267,6 +265,7 @@ test "initialize vector which is a struct field" {
             var foo = Vec4Obj{
                 .data = [_]f32{ 1, 2, 3, 4 },
             };
+            _ = foo;
         }
     };
     try S.doTheTest();
@@ -415,9 +414,6 @@ test "vector bitwise not operator" {
 }
 
 test "vector shift operators" {
-    // TODO investigate why this fails when cross-compiled to wasm.
-    if (builtin.target.os.tag == .wasi) return error.SkipZigTest;
-
     const S = struct {
         fn doTheTestShift(x: anytype, y: anytype) !void {
             const N = @typeInfo(@TypeOf(x)).Array.len;
@@ -637,4 +633,17 @@ test "vector reduce operation" {
 
     try S.doTheTest();
     comptime try S.doTheTest();
+}
+
+test "mask parameter of @shuffle is comptime scope" {
+    const __v4hi = std.meta.Vector(4, i16);
+    var v4_a = __v4hi{ 0, 0, 0, 0 };
+    var v4_b = __v4hi{ 0, 0, 0, 0 };
+    var shuffled: __v4hi = @shuffle(i16, v4_a, v4_b, std.meta.Vector(4, i32){
+        std.zig.c_translation.shuffleVectorIndex(0, @typeInfo(@TypeOf(v4_a)).Vector.len),
+        std.zig.c_translation.shuffleVectorIndex(0, @typeInfo(@TypeOf(v4_a)).Vector.len),
+        std.zig.c_translation.shuffleVectorIndex(0, @typeInfo(@TypeOf(v4_a)).Vector.len),
+        std.zig.c_translation.shuffleVectorIndex(0, @typeInfo(@TypeOf(v4_a)).Vector.len),
+    });
+    _ = shuffled;
 }

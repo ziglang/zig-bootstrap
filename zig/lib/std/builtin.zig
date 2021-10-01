@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const builtin = @import("builtin");
 
 // These are all deprecated.
@@ -32,7 +27,7 @@ pub const code_model = builtin.code_model;
 /// used rather than `explicit_subsystem`.
 /// On non-Windows targets, this is `null`.
 pub const subsystem: ?std.Target.SubSystem = blk: {
-    if (@hasDecl(builtin, "explicit_subsystem")) break :blk explicit_subsystem;
+    if (@hasDecl(builtin, "explicit_subsystem")) break :blk builtin.explicit_subsystem;
     switch (os.tag) {
         .windows => {
             if (is_test) {
@@ -65,6 +60,8 @@ pub const StackTrace = struct {
         options: std.fmt.FormatOptions,
         writer: anytype,
     ) !void {
+        _ = fmt;
+        _ = options;
         var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
         defer arena.deinit();
         const debug_info = std.debug.getSelfDebugInfo() catch |err| {
@@ -171,6 +168,15 @@ pub const CallingConvention = enum {
 
 /// This data structure is used by the Zig language code generation and
 /// therefore must be kept in sync with the compiler implementation.
+pub const AddressSpace = enum {
+    generic,
+    gs,
+    fs,
+    ss,
+};
+
+/// This data structure is used by the Zig language code generation and
+/// therefore must be kept in sync with the compiler implementation.
 pub const SourceLocation = struct {
     file: [:0]const u8,
     fn_name: [:0]const u8,
@@ -229,13 +235,14 @@ pub const TypeInfo = union(enum) {
         is_const: bool,
         is_volatile: bool,
         alignment: comptime_int,
+        address_space: AddressSpace,
         child: type,
         is_allowzero: bool,
 
         /// This field is an optional type.
         /// The type of the sentinel is the element type of the pointer, which is
         /// the value of the `child` field in this struct. However there is no way
-        /// to refer to that type here, so we use `var`.
+        /// to refer to that type here, so we use `anytype`.
         sentinel: anytype,
 
         /// This data structure is used by the Zig language code generation and
@@ -257,7 +264,7 @@ pub const TypeInfo = union(enum) {
         /// This field is an optional type.
         /// The type of the sentinel is the element type of the array, which is
         /// the value of the `child` field in this struct. However there is no way
-        /// to refer to that type here, so we use `var`.
+        /// to refer to that type here, so we use `anytype`.
         sentinel: anytype,
     };
 
@@ -457,6 +464,13 @@ pub const LinkMode = enum {
 
 /// This data structure is used by the Zig language code generation and
 /// therefore must be kept in sync with the compiler implementation.
+pub const WasiExecModel = enum {
+    command,
+    reactor,
+};
+
+/// This data structure is used by the Zig language code generation and
+/// therefore must be kept in sync with the compiler implementation.
 pub const Version = struct {
     major: u32,
     minor: u32,
@@ -500,7 +514,7 @@ pub const Version = struct {
         // found no digits or '.' before unexpected character
         if (end == 0) return error.InvalidVersion;
 
-        var it = std.mem.split(text[0..end], ".");
+        var it = std.mem.split(u8, text[0..end], ".");
         // substring is not empty, first call will succeed
         const major = it.next().?;
         if (major.len == 0) return error.InvalidVersion;
@@ -521,6 +535,7 @@ pub const Version = struct {
         options: std.fmt.FormatOptions,
         out_stream: anytype,
     ) !void {
+        _ = options;
         if (fmt.len == 0) {
             if (self.patch == 0) {
                 if (self.minor == 0) {
@@ -661,15 +676,23 @@ pub const PanicFn = fn ([]const u8, ?*StackTrace) noreturn;
 
 /// This function is used by the Zig language code generation and
 /// therefore must be kept in sync with the compiler implementation.
-pub const panic: PanicFn = if (@hasDecl(root, "panic")) root.panic else default_panic;
+pub const panic: PanicFn = if (@hasDecl(root, "panic"))
+    root.panic
+else if (@hasDecl(root, "os") and @hasDecl(root.os, "panic"))
+    root.os.panic
+else
+    default_panic;
 
 /// This function is used by the Zig language code generation and
 /// therefore must be kept in sync with the compiler implementation.
 pub fn default_panic(msg: []const u8, error_return_trace: ?*StackTrace) noreturn {
     @setCold(true);
-    if (@hasDecl(root, "os") and @hasDecl(root.os, "panic")) {
-        root.os.panic(msg, error_return_trace);
-        unreachable;
+    // Until self-hosted catches up with stage1 language features, we have a simpler
+    // default panic function:
+    if (builtin.zig_is_stage2) {
+        while (true) {
+            @breakpoint();
+        }
     }
     switch (os.tag) {
         .freestanding => {
@@ -687,7 +710,7 @@ pub fn default_panic(msg: []const u8, error_return_trace: ?*StackTrace) noreturn
         },
         else => {
             const first_trace_addr = @returnAddress();
-            std.debug.panicExtra(error_return_trace, first_trace_addr, "{s}", .{msg});
+            std.debug.panicImpl(error_return_trace, first_trace_addr, msg);
         },
     }
 }

@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("std");
 const Target = std.Target;
 const CrossTarget = std.zig.CrossTarget;
@@ -28,6 +23,7 @@ inline fn hasMask(input: u32, mask: u32) bool {
 }
 
 pub fn detectNativeCpuAndFeatures(arch: Target.Cpu.Arch, os: Target.Os, cross_target: CrossTarget) Target.Cpu {
+    _ = cross_target;
     var cpu = Target.Cpu{
         .arch = arch,
         .model = Target.Cpu.Model.generic(arch),
@@ -547,7 +543,7 @@ fn cpuid(leaf_id: u32, subid: u32) CpuidLeaf {
         :
         : [leaf_id] "{eax}" (leaf_id),
           [subid] "{ecx}" (subid),
-          [leaf_ptr] "r" (&cpuid_leaf)
+          [leaf_ptr] "r" (&cpuid_leaf),
         : "eax", "ebx", "ecx", "edx"
     );
 
@@ -559,7 +555,7 @@ fn getXCR0() u32 {
     return asm volatile (
         \\ xor %%ecx, %%ecx
         \\ xgetbv
-        : [ret] "={eax}" (-> u32)
+        : [ret] "={eax}" (-> u32),
         :
         : "eax", "edx", "ecx"
     );

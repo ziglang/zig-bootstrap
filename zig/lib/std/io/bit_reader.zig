@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("../std.zig");
 const builtin = std.builtin;
 const io = std.io;
@@ -149,7 +144,7 @@ pub fn BitReader(endian: builtin.Endian, comptime ReaderType: type) type {
             var out_bits_total = @as(usize, 0);
             //@NOTE: I'm not sure this is a good idea, maybe alignToByte should be forced
             if (self.bit_count > 0) {
-                for (buffer) |*b, i| {
+                for (buffer) |*b| {
                     b.* = try self.readBits(u8, u8_bit_count, &out_bits);
                     out_bits_total += out_bits;
                 }

@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("std.zig");
 const assert = std.debug.assert;
 const mem = std.mem;
@@ -111,11 +106,11 @@ pub const inf = @import("math/inf.zig").inf;
 /// the specified tolerance.
 ///
 /// The `tolerance` parameter is the absolute tolerance used when determining if
-/// the two numbers are close enough, a good value for this parameter is a small
+/// the two numbers are close enough; a good value for this parameter is a small
 /// multiple of `epsilon(T)`.
 ///
-/// Note that this function is recommended for for comparing small numbers
-/// around zero, using `approxEqRel` is suggested otherwise.
+/// Note that this function is recommended for comparing small numbers
+/// around zero; using `approxEqRel` is suggested otherwise.
 ///
 /// NaN values are never considered equal to any value.
 pub fn approxEqAbs(comptime T: type, x: T, y: T, tolerance: T) bool {
@@ -138,7 +133,7 @@ pub fn approxEqAbs(comptime T: type, x: T, y: T, tolerance: T) bool {
 /// than zero.
 ///
 /// The `tolerance` parameter is the relative tolerance used when determining if
-/// the two numbers are close enough, a good value for this parameter is usually
+/// the two numbers are close enough; a good value for this parameter is usually
 /// `sqrt(epsilon(T))`, meaning that the two numbers are considered equal if at
 /// least half of the digits are equal.
 ///
@@ -1087,14 +1082,14 @@ fn testCeilPowerOfTwo() !void {
 
 pub fn log2_int(comptime T: type, x: T) Log2Int(T) {
     if (@typeInfo(T) != .Int or @typeInfo(T).Int.signedness != .unsigned)
-        @compileError("log2_int requires an unsigned integer, found "++@typeName(T));
+        @compileError("log2_int requires an unsigned integer, found " ++ @typeName(T));
     assert(x != 0);
     return @intCast(Log2Int(T), @typeInfo(T).Int.bits - 1 - @clz(T, x));
 }
 
 pub fn log2_int_ceil(comptime T: type, x: T) Log2IntCeil(T) {
     if (@typeInfo(T) != .Int or @typeInfo(T).Int.signedness != .unsigned)
-        @compileError("log2_int_ceil requires an unsigned integer, found "++@typeName(T));
+        @compileError("log2_int_ceil requires an unsigned integer, found " ++ @typeName(T));
     assert(x != 0);
     if (x == 1) return 0;
     const log2_val: Log2IntCeil(T) = log2_int(T, x - 1);
@@ -1419,4 +1414,9 @@ test "boolMask" {
     }.runTest;
     try runTest();
     comptime try runTest();
+}
+
+/// Return the mod of `num` with the smallest integer type
+pub fn comptimeMod(num: anytype, denom: comptime_int) IntFittingRange(0, denom - 1) {
+    return @intCast(IntFittingRange(0, denom - 1), @mod(num, denom));
 }

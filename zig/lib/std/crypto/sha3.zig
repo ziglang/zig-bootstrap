@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("../std.zig");
 const mem = std.mem;
 const math = std.math;
@@ -28,6 +23,7 @@ fn Keccak(comptime bits: usize, comptime delim: u8) type {
         rate: usize,
 
         pub fn init(options: Options) Self {
+            _ = options;
             return Self{ .s = [_]u8{0} ** 200, .offset = 0, .rate = 200 - (bits / 4) };
         }
 

@@ -2,12 +2,13 @@ const std = @import("std");
 const mem = std.mem;
 
 /// Print the string as a Zig identifier escaping it with @"" syntax if needed.
-pub fn formatId(
+fn formatId(
     bytes: []const u8,
     comptime fmt: []const u8,
     options: std.fmt.FormatOptions,
     writer: anytype,
 ) !void {
+    _ = fmt;
     if (isValidId(bytes)) {
         return writer.writeAll(bytes);
     }
@@ -22,6 +23,7 @@ pub fn fmtId(bytes: []const u8) std.fmt.Formatter(formatId) {
 }
 
 pub fn isValidId(bytes: []const u8) bool {
+    if (mem.eql(u8, bytes, "_")) return false;
     for (bytes) |c, i| {
         switch (c) {
             '_', 'a'...'z', 'A'...'Z' => {},
@@ -35,12 +37,13 @@ pub fn isValidId(bytes: []const u8) bool {
 /// Print the string as escaped contents of a double quoted or single-quoted string.
 /// Format `{}` treats contents as a double-quoted string.
 /// Format `{'}` treats contents as a single-quoted string.
-pub fn formatEscapes(
+fn formatEscapes(
     bytes: []const u8,
     comptime fmt: []const u8,
     options: std.fmt.FormatOptions,
     writer: anytype,
 ) !void {
+    _ = options;
     for (bytes) |byte| switch (byte) {
         '\n' => try writer.writeAll("\\n"),
         '\r' => try writer.writeAll("\\r"),
@@ -68,7 +71,7 @@ pub fn formatEscapes(
         // Use hex escapes for rest any unprintable characters.
         else => {
             try writer.writeAll("\\x");
-            try std.fmt.formatInt(byte, 16, false, .{ .width = 2, .fill = '0' }, writer);
+            try std.fmt.formatInt(byte, 16, .lower, .{ .width = 2, .fill = '0' }, writer);
         },
     };
 }

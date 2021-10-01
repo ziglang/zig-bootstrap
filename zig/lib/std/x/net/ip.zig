@@ -1,9 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
-
 const std = @import("../../std.zig");
 
 const fmt = std.fmt;
@@ -53,6 +47,8 @@ pub const Address = union(enum) {
         opts: fmt.FormatOptions,
         writer: anytype,
     ) !void {
+        _ = opts;
+        _ = layout;
         switch (self) {
             .ipv4 => |address| try fmt.format(writer, "{}:{}", .{ address.host, address.port }),
             .ipv6 => |address| try fmt.format(writer, "{}:{}", .{ address.host, address.port }),

@@ -54,6 +54,8 @@ uint32_t get_async_frame_align_bytes(CodeGen *g);
 bool type_has_bits(CodeGen *g, ZigType *type_entry);
 Error type_has_bits2(CodeGen *g, ZigType *type_entry, bool *result);
 
+bool fn_returns_c_abi_small_struct(FnTypeId *fn_type_id);
+
 enum ExternPosition {
     ExternPositionFunctionParameter,
     ExternPositionFunctionReturn,
@@ -138,12 +140,13 @@ ScopeSuspend *create_suspend_scope(CodeGen *g, AstNode *node, Scope *parent);
 ScopeFnDef *create_fndef_scope(CodeGen *g, AstNode *node, Scope *parent, ZigFn *fn_entry);
 Scope *create_comptime_scope(CodeGen *g, AstNode *node, Scope *parent);
 Scope *create_nosuspend_scope(CodeGen *g, AstNode *node, Scope *parent);
-Scope *create_runtime_scope(CodeGen *g, AstNode *node, Scope *parent, IrInstSrc *is_comptime);
+Scope *create_runtime_scope(CodeGen *g, AstNode *node, Scope *parent, Stage1ZirInst *is_comptime);
 Scope *create_typeof_scope(CodeGen *g, AstNode *node, Scope *parent);
 ScopeExpr *create_expr_scope(CodeGen *g, AstNode *node, Scope *parent);
 
 void init_const_str_lit(CodeGen *g, ZigValue *const_val, Buf *str, bool move_str);
 ZigValue *create_const_str_lit(CodeGen *g, Buf *str);
+ZigValue *create_sentineled_str_lit(CodeGen *g, Buf *str, ZigValue *sentinel);
 
 void init_const_bigint(ZigValue *const_val, ZigType *type, const BigInt *bigint);
 ZigValue *create_const_bigint(CodeGen *g, ZigType *type, const BigInt *bigint);
@@ -186,8 +189,8 @@ ZigValue *create_const_ptr_array(CodeGen *g, ZigValue *array_val, size_t elem_in
         bool is_const, PtrLen ptr_len);
 
 void init_const_slice(CodeGen *g, ZigValue *const_val, ZigValue *array_val,
-        size_t start, size_t len, bool is_const);
-ZigValue *create_const_slice(CodeGen *g, ZigValue *array_val, size_t start, size_t len, bool is_const);
+        size_t start, size_t len, bool is_const, ZigValue *sentinel);
+ZigValue *create_const_slice(CodeGen *g, ZigValue *array_val, size_t start, size_t len, bool is_const, ZigValue *sentinel);
 
 void init_const_null(ZigValue *const_val, ZigType *type);
 ZigValue *create_const_null(CodeGen *g, ZigType *type);
@@ -239,6 +242,8 @@ Error get_primitive_type(CodeGen *g, Buf *name, ZigType **result);
 bool calling_convention_allows_zig_types(CallingConvention cc);
 const char *calling_convention_name(CallingConvention cc);
 
+const char *address_space_name(AddressSpace as);
+
 Error ATTRIBUTE_MUST_USE file_fetch(CodeGen *g, Buf *resolved_path, Buf *contents);
 
 void walk_function_params(CodeGen *g, ZigType *fn_type, FnWalk *fn_walk);
@@ -267,6 +272,7 @@ Buf *type_bare_name(ZigType *t);
 Buf *type_h_name(ZigType *t);
 
 LLVMTypeRef get_llvm_type(CodeGen *g, ZigType *type);
+LLVMTypeRef get_llvm_c_abi_type(CodeGen *g, ZigType *type);
 ZigLLVMDIType *get_llvm_di_type(CodeGen *g, ZigType *type);
 
 void add_cc_args(CodeGen *g, ZigList<const char *> &args, const char *out_dep_path, bool translate_c,

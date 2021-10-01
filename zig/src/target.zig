@@ -34,6 +34,8 @@ pub const available_libcs = [_]ArchOsAbi{
     .{ .arch = .i386, .os = .linux, .abi = .gnu },
     .{ .arch = .i386, .os = .linux, .abi = .musl },
     .{ .arch = .i386, .os = .windows, .abi = .gnu },
+    .{ .arch = .m68k, .os = .linux, .abi = .gnu },
+    .{ .arch = .m68k, .os = .linux, .abi = .musl },
     .{ .arch = .mips64el, .os = .linux, .abi = .gnuabi64 },
     .{ .arch = .mips64el, .os = .linux, .abi = .gnuabin32 },
     .{ .arch = .mips64el, .os = .linux, .abi = .musl },
@@ -83,6 +85,7 @@ pub fn libCGenericName(target: std.Target) [:0]const u8 {
         .musl,
         .musleabi,
         .musleabihf,
+        .muslx32,
         .none,
         => return "musl",
         .code16,
@@ -163,11 +166,79 @@ pub fn isSingleThreaded(target: std.Target) bool {
 pub fn hasValgrindSupport(target: std.Target) bool {
     switch (target.cpu.arch) {
         .x86_64 => {
-            return target.os.tag == .linux or target.isDarwin() or target.os.tag == .solaris or
+            return target.os.tag == .linux or target.os.tag == .solaris or
                 (target.os.tag == .windows and target.abi != .msvc);
         },
         else => return false,
     }
+}
+
+/// The set of targets that LLVM has non-experimental support for.
+/// Used to select between LLVM backend and self-hosted backend when compiling in
+/// release modes.
+pub fn hasLlvmSupport(target: std.Target) bool {
+    return switch (target.cpu.arch) {
+        .arm,
+        .armeb,
+        .aarch64,
+        .aarch64_be,
+        .aarch64_32,
+        .arc,
+        .avr,
+        .bpfel,
+        .bpfeb,
+        .csky,
+        .hexagon,
+        .m68k,
+        .mips,
+        .mipsel,
+        .mips64,
+        .mips64el,
+        .msp430,
+        .powerpc,
+        .powerpcle,
+        .powerpc64,
+        .powerpc64le,
+        .r600,
+        .amdgcn,
+        .riscv32,
+        .riscv64,
+        .sparc,
+        .sparcv9,
+        .sparcel,
+        .s390x,
+        .tce,
+        .tcele,
+        .thumb,
+        .thumbeb,
+        .i386,
+        .x86_64,
+        .xcore,
+        .nvptx,
+        .nvptx64,
+        .le32,
+        .le64,
+        .amdil,
+        .amdil64,
+        .hsail,
+        .hsail64,
+        .spir,
+        .spir64,
+        .kalimba,
+        .shave,
+        .lanai,
+        .wasm32,
+        .wasm64,
+        .renderscript32,
+        .renderscript64,
+        .ve,
+        => true,
+
+        .spu_2,
+        .spirv32,
+        .spirv64,
+        => false,
+    };
 }
 
 pub fn supportsStackProbing(target: std.Target) bool {
@@ -177,7 +248,7 @@ pub fn supportsStackProbing(target: std.Target) bool {
 
 pub fn osToLLVM(os_tag: std.Target.Os.Tag) llvm.OSType {
     return switch (os_tag) {
-        .freestanding, .other, .opencl, .glsl450, .vulkan => .UnknownOS,
+        .freestanding, .other, .opencl, .glsl450, .vulkan, .plan9 => .UnknownOS,
         .windows, .uefi => .Win32,
         .ananas => .Ananas,
         .cloudabi => .CloudABI,
@@ -228,6 +299,7 @@ pub fn archToLLVM(arch_tag: std.Target.Cpu.Arch) llvm.ArchType {
         .bpfeb => .bpfeb,
         .csky => .csky,
         .hexagon => .hexagon,
+        .m68k => .m68k,
         .mips => .mips,
         .mipsel => .mipsel,
         .mips64 => .mips64,
@@ -366,6 +438,13 @@ pub fn libcFullLinkFlags(target: std.Target) []const []const u8 {
             "-lc",
             "-lutil",
         },
+        .solaris => &[_][]const u8{
+            "-lm",
+            "-lsocket",
+            "-lnsl",
+            // Solaris releases after 10 merged the threading libraries into libc.
+            "-lc",
+        },
         .haiku => &[_][]const u8{
             "-lm",
             "-lroot",
@@ -403,4 +482,96 @@ pub fn clangAssemblerSupportsMcpuArg(target: std.Target) bool {
         .arm, .armeb, .thumb, .thumbeb => true,
         else => false,
     };
+}
+
+pub fn needUnwindTables(target: std.Target) bool {
+    return target.os.tag == .windows;
+}
+
+/// TODO this was ported from stage1 but it does not take into account CPU features,
+/// which can affect this value. Audit this!
+pub fn largestAtomicBits(target: std.Target) u32 {
+    return switch (target.cpu.arch) {
+        .avr,
+        .msp430,
+        .spu_2,
+        => 16,
+
+        .arc,
+        .arm,
+        .armeb,
+        .hexagon,
+        .m68k,
+        .le32,
+        .mips,
+        .mipsel,
+        .nvptx,
+        .powerpc,
+        .powerpcle,
+        .r600,
+        .riscv32,
+        .sparc,
+        .sparcel,
+        .tce,
+        .tcele,
+        .thumb,
+        .thumbeb,
+        .i386,
+        .xcore,
+        .amdil,
+        .hsail,
+        .spir,
+        .kalimba,
+        .lanai,
+        .shave,
+        .wasm32,
+        .renderscript32,
+        .csky,
+        .spirv32,
+        => 32,
+
+        .aarch64,
+        .aarch64_be,
+        .aarch64_32,
+        .amdgcn,
+        .bpfel,
+        .bpfeb,
+        .le64,
+        .mips64,
+        .mips64el,
+        .nvptx64,
+        .powerpc64,
+        .powerpc64le,
+        .riscv64,
+        .sparcv9,
+        .s390x,
+        .amdil64,
+        .hsail64,
+        .spir64,
+        .wasm64,
+        .renderscript64,
+        .ve,
+        .spirv64,
+        => 64,
+
+        .x86_64 => 128,
+    };
+}
+
+pub fn defaultAddressSpace(
+    target: std.Target,
+    context: enum {
+        /// Query the default address space for global constant values.
+        global_constant,
+        /// Query the default address space for global mutable values.
+        global_mutable,
+        /// Query the default address space for function-local values.
+        local,
+        /// Query the default address space for functions themselves.
+        function,
+    },
+) std.builtin.AddressSpace {
+    _ = target;
+    _ = context;
+    return .generic;
 }

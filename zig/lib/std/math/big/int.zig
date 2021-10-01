@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("../../std.zig");
 const math = std.math;
 const Limb = std.math.big.Limb;
@@ -316,7 +311,9 @@ pub const Mutable = struct {
         }
 
         if (a.limbs.len == 1 and b.limbs.len == 1 and a.positive == b.positive) {
-            if (!@addWithOverflow(Limb, a.limbs[0], b.limbs[0], &r.limbs[0])) {
+            var o: Limb = undefined;
+            if (!@addWithOverflow(Limb, a.limbs[0], b.limbs[0], &o)) {
+                r.limbs[0] = o;
                 r.len = 1;
                 r.positive = a.positive;
                 return;
@@ -333,10 +330,10 @@ pub const Mutable = struct {
             }
         } else {
             if (a.limbs.len >= b.limbs.len) {
-                lladd(r.limbs[0..], a.limbs[0..a.limbs.len], b.limbs[0..b.limbs.len]);
+                lladd(r.limbs[0..], a.limbs, b.limbs);
                 r.normalize(a.limbs.len + 1);
             } else {
-                lladd(r.limbs[0..], b.limbs[0..b.limbs.len], a.limbs[0..a.limbs.len]);
+                lladd(r.limbs[0..], b.limbs, a.limbs);
                 r.normalize(b.limbs.len + 1);
             }
 
@@ -456,6 +453,7 @@ pub const Mutable = struct {
     /// If `allocator` is provided, it will be used for temporary storage to improve
     /// multiplication performance. `error.OutOfMemory` is handled with a fallback algorithm.
     pub fn sqrNoAlias(rma: *Mutable, a: Const, opt_allocator: ?*Allocator) void {
+        _ = opt_allocator;
         assert(rma.limbs.ptr != a.limbs.ptr); // illegal aliasing
 
         mem.set(Limb, rma.limbs, 0);
@@ -554,47 +552,78 @@ pub const Mutable = struct {
         r.positive = a.positive;
     }
 
-    /// r = a | b
+    /// r = a | b under 2s complement semantics.
     /// r may alias with a or b.
     ///
     /// a and b are zero-extended to the longer of a or b.
     ///
     /// Asserts that r has enough limbs to store the result. Upper bound is `math.max(a.limbs.len, b.limbs.len)`.
     pub fn bitOr(r: *Mutable, a: Const, b: Const) void {
-        if (a.limbs.len > b.limbs.len) {
-            llor(r.limbs[0..], a.limbs[0..a.limbs.len], b.limbs[0..b.limbs.len]);
-            r.len = a.limbs.len;
+        // Trivial cases, llsignedor does not support zero.
+        if (a.eqZero()) {
+            r.copy(b);
+            return;
+        } else if (b.eqZero()) {
+            r.copy(a);
+            return;
+        }
+
+        if (a.limbs.len >= b.limbs.len) {
+            r.positive = llsignedor(r.limbs, a.limbs, a.positive, b.limbs, b.positive);
+            r.normalize(if (b.positive) a.limbs.len else b.limbs.len);
         } else {
-            llor(r.limbs[0..], b.limbs[0..b.limbs.len], a.limbs[0..a.limbs.len]);
-            r.len = b.limbs.len;
+            r.positive = llsignedor(r.limbs, b.limbs, b.positive, a.limbs, a.positive);
+            r.normalize(if (a.positive) b.limbs.len else a.limbs.len);
         }
     }
 
-    /// r = a & b
+    /// r = a & b under 2s complement semantics.
     /// r may alias with a or b.
     ///
-    /// Asserts that r has enough limbs to store the result. Upper bound is `math.min(a.limbs.len, b.limbs.len)`.
+    /// Asserts that r has enough limbs to store the result.
+    /// If a or b is positive, the upper bound is `math.min(a.limbs.len, b.limbs.len)`.
+    /// If a and b are negative, the upper bound is `math.max(a.limbs.len, b.limbs.len) + 1`.
     pub fn bitAnd(r: *Mutable, a: Const, b: Const) void {
-        if (a.limbs.len > b.limbs.len) {
-            lland(r.limbs[0..], a.limbs[0..a.limbs.len], b.limbs[0..b.limbs.len]);
-            r.normalize(b.limbs.len);
+        // Trivial cases, llsignedand does not support zero.
+        if (a.eqZero()) {
+            r.copy(a);
+            return;
+        } else if (b.eqZero()) {
+            r.copy(b);
+            return;
+        }
+
+        if (a.limbs.len >= b.limbs.len) {
+            r.positive = llsignedand(r.limbs, a.limbs, a.positive, b.limbs, b.positive);
+            r.normalize(if (a.positive or b.positive) b.limbs.len else a.limbs.len + 1);
         } else {
-            lland(r.limbs[0..], b.limbs[0..b.limbs.len], a.limbs[0..a.limbs.len]);
-            r.normalize(a.limbs.len);
+            r.positive = llsignedand(r.limbs, b.limbs, b.positive, a.limbs, a.positive);
+            r.normalize(if (a.positive or b.positive) a.limbs.len else b.limbs.len + 1);
         }
     }
 
-    /// r = a ^ b
+    /// r = a ^ b under 2s complement semantics.
     /// r may alias with a or b.
     ///
-    /// Asserts that r has enough limbs to store the result. Upper bound is `math.max(a.limbs.len, b.limbs.len)`.
+    /// Asserts that r has enough limbs to store the result. If a and b share the same signedness, the
+    /// upper bound is `math.max(a.limbs.len, b.limbs.len)`. Otherwise, if either a or b is negative
+    /// but not both, the upper bound is `math.max(a.limbs.len, b.limbs.len) + 1`.
     pub fn bitXor(r: *Mutable, a: Const, b: Const) void {
+        // Trivial cases, because llsignedxor does not support negative zero.
+        if (a.eqZero()) {
+            r.copy(b);
+            return;
+        } else if (b.eqZero()) {
+            r.copy(a);
+            return;
+        }
+
         if (a.limbs.len > b.limbs.len) {
-            llxor(r.limbs[0..], a.limbs[0..a.limbs.len], b.limbs[0..b.limbs.len]);
-            r.normalize(a.limbs.len);
+            r.positive = llsignedxor(r.limbs, a.limbs, a.positive, b.limbs, b.positive);
+            r.normalize(a.limbs.len + @boolToInt(a.positive != b.positive));
         } else {
-            llxor(r.limbs[0..], b.limbs[0..b.limbs.len], a.limbs[0..a.limbs.len]);
-            r.normalize(b.limbs.len);
+            r.positive = llsignedxor(r.limbs, b.limbs, b.positive, a.limbs, a.positive);
+            r.normalize(b.limbs.len + @boolToInt(a.positive != b.positive));
         }
     }
 
@@ -676,7 +705,7 @@ pub const Mutable = struct {
     pub fn gcdNoAlias(rma: *Mutable, x: Const, y: Const, limbs_buffer: *std.ArrayList(Limb)) !void {
         assert(rma.limbs.ptr != x.limbs.ptr); // illegal aliasing
         assert(rma.limbs.ptr != y.limbs.ptr); // illegal aliasing
-        return gcdLehmer(rma, x, y, allocator);
+        return gcdLehmer(rma, x, y, limbs_buffer);
     }
 
     fn gcdLehmer(result: *Mutable, xa: Const, ya: Const, limbs_buffer: *std.ArrayList(Limb)) !void {
@@ -1139,21 +1168,22 @@ pub const Const = struct {
         options: std.fmt.FormatOptions,
         out_stream: anytype,
     ) !void {
+        _ = options;
         comptime var radix = 10;
-        comptime var uppercase = false;
+        comptime var case: std.fmt.Case = .lower;
 
         if (fmt.len == 0 or comptime mem.eql(u8, fmt, "d")) {
             radix = 10;
-            uppercase = false;
+            case = .lower;
         } else if (comptime mem.eql(u8, fmt, "b")) {
             radix = 2;
-            uppercase = false;
+            case = .lower;
         } else if (comptime mem.eql(u8, fmt, "x")) {
             radix = 16;
-            uppercase = false;
+            case = .lower;
         } else if (comptime mem.eql(u8, fmt, "X")) {
             radix = 16;
-            uppercase = true;
+            case = .upper;
         } else {
             @compileError("Unknown format string: '" ++ fmt ++ "'");
         }
@@ -1171,7 +1201,7 @@ pub const Const = struct {
             .positive = false,
         };
         var buf: [biggest.sizeInBaseUpperBound(radix)]u8 = undefined;
-        const len = self.toString(&buf, radix, uppercase, &limbs);
+        const len = self.toString(&buf, radix, case, &limbs);
         return out_stream.writeAll(buf[0..len]);
     }
 
@@ -1179,7 +1209,7 @@ pub const Const = struct {
     /// Caller owns returned memory.
     /// Asserts that `base` is in the range [2, 16].
     /// See also `toString`, a lower level function than this.
-    pub fn toStringAlloc(self: Const, allocator: *Allocator, base: u8, uppercase: bool) Allocator.Error![]u8 {
+    pub fn toStringAlloc(self: Const, allocator: *Allocator, base: u8, case: std.fmt.Case) Allocator.Error![]u8 {
         assert(base >= 2);
         assert(base <= 16);
 
@@ -1192,7 +1222,7 @@ pub const Const = struct {
         const limbs = try allocator.alloc(Limb, calcToStringLimbsBufferLen(self.limbs.len, base));
         defer allocator.free(limbs);
 
-        return allocator.shrink(string, self.toString(string, base, uppercase, limbs));
+        return allocator.shrink(string, self.toString(string, base, case, limbs));
     }
 
     /// Converts self to a string in the requested base.
@@ -1204,7 +1234,7 @@ pub const Const = struct {
     /// length of at least `calcToStringLimbsBufferLen`.
     /// In the case of power-of-two base, `limbs_buffer` is ignored.
     /// See also `toStringAlloc`, a higher level function than this.
-    pub fn toString(self: Const, string: []u8, base: u8, uppercase: bool, limbs_buffer: []Limb) usize {
+    pub fn toString(self: Const, string: []u8, base: u8, case: std.fmt.Case, limbs_buffer: []Limb) usize {
         assert(base >= 2);
         assert(base <= 16);
 
@@ -1223,7 +1253,7 @@ pub const Const = struct {
                 var shift: usize = 0;
                 while (shift < limb_bits) : (shift += base_shift) {
                     const r = @intCast(u8, (limb >> @intCast(Log2Limb, shift)) & @as(Limb, base - 1));
-                    const ch = std.fmt.digitToChar(r, uppercase);
+                    const ch = std.fmt.digitToChar(r, case);
                     string[digits_len] = ch;
                     digits_len += 1;
                     // If we hit the end, it must be all zeroes from here.
@@ -1269,7 +1299,7 @@ pub const Const = struct {
                 var r_word = r.limbs[0];
                 var i: usize = 0;
                 while (i < digits_per_limb) : (i += 1) {
-                    const ch = std.fmt.digitToChar(@intCast(u8, r_word % base), uppercase);
+                    const ch = std.fmt.digitToChar(@intCast(u8, r_word % base), case);
                     r_word /= base;
                     string[digits_len] = ch;
                     digits_len += 1;
@@ -1281,7 +1311,7 @@ pub const Const = struct {
 
                 var r_word = q.limbs[0];
                 while (r_word != 0) {
-                    const ch = std.fmt.digitToChar(@intCast(u8, r_word % base), uppercase);
+                    const ch = std.fmt.digitToChar(@intCast(u8, r_word % base), case);
                     r_word /= base;
                     string[digits_len] = ch;
                     digits_len += 1;
@@ -1615,9 +1645,10 @@ pub const Managed = struct {
 
     /// Converts self to a string in the requested base. Memory is allocated from the provided
     /// allocator and not the one present in self.
-    pub fn toString(self: Managed, allocator: *Allocator, base: u8, uppercase: bool) ![]u8 {
+    pub fn toString(self: Managed, allocator: *Allocator, base: u8, case: std.fmt.Case) ![]u8 {
+        _ = allocator;
         if (base < 2 or base > 16) return error.InvalidBase;
-        return self.toConst().toStringAlloc(self.allocator, base, uppercase);
+        return self.toConst().toStringAlloc(self.allocator, base, case);
     }
 
     /// To allow `std.fmt.format` to work with `Managed`.
@@ -1683,12 +1714,14 @@ pub const Managed = struct {
 
     /// r = a + scalar
     ///
-    /// r and a may be aliases.
+    /// r and a may be aliases. If r aliases a, then caller must call
+    /// `r.ensureAddScalarCapacity` prior to calling `add`.
     /// scalar is a primitive integer type.
     ///
     /// Returns an error if memory could not be allocated.
     pub fn addScalar(r: *Managed, a: Const, scalar: anytype) Allocator.Error!void {
-        try r.ensureCapacity(math.max(a.limbs.len, calcLimbLen(scalar)) + 1);
+        assert((r.limbs.ptr != a.limbs.ptr) or r.limbs.len >= math.max(a.limbs.len, calcLimbLen(scalar)) + 1);
+        try r.ensureAddScalarCapacity(a, scalar);
         var m = r.toMutable();
         m.addScalar(a, scalar);
         r.setMetadata(m.positive, m.len);
@@ -1696,11 +1729,13 @@ pub const Managed = struct {
 
     /// r = a + b
     ///
-    /// r, a and b may be aliases.
+    /// r, a and b may be aliases. If r aliases a or b, then caller must call
+    /// `r.ensureAddCapacity` prior to calling `add`.
     ///
     /// Returns an error if memory could not be allocated.
     pub fn add(r: *Managed, a: Const, b: Const) Allocator.Error!void {
-        try r.ensureCapacity(math.max(a.limbs.len, b.limbs.len) + 1);
+        assert((r.limbs.ptr != a.limbs.ptr and r.limbs.ptr != b.limbs.ptr) or r.limbs.len >= math.max(a.limbs.len, b.limbs.len) + 1);
+        try r.ensureAddCapacity(a, b);
         var m = r.toMutable();
         m.add(a, b);
         r.setMetadata(m.positive, m.len);
@@ -1744,6 +1779,14 @@ pub const Managed = struct {
             m.mul(a, b, limbs_buffer, rma.allocator);
         }
         rma.setMetadata(m.positive, m.len);
+    }
+
+    pub fn ensureAddScalarCapacity(r: *Managed, a: Const, scalar: anytype) !void {
+        try r.ensureCapacity(math.max(a.limbs.len, calcLimbLen(scalar)) + 1);
+    }
+
+    pub fn ensureAddCapacity(r: *Managed, a: Const, b: Const) !void {
+        try r.ensureCapacity(math.max(a.limbs.len, b.limbs.len) + 1);
     }
 
     pub fn ensureMulCapacity(rma: *Managed, a: Const, b: Const) !void {
@@ -1822,7 +1865,11 @@ pub const Managed = struct {
 
     /// r = a & b
     pub fn bitAnd(r: *Managed, a: Managed, b: Managed) !void {
-        try r.ensureCapacity(math.min(a.len(), b.len()));
+        const cap = if (a.isPositive() or b.isPositive())
+            math.min(a.len(), b.len())
+        else
+            math.max(a.len(), b.len()) + 1;
+        try r.ensureCapacity(cap);
         var m = r.toMutable();
         m.bitAnd(a.toConst(), b.toConst());
         r.setMetadata(m.positive, m.len);
@@ -1830,7 +1877,9 @@ pub const Managed = struct {
 
     /// r = a ^ b
     pub fn bitXor(r: *Managed, a: Managed, b: Managed) !void {
-        try r.ensureCapacity(math.max(a.len(), b.len()));
+        var cap = math.max(a.len(), b.len()) + @boolToInt(a.isPositive() != b.isPositive());
+        try r.ensureCapacity(cap);
+
         var m = r.toMutable();
         m.bitXor(a.toConst(), b.toConst());
         r.setMetadata(m.positive, m.len);
@@ -1986,8 +2035,6 @@ fn llmulacc_karatsuba(allocator: *Allocator, r: []Limb, x: []const Limb, y: []co
     } else {
         llsub(j1, y0[0..y0_len], y1[0..y1_len]);
     }
-    const j0_len = llnormalize(j0);
-    const j1_len = llnormalize(j1);
     if (x_cmp == y_cmp) {
         mem.set(Limb, tmp[0..length], 0);
         llmulacc(allocator, tmp, j0, j1);
@@ -2211,42 +2258,299 @@ fn llshr(r: []Limb, a: []const Limb, shift: usize) void {
     }
 }
 
-fn llor(r: []Limb, a: []const Limb, b: []const Limb) void {
+// r = a | b with 2s complement semantics.
+// r may alias.
+// a and b must not be 0.
+// Returns `true` when the result is positive.
+// When b is positive, r requires at least `a.len` limbs of storage.
+// When b is negative, r requires at least `b.len` limbs of storage.
+fn llsignedor(r: []Limb, a: []const Limb, a_positive: bool, b: []const Limb, b_positive: bool) bool {
     @setRuntimeSafety(debug_safety);
     assert(r.len >= a.len);
     assert(a.len >= b.len);
 
-    var i: usize = 0;
-    while (i < b.len) : (i += 1) {
-        r[i] = a[i] | b[i];
-    }
-    while (i < a.len) : (i += 1) {
-        r[i] = a[i];
+    if (a_positive and b_positive) {
+        // Trivial case, result is positive.
+        var i: usize = 0;
+        while (i < b.len) : (i += 1) {
+            r[i] = a[i] | b[i];
+        }
+        while (i < a.len) : (i += 1) {
+            r[i] = a[i];
+        }
+
+        return true;
+    } else if (!a_positive and b_positive) {
+        // Result is negative.
+        // r = (--a) | b
+        //   = ~(-a - 1) | b
+        //   = ~(-a - 1) | ~~b
+        //   = ~((-a - 1) & ~b)
+        //   = -(((-a - 1) & ~b) + 1)
+
+        var i: usize = 0;
+        var a_borrow: u1 = 1;
+        var r_carry: u1 = 1;
+
+        while (i < b.len) : (i += 1) {
+            var a_limb: Limb = undefined;
+            a_borrow = @boolToInt(@subWithOverflow(Limb, a[i], a_borrow, &a_limb));
+
+            r[i] = a_limb & ~b[i];
+            r_carry = @boolToInt(@addWithOverflow(Limb, r[i], r_carry, &r[i]));
+        }
+
+        // In order for r_carry to be nonzero at this point, ~b[i] would need to be
+        // all ones, which would require b[i] to be zero. This cannot be when
+        // b is normalized, so there cannot be a carry here.
+        // Also, x & ~b can only clear bits, so (x & ~b) <= x, meaning (-a - 1) + 1 never overflows.
+        assert(r_carry == 0);
+
+        // With b = 0, we get (-a - 1) & ~0 = -a - 1.
+        // Note, if a_borrow is zero we do not need to compute anything for
+        // the higher limbs so we can early return here.
+        while (i < a.len and a_borrow == 1) : (i += 1) {
+            a_borrow = @boolToInt(@subWithOverflow(Limb, a[i], a_borrow, &r[i]));
+        }
+
+        assert(a_borrow == 0); // a was 0.
+
+        return false;
+    } else if (a_positive and !b_positive) {
+        // Result is negative.
+        // r = a | (--b)
+        //   = a | ~(-b - 1)
+        //   = ~~a | ~(-b - 1)
+        //   = ~(~a & (-b - 1))
+        //   = -((~a & (-b - 1)) + 1)
+
+        var i: usize = 0;
+        var b_borrow: u1 = 1;
+        var r_carry: u1 = 1;
+
+        while (i < b.len) : (i += 1) {
+            var b_limb: Limb = undefined;
+            b_borrow = @boolToInt(@subWithOverflow(Limb, b[i], b_borrow, &b_limb));
+
+            r[i] = ~a[i] & b_limb;
+            r_carry = @boolToInt(@addWithOverflow(Limb, r[i], r_carry, &r[i]));
+        }
+
+        // b is at least 1, so this should never underflow.
+        assert(b_borrow == 0); // b was 0
+
+        // x & ~a can only clear bits, so (x & ~a) <= x, meaning (-b - 1) + 1 never overflows.
+        assert(r_carry == 0);
+
+        // With b = 0 and b_borrow = 0, we get ~a & (-0 - 0) = ~a & 0 = 0.
+        // Omit setting the upper bytes, just deal with those when calling llsignedor.
+
+        return false;
+    } else {
+        // Result is negative.
+        // r = (--a) | (--b)
+        //   = ~(-a - 1) | ~(-b - 1)
+        //   = ~((-a - 1) & (-b - 1))
+        //   = -(~(~((-a - 1) & (-b - 1))) + 1)
+        //   = -((-a - 1) & (-b - 1) + 1)
+
+        var i: usize = 0;
+        var a_borrow: u1 = 1;
+        var b_borrow: u1 = 1;
+        var r_carry: u1 = 1;
+
+        while (i < b.len) : (i += 1) {
+            var a_limb: Limb = undefined;
+            a_borrow = @boolToInt(@subWithOverflow(Limb, a[i], a_borrow, &a_limb));
+
+            var b_limb: Limb = undefined;
+            b_borrow = @boolToInt(@subWithOverflow(Limb, b[i], b_borrow, &b_limb));
+
+            r[i] = a_limb & b_limb;
+            r_carry = @boolToInt(@addWithOverflow(Limb, r[i], r_carry, &r[i]));
+        }
+
+        // b is at least 1, so this should never underflow.
+        assert(b_borrow == 0); // b was 0
+
+        // Can never overflow because in order for b_limb to be maxInt(Limb),
+        // b_borrow would need to equal 1.
+
+        // x & y can only clear bits, meaning x & y <= x and x & y <= y. This implies that
+        // for x = a - 1 and y = b - 1, the +1 term would never cause an overflow.
+        assert(r_carry == 0);
+
+        // With b = 0 and b_borrow = 0 we get (-a - 1) & (-0 - 0) = (-a - 1) & 0 = 0.
+        // Omit setting the upper bytes, just deal with those when calling llsignedor.
+        return false;
     }
 }
 
-fn lland(r: []Limb, a: []const Limb, b: []const Limb) void {
+// r = a & b with 2s complement semantics.
+// r may alias.
+// a and b must not be 0.
+// Returns `true` when the result is positive.
+// When either or both of a and b are positive, r requires at least `b.len` limbs of storage.
+// When both a and b are negative, r requires at least `a.limbs.len + 1` limbs of storage.
+fn llsignedand(r: []Limb, a: []const Limb, a_positive: bool, b: []const Limb, b_positive: bool) bool {
     @setRuntimeSafety(debug_safety);
-    assert(r.len >= b.len);
-    assert(a.len >= b.len);
-
-    var i: usize = 0;
-    while (i < b.len) : (i += 1) {
-        r[i] = a[i] & b[i];
-    }
-}
-
-fn llxor(r: []Limb, a: []const Limb, b: []const Limb) void {
+    assert(a.len != 0 and b.len != 0);
     assert(r.len >= a.len);
     assert(a.len >= b.len);
 
+    if (a_positive and b_positive) {
+        // Trivial case, result is positive.
+        var i: usize = 0;
+        while (i < b.len) : (i += 1) {
+            r[i] = a[i] & b[i];
+        }
+
+        // With b = 0 we have a & 0 = 0, so the upper bytes are zero.
+        // Omit setting them here and simply discard them whenever
+        // llsignedand is called.
+
+        return true;
+    } else if (!a_positive and b_positive) {
+        // Result is positive.
+        // r = (--a) & b
+        //   = ~(-a - 1) & b
+
+        var i: usize = 0;
+        var a_borrow: u1 = 1;
+
+        while (i < b.len) : (i += 1) {
+            var a_limb: Limb = undefined;
+            a_borrow = @boolToInt(@subWithOverflow(Limb, a[i], a_borrow, &a_limb));
+            r[i] = ~a_limb & b[i];
+        }
+
+        // With b = 0 we have ~(a - 1) & 0 = 0, so the upper bytes are zero.
+        // Omit setting them here and simply discard them whenever
+        // llsignedand is called.
+
+        return true;
+    } else if (a_positive and !b_positive) {
+        // Result is positive.
+        // r = a & (--b)
+        //   = a & ~(-b - 1)
+
+        var i: usize = 0;
+        var b_borrow: u1 = 1;
+
+        while (i < b.len) : (i += 1) {
+            var a_limb: Limb = undefined;
+            b_borrow = @boolToInt(@subWithOverflow(Limb, b[i], b_borrow, &a_limb));
+            r[i] = a[i] & ~a_limb;
+        }
+
+        assert(b_borrow == 0); // b was 0
+
+        // With b = 0 and b_borrow = 0 we have a & ~(-0 - 0) = a & 0 = 0, so
+        // the upper bytes are zero.  Omit setting them here and simply discard
+        // them whenever llsignedand is called.
+
+        return true;
+    } else {
+        // Result is negative.
+        // r = (--a) & (--b)
+        //   = ~(-a - 1) & ~(-b - 1)
+        //   = ~((-a - 1) | (-b - 1))
+        //   = -(((-a - 1) | (-b - 1)) + 1)
+
+        var i: usize = 0;
+        var a_borrow: u1 = 1;
+        var b_borrow: u1 = 1;
+        var r_carry: u1 = 1;
+
+        while (i < b.len) : (i += 1) {
+            var a_limb: Limb = undefined;
+            a_borrow = @boolToInt(@subWithOverflow(Limb, a[i], a_borrow, &a_limb));
+
+            var b_limb: Limb = undefined;
+            b_borrow = @boolToInt(@subWithOverflow(Limb, b[i], b_borrow, &b_limb));
+
+            r[i] = a_limb | b_limb;
+            r_carry = @boolToInt(@addWithOverflow(Limb, r[i], r_carry, &r[i]));
+        }
+
+        // b is at least 1, so this should never underflow.
+        assert(b_borrow == 0); // b was 0
+
+        // With b = 0 and b_borrow = 0 we get (-a - 1) | (-0 - 0) = (-a - 1) | 0 = -a - 1.
+        while (i < a.len) : (i += 1) {
+            a_borrow = @boolToInt(@subWithOverflow(Limb, a[i], a_borrow, &r[i]));
+            r_carry = @boolToInt(@addWithOverflow(Limb, r[i], r_carry, &r[i]));
+        }
+
+        assert(a_borrow == 0); // a was 0.
+
+        // The final addition can overflow here, so we need to keep that in mind.
+        r[i] = r_carry;
+
+        return false;
+    }
+}
+
+// r = a ^ b with 2s complement semantics.
+// r may alias.
+// a and b must not be -0.
+// Returns `true` when the result is positive.
+// If the sign of a and b is equal, then r requires at least `max(a.len, b.len)` limbs are required.
+// Otherwise, r requires at least `max(a.len, b.len) + 1` limbs.
+fn llsignedxor(r: []Limb, a: []const Limb, a_positive: bool, b: []const Limb, b_positive: bool) bool {
+    @setRuntimeSafety(debug_safety);
+    assert(a.len != 0 and b.len != 0);
+    assert(r.len >= a.len);
+    assert(a.len >= b.len);
+
+    // If a and b are positive, the result is positive and r = a ^ b.
+    // If a negative, b positive, result is negative and we have
+    // r = --(--a ^ b)
+    //   = --(~(-a - 1) ^ b)
+    //   = -(~(~(-a - 1) ^ b) + 1)
+    //   = -(((-a - 1) ^ b) + 1)
+    // Same if a is positive and b is negative, sides switched.
+    // If both a and b are negative, the result is positive and we have
+    // r = (--a) ^ (--b)
+    //   = ~(-a - 1) ^ ~(-b - 1)
+    //   = (-a - 1) ^ (-b - 1)
+    // These operations can be made more generic as follows:
+    // - If a is negative, subtract 1 from |a| before the xor.
+    // - If b is negative, subtract 1 from |b| before the xor.
+    // - if the result is supposed to be negative, add 1.
+
     var i: usize = 0;
+    var a_borrow = @boolToInt(!a_positive);
+    var b_borrow = @boolToInt(!b_positive);
+    var r_carry = @boolToInt(a_positive != b_positive);
+
     while (i < b.len) : (i += 1) {
-        r[i] = a[i] ^ b[i];
+        var a_limb: Limb = undefined;
+        a_borrow = @boolToInt(@subWithOverflow(Limb, a[i], a_borrow, &a_limb));
+
+        var b_limb: Limb = undefined;
+        b_borrow = @boolToInt(@subWithOverflow(Limb, b[i], b_borrow, &b_limb));
+
+        r[i] = a_limb ^ b_limb;
+        r_carry = @boolToInt(@addWithOverflow(Limb, r[i], r_carry, &r[i]));
     }
+
     while (i < a.len) : (i += 1) {
-        r[i] = a[i];
+        a_borrow = @boolToInt(@subWithOverflow(Limb, a[i], a_borrow, &r[i]));
+        r_carry = @boolToInt(@addWithOverflow(Limb, r[i], r_carry, &r[i]));
     }
+
+    // If both inputs don't share the same sign, an extra limb is required.
+    if (a_positive != b_positive) {
+        r[i] = r_carry;
+    } else {
+        assert(r_carry == 0);
+    }
+
+    assert(a_borrow == 0);
+    assert(b_borrow == 0);
+
+    return a_positive == b_positive;
 }
 
 /// r MUST NOT alias x.

@@ -1,30 +1,25 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("std");
 const builtin = @import("builtin");
 const is_test = builtin.is_test;
 
 pub fn __extendsfdf2(a: f32) callconv(.C) f64 {
-    return @call(.{ .modifier = .always_inline }, extendXfYf2, .{ f64, f32, @bitCast(u32, a) });
+    return extendXfYf2(f64, f32, @bitCast(u32, a));
 }
 
 pub fn __extenddftf2(a: f64) callconv(.C) f128 {
-    return @call(.{ .modifier = .always_inline }, extendXfYf2, .{ f128, f64, @bitCast(u64, a) });
+    return extendXfYf2(f128, f64, @bitCast(u64, a));
 }
 
 pub fn __extendsftf2(a: f32) callconv(.C) f128 {
-    return @call(.{ .modifier = .always_inline }, extendXfYf2, .{ f128, f32, @bitCast(u32, a) });
+    return extendXfYf2(f128, f32, @bitCast(u32, a));
 }
 
 pub fn __extendhfsf2(a: u16) callconv(.C) f32 {
-    return @call(.{ .modifier = .always_inline }, extendXfYf2, .{ f32, f16, a });
+    return extendXfYf2(f32, f16, a);
 }
 
 pub fn __extendhftf2(a: u16) callconv(.C) f128 {
-    return @call(.{ .modifier = .always_inline }, extendXfYf2, .{ f128, f16, a });
+    return extendXfYf2(f128, f16, a);
 }
 
 pub fn __aeabi_h2f(arg: u16) callconv(.AAPCS) f32 {
@@ -39,14 +34,13 @@ pub fn __aeabi_f2d(arg: f32) callconv(.AAPCS) f64 {
 
 const CHAR_BIT = 8;
 
-fn extendXfYf2(comptime dst_t: type, comptime src_t: type, a: std.meta.Int(.unsigned, @typeInfo(src_t).Float.bits)) dst_t {
+inline fn extendXfYf2(comptime dst_t: type, comptime src_t: type, a: std.meta.Int(.unsigned, @typeInfo(src_t).Float.bits)) dst_t {
     @setRuntimeSafety(builtin.is_test);
 
     const src_rep_t = std.meta.Int(.unsigned, @typeInfo(src_t).Float.bits);
     const dst_rep_t = std.meta.Int(.unsigned, @typeInfo(dst_t).Float.bits);
     const srcSigBits = std.math.floatMantissaBits(src_t);
     const dstSigBits = std.math.floatMantissaBits(dst_t);
-    const SrcShift = std.math.Log2Int(src_rep_t);
     const DstShift = std.math.Log2Int(dst_rep_t);
 
     // Various constants whose values follow from the type parameters.
@@ -110,6 +104,6 @@ fn extendXfYf2(comptime dst_t: type, comptime src_t: type, a: std.meta.Int(.unsi
     return @bitCast(dst_t, result);
 }
 
-test "import extendXfYf2" {
+test {
     _ = @import("extendXfYf2_test.zig");
 }

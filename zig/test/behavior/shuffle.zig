@@ -5,9 +5,6 @@ const expect = std.testing.expect;
 const Vector = std.meta.Vector;
 
 test "@shuffle" {
-    // TODO investigate why this fails when cross-compiling to wasm.
-    if (builtin.os.tag == .wasi) return error.SkipZigTest;
-
     const S = struct {
         fn doTheTest() !void {
             var v: Vector(4, i32) = [4]i32{ 2147483647, -2, 30, 40 };
@@ -38,8 +35,7 @@ test "@shuffle" {
             try expect(mem.eql(i32, &@as([4]i32, res), &[4]i32{ 2147483647, 3, -2, 4 }));
 
             // bool
-            // https://github.com/ziglang/zig/issues/3317
-            if (builtin.target.cpu.arch != .mipsel and builtin.target.cpu.arch != .mips) {
+            {
                 var x2: Vector(4, bool) = [4]bool{ false, true, false, true };
                 var v4: Vector(2, bool) = [2]bool{ true, false };
                 const mask5: Vector(4, i32) = [4]i32{ 0, ~@as(i32, 1), 1, 2 };

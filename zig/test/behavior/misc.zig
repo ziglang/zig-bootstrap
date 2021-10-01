@@ -5,111 +5,6 @@ const expectEqualStrings = std.testing.expectEqualStrings;
 const mem = std.mem;
 const builtin = @import("builtin");
 
-// normal comment
-
-/// this is a documentation comment
-/// doc comment line 2
-fn emptyFunctionWithComments() void {}
-
-test "empty function with comments" {
-    emptyFunctionWithComments();
-}
-
-comptime {
-    @export(disabledExternFn, .{ .name = "disabledExternFn", .linkage = .Internal });
-}
-
-fn disabledExternFn() callconv(.C) void {}
-
-test "call disabled extern fn" {
-    disabledExternFn();
-}
-
-test "short circuit" {
-    try testShortCircuit(false, true);
-    comptime try testShortCircuit(false, true);
-}
-
-fn testShortCircuit(f: bool, t: bool) !void {
-    var hit_1 = f;
-    var hit_2 = f;
-    var hit_3 = f;
-    var hit_4 = f;
-
-    if (t or x: {
-        try expect(f);
-        break :x f;
-    }) {
-        hit_1 = t;
-    }
-    if (f or x: {
-        hit_2 = t;
-        break :x f;
-    }) {
-        try expect(f);
-    }
-
-    if (t and x: {
-        hit_3 = t;
-        break :x f;
-    }) {
-        try expect(f);
-    }
-    if (f and x: {
-        try expect(f);
-        break :x f;
-    }) {
-        try expect(f);
-    } else {
-        hit_4 = t;
-    }
-    try expect(hit_1);
-    try expect(hit_2);
-    try expect(hit_3);
-    try expect(hit_4);
-}
-
-test "truncate" {
-    try expect(testTruncate(0x10fd) == 0xfd);
-}
-fn testTruncate(x: u32) u8 {
-    return @truncate(u8, x);
-}
-
-fn first4KeysOfHomeRow() []const u8 {
-    return "aoeu";
-}
-
-test "return string from function" {
-    try expect(mem.eql(u8, first4KeysOfHomeRow(), "aoeu"));
-}
-
-const g1: i32 = 1233 + 1;
-var g2: i32 = 0;
-
-test "global variables" {
-    try expect(g2 == 0);
-    g2 = g1;
-    try expect(g2 == 1234);
-}
-
-test "memcpy and memset intrinsics" {
-    var foo: [20]u8 = undefined;
-    var bar: [20]u8 = undefined;
-
-    @memset(&foo, 'A', foo.len);
-    @memcpy(&bar, &foo, bar.len);
-
-    if (bar[11] != 'A') unreachable;
-}
-
-test "builtin static eval" {
-    const x: i32 = comptime x: {
-        break :x 1 + 2 + 3;
-    };
-    try expect(x == comptime 6);
-}
-
 test "slicing" {
     var array: [20]i32 = undefined;
 
@@ -135,18 +30,6 @@ test "constant equal function pointers" {
 
 fn emptyFn() void {}
 
-test "hex escape" {
-    try expect(mem.eql(u8, "\x68\x65\x6c\x6c\x6f", "hello"));
-}
-
-test "string concatenation" {
-    try expect(mem.eql(u8, "OK" ++ " IT " ++ "WORKED", "OK IT WORKED"));
-}
-
-test "array mult operator" {
-    try expect(mem.eql(u8, "ab" ** 5, "ababababab"));
-}
-
 test "string escapes" {
     try expectEqualStrings("\"", "\x22");
     try expectEqualStrings("\'", "\x27");
@@ -157,59 +40,7 @@ test "string escapes" {
     try expectEqualStrings("\u{1234}\u{069}\u{1}", "\xe1\x88\xb4\x69\x01");
 }
 
-test "multiline string" {
-    const s1 =
-        \\one
-        \\two)
-        \\three
-    ;
-    const s2 = "one\ntwo)\nthree";
-    try expect(mem.eql(u8, s1, s2));
-}
-
-test "multiline string comments at start" {
-    const s1 =
-        //\\one
-        \\two)
-        \\three
-    ;
-    const s2 = "two)\nthree";
-    try expect(mem.eql(u8, s1, s2));
-}
-
-test "multiline string comments at end" {
-    const s1 =
-        \\one
-        \\two)
-        //\\three
-    ;
-    const s2 = "one\ntwo)";
-    try expect(mem.eql(u8, s1, s2));
-}
-
-test "multiline string comments in middle" {
-    const s1 =
-        \\one
-        //\\two)
-        \\three
-    ;
-    const s2 = "one\nthree";
-    try expect(mem.eql(u8, s1, s2));
-}
-
-test "multiline string comments at multiple places" {
-    const s1 =
-        \\one
-        //\\two
-        \\three
-        //\\four
-        \\five
-    ;
-    const s2 = "one\nthree\nfive";
-    try expect(mem.eql(u8, s1, s2));
-}
-
-test "multiline C string" {
+test "multiline string literal is null terminated" {
     const s1 =
         \\one
         \\two)
@@ -217,10 +48,6 @@ test "multiline C string" {
     ;
     const s2 = "one\ntwo)\nthree";
     try expect(std.cstr.cmp(s1, s2) == 0);
-}
-
-test "type equality" {
-    try expect(*const u8 != *u8);
 }
 
 const global_a: i32 = 1234;
@@ -234,6 +61,7 @@ test "compile time global reinterpret" {
 test "explicit cast maybe pointers" {
     const a: ?*i32 = undefined;
     const b: ?*f32 = @ptrCast(?*f32, a);
+    _ = b;
 }
 
 test "generic malloc free" {
@@ -244,24 +72,17 @@ var some_mem: [100]u8 = undefined;
 fn memAlloc(comptime T: type, n: usize) anyerror![]T {
     return @ptrCast([*]T, &some_mem[0])[0..n];
 }
-fn memFree(comptime T: type, memory: []T) void {}
+fn memFree(comptime T: type, memory: []T) void {
+    _ = memory;
+}
 
 test "cast undefined" {
     const array: [100]u8 = undefined;
     const slice = @as([]const u8, &array);
     testCastUndefined(slice);
 }
-fn testCastUndefined(x: []const u8) void {}
-
-test "cast small unsigned to larger signed" {
-    try expect(castSmallUnsignedToLargerSigned1(200) == @as(i16, 200));
-    try expect(castSmallUnsignedToLargerSigned2(9999) == @as(i64, 9999));
-}
-fn castSmallUnsignedToLargerSigned1(x: u8) i16 {
-    return x;
-}
-fn castSmallUnsignedToLargerSigned2(x: u16) i64 {
-    return x;
+fn testCastUndefined(x: []const u8) void {
+    _ = x;
 }
 
 test "implicit cast after unreachable" {
@@ -272,37 +93,6 @@ fn inner() i32 {
 }
 fn outer() i64 {
     return inner();
-}
-
-test "pointer dereferencing" {
-    var x = @as(i32, 3);
-    const y = &x;
-
-    y.* += 1;
-
-    try expect(x == 4);
-    try expect(y.* == 4);
-}
-
-test "call result of if else expression" {
-    try expect(mem.eql(u8, f2(true), "a"));
-    try expect(mem.eql(u8, f2(false), "b"));
-}
-fn f2(x: bool) []const u8 {
-    return (if (x) fA else fB)();
-}
-fn fA() []const u8 {
-    return "a";
-}
-fn fB() []const u8 {
-    return "b";
-}
-
-test "const expression eval handling of variables" {
-    var x = true;
-    while (x) {
-        x = false;
-    }
 }
 
 test "constant enum initialization with differing sizes" {
@@ -342,11 +132,6 @@ fn test3_2(f: Test3Foo) !void {
         else => unreachable,
     }
 }
-
-test "character literals" {
-    try expect('\'' == single_quote);
-}
-const single_quote = '\'';
 
 test "take address of parameter" {
     try testTakeAddressOfParameter(12.34);
@@ -396,11 +181,6 @@ fn testPointerToVoidReturnType2() *const void {
     return &test_pointer_to_void_return_type_x;
 }
 
-test "non const ptr to aliased type" {
-    const int = i32;
-    try expect(?*int == ?*i32);
-}
-
 test "array 2D const double ptr" {
     const rect_2d_vertexes = [_][1]f32{
         [_]f32{1.0},
@@ -413,45 +193,6 @@ fn testArray2DConstDoublePtr(ptr: *const f32) !void {
     const ptr2 = @ptrCast([*]const f32, ptr);
     try expect(ptr2[0] == 1.0);
     try expect(ptr2[1] == 2.0);
-}
-
-const AStruct = struct {
-    x: i32,
-};
-const AnEnum = enum {
-    One,
-    Two,
-};
-const AUnionEnum = union(enum) {
-    One: i32,
-    Two: void,
-};
-const AUnion = union {
-    One: void,
-    Two: void,
-};
-
-test "@typeName" {
-    const Struct = struct {};
-    const Union = union {
-        unused: u8,
-    };
-    const Enum = enum {
-        Unused,
-    };
-    comptime {
-        try expect(mem.eql(u8, @typeName(i64), "i64"));
-        try expect(mem.eql(u8, @typeName(*usize), "*usize"));
-        // https://github.com/ziglang/zig/issues/675
-        try expect(mem.eql(u8, "behavior.misc.TypeFromFn(u8)", @typeName(TypeFromFn(u8))));
-        try expect(mem.eql(u8, @typeName(Struct), "Struct"));
-        try expect(mem.eql(u8, @typeName(Union), "Union"));
-        try expect(mem.eql(u8, @typeName(Enum), "Enum"));
-    }
-}
-
-fn TypeFromFn(comptime T: type) type {
-    return struct {};
 }
 
 test "double implicit cast in same expression" {
@@ -529,15 +270,6 @@ test "function closes over local const" {
     try expect(x == 1);
 }
 
-test "cold function" {
-    thisIsAColdFn();
-    comptime thisIsAColdFn();
-}
-
-fn thisIsAColdFn() void {
-    @setCold(true);
-}
-
 const PackedStruct = packed struct {
     a: u8,
     b: u8,
@@ -546,19 +278,20 @@ const PackedUnion = packed union {
     a: u8,
     b: u32,
 };
-const PackedEnum = packed enum {
-    A,
-    B,
-};
 
 test "packed struct, enum, union parameters in extern function" {
     testPackedStuff(&(PackedStruct{
         .a = 1,
         .b = 2,
-    }), &(PackedUnion{ .a = 1 }), PackedEnum.A);
+    }), &(PackedUnion{ .a = 1 }));
 }
 
-export fn testPackedStuff(a: *const PackedStruct, b: *const PackedUnion, c: PackedEnum) void {}
+export fn testPackedStuff(a: *const PackedStruct, b: *const PackedUnion) void {
+    if (false) {
+        a;
+        b;
+    }
+}
 
 test "slicing zero length array" {
     const s1 = ""[0..];
@@ -587,6 +320,7 @@ test "self reference through fn ptr field" {
         };
 
         fn foo(a: A) u8 {
+            _ = a;
             return 12;
         }
     };
@@ -647,15 +381,6 @@ test "thread local variable" {
     };
     S.t += 1;
     try expect(S.t == 1235);
-}
-
-test "unicode escape in character literal" {
-    var a: u24 = '\u{01f4a9}';
-    try expect(a == 128169);
-}
-
-test "unicode character in character literal" {
-    try expect('💩' == 128169);
 }
 
 test "result location zero sized array inside struct field implicit cast to slice" {
@@ -756,7 +481,42 @@ test "extern variable with non-pointer opaque type" {
 
 test "lazy typeInfo value as generic parameter" {
     const S = struct {
-        fn foo(args: anytype) void {}
+        fn foo(args: anytype) void {
+            _ = args;
+        }
     };
     S.foo(@typeInfo(@TypeOf(.{})));
+}
+
+fn ZA() type {
+    return struct {
+        b: B(),
+
+        const Self = @This();
+
+        fn B() type {
+            return struct {
+                const Self = @This();
+            };
+        }
+    };
+}
+test "non-ambiguous reference of shadowed decls" {
+    try expect(ZA().B().Self != ZA().Self);
+}
+
+test "use of declaration with same name as primitive" {
+    const S = struct {
+        const @"u8" = u16;
+        const alias = @"u8";
+    };
+    const a: S.u8 = 300;
+    try expect(a == 300);
+
+    const b: S.alias = 300;
+    try expect(b == 300);
+
+    const @"u8" = u16;
+    const c: @"u8" = 300;
+    try expect(c == 300);
 }

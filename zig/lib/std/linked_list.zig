@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("std.zig");
 const debug = std.debug;
 const assert = debug.assert;
@@ -359,8 +354,8 @@ test "basic TailQueue test" {
         }
     }
 
-    var first = list.popFirst(); // {2, 3, 4, 5}
-    var last = list.pop(); // {2, 3, 4}
+    _ = list.popFirst(); // {2, 3, 4, 5}
+    _ = list.pop(); // {2, 3, 4}
     list.remove(&three); // {2, 4}
 
     try testing.expect(list.first.?.data == 2);

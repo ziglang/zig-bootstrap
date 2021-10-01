@@ -1,9 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
-
 const std = @import("std");
 const crypto = std.crypto;
 const aes = crypto.core.aes;
@@ -271,7 +265,6 @@ test "AesOcb test vector 1" {
     var c: [0]u8 = undefined;
     Aes128Ocb.encrypt(&c, &tag, "", "", nonce, k);
 
-    var expected_c: [c.len]u8 = undefined;
     var expected_tag: [tag.len]u8 = undefined;
     _ = try hexToBytes(&expected_tag, "785407BFFFC8AD9EDCC5520AC9111EE6");
 

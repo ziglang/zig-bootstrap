@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const uefi = @import("std").os.uefi;
 const Guid = uefi.Guid;
 const Event = uefi.Event;
@@ -35,6 +30,7 @@ pub const ManagedNetworkProtocol = extern struct {
     /// Translates an IP multicast address to a hardware (MAC) multicast address.
     /// This function may be unsupported in some MNP implementations.
     pub fn mcastIpToMac(self: *const ManagedNetworkProtocol, ipv6flag: bool, ipaddress: *const c_void, mac_address: *MacAddress) Status {
+        _ = mac_address;
         return self._mcast_ip_to_mac(self, ipv6flag, ipaddress);
     }
 

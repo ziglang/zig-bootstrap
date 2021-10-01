@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("std.zig");
 const assert = std.debug.assert;
 const meta = std.meta;
@@ -46,8 +41,7 @@ pub fn MultiArrayList(comptime S: type) type {
                     return &[_]F{};
                 }
                 const byte_ptr = self.ptrs[@enumToInt(field)];
-                const casted_ptr: [*]F = if (@sizeOf([*]F) == 0) undefined
-                    else @ptrCast([*]F, @alignCast(@alignOf(F), byte_ptr));
+                const casted_ptr: [*]F = if (@sizeOf([*]F) == 0) undefined else @ptrCast([*]F, @alignCast(@alignOf(F), byte_ptr));
                 return casted_ptr[0..self.len];
             }
 
@@ -93,6 +87,7 @@ pub fn MultiArrayList(comptime S: type) type {
             }
             const Sort = struct {
                 fn lessThan(trash: *i32, lhs: Data, rhs: Data) bool {
+                    _ = trash;
                     return lhs.alignment > rhs.alignment;
                 }
             };
@@ -194,10 +189,10 @@ pub fn MultiArrayList(comptime S: type) type {
         /// sets the given index to the specified element.  May reallocate
         /// and invalidate iterators.
         pub fn insert(self: *Self, gpa: *Allocator, index: usize, elem: S) void {
-            try self.ensureCapacity(gpa, self.len + 1);
+            try self.ensureUnusedCapacity(gpa, 1);
             self.insertAssumeCapacity(index, elem);
         }
-        
+
         /// Inserts an item into an ordered list which has room for it.
         /// Shifts all elements after and including the specified index
         /// back by one and sets the given index to the specified element.
@@ -209,9 +204,9 @@ pub fn MultiArrayList(comptime S: type) type {
             const slices = self.slice();
             inline for (fields) |field_info, field_index| {
                 const field_slice = slices.items(@intToEnum(Field, field_index));
-                var i: usize = self.len-1;
+                var i: usize = self.len - 1;
                 while (i > index) : (i -= 1) {
-                    field_slice[i] = field_slice[i-1];
+                    field_slice[i] = field_slice[i - 1];
                 }
                 field_slice[index] = @field(elem, field_info.name);
             }
@@ -222,10 +217,10 @@ pub fn MultiArrayList(comptime S: type) type {
         /// retain list ordering.
         pub fn swapRemove(self: *Self, index: usize) void {
             const slices = self.slice();
-            inline for (fields) |field_info, i| {
+            inline for (fields) |_, i| {
                 const field_slice = slices.items(@intToEnum(Field, i));
-                field_slice[index] = field_slice[self.len-1];
-                field_slice[self.len-1] = undefined;
+                field_slice[index] = field_slice[self.len - 1];
+                field_slice[self.len - 1] = undefined;
             }
             self.len -= 1;
         }
@@ -234,11 +229,11 @@ pub fn MultiArrayList(comptime S: type) type {
         /// after it to preserve order.
         pub fn orderedRemove(self: *Self, index: usize) void {
             const slices = self.slice();
-            inline for (fields) |field_info, field_index| {
+            inline for (fields) |_, field_index| {
                 const field_slice = slices.items(@intToEnum(Field, field_index));
                 var i = index;
-                while (i < self.len-1) : (i += 1) {
-                    field_slice[i] = field_slice[i+1];
+                while (i < self.len - 1) : (i += 1) {
+                    field_slice[i] = field_slice[i + 1];
                 }
                 field_slice[i] = undefined;
             }
@@ -381,7 +376,7 @@ pub fn MultiArrayList(comptime S: type) type {
         pub fn clone(self: Self, gpa: *Allocator) !Self {
             var result = Self{};
             errdefer result.deinit(gpa);
-            try result.ensureCapacity(gpa, self.len);
+            try result.ensureTotalCapacity(gpa, self.len);
             result.len = self.len;
             const self_slice = self.slice();
             const result_slice = result.slice();

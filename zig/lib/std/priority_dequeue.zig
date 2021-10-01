@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("std.zig");
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -48,13 +43,13 @@ pub fn PriorityDequeue(comptime T: type) type {
 
         /// Insert a new element, maintaining priority.
         pub fn add(self: *Self, elem: T) !void {
-            try ensureCapacity(self, self.len + 1);
+            try self.ensureUnusedCapacity(1);
             addUnchecked(self, elem);
         }
 
         /// Add each element in `items` to the dequeue.
         pub fn addSlice(self: *Self, items: []const T) !void {
-            try self.ensureCapacity(self.len + items.len);
+            try self.ensureUnusedCapacity(items.len);
             for (items) |e| {
                 self.addUnchecked(e);
             }
@@ -364,7 +359,11 @@ pub fn PriorityDequeue(comptime T: type) type {
             return queue;
         }
 
-        pub fn ensureCapacity(self: *Self, new_capacity: usize) !void {
+        /// Deprecated: call `ensureUnusedCapacity` or `ensureTotalCapacity`.
+        pub const ensureCapacity = ensureTotalCapacity;
+
+        /// Ensure that the dequeue can fit at least `new_capacity` items.
+        pub fn ensureTotalCapacity(self: *Self, new_capacity: usize) !void {
             var better_capacity = self.capacity();
             if (better_capacity >= new_capacity) return;
             while (true) {
@@ -372,6 +371,11 @@ pub fn PriorityDequeue(comptime T: type) type {
                 if (better_capacity >= new_capacity) break;
             }
             self.items = try self.allocator.realloc(self.items, better_capacity);
+        }
+
+        /// Ensure that the dequeue can fit at least `additional_count` **more** items.
+        pub fn ensureUnusedCapacity(self: *Self, additional_count: usize) !void {
+            return self.ensureTotalCapacity(self.len + additional_count);
         }
 
         /// Reduce allocated capacity to `new_len`.
@@ -428,7 +432,7 @@ pub fn PriorityDequeue(comptime T: type) type {
                 warn("{}, ", .{e});
             }
             warn("array: ", .{});
-            for (self.items) |e, i| {
+            for (self.items) |e| {
                 warn("{}, ", .{e});
             }
             warn("len: {} ", .{self.len});
@@ -829,7 +833,7 @@ test "std.PriorityDequeue: shrinkAndFree" {
     var queue = PDQ.init(testing.allocator, lessThanComparison);
     defer queue.deinit();
 
-    try queue.ensureCapacity(4);
+    try queue.ensureTotalCapacity(4);
     try expect(queue.capacity() >= 4);
 
     try queue.add(1);
@@ -945,7 +949,7 @@ fn fuzzTestMinMax(rng: *std.rand.Random, queue_size: usize) !void {
 
 fn generateRandomSlice(allocator: *std.mem.Allocator, rng: *std.rand.Random, size: usize) ![]u32 {
     var array = std.ArrayList(u32).init(allocator);
-    try array.ensureCapacity(size);
+    try array.ensureTotalCapacity(size);
 
     var i: usize = 0;
     while (i < size) : (i += 1) {

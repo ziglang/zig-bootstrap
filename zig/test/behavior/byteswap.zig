@@ -39,12 +39,6 @@ test "@byteSwap integers" {
 }
 
 test "@byteSwap vectors" {
-    // https://github.com/ziglang/zig/issues/3563
-    if (std.Target.current.os.tag == .dragonfly) return error.SkipZigTest;
-
-    // https://github.com/ziglang/zig/issues/3317
-    if (std.Target.current.cpu.arch == .mipsel or std.Target.current.cpu.arch == .mips) return error.SkipZigTest;
-
     const ByteSwapVectorTest = struct {
         fn run() !void {
             try t(u8, 2, [_]u8{ 0x12, 0x13 }, [_]u8{ 0x12, 0x13 });

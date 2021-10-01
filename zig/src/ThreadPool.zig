@@ -21,7 +21,7 @@ const Runnable = struct {
 
 const Worker = struct {
     pool: *ThreadPool,
-    thread: *std.Thread,
+    thread: std.Thread,
     /// The node is for this worker only and must have an already initialized event
     /// when the thread is spawned.
     idle_node: IdleQueue.Node,
@@ -60,7 +60,7 @@ pub fn init(self: *ThreadPool, allocator: *std.mem.Allocator) !void {
     if (std.builtin.single_threaded)
         return;
 
-    const worker_count = std.math.max(1, std.Thread.cpuCount() catch 1);
+    const worker_count = std.math.max(1, std.Thread.getCpuCount() catch 1);
     self.workers = try allocator.alloc(Worker, worker_count);
     errdefer allocator.free(self.workers);
 
@@ -74,13 +74,13 @@ pub fn init(self: *ThreadPool, allocator: *std.mem.Allocator) !void {
         try worker.idle_node.data.init();
         errdefer worker.idle_node.data.deinit();
 
-        worker.thread = try std.Thread.spawn(Worker.run, worker);
+        worker.thread = try std.Thread.spawn(.{}, Worker.run, .{worker});
     }
 }
 
 fn destroyWorkers(self: *ThreadPool, spawned: usize) void {
     for (self.workers[0..spawned]) |*worker| {
-        worker.thread.wait();
+        worker.thread.join();
         worker.idle_node.data.deinit();
     }
 }
@@ -101,7 +101,7 @@ pub fn deinit(self: *ThreadPool) void {
 
 pub fn spawn(self: *ThreadPool, comptime func: anytype, args: anytype) !void {
     if (std.builtin.single_threaded) {
-        const result = @call(.{}, func, args);
+        @call(.{}, func, args);
         return;
     }
 
@@ -114,7 +114,7 @@ pub fn spawn(self: *ThreadPool, comptime func: anytype, args: anytype) !void {
         fn runFn(runnable: *Runnable) void {
             const run_node = @fieldParentPtr(RunQueue.Node, "data", runnable);
             const closure = @fieldParentPtr(@This(), "run_node", run_node);
-            const result = @call(.{}, func, closure.arguments);
+            @call(.{}, func, closure.arguments);
 
             const held = closure.pool.lock.acquire();
             defer held.release();

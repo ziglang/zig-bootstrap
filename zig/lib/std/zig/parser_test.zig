@@ -1,11 +1,5 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
-
 test "zig fmt: preserves clobbers in inline asm with stray comma" {
-    try testTransform(
+    try testCanonical(
         \\fn foo() void {
         \\    asm volatile (""
         \\        : [_] "" (-> type),
@@ -15,20 +9,6 @@ test "zig fmt: preserves clobbers in inline asm with stray comma" {
         \\    asm volatile (""
         \\        :
         \\        : [_] "" (type),
-        \\        : "clobber"
-        \\    );
-        \\}
-        \\
-    ,
-        \\fn foo() void {
-        \\    asm volatile (""
-        \\        : [_] "" (-> type)
-        \\        :
-        \\        : "clobber"
-        \\    );
-        \\    asm volatile (""
-        \\        :
-        \\        : [_] "" (type)
         \\        : "clobber"
         \\    );
         \\}
@@ -93,15 +73,15 @@ test "zig fmt: rewrite callconv(.Inline) to the inline keyword" {
 }
 
 // TODO Remove this after zig 0.9.0 is released.
-test "zig fmt: rewrite suspend without block expression" {
+test "zig fmt: rewrite @byteOffsetOf to @offsetOf" {
     try testTransform(
         \\fn foo() void {
-        \\    suspend;
+        \\    @byteOffsetOf(Foo, "bar");
         \\}
         \\
     ,
         \\fn foo() void {
-        \\    suspend {}
+        \\    @offsetOf(Foo, "bar");
         \\}
         \\
     );
@@ -424,6 +404,10 @@ test "zig fmt: trailing comma in fn parameter list" {
         \\pub fn f(
         \\    a: i32,
         \\    b: i32,
+        \\) addrspace(.generic) i32 {}
+        \\pub fn f(
+        \\    a: i32,
+        \\    b: i32,
         \\) linksection(".text") i32 {}
         \\pub fn f(
         \\    a: i32,
@@ -514,15 +498,15 @@ test "zig fmt: asm expression with comptime content" {
         \\pub fn main() void {
         \\    asm volatile ("foo" ++ "bar");
         \\    asm volatile ("foo" ++ "bar"
-        \\        : [_] "" (x)
+        \\        : [_] "" (x),
         \\    );
         \\    asm volatile ("foo" ++ "bar"
-        \\        : [_] "" (x)
-        \\        : [_] "" (y)
+        \\        : [_] "" (x),
+        \\        : [_] "" (y),
         \\    );
         \\    asm volatile ("foo" ++ "bar"
-        \\        : [_] "" (x)
-        \\        : [_] "" (y)
+        \\        : [_] "" (x),
+        \\        : [_] "" (y),
         \\        : "h", "e", "l", "l", "o"
         \\    );
         \\}
@@ -573,8 +557,8 @@ test "zig fmt: sentinel-terminated slice type" {
 test "zig fmt: pointer-to-one with modifiers" {
     try testCanonical(
         \\const x: *u32 = undefined;
-        \\const y: *allowzero align(8) const volatile u32 = undefined;
-        \\const z: *allowzero align(8:4:2) const volatile u32 = undefined;
+        \\const y: *allowzero align(8) addrspace(.generic) const volatile u32 = undefined;
+        \\const z: *allowzero align(8:4:2) addrspace(.generic) const volatile u32 = undefined;
         \\
     );
 }
@@ -582,8 +566,8 @@ test "zig fmt: pointer-to-one with modifiers" {
 test "zig fmt: pointer-to-many with modifiers" {
     try testCanonical(
         \\const x: [*]u32 = undefined;
-        \\const y: [*]allowzero align(8) const volatile u32 = undefined;
-        \\const z: [*]allowzero align(8:4:2) const volatile u32 = undefined;
+        \\const y: [*]allowzero align(8) addrspace(.generic) const volatile u32 = undefined;
+        \\const z: [*]allowzero align(8:4:2) addrspace(.generic) const volatile u32 = undefined;
         \\
     );
 }
@@ -591,8 +575,8 @@ test "zig fmt: pointer-to-many with modifiers" {
 test "zig fmt: sentinel pointer with modifiers" {
     try testCanonical(
         \\const x: [*:42]u32 = undefined;
-        \\const y: [*:42]allowzero align(8) const volatile u32 = undefined;
-        \\const y: [*:42]allowzero align(8:4:2) const volatile u32 = undefined;
+        \\const y: [*:42]allowzero align(8) addrspace(.generic) const volatile u32 = undefined;
+        \\const y: [*:42]allowzero align(8:4:2) addrspace(.generic) const volatile u32 = undefined;
         \\
     );
 }
@@ -600,8 +584,8 @@ test "zig fmt: sentinel pointer with modifiers" {
 test "zig fmt: c pointer with modifiers" {
     try testCanonical(
         \\const x: [*c]u32 = undefined;
-        \\const y: [*c]allowzero align(8) const volatile u32 = undefined;
-        \\const z: [*c]allowzero align(8:4:2) const volatile u32 = undefined;
+        \\const y: [*c]allowzero align(8) addrspace(.generic) const volatile u32 = undefined;
+        \\const z: [*c]allowzero align(8:4:2) addrspace(.generic) const volatile u32 = undefined;
         \\
     );
 }
@@ -609,7 +593,7 @@ test "zig fmt: c pointer with modifiers" {
 test "zig fmt: slice with modifiers" {
     try testCanonical(
         \\const x: []u32 = undefined;
-        \\const y: []allowzero align(8) const volatile u32 = undefined;
+        \\const y: []allowzero align(8) addrspace(.generic) const volatile u32 = undefined;
         \\
     );
 }
@@ -617,7 +601,7 @@ test "zig fmt: slice with modifiers" {
 test "zig fmt: sentinel slice with modifiers" {
     try testCanonical(
         \\const x: [:42]u32 = undefined;
-        \\const y: [:42]allowzero align(8) const volatile u32 = undefined;
+        \\const y: [:42]allowzero align(8) addrspace(.generic) const volatile u32 = undefined;
         \\
     );
 }
@@ -1145,6 +1129,16 @@ test "zig fmt: linksection" {
     try testCanonical(
         \\export var aoeu: u64 linksection(".text.derp") = 1234;
         \\export fn _start() linksection(".text.boot") callconv(.Naked) noreturn {}
+        \\
+    );
+}
+
+test "zig fmt: addrspace" {
+    try testCanonical(
+        \\export var python_length: u64 align(1) addrspace(.generic);
+        \\export var python_color: Color addrspace(.generic) = .green;
+        \\export var python_legs: u0 align(8) addrspace(.generic) linksection(".python") = 0;
+        \\export fn python_hiss() align(8) addrspace(.generic) linksection(".python") void;
         \\
     );
 }
@@ -2064,11 +2058,11 @@ test "zig fmt: simple asm" {
         \\    );
         \\
         \\    asm ("not real assembly"
-        \\        : [a] "x" (x)
+        \\        : [a] "x" (x),
         \\    );
         \\    asm ("not real assembly"
-        \\        : [a] "x" (-> i32)
-        \\        : [a] "x" (1)
+        \\        : [a] "x" (-> i32),
+        \\        : [a] "x" (1),
         \\    );
         \\    asm ("still not real assembly" ::: "a", "b");
         \\}
@@ -2899,6 +2893,9 @@ test "zig fmt: functions" {
         \\pub export fn puts(s: *const u8) align(2 + 2) c_int;
         \\pub inline fn puts(s: *const u8) align(2 + 2) c_int;
         \\pub noinline fn puts(s: *const u8) align(2 + 2) c_int;
+        \\pub fn callInlineFn(func: fn () callconv(.Inline) void) void {
+        \\    func();
+        \\}
         \\
     );
 }
@@ -3718,9 +3715,9 @@ test "zig fmt: inline asm" {
     try testCanonical(
         \\pub fn syscall1(number: usize, arg1: usize) usize {
         \\    return asm volatile ("syscall"
-        \\        : [ret] "={rax}" (-> usize)
+        \\        : [ret] "={rax}" (-> usize),
         \\        : [number] "{rax}" (number),
-        \\          [arg1] "{rdi}" (arg1)
+        \\          [arg1] "{rdi}" (arg1),
         \\        : "rcx", "r11"
         \\    );
         \\}
@@ -3823,14 +3820,14 @@ test "zig fmt: inline asm parameter alignment" {
         \\        \\ foo
         \\        \\ bar
         \\        : [_] "" (-> usize),
-        \\          [_] "" (-> usize)
+        \\          [_] "" (-> usize),
         \\    );
         \\    asm volatile (
         \\        \\ foo
         \\        \\ bar
         \\        :
         \\        : [_] "" (0),
-        \\          [_] "" (0)
+        \\          [_] "" (0),
         \\    );
         \\    asm volatile (
         \\        \\ foo
@@ -3840,9 +3837,9 @@ test "zig fmt: inline asm parameter alignment" {
         \\        \\ foo
         \\        \\ bar
         \\        : [_] "" (-> usize),
-        \\          [_] "" (-> usize)
+        \\          [_] "" (-> usize),
         \\        : [_] "" (0),
-        \\          [_] "" (0)
+        \\          [_] "" (0),
         \\        : "", ""
         \\    );
         \\}
@@ -4742,6 +4739,26 @@ test "zig fmt: assignment with inline for and inline while" {
     );
 }
 
+test "zig fmt: saturating arithmetic" {
+    try testCanonical(
+        \\test {
+        \\    const actual = switch (op) {
+        \\        .add => a +| b,
+        \\        .sub => a -| b,
+        \\        .mul => a *| b,
+        \\        .shl => a <<| b,
+        \\    };
+        \\    switch (op) {
+        \\        .add => actual +|= b,
+        \\        .sub => actual -|= b,
+        \\        .mul => actual *|= b,
+        \\        .shl => actual <<|= b,
+        \\    }
+        \\}
+        \\
+    );
+}
+
 test "zig fmt: insert trailing comma if there are comments between switch values" {
     try testTransform(
         \\const a = switch (b) {
@@ -4857,6 +4874,77 @@ test "zig fmt: make single-line if no trailing comma" {
     );
 }
 
+test "zig fmt: make single-line if no trailing comma" {
+    try testCanonical(
+        \\// Test trailing comma syntax
+        \\// zig fmt: off
+        \\
+        \\extern var a: c_int;
+        \\extern "c" var b: c_int;
+        \\export var c: c_int = 0;
+        \\threadlocal var d: c_int = 0;
+        \\extern threadlocal var e: c_int;
+        \\extern "c" threadlocal var f: c_int;
+        \\export threadlocal var g: c_int = 0;
+        \\
+        \\const struct_trailing_comma = struct { x: i32, y: i32, };
+        \\const struct_no_comma = struct { x: i32, y: i32 };
+        \\const struct_fn_no_comma = struct { fn m() void {} y: i32 };
+        \\
+        \\const enum_no_comma = enum { A, B };
+        \\
+        \\fn container_init() void {
+        \\    const S = struct { x: i32, y: i32 };
+        \\    _ = S { .x = 1, .y = 2 };
+        \\    _ = S { .x = 1, .y = 2, };
+        \\}
+        \\
+        \\fn type_expr_return1() if (true) A {}
+        \\fn type_expr_return2() for (true) |_| A {}
+        \\fn type_expr_return3() while (true) A {}
+        \\
+        \\fn switch_cases(x: i32) void {
+        \\    switch (x) {
+        \\        1,2,3 => {},
+        \\        4,5, => {},
+        \\        6...8, => {},
+        \\        else => {},
+        \\    }
+        \\}
+        \\
+        \\fn switch_prongs(x: i32) void {
+        \\    switch (x) {
+        \\        0 => {},
+        \\        else => {},
+        \\    }
+        \\    switch (x) {
+        \\        0 => {},
+        \\        else => {}
+        \\    }
+        \\}
+        \\
+        \\const fn_no_comma = fn(i32, i32)void;
+        \\const fn_trailing_comma = fn(i32, i32,)void;
+        \\
+        \\fn fn_calls() void {
+        \\    fn add(x: i32, y: i32,) i32 { x + y };
+        \\    _ = add(1, 2);
+        \\    _ = add(1, 2,);
+        \\}
+        \\
+        \\fn asm_lists() void {
+        \\    if (false) { // Build AST but don't analyze
+        \\        asm ("not real assembly"
+        \\            :[a] "x" (x),);
+        \\        asm ("not real assembly"
+        \\            :[a] "x" (->i32),:[a] "x" (1),);
+        \\        asm volatile ("still not real assembly"
+        \\            :::"a","b",);
+        \\    }
+        \\}
+    );
+}
+
 test "zig fmt: error for invalid bit range" {
     try testError(
         \\var x: []align(0:0:0)u8 = bar;
@@ -4915,7 +5003,6 @@ test "recovery: missing comma" {
     , &[_]Error{
         .expected_token,
         .expected_token,
-        .invalid_and,
         .invalid_token,
     });
 }
@@ -4948,7 +5035,6 @@ test "recovery: missing return type" {
         \\test ""
     , &[_]Error{
         .expected_return_type,
-        .invalid_and,
         .expected_block,
     });
 }
@@ -4965,7 +5051,6 @@ test "recovery: continue after invalid decl" {
         .expected_token,
         .expected_pub_item,
         .expected_param_list,
-        .invalid_and,
     });
     try testError(
         \\threadlocal test "" {
@@ -4974,7 +5059,6 @@ test "recovery: continue after invalid decl" {
     , &[_]Error{
         .expected_var_decl,
         .expected_param_list,
-        .invalid_and,
     });
 }
 
@@ -4983,13 +5067,11 @@ test "recovery: invalid extern/inline" {
         \\inline test "" { a && b; }
     , &[_]Error{
         .expected_fn,
-        .invalid_and,
     });
     try testError(
         \\extern "" test "" { a && b; }
     , &[_]Error{
         .expected_var_decl_or_fn,
-        .invalid_and,
     });
 }
 
@@ -5001,9 +5083,7 @@ test "recovery: missing semicolon" {
         \\    @foo
         \\}
     , &[_]Error{
-        .invalid_and,
         .expected_token,
-        .invalid_and,
         .expected_token,
         .expected_param_list,
         .expected_token,
@@ -5023,7 +5103,6 @@ test "recovery: invalid container members" {
         .expected_expr,
         .expected_token,
         .expected_container_members,
-        .invalid_and,
         .expected_token,
     });
 }
@@ -5061,7 +5140,6 @@ test "recovery: invalid global error set access" {
     , &[_]Error{
         .expected_token,
         .expected_token,
-        .invalid_and,
     });
 }
 
@@ -5079,7 +5157,6 @@ test "recovery: invalid asterisk after pointer dereference" {
         \\}
     , &[_]Error{
         .asterisk_after_ptr_deref,
-        .invalid_and,
     });
 }
 
@@ -5095,7 +5172,6 @@ test "recovery: missing semicolon after if, for, while stmt" {
         .expected_semi_or_else,
         .expected_semi_or_else,
         .expected_semi_or_else,
-        .invalid_and,
     });
 }
 
@@ -5139,7 +5215,7 @@ test "recovery: missing for payload" {
     try testError(
         \\comptime {
         \\    const a = for(a) {};
-        \\    const a: for(a) {};
+        \\    const a: for(a) blk: {};
         \\    for(a) {}
         \\}
     , &[_]Error{
@@ -5171,6 +5247,26 @@ test "recovery: missing while rbrace" {
     });
 }
 
+test "recovery: nonfinal varargs" {
+    try testError(
+        \\extern fn f(a: u32, ..., b: u32) void;
+        \\extern fn g(a: u32, ..., b: anytype) void;
+        \\extern fn h(a: u32, ..., ...) void;
+    , &[_]Error{
+        .varargs_nonfinal,
+        .varargs_nonfinal,
+        .varargs_nonfinal,
+    });
+}
+
+test "recovery: eof in c pointer" {
+    try testError(
+        \\const Ptr = [*c
+    , &[_]Error{
+        .expected_token,
+    });
+}
+
 const std = @import("std");
 const mem = std.mem;
 const print = std.debug.print;
@@ -5179,14 +5275,13 @@ const maxInt = std.math.maxInt;
 
 var fixed_buffer_mem: [100 * 1024]u8 = undefined;
 
-fn testParse(source: []const u8, allocator: *mem.Allocator, anything_changed: *bool) ![]u8 {
+fn testParse(source: [:0]const u8, allocator: *mem.Allocator, anything_changed: *bool) ![]u8 {
     const stderr = io.getStdErr().writer();
 
     var tree = try std.zig.parse(allocator, source);
     defer tree.deinit(allocator);
 
     for (tree.errors) |parse_error| {
-        const token_start = tree.tokens.items(.start)[parse_error.token];
         const loc = tree.tokenLocation(0, parse_error.token);
         try stderr.print("(memory buffer):{d}:{d}: error: ", .{ loc.line + 1, loc.column + 1 });
         try tree.renderError(parse_error, stderr);
@@ -5208,7 +5303,7 @@ fn testParse(source: []const u8, allocator: *mem.Allocator, anything_changed: *b
     anything_changed.* = !mem.eql(u8, formatted, source);
     return formatted;
 }
-fn testTransform(source: []const u8, expected_source: []const u8) !void {
+fn testTransform(source: [:0]const u8, expected_source: []const u8) !void {
     const needed_alloc_count = x: {
         // Try it once with unlimited memory, make sure it works
         var fixed_allocator = std.heap.FixedBufferAllocator.init(fixed_buffer_mem[0..]);
@@ -5254,13 +5349,13 @@ fn testTransform(source: []const u8, expected_source: []const u8) !void {
         }
     }
 }
-fn testCanonical(source: []const u8) !void {
+fn testCanonical(source: [:0]const u8) !void {
     return testTransform(source, source);
 }
 
-const Error = std.zig.ast.Error.Tag;
+const Error = std.zig.Ast.Error.Tag;
 
-fn testError(source: []const u8, expected_errors: []const Error) !void {
+fn testError(source: [:0]const u8, expected_errors: []const Error) !void {
     var tree = try std.zig.parse(std.testing.allocator, source);
     defer tree.deinit(std.testing.allocator);
 

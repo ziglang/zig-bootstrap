@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("std.zig");
 const root = @import("root");
 const debug = std.debug;
@@ -16,6 +11,9 @@ const maxInt = std.math.maxInt;
 
 pub const LoggingAllocator = @import("heap/logging_allocator.zig").LoggingAllocator;
 pub const loggingAllocator = @import("heap/logging_allocator.zig").loggingAllocator;
+pub const ScopedLoggingAllocator = @import("heap/logging_allocator.zig").ScopedLoggingAllocator;
+pub const LogToWriterAllocator = @import("heap/log_to_writer_allocator.zig").LogToWriterAllocator;
+pub const logToWriterAllocator = @import("heap/log_to_writer_allocator.zig").logToWriterAllocator;
 pub const ArenaAllocator = @import("heap/arena_allocator.zig").ArenaAllocator;
 pub const GeneralPurposeAllocator = @import("heap/general_purpose_allocator.zig").GeneralPurposeAllocator;
 
@@ -90,12 +88,12 @@ const CAllocator = struct {
 
     fn alignedAllocSize(ptr: [*]u8) usize {
         if (supports_posix_memalign) {
-            return malloc_size(ptr);
+            return CAllocator.malloc_size(ptr);
         }
 
         const unaligned_ptr = getHeader(ptr).*;
         const delta = @ptrToInt(ptr) - @ptrToInt(unaligned_ptr);
-        return malloc_size(unaligned_ptr) - delta;
+        return CAllocator.malloc_size(unaligned_ptr) - delta;
     }
 
     fn alloc(
@@ -105,6 +103,8 @@ const CAllocator = struct {
         len_align: u29,
         return_address: usize,
     ) error{OutOfMemory}![]u8 {
+        _ = allocator;
+        _ = return_address;
         assert(len > 0);
         assert(std.math.isPowerOfTwo(alignment));
 
@@ -113,7 +113,7 @@ const CAllocator = struct {
             return ptr[0..len];
         }
         const full_len = init: {
-            if (supports_malloc_size) {
+            if (CAllocator.supports_malloc_size) {
                 const s = alignedAllocSize(ptr);
                 assert(s >= len);
                 break :init s;
@@ -131,6 +131,9 @@ const CAllocator = struct {
         len_align: u29,
         return_address: usize,
     ) Allocator.Error!usize {
+        _ = allocator;
+        _ = buf_align;
+        _ = return_address;
         if (new_len == 0) {
             alignedFree(buf.ptr);
             return 0;
@@ -138,7 +141,7 @@ const CAllocator = struct {
         if (new_len <= buf.len) {
             return mem.alignAllocLen(buf.len, new_len, len_align);
         }
-        if (supports_malloc_size) {
+        if (CAllocator.supports_malloc_size) {
             const full_len = alignedAllocSize(buf.ptr);
             if (new_len <= full_len) {
                 return mem.alignAllocLen(full_len, new_len, len_align);
@@ -175,6 +178,9 @@ fn rawCAlloc(
     len_align: u29,
     ret_addr: usize,
 ) Allocator.Error![]u8 {
+    _ = self;
+    _ = len_align;
+    _ = ret_addr;
     assert(ptr_align <= @alignOf(std.c.max_align_t));
     const ptr = @ptrCast([*]u8, c.malloc(len) orelse return error.OutOfMemory);
     return ptr[0..len];
@@ -188,6 +194,9 @@ fn rawCResize(
     len_align: u29,
     ret_addr: usize,
 ) Allocator.Error!usize {
+    _ = self;
+    _ = old_align;
+    _ = ret_addr;
     if (new_len == 0) {
         c.free(buf.ptr);
         return 0;
@@ -228,6 +237,8 @@ pub var next_mmap_addr_hint: ?[*]align(mem.page_size) u8 = null;
 
 const PageAllocator = struct {
     fn alloc(allocator: *Allocator, n: usize, alignment: u29, len_align: u29, ra: usize) error{OutOfMemory}![]u8 {
+        _ = allocator;
+        _ = ra;
         assert(n > 0);
         const aligned_len = mem.alignForward(n, mem.page_size);
 
@@ -247,7 +258,7 @@ const PageAllocator = struct {
             ) catch return error.OutOfMemory;
 
             // If the allocation is sufficiently aligned, use it.
-            if (@ptrToInt(addr) & (alignment - 1) == 0) {
+            if (mem.isAligned(@ptrToInt(addr), alignment)) {
                 return @ptrCast([*]u8, addr)[0..alignPageAllocLen(aligned_len, n, len_align)];
             }
 
@@ -293,20 +304,20 @@ const PageAllocator = struct {
         const slice = os.mmap(
             hint,
             alloc_len,
-            os.PROT_READ | os.PROT_WRITE,
-            os.MAP_PRIVATE | os.MAP_ANONYMOUS,
+            os.PROT.READ | os.PROT.WRITE,
+            os.MAP.PRIVATE | os.MAP.ANONYMOUS,
             -1,
             0,
         ) catch return error.OutOfMemory;
         assert(mem.isAligned(@ptrToInt(slice.ptr), mem.page_size));
 
-        const aligned_addr = mem.alignForward(@ptrToInt(slice.ptr), alignment);
-        const result_ptr = @alignCast(mem.page_size, @intToPtr([*]u8, aligned_addr));
+        const result_ptr = mem.alignPointer(slice.ptr, alignment) orelse
+            return error.OutOfMemory;
 
         // Unmap the extra bytes that were only requested in order to guarantee
         // that the range of memory we were provided had a proper alignment in
         // it somewhere. The extra bytes could be at the beginning, or end, or both.
-        const drop_len = aligned_addr - @ptrToInt(slice.ptr);
+        const drop_len = @ptrToInt(result_ptr) - @ptrToInt(slice.ptr);
         if (drop_len != 0) {
             os.munmap(slice[0..drop_len]);
         }
@@ -331,6 +342,9 @@ const PageAllocator = struct {
         len_align: u29,
         return_address: usize,
     ) Allocator.Error!usize {
+        _ = allocator;
+        _ = buf_align;
+        _ = return_address;
         const new_size_aligned = mem.alignForward(new_size, mem.page_size);
 
         if (builtin.os.tag == .windows) {
@@ -372,7 +386,7 @@ const PageAllocator = struct {
             return alignPageAllocLen(new_size_aligned, new_size, len_align);
 
         if (new_size_aligned < buf_aligned_len) {
-            const ptr = @intToPtr([*]align(mem.page_size) u8, @ptrToInt(buf_unaligned.ptr) + new_size_aligned);
+            const ptr = @alignCast(mem.page_size, buf_unaligned.ptr + new_size_aligned);
             // TODO: if the next_mmap_addr_hint is within the unmapped range, update it
             os.munmap(ptr[0 .. buf_aligned_len - new_size_aligned]);
             if (new_size_aligned == 0)
@@ -479,6 +493,8 @@ const WasmPageAllocator = struct {
     }
 
     fn alloc(allocator: *Allocator, len: usize, alignment: u29, len_align: u29, ra: usize) error{OutOfMemory}![]u8 {
+        _ = allocator;
+        _ = ra;
         const page_count = nPages(len);
         const page_idx = try allocPages(page_count, alignment);
         return @intToPtr([*]u8, page_idx * mem.page_size)[0..alignPageAllocLen(page_count * mem.page_size, len, len_align)];
@@ -539,6 +555,9 @@ const WasmPageAllocator = struct {
         len_align: u29,
         return_address: usize,
     ) error{OutOfMemory}!usize {
+        _ = allocator;
+        _ = buf_align;
+        _ = return_address;
         const aligned_len = mem.alignForward(buf.len, mem.page_size);
         if (new_len > aligned_len) return error.OutOfMemory;
         const current_n = nPages(aligned_len);
@@ -585,6 +604,7 @@ pub const HeapAllocator = switch (builtin.os.tag) {
             len_align: u29,
             return_address: usize,
         ) error{OutOfMemory}![]u8 {
+            _ = return_address;
             const self = @fieldParentPtr(HeapAllocator, "allocator", allocator);
 
             const amt = n + ptr_align - 1 + @sizeOf(usize);
@@ -619,6 +639,8 @@ pub const HeapAllocator = switch (builtin.os.tag) {
             len_align: u29,
             return_address: usize,
         ) error{OutOfMemory}!usize {
+            _ = buf_align;
+            _ = return_address;
             const self = @fieldParentPtr(HeapAllocator, "allocator", allocator);
             if (new_size == 0) {
                 os.windows.HeapFree(self.heap_handle.?, 0, @intToPtr(*c_void, getRecordPtr(buf).*));
@@ -691,9 +713,12 @@ pub const FixedBufferAllocator = struct {
     }
 
     fn alloc(allocator: *Allocator, n: usize, ptr_align: u29, len_align: u29, ra: usize) ![]u8 {
+        _ = len_align;
+        _ = ra;
         const self = @fieldParentPtr(FixedBufferAllocator, "allocator", allocator);
-        const aligned_addr = mem.alignForward(@ptrToInt(self.buffer.ptr) + self.end_index, ptr_align);
-        const adjusted_index = aligned_addr - @ptrToInt(self.buffer.ptr);
+        const adjust_off = mem.alignPointerOffset(self.buffer.ptr + self.end_index, ptr_align) orelse
+            return error.OutOfMemory;
+        const adjusted_index = self.end_index + adjust_off;
         const new_end_index = adjusted_index + n;
         if (new_end_index > self.buffer.len) {
             return error.OutOfMemory;
@@ -712,6 +737,8 @@ pub const FixedBufferAllocator = struct {
         len_align: u29,
         return_address: usize,
     ) Allocator.Error!usize {
+        _ = buf_align;
+        _ = return_address;
         const self = @fieldParentPtr(FixedBufferAllocator, "allocator", allocator);
         assert(self.ownsSlice(buf)); // sanity check
 
@@ -762,12 +789,14 @@ pub const ThreadSafeFixedBufferAllocator = blk: {
             }
 
             fn alloc(allocator: *Allocator, n: usize, ptr_align: u29, len_align: u29, ra: usize) ![]u8 {
+                _ = len_align;
+                _ = ra;
                 const self = @fieldParentPtr(ThreadSafeFixedBufferAllocator, "allocator", allocator);
                 var end_index = @atomicLoad(usize, &self.end_index, builtin.AtomicOrder.SeqCst);
                 while (true) {
-                    const addr = @ptrToInt(self.buffer.ptr) + end_index;
-                    const adjusted_addr = mem.alignForward(addr, ptr_align);
-                    const adjusted_index = end_index + (adjusted_addr - addr);
+                    const adjust_off = mem.alignPointerOffset(self.buffer.ptr + end_index, ptr_align) orelse
+                        return error.OutOfMemory;
+                    const adjusted_index = end_index + adjust_off;
                     const new_end_index = adjusted_index + n;
                     if (new_end_index > self.buffer.len) {
                         return error.OutOfMemory;
@@ -1161,4 +1190,5 @@ pub fn testAllocatorAlignedShrink(base_allocator: *mem.Allocator) !void {
 
 test "heap" {
     _ = @import("heap/logging_allocator.zig");
+    _ = @import("heap/log_to_writer_allocator.zig");
 }

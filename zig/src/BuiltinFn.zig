@@ -17,7 +17,7 @@ pub const Tag = enum {
     mul_add,
     byte_swap,
     bit_reverse,
-    byte_offset_of,
+    offset_of,
     call,
     c_define,
     c_import,
@@ -57,8 +57,10 @@ pub const Tag = enum {
     int_to_error,
     int_to_float,
     int_to_ptr,
+    maximum,
     memcpy,
     memset,
+    minimum,
     wasm_memory_size,
     wasm_memory_grow,
     mod,
@@ -69,6 +71,7 @@ pub const Tag = enum {
     ptr_to_int,
     rem,
     return_address,
+    select,
     set_align_stack,
     set_cold,
     set_eval_branch_quota,
@@ -107,10 +110,19 @@ pub const Tag = enum {
     Vector,
 };
 
+pub const MemLocRequirement = enum {
+    /// The builtin never needs a memory location.
+    never,
+    /// The builtin always needs a memory location.
+    always,
+    /// The builtin forwards the question to argument at index 1.
+    forward1,
+};
+
 tag: Tag,
 
-/// `true` if the builtin call can take advantage of a result location pointer.
-needs_mem_loc: bool = false,
+/// Info about the builtin call's ability to take advantage of a result location pointer.
+needs_mem_loc: MemLocRequirement = .never,
 /// `true` if the builtin call can be the left-hand side of an expression (assigned to).
 allows_lvalue: bool = false,
 /// The number of parameters to this builtin function. `null` means variable number
@@ -145,7 +157,7 @@ pub const list = list: {
             "@as",
             .{
                 .tag = .as,
-                .needs_mem_loc = true,
+                .needs_mem_loc = .forward1,
                 .param_count = 2,
             },
         },
@@ -153,7 +165,7 @@ pub const list = list: {
             "@asyncCall",
             .{
                 .tag = .async_call,
-                .param_count = null,
+                .param_count = 4,
             },
         },
         .{
@@ -181,7 +193,7 @@ pub const list = list: {
             "@bitCast",
             .{
                 .tag = .bit_cast,
-                .needs_mem_loc = true,
+                .needs_mem_loc = .forward1,
                 .param_count = 2,
             },
         },
@@ -235,9 +247,9 @@ pub const list = list: {
             },
         },
         .{
-            "@byteOffsetOf",
+            "@offsetOf",
             .{
-                .tag = .byte_offset_of,
+                .tag = .offset_of,
                 .param_count = 2,
             },
         },
@@ -245,7 +257,7 @@ pub const list = list: {
             "@call",
             .{
                 .tag = .call,
-                .needs_mem_loc = true,
+                .needs_mem_loc = .always,
                 .param_count = 3,
             },
         },
@@ -407,7 +419,7 @@ pub const list = list: {
             "@field",
             .{
                 .tag = .field,
-                .needs_mem_loc = true,
+                .needs_mem_loc = .always,
                 .param_count = 2,
                 .allows_lvalue = true,
             },
@@ -518,6 +530,13 @@ pub const list = list: {
             },
         },
         .{
+            "@maximum",
+            .{
+                .tag = .maximum,
+                .param_count = 2,
+            },
+        },
+        .{
             "@memcpy",
             .{
                 .tag = .memcpy,
@@ -529,6 +548,13 @@ pub const list = list: {
             .{
                 .tag = .memset,
                 .param_count = 3,
+            },
+        },
+        .{
+            "@minimum",
+            .{
+                .tag = .minimum,
+                .param_count = 2,
             },
         },
         .{
@@ -599,6 +625,13 @@ pub const list = list: {
             .{
                 .tag = .return_address,
                 .param_count = 0,
+            },
+        },
+        .{
+            "@select",
+            .{
+                .tag = .select,
+                .param_count = 4,
             },
         },
         .{
@@ -675,7 +708,6 @@ pub const list = list: {
             "@splat",
             .{
                 .tag = .splat,
-                .needs_mem_loc = true,
                 .param_count = 2,
             },
         },
@@ -690,7 +722,7 @@ pub const list = list: {
             "@src",
             .{
                 .tag = .src,
-                .needs_mem_loc = true,
+                .needs_mem_loc = .always,
                 .param_count = 0,
             },
         },
@@ -845,7 +877,7 @@ pub const list = list: {
             "@unionInit",
             .{
                 .tag = .union_init,
-                .needs_mem_loc = true,
+                .needs_mem_loc = .always,
                 .param_count = 3,
             },
         },

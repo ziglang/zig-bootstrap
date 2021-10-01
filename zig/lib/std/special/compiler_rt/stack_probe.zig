@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const native_arch = @import("std").Target.current.cpu.arch;
 
 // Zig's own stack-probe routine (available only on x86 and x86_64)
@@ -110,6 +105,21 @@ fn win_probe_stack_only() void {
         },
         else => {},
     }
+    if (comptime native_arch.isAARCH64()) {
+        // NOTE: page size hardcoded to 4096 for now
+        asm volatile (
+            \\        lsl    x16, x15, #4
+            \\        mov    x17, sp
+            \\1:
+            \\
+            \\        sub    x17, x17, 4096
+            \\        subs   x16, x16, 4096
+            \\        ldr    xzr, [x17]
+            \\        b.gt   1b
+            \\
+            \\        ret
+        );
+    }
 
     unreachable;
 }
@@ -191,7 +201,9 @@ pub fn _chkstk() callconv(.Naked) void {
 }
 pub fn __chkstk() callconv(.Naked) void {
     @setRuntimeSafety(false);
-    switch (native_arch) {
+    if (comptime native_arch.isAARCH64()) {
+        @call(.{ .modifier = .always_inline }, win_probe_stack_only, .{});
+    } else switch (native_arch) {
         .i386 => @call(.{ .modifier = .always_inline }, win_probe_stack_adjust_sp, .{}),
         .x86_64 => @call(.{ .modifier = .always_inline }, win_probe_stack_only, .{}),
         else => unreachable,

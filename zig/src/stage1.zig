@@ -7,6 +7,7 @@ const assert = std.debug.assert;
 const mem = std.mem;
 const CrossTarget = std.zig.CrossTarget;
 const Target = std.Target;
+const builtin = @import("builtin");
 
 const build_options = @import("build_options");
 const stage2 = @import("main.zig");
@@ -16,16 +17,18 @@ const translate_c = @import("translate_c.zig");
 const target_util = @import("target.zig");
 
 comptime {
-    assert(std.builtin.link_libc);
+    assert(builtin.link_libc);
     assert(build_options.is_stage1);
     assert(build_options.have_llvm);
-    _ = @import("compiler_rt");
+    if (!builtin.is_test) {
+        @export(main, .{ .name = "main" });
+    }
 }
 
 pub const log = stage2.log;
 pub const log_level = stage2.log_level;
 
-pub export fn main(argc: c_int, argv: [*][*:0]u8) c_int {
+pub fn main(argc: c_int, argv: [*][*:0]u8) callconv(.C) c_int {
     std.os.argv = argv[0..@intCast(usize, argc)];
 
     std.debug.maybeEnableSegfaultHandler();
@@ -41,7 +44,7 @@ pub export fn main(argc: c_int, argv: [*][*:0]u8) c_int {
     for (args) |*arg, i| {
         arg.* = mem.spanZ(argv[i]);
     }
-    if (std.builtin.mode == .Debug) {
+    if (builtin.mode == .Debug) {
         stage2.mainArgs(gpa, arena, args) catch unreachable;
     } else {
         stage2.mainArgs(gpa, arena, args) catch |err| fatal("{s}", .{@errorName(err)});
@@ -58,7 +61,7 @@ pub const OS = c_int;
 /// Matches std.builtin.BuildMode
 pub const BuildMode = c_int;
 
-pub const TargetSubsystem = extern enum(c_int) {
+pub const TargetSubsystem = enum(c_int) {
     Console,
     Windows,
     Posix,
@@ -91,6 +94,8 @@ pub const Module = extern struct {
     emit_asm_len: usize,
     emit_llvm_ir_ptr: [*]const u8,
     emit_llvm_ir_len: usize,
+    emit_bitcode_ptr: [*]const u8,
+    emit_bitcode_len: usize,
     emit_analysis_json_ptr: [*]const u8,
     emit_analysis_json_len: usize,
     emit_docs_ptr: [*]const u8,
@@ -102,7 +107,7 @@ pub const Module = extern struct {
     test_name_prefix_ptr: [*]const u8,
     test_name_prefix_len: usize,
     userdata: usize,
-    root_pkg: *Pkg,
+    main_pkg: *Pkg,
     main_progress_node: ?*std.Progress.Node,
     code_model: CodeModel,
     subsystem: TargetSubsystem,
@@ -110,6 +115,7 @@ pub const Module = extern struct {
     pic: bool,
     pie: bool,
     lto: bool,
+    unwind_tables: bool,
     link_libc: bool,
     link_libcpp: bool,
     strip: bool,
@@ -119,13 +125,12 @@ pub const Module = extern struct {
     valgrind_enabled: bool,
     tsan_enabled: bool,
     function_sections: bool,
+    include_compiler_rt: bool,
     enable_stack_probing: bool,
     red_zone: bool,
     enable_time_report: bool,
     enable_stack_report: bool,
     test_is_evented: bool,
-    verbose_tokenize: bool,
-    verbose_ast: bool,
     verbose_ir: bool,
     verbose_llvm_ir: bool,
     verbose_cimport: bool,
@@ -148,6 +153,7 @@ pub const Module = extern struct {
     }
 };
 
+pub const os_init = zig_stage1_os_init;
 extern fn zig_stage1_os_init() void;
 
 pub const create = zig_stage1_create;
@@ -172,7 +178,7 @@ export fn stage2_panic(ptr: [*]const u8, len: usize) void {
 }
 
 // ABI warning
-const Error = extern enum {
+const Error = enum(c_int) {
     None,
     OutOfMemory,
     InvalidFormat,
@@ -408,6 +414,8 @@ export fn stage2_add_link_lib(
     symbol_name_ptr: [*c]const u8,
     symbol_name_len: usize,
 ) ?[*:0]const u8 {
+    _ = symbol_name_len;
+    _ = symbol_name_ptr;
     const comp = @intToPtr(*Compilation, stage1.userdata);
     const lib_name = std.ascii.allocLowerString(comp.gpa, lib_name_ptr[0..lib_name_len]) catch return "out of memory";
     const target = comp.getTarget();

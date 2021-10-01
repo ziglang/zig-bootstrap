@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("std.zig");
 const mem = std.mem;
 const builtin = std.builtin;
@@ -60,11 +55,19 @@ pub const Target = struct {
             opencl,
             glsl450,
             vulkan,
+            plan9,
             other,
 
             pub fn isDarwin(tag: Tag) bool {
                 return switch (tag) {
                     .ios, .macos, .watchos, .tvos => true,
+                    else => false,
+                };
+            }
+
+            pub fn isBSD(tag: Tag) bool {
+                return tag.isDarwin() or switch (tag) {
+                    .kfreebsd, .freebsd, .openbsd, .netbsd, .dragonfly => true,
                     else => false,
                 };
             }
@@ -157,7 +160,7 @@ pub const Target = struct {
             pub fn format(
                 self: WindowsVersion,
                 comptime fmt: []const u8,
-                options: std.fmt.FormatOptions,
+                _: std.fmt.FormatOptions,
                 out_stream: anytype,
             ) !void {
                 if (fmt.len > 0 and fmt[0] == 's') {
@@ -232,7 +235,6 @@ pub const Target = struct {
                     .fuchsia,
                     .kfreebsd,
                     .lv2,
-                    .solaris,
                     .zos,
                     .haiku,
                     .minix,
@@ -255,6 +257,7 @@ pub const Target = struct {
                     .opencl, // TODO: OpenCL versions
                     .glsl450, // TODO: GLSL versions
                     .vulkan,
+                    .plan9,
                     .other,
                     => return .{ .none = {} },
 
@@ -306,6 +309,12 @@ pub const Target = struct {
                             .max = .{ .major = 6, .minor = 0 },
                         },
                     },
+                    .solaris => return .{
+                        .semver = .{
+                            .min = .{ .major = 5, .minor = 11 },
+                            .max = .{ .major = 5, .minor = 11 },
+                        },
+                    },
 
                     .linux => return .{
                         .linux = .{
@@ -349,6 +358,7 @@ pub const Target = struct {
                 .netbsd,
                 .openbsd,
                 .dragonfly,
+                .solaris,
                 => return TaggedVersionRange{ .semver = self.version_range.semver },
 
                 else => return .none,
@@ -381,6 +391,7 @@ pub const Target = struct {
                 .dragonfly,
                 .openbsd,
                 .haiku,
+                .solaris,
                 => true,
 
                 .linux,
@@ -391,7 +402,6 @@ pub const Target = struct {
                 .fuchsia,
                 .kfreebsd,
                 .lv2,
-                .solaris,
                 .zos,
                 .minix,
                 .rtems,
@@ -413,6 +423,7 @@ pub const Target = struct {
                 .opencl,
                 .glsl450,
                 .vulkan,
+                .plan9,
                 .other,
                 => false,
             };
@@ -420,6 +431,7 @@ pub const Target = struct {
     };
 
     pub const aarch64 = @import("target/aarch64.zig");
+    pub const arc = @import("target/arc.zig");
     pub const amdgpu = @import("target/amdgpu.zig");
     pub const arm = @import("target/arm.zig");
     pub const avr = @import("target/avr.zig");
@@ -453,6 +465,7 @@ pub const Target = struct {
         musl,
         musleabi,
         musleabihf,
+        muslx32,
         msvc,
         itanium,
         cygnus,
@@ -508,6 +521,7 @@ pub const Target = struct {
                 .opencl, // TODO: SPIR-V ABIs with Linkage capability
                 .glsl450,
                 .vulkan,
+                .plan9, // TODO specify abi
                 => return .none,
             }
         }
@@ -538,15 +552,36 @@ pub const Target = struct {
     };
 
     pub const ObjectFormat = enum {
+        /// Common Object File Format (Windows)
         coff,
-        pe,
+        /// Executable and Linking Format
         elf,
+        /// macOS relocatables
         macho,
+        /// WebAssembly
         wasm,
+        /// C source code
         c,
+        /// Standard, Portable Intermediate Representation V
         spirv,
+        /// Intel IHEX
         hex,
+        /// Machine code with no metadata.
         raw,
+        /// Plan 9 from Bell Labs
+        plan9,
+
+        pub fn fileExt(of: ObjectFormat, cpu_arch: Cpu.Arch) [:0]const u8 {
+            return switch (of) {
+                .coff => ".obj",
+                .elf, .macho, .wasm => ".o",
+                .c => ".c",
+                .spirv => ".spv",
+                .hex => ".ihex",
+                .raw => ".bin",
+                .plan9 => plan9Ext(cpu_arch),
+            };
+        }
     };
 
     pub const SubSystem = enum {
@@ -664,8 +699,15 @@ pub const Target = struct {
                     return @ptrCast(*const [byte_count]u8, &set.ints);
                 }
 
-                pub fn eql(set: Set, other: Set) bool {
-                    return mem.eql(usize, &set.ints, &other.ints);
+                pub fn eql(set: Set, other_set: Set) bool {
+                    return mem.eql(usize, &set.ints, &other_set.ints);
+                }
+
+                pub fn isSuperSetOf(set: Set, other_set: Set) bool {
+                    const V = std.meta.Vector(usize_count, usize);
+                    const set_v: V = set.ints;
+                    const other_v: V = other_set.ints;
+                    return @reduce(.And, (set_v & other_v) == other_v);
                 }
             };
 
@@ -718,6 +760,7 @@ pub const Target = struct {
             bpfeb,
             csky,
             hexagon,
+            m68k,
             mips,
             mipsel,
             mips64,
@@ -776,6 +819,13 @@ pub const Target = struct {
             pub fn isARM(arch: Arch) bool {
                 return switch (arch) {
                     .arm, .armeb => true,
+                    else => false,
+                };
+            }
+
+            pub fn isAARCH64(arch: Arch) bool {
+                return switch (arch) {
+                    .aarch64, .aarch64_be, .aarch64_32 => true,
                     else => false,
                 };
             }
@@ -853,6 +903,7 @@ pub const Target = struct {
                     .arm => ._ARM,
                     .armeb => ._ARM,
                     .hexagon => ._HEXAGON,
+                    .m68k => ._68K,
                     .le32 => ._NONE,
                     .mips => ._MIPS,
                     .mipsel => ._MIPS_RS3_LE,
@@ -913,6 +964,7 @@ pub const Target = struct {
                     .arm => .ARM,
                     .armeb => .Unknown,
                     .hexagon => .Unknown,
+                    .m68k => .Unknown,
                     .le32 => .Unknown,
                     .mips => .Unknown,
                     .mipsel => .Unknown,
@@ -1016,6 +1068,7 @@ pub const Target = struct {
                     .armeb,
                     .aarch64_be,
                     .bpfeb,
+                    .m68k,
                     .mips,
                     .mips64,
                     .powerpc,
@@ -1042,6 +1095,7 @@ pub const Target = struct {
                     .armeb,
                     .csky,
                     .hexagon,
+                    .m68k,
                     .le32,
                     .mips,
                     .mipsel,
@@ -1264,30 +1318,16 @@ pub const Target = struct {
         return linuxTripleSimple(allocator, self.cpu.arch, self.os.tag, self.abi);
     }
 
-    pub fn oFileExt_os_abi(os_tag: Os.Tag, abi: Abi) [:0]const u8 {
-        if (abi == .msvc) {
-            return ".obj";
-        }
-        switch (os_tag) {
-            .windows, .uefi => return ".obj",
-            else => return ".o",
-        }
-    }
-
-    pub fn oFileExt(self: Target) [:0]const u8 {
-        return oFileExt_os_abi(self.os.tag, self.abi);
-    }
-
     pub fn exeFileExtSimple(cpu_arch: Cpu.Arch, os_tag: Os.Tag) [:0]const u8 {
-        switch (os_tag) {
-            .windows => return ".exe",
-            .uefi => return ".efi",
-            else => if (cpu_arch.isWasm()) {
-                return ".wasm";
-            } else {
-                return "";
+        return switch (os_tag) {
+            .windows => ".exe",
+            .uefi => ".efi",
+            .plan9 => plan9Ext(cpu_arch),
+            else => switch (cpu_arch) {
+                .wasm32, .wasm64 => ".wasm",
+                else => "",
             },
-        }
+        };
     }
 
     pub fn exeFileExt(self: Target) [:0]const u8 {
@@ -1327,18 +1367,16 @@ pub const Target = struct {
     }
 
     pub fn getObjectFormatSimple(os_tag: Os.Tag, cpu_arch: Cpu.Arch) ObjectFormat {
-        if (os_tag == .windows or os_tag == .uefi) {
-            return .coff;
-        } else if (os_tag.isDarwin()) {
-            return .macho;
-        }
-        if (cpu_arch.isWasm()) {
-            return .wasm;
-        }
-        if (cpu_arch.isSPIRV()) {
-            return .spirv;
-        }
-        return .elf;
+        return switch (os_tag) {
+            .windows, .uefi => .coff,
+            .ios, .macos, .watchos, .tvos => .macho,
+            .plan9 => .plan9,
+            else => return switch (cpu_arch) {
+                .wasm32, .wasm64 => .wasm,
+                .spirv32, .spirv64 => .spirv,
+                else => .elf,
+            },
+        };
     }
 
     pub fn getObjectFormat(self: Target) ObjectFormat {
@@ -1358,10 +1396,7 @@ pub const Target = struct {
     }
 
     pub fn isAndroid(self: Target) bool {
-        return switch (self.abi) {
-            .android => true,
-            else => false,
-        };
+        return self.abi == .android;
     }
 
     pub fn isWasm(self: Target) bool {
@@ -1370,6 +1405,10 @@ pub const Target = struct {
 
     pub fn isDarwin(self: Target) bool {
         return self.os.tag.isDarwin();
+    }
+
+    pub fn isBSD(self: Target) bool {
+        return self.os.tag.isBSD();
     }
 
     pub fn isGnuLibC_os_tag_abi(os_tag: Os.Tag, abi: Abi) bool {
@@ -1410,6 +1449,7 @@ pub const Target = struct {
             .opencl,
             .glsl450,
             .vulkan,
+            .plan9,
             .other,
             => return false,
             else => return true,
@@ -1487,8 +1527,9 @@ pub const Target = struct {
         switch (self.os.tag) {
             .freebsd => return copy(&result, "/libexec/ld-elf.so.1"),
             .netbsd => return copy(&result, "/libexec/ld.elf_so"),
-            .openbsd => return copy(&result, "/libexec/ld.so"),
+            .openbsd => return copy(&result, "/usr/libexec/ld.so"),
             .dragonfly => return copy(&result, "/libexec/ld-elf.so.2"),
+            .solaris => return copy(&result, "/lib/64/ld.so.1"),
             .linux => switch (self.cpu.arch) {
                 .i386,
                 .sparc,
@@ -1554,6 +1595,7 @@ pub const Target = struct {
                 .arc,
                 .csky,
                 .hexagon,
+                .m68k,
                 .msp430,
                 .r600,
                 .amdgcn,
@@ -1594,6 +1636,7 @@ pub const Target = struct {
             .glsl450,
             .vulkan,
             .other,
+            .plan9,
             => return result,
 
             // TODO revisit when multi-arch for Haiku is available
@@ -1606,7 +1649,6 @@ pub const Target = struct {
             .fuchsia,
             .kfreebsd,
             .lv2,
-            .solaris,
             .zos,
             .minix,
             .rtems,
@@ -1645,6 +1687,30 @@ pub const Target = struct {
             return true;
 
         return false;
+    }
+
+    /// 0c spim    little-endian MIPS 3000 family
+    /// 1c 68000   Motorola MC68000
+    /// 2c 68020   Motorola MC68020
+    /// 5c arm     little-endian ARM
+    /// 6c amd64   AMD64 and compatibles (e.g., Intel EM64T)
+    /// 7c arm64   ARM64 (ARMv8)
+    /// 8c 386     Intel i386, i486, Pentium, etc.
+    /// kc sparc   Sun SPARC
+    /// qc power   Power PC
+    /// vc mips    big-endian MIPS 3000 family
+    pub fn plan9Ext(cpu_arch: Cpu.Arch) [:0]const u8 {
+        return switch (cpu_arch) {
+            .arm => ".5",
+            .x86_64 => ".6",
+            .aarch64 => ".7",
+            .i386 => ".8",
+            .sparc => ".k",
+            .powerpc, .powerpcle => ".q",
+            .mips, .mipsel => ".v",
+            // ISAs without designated characters get 'X' for lack of a better option.
+            else => ".X",
+        };
     }
 };
 

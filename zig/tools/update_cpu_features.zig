@@ -219,7 +219,6 @@ const llvm_targets = [_]LlvmTarget{
                     "use_postra_scheduler",
                     "use_reciprocal_square_root",
                     "v8a",
-                    "zcz_fp",
                 },
             },
             .{
@@ -236,7 +235,6 @@ const llvm_targets = [_]LlvmTarget{
                     "slow_paired_128",
                     "use_postra_scheduler",
                     "v8a",
-                    "zcz_fp",
                 },
             },
             .{
@@ -754,6 +752,10 @@ const llvm_targets = [_]LlvmTarget{
                 .llvm_name = "i686",
                 .zig_name = "_i686",
             },
+            .{
+                .llvm_name = "lakemont",
+                .extra_deps = &.{"soft_float"},
+            },
         },
     },
     .{
@@ -812,18 +814,19 @@ pub fn main() anyerror!void {
             });
         }
     } else {
-        var threads = try arena.alloc(*std.Thread, llvm_targets.len);
+        var threads = try arena.alloc(std.Thread, llvm_targets.len);
         for (llvm_targets) |llvm_target, i| {
-            threads[i] = try std.Thread.spawn(processOneTarget, .{
+            const job = Job{
                 .llvm_tblgen_exe = llvm_tblgen_exe,
                 .llvm_src_root = llvm_src_root,
                 .zig_src_dir = zig_src_dir,
                 .root_progress = root_progress,
                 .llvm_target = llvm_target,
-            });
+            };
+            threads[i] = try std.Thread.spawn(.{}, processOneTarget, .{job});
         }
         for (threads) |thread| {
-            thread.wait();
+            thread.join();
         }
     }
 }
@@ -902,19 +905,19 @@ fn processOneTarget(job: Job) anyerror!void {
     {
         var it = root_map.iterator();
         root_it: while (it.next()) |kv| {
-            if (kv.key.len == 0) continue;
-            if (kv.key.*[0] == '!') continue;
-            if (kv.value.* != .Object) continue;
-            if (hasSuperclass(&kv.value.Object, "SubtargetFeature")) {
-                const llvm_name = kv.value.Object.get("Name").?.String;
+            if (kv.key_ptr.len == 0) continue;
+            if (kv.key_ptr.*[0] == '!') continue;
+            if (kv.value_ptr.* != .Object) continue;
+            if (hasSuperclass(&kv.value_ptr.Object, "SubtargetFeature")) {
+                const llvm_name = kv.value_ptr.Object.get("Name").?.String;
                 if (llvm_name.len == 0) continue;
 
                 var zig_name = try llvmNameToZigName(arena, llvm_name);
-                var desc = kv.value.Object.get("Desc").?.String;
+                var desc = kv.value_ptr.Object.get("Desc").?.String;
                 var deps = std.ArrayList([]const u8).init(arena);
                 var omit = false;
                 var flatten = false;
-                const implies = kv.value.Object.get("Implies").?.Array;
+                const implies = kv.value_ptr.Object.get("Implies").?.Array;
                 for (implies.items) |imply| {
                     const other_key = imply.Object.get("def").?.String;
                     const other_obj = &root_map.getPtr(other_key).?.Object;
@@ -960,13 +963,13 @@ fn processOneTarget(job: Job) anyerror!void {
                     try all_features.append(feature);
                 }
             }
-            if (hasSuperclass(&kv.value.Object, "Processor")) {
-                const llvm_name = kv.value.Object.get("Name").?.String;
+            if (hasSuperclass(&kv.value_ptr.Object, "Processor")) {
+                const llvm_name = kv.value_ptr.Object.get("Name").?.String;
                 if (llvm_name.len == 0) continue;
 
                 var zig_name = try llvmNameToZigName(arena, llvm_name);
                 var deps = std.ArrayList([]const u8).init(arena);
-                const features = kv.value.Object.get("Features").?.Array;
+                const features = kv.value_ptr.Object.get("Features").?.Array;
                 for (features.items) |feature| {
                     const feature_key = feature.Object.get("def").?.String;
                     const feature_obj = &root_map.getPtr(feature_key).?.Object;
@@ -979,7 +982,7 @@ fn processOneTarget(job: Job) anyerror!void {
                     )) orelse continue;
                     try deps.append(feature_zig_name);
                 }
-                const tune_features = kv.value.Object.get("TuneFeatures").?.Array;
+                const tune_features = kv.value_ptr.Object.get("TuneFeatures").?.Array;
                 for (tune_features.items) |feature| {
                     const feature_key = feature.Object.get("def").?.String;
                     const feature_obj = &root_map.getPtr(feature_key).?.Object;
@@ -1060,7 +1063,10 @@ fn processOneTarget(job: Job) anyerror!void {
     try w.writeAll(
         \\};
         \\
-        \\pub usingnamespace CpuFeature.feature_set_fns(Feature);
+        \\pub const featureSet = CpuFeature.feature_set_fns(Feature).featureSet;
+        \\pub const featureSetHas = CpuFeature.feature_set_fns(Feature).featureSetHas;
+        \\pub const featureSetHasAny = CpuFeature.feature_set_fns(Feature).featureSetHasAny;
+        \\pub const featureSetHasAll = CpuFeature.feature_set_fns(Feature).featureSetHasAll;
         \\
         \\pub const all_features = blk: {
         \\
@@ -1223,14 +1229,17 @@ fn usageAndExit(file: fs.File, arg0: []const u8, code: u8) noreturn {
 }
 
 fn featureLessThan(context: void, a: Feature, b: Feature) bool {
+    _ = context;
     return std.ascii.lessThanIgnoreCase(a.zig_name, b.zig_name);
 }
 
 fn cpuLessThan(context: void, a: Cpu, b: Cpu) bool {
+    _ = context;
     return std.ascii.lessThanIgnoreCase(a.zig_name, b.zig_name);
 }
 
 fn asciiLessThan(context: void, a: []const u8, b: []const u8) bool {
+    _ = context;
     return std.ascii.lessThanIgnoreCase(a, b);
 }
 

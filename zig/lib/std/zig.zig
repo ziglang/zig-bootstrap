@@ -1,20 +1,22 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("std.zig");
 const tokenizer = @import("zig/tokenizer.zig");
+const fmt = @import("zig/fmt.zig");
+const assert = std.debug.assert;
 
 pub const Token = tokenizer.Token;
 pub const Tokenizer = tokenizer.Tokenizer;
-pub const fmtId = @import("zig/fmt.zig").fmtId;
-pub const fmtEscapes = @import("zig/fmt.zig").fmtEscapes;
+pub const fmtId = fmt.fmtId;
+pub const fmtEscapes = fmt.fmtEscapes;
+pub const isValidId = fmt.isValidId;
 pub const parse = @import("zig/parse.zig").parse;
 pub const string_literal = @import("zig/string_literal.zig");
-pub const ast = @import("zig/ast.zig");
+pub const Ast = @import("zig/Ast.zig");
 pub const system = @import("zig/system.zig");
 pub const CrossTarget = @import("zig/cross_target.zig").CrossTarget;
+
+// Files needed by translate-c.
+pub const c_builtins = @import("zig/c_builtins.zig");
+pub const c_translation = @import("zig/c_translation.zig");
 
 pub const SrcHash = [16]u8;
 
@@ -101,8 +103,9 @@ pub const BinNameOptions = struct {
 pub fn binNameAlloc(allocator: *std.mem.Allocator, options: BinNameOptions) error{OutOfMemory}![]u8 {
     const root_name = options.root_name;
     const target = options.target;
-    switch (options.object_format orelse target.getObjectFormat()) {
-        .coff, .pe => switch (options.output_mode) {
+    const ofmt = options.object_format orelse target.getObjectFormat();
+    switch (ofmt) {
+        .coff => switch (options.output_mode) {
             .Exe => return std.fmt.allocPrint(allocator, "{s}{s}", .{ root_name, target.exeFileExt() }),
             .Lib => {
                 const suffix = switch (options.link_mode orelse .Static) {
@@ -111,7 +114,7 @@ pub fn binNameAlloc(allocator: *std.mem.Allocator, options: BinNameOptions) erro
                 };
                 return std.fmt.allocPrint(allocator, "{s}{s}", .{ root_name, suffix });
             },
-            .Obj => return std.fmt.allocPrint(allocator, "{s}{s}", .{ root_name, target.oFileExt() }),
+            .Obj => return std.fmt.allocPrint(allocator, "{s}.obj", .{root_name}),
         },
         .elf => switch (options.output_mode) {
             .Exe => return allocator.dupe(u8, root_name),
@@ -133,7 +136,7 @@ pub fn binNameAlloc(allocator: *std.mem.Allocator, options: BinNameOptions) erro
                     },
                 }
             },
-            .Obj => return std.fmt.allocPrint(allocator, "{s}{s}", .{ root_name, target.oFileExt() }),
+            .Obj => return std.fmt.allocPrint(allocator, "{s}.o", .{root_name}),
         },
         .macho => switch (options.output_mode) {
             .Exe => return allocator.dupe(u8, root_name),
@@ -154,9 +157,8 @@ pub fn binNameAlloc(allocator: *std.mem.Allocator, options: BinNameOptions) erro
                         }
                     },
                 }
-                return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ target.libPrefix(), root_name, suffix });
             },
-            .Obj => return std.fmt.allocPrint(allocator, "{s}{s}", .{ root_name, target.oFileExt() }),
+            .Obj => return std.fmt.allocPrint(allocator, "{s}.o", .{root_name}),
         },
         .wasm => switch (options.output_mode) {
             .Exe => return std.fmt.allocPrint(allocator, "{s}{s}", .{ root_name, target.exeFileExt() }),
@@ -168,38 +170,62 @@ pub fn binNameAlloc(allocator: *std.mem.Allocator, options: BinNameOptions) erro
                     .Dynamic => return std.fmt.allocPrint(allocator, "{s}.wasm", .{root_name}),
                 }
             },
-            .Obj => return std.fmt.allocPrint(allocator, "{s}{s}", .{ root_name, target.oFileExt() }),
+            .Obj => return std.fmt.allocPrint(allocator, "{s}.o", .{root_name}),
         },
         .c => return std.fmt.allocPrint(allocator, "{s}.c", .{root_name}),
         .spirv => return std.fmt.allocPrint(allocator, "{s}.spv", .{root_name}),
         .hex => return std.fmt.allocPrint(allocator, "{s}.ihex", .{root_name}),
         .raw => return std.fmt.allocPrint(allocator, "{s}.bin", .{root_name}),
+        .plan9 => switch (options.output_mode) {
+            .Exe => return allocator.dupe(u8, root_name),
+            .Obj => return std.fmt.allocPrint(allocator, "{s}{s}", .{ root_name, ofmt.fileExt(target.cpu.arch) }),
+            .Lib => return std.fmt.allocPrint(allocator, "{s}{s}.a", .{ target.libPrefix(), root_name }),
+        },
     }
 }
+
+pub const ParsedCharLiteral = union(enum) {
+    success: u32,
+    /// The character after backslash is not recognized.
+    invalid_escape_character: usize,
+    /// Expected hex digit at this index.
+    expected_hex_digit: usize,
+    /// Unicode escape sequence had no digits with rbrace at this index.
+    empty_unicode_escape_sequence: usize,
+    /// Expected hex digit or '}' at this index.
+    expected_hex_digit_or_rbrace: usize,
+    /// The unicode point is outside the range of Unicode codepoints.
+    unicode_escape_overflow: usize,
+    /// Expected '{' at this index.
+    expected_lbrace: usize,
+    /// Expected the terminating single quote at this index.
+    expected_end: usize,
+    /// The character at this index cannot be represented without an escape sequence.
+    invalid_character: usize,
+};
 
 /// Only validates escape sequence characters.
 /// Slice must be valid utf8 starting and ending with "'" and exactly one codepoint in between.
-pub fn parseCharLiteral(
-    slice: []const u8,
-    bad_index: *usize, // populated if error.InvalidCharacter is returned
-) error{InvalidCharacter}!u32 {
-    std.debug.assert(slice.len >= 3 and slice[0] == '\'' and slice[slice.len - 1] == '\'');
+pub fn parseCharLiteral(slice: []const u8) ParsedCharLiteral {
+    assert(slice.len >= 3 and slice[0] == '\'' and slice[slice.len - 1] == '\'');
 
-    if (slice[1] == '\\') {
-        switch (slice[2]) {
-            'n' => return '\n',
-            'r' => return '\r',
-            '\\' => return '\\',
-            't' => return '\t',
-            '\'' => return '\'',
-            '"' => return '"',
+    switch (slice[1]) {
+        0 => return .{ .invalid_character = 1 },
+        '\\' => switch (slice[2]) {
+            'n' => return .{ .success = '\n' },
+            'r' => return .{ .success = '\r' },
+            '\\' => return .{ .success = '\\' },
+            't' => return .{ .success = '\t' },
+            '\'' => return .{ .success = '\'' },
+            '"' => return .{ .success = '"' },
             'x' => {
-                if (slice.len != 6) {
-                    bad_index.* = slice.len - 2;
-                    return error.InvalidCharacter;
+                if (slice.len < 4) {
+                    return .{ .expected_hex_digit = 3 };
                 }
                 var value: u32 = 0;
-                for (slice[3..5]) |c, i| {
+                var i: usize = 3;
+                while (i < 5) : (i += 1) {
+                    const c = slice[i];
                     switch (c) {
                         '0'...'9' => {
                             value *= 16;
@@ -214,20 +240,28 @@ pub fn parseCharLiteral(
                             value += c - 'A' + 10;
                         },
                         else => {
-                            bad_index.* = 3 + i;
-                            return error.InvalidCharacter;
+                            return .{ .expected_hex_digit = i };
                         },
                     }
                 }
-                return value;
+                if (slice[i] != '\'') {
+                    return .{ .expected_end = i };
+                }
+                return .{ .success = value };
             },
             'u' => {
-                if (slice.len < "'\\u{0}'".len or slice[3] != '{' or slice[slice.len - 2] != '}') {
-                    bad_index.* = 2;
-                    return error.InvalidCharacter;
+                var i: usize = 3;
+                if (slice[i] != '{') {
+                    return .{ .expected_lbrace = i };
                 }
+                i += 1;
+                if (slice[i] == '}') {
+                    return .{ .empty_unicode_escape_sequence = i };
+                }
+
                 var value: u32 = 0;
-                for (slice[4 .. slice.len - 2]) |c, i| {
+                while (i < slice.len) : (i += 1) {
+                    const c = slice[i];
                     switch (c) {
                         '0'...'9' => {
                             value *= 16;
@@ -241,49 +275,112 @@ pub fn parseCharLiteral(
                             value *= 16;
                             value += c - 'A' + 10;
                         },
-                        else => {
-                            bad_index.* = 4 + i;
-                            return error.InvalidCharacter;
+                        '}' => {
+                            i += 1;
+                            break;
                         },
+                        else => return .{ .expected_hex_digit_or_rbrace = i },
                     }
                     if (value > 0x10ffff) {
-                        bad_index.* = 4 + i;
-                        return error.InvalidCharacter;
+                        return .{ .unicode_escape_overflow = i };
                     }
                 }
-                return value;
+                if (slice[i] != '\'') {
+                    return .{ .expected_end = i };
+                }
+                return .{ .success = value };
             },
-            else => {
-                bad_index.* = 2;
-                return error.InvalidCharacter;
-            },
-        }
+            else => return .{ .invalid_escape_character = 2 },
+        },
+        else => {
+            const codepoint = std.unicode.utf8Decode(slice[1 .. slice.len - 1]) catch unreachable;
+            return .{ .success = codepoint };
+        },
     }
-    return std.unicode.utf8Decode(slice[1 .. slice.len - 1]) catch unreachable;
 }
 
 test "parseCharLiteral" {
-    var bad_index: usize = undefined;
-    try std.testing.expectEqual(try parseCharLiteral("'a'", &bad_index), 'a');
-    try std.testing.expectEqual(try parseCharLiteral("'ä'", &bad_index), 'ä');
-    try std.testing.expectEqual(try parseCharLiteral("'\\x00'", &bad_index), 0);
-    try std.testing.expectEqual(try parseCharLiteral("'\\x4f'", &bad_index), 0x4f);
-    try std.testing.expectEqual(try parseCharLiteral("'\\x4F'", &bad_index), 0x4f);
-    try std.testing.expectEqual(try parseCharLiteral("'ぁ'", &bad_index), 0x3041);
-    try std.testing.expectEqual(try parseCharLiteral("'\\u{0}'", &bad_index), 0);
-    try std.testing.expectEqual(try parseCharLiteral("'\\u{3041}'", &bad_index), 0x3041);
-    try std.testing.expectEqual(try parseCharLiteral("'\\u{7f}'", &bad_index), 0x7f);
-    try std.testing.expectEqual(try parseCharLiteral("'\\u{7FFF}'", &bad_index), 0x7FFF);
+    try std.testing.expectEqual(
+        ParsedCharLiteral{ .success = 'a' },
+        parseCharLiteral("'a'"),
+    );
+    try std.testing.expectEqual(
+        ParsedCharLiteral{ .success = 'ä' },
+        parseCharLiteral("'ä'"),
+    );
+    try std.testing.expectEqual(
+        ParsedCharLiteral{ .success = 0 },
+        parseCharLiteral("'\\x00'"),
+    );
+    try std.testing.expectEqual(
+        ParsedCharLiteral{ .success = 0x4f },
+        parseCharLiteral("'\\x4f'"),
+    );
+    try std.testing.expectEqual(
+        ParsedCharLiteral{ .success = 0x4f },
+        parseCharLiteral("'\\x4F'"),
+    );
+    try std.testing.expectEqual(
+        ParsedCharLiteral{ .success = 0x3041 },
+        parseCharLiteral("'ぁ'"),
+    );
+    try std.testing.expectEqual(
+        ParsedCharLiteral{ .success = 0 },
+        parseCharLiteral("'\\u{0}'"),
+    );
+    try std.testing.expectEqual(
+        ParsedCharLiteral{ .success = 0x3041 },
+        parseCharLiteral("'\\u{3041}'"),
+    );
+    try std.testing.expectEqual(
+        ParsedCharLiteral{ .success = 0x7f },
+        parseCharLiteral("'\\u{7f}'"),
+    );
+    try std.testing.expectEqual(
+        ParsedCharLiteral{ .success = 0x7fff },
+        parseCharLiteral("'\\u{7FFF}'"),
+    );
 
-    try std.testing.expectError(error.InvalidCharacter, parseCharLiteral("'\\x0'", &bad_index));
-    try std.testing.expectError(error.InvalidCharacter, parseCharLiteral("'\\x000'", &bad_index));
-    try std.testing.expectError(error.InvalidCharacter, parseCharLiteral("'\\y'", &bad_index));
-    try std.testing.expectError(error.InvalidCharacter, parseCharLiteral("'\\u'", &bad_index));
-    try std.testing.expectError(error.InvalidCharacter, parseCharLiteral("'\\uFFFF'", &bad_index));
-    try std.testing.expectError(error.InvalidCharacter, parseCharLiteral("'\\u{}'", &bad_index));
-    try std.testing.expectError(error.InvalidCharacter, parseCharLiteral("'\\u{FFFFFF}'", &bad_index));
-    try std.testing.expectError(error.InvalidCharacter, parseCharLiteral("'\\u{FFFF'", &bad_index));
-    try std.testing.expectError(error.InvalidCharacter, parseCharLiteral("'\\u{FFFF}x'", &bad_index));
+    try std.testing.expectEqual(
+        ParsedCharLiteral{ .expected_hex_digit = 4 },
+        parseCharLiteral("'\\x0'"),
+    );
+    try std.testing.expectEqual(
+        ParsedCharLiteral{ .expected_end = 5 },
+        parseCharLiteral("'\\x000'"),
+    );
+    try std.testing.expectEqual(
+        ParsedCharLiteral{ .invalid_escape_character = 2 },
+        parseCharLiteral("'\\y'"),
+    );
+    try std.testing.expectEqual(
+        ParsedCharLiteral{ .expected_lbrace = 3 },
+        parseCharLiteral("'\\u'"),
+    );
+    try std.testing.expectEqual(
+        ParsedCharLiteral{ .expected_lbrace = 3 },
+        parseCharLiteral("'\\uFFFF'"),
+    );
+    try std.testing.expectEqual(
+        ParsedCharLiteral{ .empty_unicode_escape_sequence = 4 },
+        parseCharLiteral("'\\u{}'"),
+    );
+    try std.testing.expectEqual(
+        ParsedCharLiteral{ .unicode_escape_overflow = 9 },
+        parseCharLiteral("'\\u{FFFFFF}'"),
+    );
+    try std.testing.expectEqual(
+        ParsedCharLiteral{ .expected_hex_digit_or_rbrace = 8 },
+        parseCharLiteral("'\\u{FFFF'"),
+    );
+    try std.testing.expectEqual(
+        ParsedCharLiteral{ .expected_end = 9 },
+        parseCharLiteral("'\\u{FFFF}x'"),
+    );
+    try std.testing.expectEqual(
+        ParsedCharLiteral{ .invalid_character = 1 },
+        parseCharLiteral("'\x00'"),
+    );
 }
 
 test {

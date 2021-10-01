@@ -1,9 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
-
 //! This file defines several variants of bit sets.  A bit set
 //! is a densely stored set of integers with a known maximum,
 //! in which each integer gets a single bit.  Bit sets have very
@@ -84,6 +78,7 @@ pub fn IntegerBitSet(comptime size: u16) type {
 
         /// Returns the number of bits in this bit set
         pub inline fn capacity(self: Self) usize {
+            _ = self;
             return bit_length;
         }
 
@@ -311,6 +306,7 @@ pub fn ArrayBitSet(comptime MaskIntType: type, comptime size: usize) type {
 
         /// Returns the number of bits in this bit set
         pub inline fn capacity(self: Self) usize {
+            _ = self;
             return bit_length;
         }
 
@@ -373,7 +369,7 @@ pub fn ArrayBitSet(comptime MaskIntType: type, comptime size: usize) type {
 
         /// Flips every bit in the bit set.
         pub fn toggleAll(self: *Self) void {
-            for (self.masks) |*mask, i| {
+            for (self.masks) |*mask| {
                 mask.* = ~mask.*;
             }
 
@@ -642,7 +638,7 @@ pub const DynamicBitSetUnmanaged = struct {
         if (bit_length == 0) return;
 
         const num_masks = numMasks(self.bit_length);
-        for (self.masks[0..num_masks]) |*mask, i| {
+        for (self.masks[0..num_masks]) |*mask| {
             mask.* = ~mask.*;
         }
 
@@ -870,7 +866,7 @@ pub const DynamicBitSet = struct {
     /// ascending order.  Modifications to the underlying bit set may
     /// or may not be observed by the iterator.  Resizing the underlying
     /// bit set invalidates the iterator.
-    pub fn iterator(self: *Self, comptime options: IteratorOptions) Iterator(options) {
+    pub fn iterator(self: *const Self, comptime options: IteratorOptions) Iterator(options) {
         return self.unmanaged.iterator(options);
     }
 

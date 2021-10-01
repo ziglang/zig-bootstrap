@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("std");
 const builtin = std.builtin;
 
@@ -353,7 +348,6 @@ fn SMHasherTest(comptime hash_fn: anytype) u32 {
 
     var key: [256]u8 = undefined;
     var hashes_bytes: [256 * @sizeOf(HashResult)]u8 = undefined;
-    var final: HashResult = 0;
 
     std.mem.set(u8, &key, 0);
     std.mem.set(u8, &hashes_bytes, 0);
@@ -376,6 +370,7 @@ fn SMHasherTest(comptime hash_fn: anytype) u32 {
 }
 
 fn CityHash32hashIgnoreSeed(str: []const u8, seed: u32) u32 {
+    _ = seed;
     return CityHash32.hash(str);
 }
 

@@ -834,13 +834,14 @@ static bool is_stderr_cyg_pty(void) {
 }
 #endif
 
-bool os_stderr_tty(void) {
+bool os_stderr_supports_color(void) {
+    if (getenv("NO_COLOR") != NULL) return false;
 #if defined(ZIG_OS_WINDOWS)
     return _isatty(_fileno(stderr)) != 0 || is_stderr_cyg_pty();
 #elif defined(ZIG_OS_POSIX)
     return isatty(STDERR_FILENO) != 0;
 #else
-#error "missing os_stderr_tty implementation"
+#error "missing os_stderr_supports_color implementation"
 #endif
 }
 
@@ -924,12 +925,6 @@ Error os_make_path(Buf *path) {
 Error os_make_dir(Buf *path) {
 #if defined(ZIG_OS_WINDOWS)
     PathSpace path_space = slice_to_prefixed_file_w(buf_to_slice(path));
-    if (memEql(buf_to_slice(path), str("C:\\dev\\tést"))) {
-        for (size_t i = 0; i < path_space.len; i++) {
-            fprintf(stderr, "%d ", path_space.data.items[i]);
-        }
-        fprintf(stderr, "\n");
-    }
     
     if (!CreateDirectoryW(&path_space.data.items[0], NULL)) {
         if (GetLastError() == ERROR_ALREADY_EXISTS)

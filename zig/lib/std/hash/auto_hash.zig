@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("std");
 const assert = std.debug.assert;
 const mem = std.mem;
@@ -122,12 +117,9 @@ pub fn hash(hasher: anytype, key: anytype, comptime strat: HashStrategy) void {
         .Array => hashArray(hasher, key, strat),
 
         .Vector => |info| {
-            if (std.meta.bitCount(info.child) % 8 == 0) {
-                // If there's no unused bits in the child type, we can just hash
-                // this as an array of bytes.
+            if (comptime meta.trait.hasUniqueRepresentation(Key)) {
                 hasher.update(mem.asBytes(&key));
             } else {
-                // Otherwise, hash every element.
                 comptime var i = 0;
                 inline while (i < info.len) : (i += 1) {
                     hash(hasher, key[i], strat);
@@ -146,10 +138,12 @@ pub fn hash(hasher: anytype, key: anytype, comptime strat: HashStrategy) void {
         .Union => |info| {
             if (info.tag_type) |tag_type| {
                 const tag = meta.activeTag(key);
-                const s = hash(hasher, tag, strat);
+                hash(hasher, tag, strat);
                 inline for (info.fields) |field| {
                     if (@field(tag_type, field.name) == tag) {
-                        hash(hasher, @field(key, field.name), strat);
+                        if (field.field_type != void) {
+                            hash(hasher, @field(key, field.name), strat);
+                        }
                         // TODO use a labelled break when it does not crash the compiler. cf #2908
                         // break :blk;
                         return;
@@ -385,23 +379,26 @@ test "testHash union" {
         A: u32,
         B: bool,
         C: u32,
+        D: void,
     };
 
     const a = Foo{ .A = 18 };
     var b = Foo{ .B = true };
     const c = Foo{ .C = 18 };
+    const d: Foo = .D;
     try testing.expect(testHash(a) == testHash(a));
     try testing.expect(testHash(a) != testHash(b));
     try testing.expect(testHash(a) != testHash(c));
+    try testing.expect(testHash(a) != testHash(d));
 
     b = Foo{ .A = 18 };
     try testing.expect(testHash(a) == testHash(b));
+
+    b = .D;
+    try testing.expect(testHash(d) == testHash(b));
 }
 
 test "testHash vector" {
-    // Disabled because of #3317
-    if (builtin.target.cpu.arch == .mipsel or builtin.target.cpu.arch == .mips) return error.SkipZigTest;
-
     const a: meta.Vector(4, u32) = [_]u32{ 1, 2, 3, 4 };
     const b: meta.Vector(4, u32) = [_]u32{ 1, 2, 3, 5 };
     try testing.expect(testHash(a) == testHash(a));

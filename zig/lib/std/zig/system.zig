@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("../std.zig");
 const elf = std.elf;
 const mem = std.mem;
@@ -13,12 +8,10 @@ const assert = std.debug.assert;
 const process = std.process;
 const Target = std.Target;
 const CrossTarget = std.zig.CrossTarget;
-const macos = @import("system/macos.zig");
 const native_endian = std.Target.current.cpu.arch.endian();
 const linux = @import("system/linux.zig");
 pub const windows = @import("system/windows.zig");
-
-pub const getSDKPath = macos.getSDKPath;
+pub const darwin = @import("system/darwin.zig");
 
 pub const NativePaths = struct {
     include_dirs: ArrayList([:0]u8),
@@ -44,7 +37,7 @@ pub const NativePaths = struct {
             defer allocator.free(nix_cflags_compile);
 
             is_nix = true;
-            var it = mem.tokenize(nix_cflags_compile, " ");
+            var it = mem.tokenize(u8, nix_cflags_compile, " ");
             while (true) {
                 const word = it.next() orelse break;
                 if (mem.eql(u8, word, "-isystem")) {
@@ -69,7 +62,7 @@ pub const NativePaths = struct {
             defer allocator.free(nix_ldflags);
 
             is_nix = true;
-            var it = mem.tokenize(nix_ldflags, " ");
+            var it = mem.tokenize(u8, nix_ldflags, " ");
             while (true) {
                 const word = it.next() orelse break;
                 if (mem.eql(u8, word, "-rpath")) {
@@ -104,6 +97,17 @@ pub const NativePaths = struct {
 
             try self.addFrameworkDir("/Library/Frameworks");
             try self.addFrameworkDir("/System/Library/Frameworks");
+
+            return self;
+        }
+
+        if (comptime native_target.os.tag == .solaris) {
+            try self.addLibDir("/usr/lib/64");
+            try self.addLibDir("/usr/local/lib/64");
+            try self.addLibDir("/lib/64");
+
+            try self.addIncludeDir("/usr/include");
+            try self.addIncludeDir("/usr/local/include");
 
             return self;
         }
@@ -200,6 +204,7 @@ pub const NativePaths = struct {
     }
 
     fn appendArray(self: *NativePaths, array: *ArrayList([:0]u8), s: []const u8) !void {
+        _ = self;
         const item = try array.allocator.dupeZ(u8, s);
         errdefer array.allocator.free(item);
         try array.append(item);
@@ -249,12 +254,24 @@ pub const NativeTargetInfo = struct {
                         error.InvalidVersion => {},
                     }
                 },
+                .solaris => {
+                    const uts = std.os.uname();
+                    const release = mem.spanZ(&uts.release);
+                    if (std.builtin.Version.parse(release)) |ver| {
+                        os.version_range.semver.min = ver;
+                        os.version_range.semver.max = ver;
+                    } else |err| switch (err) {
+                        error.Overflow => {},
+                        error.InvalidCharacter => {},
+                        error.InvalidVersion => {},
+                    }
+                },
                 .windows => {
                     const detected_version = windows.detectRuntimeVersion();
                     os.version_range.windows.min = detected_version;
                     os.version_range.windows.max = detected_version;
                 },
-                .macos => try macos.detect(&os),
+                .macos => try darwin.macos.detect(&os),
                 .freebsd, .netbsd, .dragonfly => {
                     const key = switch (Target.current.os.tag) {
                         .freebsd => "kern.osreldate",
@@ -315,8 +332,8 @@ pub const NativeTargetInfo = struct {
                 },
                 .openbsd => {
                     const mib: [2]c_int = [_]c_int{
-                        std.os.CTL_KERN,
-                        std.os.KERN_OSRELEASE,
+                        std.os.CTL.KERN,
+                        std.os.KERN.OSRELEASE,
                     };
                     var buf: [64]u8 = undefined;
                     var len: usize = buf.len;
@@ -332,7 +349,7 @@ pub const NativeTargetInfo = struct {
                     if (std.builtin.Version.parse(buf[0 .. len - 1])) |ver| {
                         os.version_range.semver.min = ver;
                         os.version_range.semver.max = ver;
-                    } else |err| {
+                    } else |_| {
                         return error.OSVersionDetectionFail;
                     }
                 },
@@ -477,13 +494,6 @@ pub const NativeTargetInfo = struct {
             ld_info_list_len += 1;
         }
         const ld_info_list = ld_info_list_buffer[0..ld_info_list_len];
-
-        if (cross_target.dynamic_linker.get()) |explicit_ld| {
-            const explicit_ld_basename = fs.path.basename(explicit_ld);
-            for (ld_info_list) |ld_info| {
-                const standard_ld_basename = fs.path.basename(ld_info.ld.get().?);
-            }
-        }
 
         // Best case scenario: the executable is dynamically linked, and we can iterate
         // over our own shared objects and find a dynamic linker.
@@ -838,14 +848,14 @@ pub const NativeTargetInfo = struct {
 
                 if (dynstr) |ds| {
                     const strtab_len = std.math.min(ds.size, strtab_buf.len);
-                    const strtab_read_len = try preadMin(file, &strtab_buf, ds.offset, shstrtab_len);
+                    const strtab_read_len = try preadMin(file, &strtab_buf, ds.offset, strtab_len);
                     const strtab = strtab_buf[0..strtab_read_len];
                     // TODO this pointer cast should not be necessary
                     const rpoff_usize = std.math.cast(usize, rpoff) catch |err| switch (err) {
                         error.Overflow => return error.InvalidElfFile,
                     };
                     const rpath_list = mem.spanZ(std.meta.assumeSentinel(strtab[rpoff_usize..].ptr, 0));
-                    var it = mem.tokenize(rpath_list, ":");
+                    var it = mem.tokenize(u8, rpath_list, ":");
                     while (it.next()) |rpath| {
                         var dir = fs.cwd().openDir(rpath, .{}) catch |err| switch (err) {
                             error.NameTooLong => unreachable,
@@ -978,7 +988,7 @@ pub const NativeTargetInfo = struct {
 
         switch (std.Target.current.os.tag) {
             .linux => return linux.detectNativeCpuAndFeatures(),
-            .macos => return macos.detectNativeCpuAndFeatures(),
+            .macos => return darwin.macos.detectNativeCpuAndFeatures(),
             else => {},
         }
 
@@ -989,6 +999,6 @@ pub const NativeTargetInfo = struct {
 };
 
 test {
-    _ = @import("system/macos.zig");
+    _ = @import("system/darwin.zig");
     _ = @import("system/linux.zig");
 }

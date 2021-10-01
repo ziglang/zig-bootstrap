@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
 const fs = std.fs;
@@ -13,8 +14,11 @@ const Type = @import("type.zig").Type;
 const Cache = @import("Cache.zig");
 const build_options = @import("build_options");
 const LibCInstallation = @import("libc_installation.zig").LibCInstallation;
+const wasi_libc = @import("wasi_libc.zig");
+const Air = @import("Air.zig");
+const Liveness = @import("Liveness.zig");
 
-pub const producer_string = if (std.builtin.is_test) "zig test" else "zig " ++ build_options.version;
+pub const producer_string = if (builtin.is_test) "zig test" else "zig " ++ build_options.version;
 
 pub const Emit = struct {
     /// Where the output will go.
@@ -37,6 +41,8 @@ pub const Options = struct {
     /// Not every Compilation compiles .zig code! For example you could do `zig build-exe foo.o`.
     module: ?*Module,
     dynamic_linker: ?[]const u8,
+    /// The root path for the dynamic linker and system libraries (as well as frameworks on Darwin)
+    sysroot: ?[]const u8,
     /// Used for calculating how much space to reserve for symbols in case the binary file
     /// does not already have a symbol table.
     symbol_count_hint: u64 = 32,
@@ -58,9 +64,6 @@ pub const Options = struct {
     /// other objects.
     /// Otherwise (depending on `use_lld`) this link code directly outputs and updates the final binary.
     use_llvm: bool,
-    /// Darwin-only. If this is true, `use_llvm` is true, and `is_native_os` is true, this link code will
-    /// use system linker `ld` instead of the LLD.
-    system_linker_hack: bool,
     link_libc: bool,
     link_libcpp: bool,
     link_libunwind: bool,
@@ -70,6 +73,10 @@ pub const Options = struct {
     rdynamic: bool,
     z_nodelete: bool,
     z_defs: bool,
+    z_origin: bool,
+    z_noexecstack: bool,
+    z_now: bool,
+    z_relro: bool,
     tsaware: bool,
     nxcompat: bool,
     dynamicbase: bool,
@@ -92,6 +99,7 @@ pub const Options = struct {
     each_lib_rpath: bool,
     disable_lld_caching: bool,
     is_test: bool,
+    use_stage1: bool,
     major_subsystem_version: ?u32,
     minor_subsystem_version: ?u32,
     gc_sections: ?bool = null,
@@ -103,18 +111,20 @@ pub const Options = struct {
     llvm_cpu_features: ?[*:0]const u8,
     /// Extra args passed directly to LLD. Ignored when not linking with LLD.
     extra_lld_args: []const []const u8,
-    /// Darwin-only. Set the root path to the system libraries and frameworks.
-    syslibroot: ?[]const u8,
 
     objects: []const []const u8,
     framework_dirs: []const []const u8,
     frameworks: []const []const u8,
     system_libs: std.StringArrayHashMapUnmanaged(void),
+    wasi_emulated_libs: []const wasi_libc.CRTFile,
     lib_dirs: []const []const u8,
     rpath_list: []const []const u8,
 
     version: ?std.builtin.Version,
     libc_installation: ?*const LibCInstallation,
+
+    /// WASI-only. Type of WASI execution model ("command" or "reactor").
+    wasi_exec_model: std.builtin.WasiExecModel = undefined,
 
     pub fn effectiveOutputMode(options: Options) std.builtin.OutputMode {
         return if (options.use_lld) .Obj else options.output_mode;
@@ -138,7 +148,8 @@ pub const File = struct {
         elf: Elf.TextBlock,
         coff: Coff.TextBlock,
         macho: MachO.TextBlock,
-        c: C.DeclBlock,
+        plan9: Plan9.DeclBlock,
+        c: void,
         wasm: Wasm.DeclBlock,
         spirv: void,
     };
@@ -147,7 +158,8 @@ pub const File = struct {
         elf: Elf.SrcFn,
         coff: Coff.SrcFn,
         macho: MachO.SrcFn,
-        c: C.FnBlock,
+        plan9: void,
+        c: void,
         wasm: Wasm.FnData,
         spirv: SpirV.FnData,
     };
@@ -156,13 +168,14 @@ pub const File = struct {
         elf: Elf.Export,
         coff: void,
         macho: MachO.Export,
+        plan9: Plan9.Export,
         c: void,
         wasm: void,
         spirv: void,
     };
 
     /// For DWARF .debug_info.
-    pub const DbgInfoTypeRelocsTable = std.HashMapUnmanaged(Type, DbgInfoTypeReloc, Type.HashContext, std.hash_map.default_max_load_percentage);
+    pub const DbgInfoTypeRelocsTable = std.HashMapUnmanaged(Type, DbgInfoTypeReloc, Type.HashContext64, std.hash_map.default_max_load_percentage);
 
     /// For DWARF .debug_info.
     pub const DbgInfoTypeReloc = struct {
@@ -170,7 +183,7 @@ pub const File = struct {
         /// This is where the .debug_info tag for the type is.
         off: u32,
         /// Offset from `TextBlock.dbg_info_off` (the buffer that is local to a Decl).
-        /// List of DW.AT_type / DW.FORM_ref4 that points to the type.
+        /// List of DW.AT.type / DW.FORM.ref4 that points to the type.
         relocs: std.ArrayListUnmanaged(u32),
     };
 
@@ -179,13 +192,14 @@ pub const File = struct {
     /// rewriting it. A malicious file is detected as incremental link failure
     /// and does not cause Illegal Behavior. This operation is not atomic.
     pub fn openPath(allocator: *Allocator, options: Options) !*File {
-        const use_stage1 = build_options.is_stage1 and options.use_llvm;
+        const use_stage1 = build_options.is_stage1 and options.use_stage1;
         if (use_stage1 or options.emit == null) {
             return switch (options.object_format) {
-                .coff, .pe => &(try Coff.createEmpty(allocator, options)).base,
+                .coff => &(try Coff.createEmpty(allocator, options)).base,
                 .elf => &(try Elf.createEmpty(allocator, options)).base,
                 .macho => &(try MachO.createEmpty(allocator, options)).base,
                 .wasm => &(try Wasm.createEmpty(allocator, options)).base,
+                .plan9 => return &(try Plan9.createEmpty(allocator, options)).base,
                 .c => unreachable, // Reported error earlier.
                 .spirv => &(try SpirV.createEmpty(allocator, options)).base,
                 .hex => return error.HexObjectFormatUnimplemented,
@@ -196,11 +210,13 @@ pub const File = struct {
         const use_lld = build_options.have_llvm and options.use_lld; // comptime known false when !have_llvm
         const sub_path = if (use_lld) blk: {
             if (options.module == null) {
-                // No point in opening a file, we would not write anything to it. Initialize with empty.
+                // No point in opening a file, we would not write anything to it.
+                // Initialize with empty.
                 return switch (options.object_format) {
-                    .coff, .pe => &(try Coff.createEmpty(allocator, options)).base,
+                    .coff => &(try Coff.createEmpty(allocator, options)).base,
                     .elf => &(try Elf.createEmpty(allocator, options)).base,
                     .macho => &(try MachO.createEmpty(allocator, options)).base,
+                    .plan9 => &(try Plan9.createEmpty(allocator, options)).base,
                     .wasm => &(try Wasm.createEmpty(allocator, options)).base,
                     .c => unreachable, // Reported error earlier.
                     .spirv => &(try SpirV.createEmpty(allocator, options)).base,
@@ -208,15 +224,19 @@ pub const File = struct {
                     .raw => return error.RawObjectFormatUnimplemented,
                 };
             }
-            // Open a temporary object file, not the final output file because we want to link with LLD.
-            break :blk try std.fmt.allocPrint(allocator, "{s}{s}", .{ emit.sub_path, options.target.oFileExt() });
+            // Open a temporary object file, not the final output file because we
+            // want to link with LLD.
+            break :blk try std.fmt.allocPrint(allocator, "{s}{s}", .{
+                emit.sub_path, options.object_format.fileExt(options.target.cpu.arch),
+            });
         } else emit.sub_path;
         errdefer if (use_lld) allocator.free(sub_path);
 
         const file: *File = switch (options.object_format) {
-            .coff, .pe => &(try Coff.openPath(allocator, sub_path, options)).base,
+            .coff => &(try Coff.openPath(allocator, sub_path, options)).base,
             .elf => &(try Elf.openPath(allocator, sub_path, options)).base,
             .macho => &(try MachO.openPath(allocator, sub_path, options)).base,
+            .plan9 => &(try Plan9.openPath(allocator, sub_path, options)).base,
             .wasm => &(try Wasm.openPath(allocator, sub_path, options)).base,
             .c => &(try C.openPath(allocator, sub_path, options)).base,
             .spirv => &(try SpirV.openPath(allocator, sub_path, options)).base,
@@ -225,6 +245,9 @@ pub const File = struct {
         };
 
         if (use_lld) {
+            // TODO this intermediary_basename isn't enough; in the case of `zig build-exe`,
+            // we also want to put the intermediary object file in the cache while the
+            // main emit directory is the cwd.
             file.intermediary_basename = sub_path;
         }
 
@@ -240,7 +263,7 @@ pub const File = struct {
 
     pub fn makeWritable(base: *File) !void {
         switch (base.tag) {
-            .coff, .elf, .macho => {
+            .coff, .elf, .macho, .plan9 => {
                 if (base.file != null) return;
                 const emit = base.options.emit orelse return;
                 base.file = try emit.directory.handle.createFile(emit.sub_path, .{
@@ -285,7 +308,7 @@ pub const File = struct {
                 f.close();
                 base.file = null;
             },
-            .coff, .elf => if (base.file) |f| {
+            .coff, .elf, .plan9 => if (base.file) |f| {
                 if (base.intermediary_basename != null) {
                     // The file we have open is not the final file that we want to
                     // make executable, so we don't have to close it.
@@ -304,12 +327,34 @@ pub const File = struct {
         log.debug("updateDecl {*} ({s}), type={}", .{ decl, decl.name, decl.ty });
         assert(decl.has_tv);
         switch (base.tag) {
-            .coff => return @fieldParentPtr(Coff, "base", base).updateDecl(module, decl),
-            .elf => return @fieldParentPtr(Elf, "base", base).updateDecl(module, decl),
+            // zig fmt: off
+            .coff  => return @fieldParentPtr(Coff,  "base", base).updateDecl(module, decl),
+            .elf   => return @fieldParentPtr(Elf,   "base", base).updateDecl(module, decl),
             .macho => return @fieldParentPtr(MachO, "base", base).updateDecl(module, decl),
-            .c => return @fieldParentPtr(C, "base", base).updateDecl(module, decl),
-            .wasm => return @fieldParentPtr(Wasm, "base", base).updateDecl(module, decl),
+            .c     => return @fieldParentPtr(C,     "base", base).updateDecl(module, decl),
+            .wasm  => return @fieldParentPtr(Wasm,  "base", base).updateDecl(module, decl),
             .spirv => return @fieldParentPtr(SpirV, "base", base).updateDecl(module, decl),
+            .plan9 => return @fieldParentPtr(Plan9, "base", base).updateDecl(module, decl),
+            // zig fmt: on
+        }
+    }
+
+    /// May be called before or after updateDeclExports but must be called
+    /// after allocateDeclIndexes for any given Decl.
+    pub fn updateFunc(base: *File, module: *Module, func: *Module.Fn, air: Air, liveness: Liveness) !void {
+        log.debug("updateFunc {*} ({s}), type={}", .{
+            func.owner_decl, func.owner_decl.name, func.owner_decl.ty,
+        });
+        switch (base.tag) {
+            // zig fmt: off
+            .coff  => return @fieldParentPtr(Coff,  "base", base).updateFunc(module, func, air, liveness),
+            .elf   => return @fieldParentPtr(Elf,   "base", base).updateFunc(module, func, air, liveness),
+            .macho => return @fieldParentPtr(MachO, "base", base).updateFunc(module, func, air, liveness),
+            .c     => return @fieldParentPtr(C,     "base", base).updateFunc(module, func, air, liveness),
+            .wasm  => return @fieldParentPtr(Wasm,  "base", base).updateFunc(module, func, air, liveness),
+            .spirv => return @fieldParentPtr(SpirV, "base", base).updateFunc(module, func, air, liveness),
+            .plan9 => return @fieldParentPtr(Plan9, "base", base).updateFunc(module, func, air, liveness),
+            // zig fmt: on
         }
     }
 
@@ -323,21 +368,25 @@ pub const File = struct {
             .elf => return @fieldParentPtr(Elf, "base", base).updateDeclLineNumber(module, decl),
             .macho => return @fieldParentPtr(MachO, "base", base).updateDeclLineNumber(module, decl),
             .c => return @fieldParentPtr(C, "base", base).updateDeclLineNumber(module, decl),
+            .plan9 => @panic("TODO: implement updateDeclLineNumber for plan9"),
             .wasm, .spirv => {},
         }
     }
 
     /// Must be called before any call to updateDecl or updateDeclExports for
     /// any given Decl.
+    /// TODO we're transitioning to deleting this function and instead having
+    /// each linker backend notice the first time updateDecl or updateFunc is called, or
+    /// a callee referenced from AIR.
     pub fn allocateDeclIndexes(base: *File, decl: *Module.Decl) !void {
         log.debug("allocateDeclIndexes {*} ({s})", .{ decl, decl.name });
         switch (base.tag) {
             .coff => return @fieldParentPtr(Coff, "base", base).allocateDeclIndexes(decl),
             .elf => return @fieldParentPtr(Elf, "base", base).allocateDeclIndexes(decl),
             .macho => return @fieldParentPtr(MachO, "base", base).allocateDeclIndexes(decl),
-            .c => return @fieldParentPtr(C, "base", base).allocateDeclIndexes(decl),
             .wasm => return @fieldParentPtr(Wasm, "base", base).allocateDeclIndexes(decl),
-            .spirv => {},
+            .plan9 => return @fieldParentPtr(Plan9, "base", base).allocateDeclIndexes(decl),
+            .c, .spirv => {},
         }
     }
 
@@ -390,6 +439,11 @@ pub const File = struct {
                 parent.deinit();
                 base.allocator.destroy(parent);
             },
+            .plan9 => {
+                const parent = @fieldParentPtr(Plan9, "base", base);
+                parent.deinit();
+                base.allocator.destroy(parent);
+            },
         }
     }
 
@@ -422,6 +476,7 @@ pub const File = struct {
             .c => return @fieldParentPtr(C, "base", base).flush(comp),
             .wasm => return @fieldParentPtr(Wasm, "base", base).flush(comp),
             .spirv => return @fieldParentPtr(SpirV, "base", base).flush(comp),
+            .plan9 => return @fieldParentPtr(Plan9, "base", base).flush(comp),
         }
     }
 
@@ -435,6 +490,7 @@ pub const File = struct {
             .c => return @fieldParentPtr(C, "base", base).flushModule(comp),
             .wasm => return @fieldParentPtr(Wasm, "base", base).flushModule(comp),
             .spirv => return @fieldParentPtr(SpirV, "base", base).flushModule(comp),
+            .plan9 => return @fieldParentPtr(Plan9, "base", base).flushModule(comp),
         }
     }
 
@@ -448,6 +504,7 @@ pub const File = struct {
             .c => @fieldParentPtr(C, "base", base).freeDecl(decl),
             .wasm => @fieldParentPtr(Wasm, "base", base).freeDecl(decl),
             .spirv => @fieldParentPtr(SpirV, "base", base).freeDecl(decl),
+            .plan9 => @fieldParentPtr(Plan9, "base", base).freeDecl(decl),
         }
     }
 
@@ -456,6 +513,7 @@ pub const File = struct {
             .coff => return @fieldParentPtr(Coff, "base", base).error_flags,
             .elf => return @fieldParentPtr(Elf, "base", base).error_flags,
             .macho => return @fieldParentPtr(MachO, "base", base).error_flags,
+            .plan9 => return @fieldParentPtr(Plan9, "base", base).error_flags,
             .c => return .{ .no_entry_point_found = false },
             .wasm, .spirv => return ErrorFlags{},
         }
@@ -478,6 +536,7 @@ pub const File = struct {
             .c => return @fieldParentPtr(C, "base", base).updateDeclExports(module, decl, exports),
             .wasm => return @fieldParentPtr(Wasm, "base", base).updateDeclExports(module, decl, exports),
             .spirv => return @fieldParentPtr(SpirV, "base", base).updateDeclExports(module, decl, exports),
+            .plan9 => return @fieldParentPtr(Plan9, "base", base).updateDeclExports(module, decl, exports),
         }
     }
 
@@ -486,13 +545,14 @@ pub const File = struct {
             .coff => return @fieldParentPtr(Coff, "base", base).getDeclVAddr(decl),
             .elf => return @fieldParentPtr(Elf, "base", base).getDeclVAddr(decl),
             .macho => return @fieldParentPtr(MachO, "base", base).getDeclVAddr(decl),
+            .plan9 => @panic("GET VADDR"),
             .c => unreachable,
             .wasm => unreachable,
             .spirv => unreachable,
         }
     }
 
-    fn linkAsArchive(base: *File, comp: *Compilation) !void {
+    pub fn linkAsArchive(base: *File, comp: *Compilation) !void {
         const tracy = trace(@src());
         defer tracy.end();
 
@@ -505,14 +565,14 @@ pub const File = struct {
         // If there is no Zig code to compile, then we should skip flushing the output file because it
         // will not be part of the linker line anyway.
         const module_obj_path: ?[]const u8 = if (base.options.module) |module| blk: {
-            const use_stage1 = build_options.is_stage1 and base.options.use_llvm;
+            const use_stage1 = build_options.is_stage1 and base.options.use_stage1;
             if (use_stage1) {
                 const obj_basename = try std.zig.binNameAlloc(arena, .{
                     .root_name = base.options.root_name,
                     .target = base.options.target,
                     .output_mode = .Obj,
                 });
-                const o_directory = base.options.module.?.zig_cache_artifact_directory;
+                const o_directory = module.zig_cache_artifact_directory;
                 const full_obj_path = try o_directory.join(arena, &[_][]const u8{obj_basename});
                 break :blk full_obj_path;
             }
@@ -580,7 +640,7 @@ pub const File = struct {
         var object_files = std.ArrayList([*:0]const u8).init(base.allocator);
         defer object_files.deinit();
 
-        try object_files.ensureCapacity(base.options.objects.len + comp.c_object_table.count() + 2);
+        try object_files.ensureTotalCapacity(base.options.objects.len + comp.c_object_table.count() + 2);
         for (base.options.objects) |obj_path| {
             object_files.appendAssumeCapacity(try arena.dupeZ(u8, obj_path));
         }
@@ -630,6 +690,7 @@ pub const File = struct {
         c,
         wasm,
         spirv,
+        plan9,
     };
 
     pub const ErrorFlags = struct {
@@ -638,6 +699,7 @@ pub const File = struct {
 
     pub const C = @import("link/C.zig");
     pub const Coff = @import("link/Coff.zig");
+    pub const Plan9 = @import("link/Plan9.zig");
     pub const Elf = @import("link/Elf.zig");
     pub const MachO = @import("link/MachO.zig");
     pub const SpirV = @import("link/SpirV.zig");

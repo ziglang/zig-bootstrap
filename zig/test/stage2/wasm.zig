@@ -56,13 +56,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\}
             \\fn bar() void {}
         ,
-        // This is what you get when you take the bits of the IEE-754
-        // representation of 42.0 and reinterpret them as an unsigned
-        // integer.
-        // Bug is fixed in wasmtime v0.26 but updating to v0.26 is blocked
-        // on this issue:
-        // https://github.com/ziglang/zig/issues/8742
-            "1109917696\n",
+            "42\n",
         );
 
         case.addCompareOutput(
@@ -70,7 +64,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    foo(10, 20);
             \\    return 5;
             \\}
-            \\fn foo(x: u32, y: u32) void {}
+            \\fn foo(x: u32, y: u32) void { _ = x; _ = y; }
         , "5\n");
     }
 
@@ -82,6 +76,10 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    var i: u32 = 5;
             \\    var y: f32 = 42.0;
             \\    var x: u32 = 10;
+            \\    if (false) {
+            \\      y;
+            \\      x;
+            \\    }
             \\    return i;
             \\}
         , "5\n");
@@ -90,12 +88,14 @@ pub fn addCases(ctx: *TestContext) !void {
             \\pub export fn _start() u32 {
             \\    var i: u32 = 5;
             \\    var y: f32 = 42.0;
+            \\    _ = y;
             \\    var x: u32 = 10;
             \\    foo(i, x);
             \\    i = x;
             \\    return i;
             \\}
             \\fn foo(x: u32, y: u32) void {
+            \\    _  = y;
             \\    var i: u32 = 10;
             \\    i = x;
             \\}
@@ -114,6 +114,27 @@ pub fn addCases(ctx: *TestContext) !void {
         , "25\n");
 
         case.addCompareOutput(
+            \\pub export fn _start() i32 {
+            \\    var i: i32 = 2147483647;
+            \\    return i +% 1;
+            \\}
+        , "-2147483648\n");
+
+        case.addCompareOutput(
+            \\pub export fn _start() i32 {
+            \\    var i: i4 = 7;
+            \\    return i +% 1;
+            \\}
+        , "0\n");
+
+        case.addCompareOutput(
+            \\pub export fn _start() u32 {
+            \\    var i: u8 = 255;
+            \\    return i +% 1;
+            \\}
+        , "0\n");
+
+        case.addCompareOutput(
             \\pub export fn _start() u32 {
             \\    var i: u32 = 5;
             \\    i += 20;
@@ -130,6 +151,27 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    var i: u32 = 20;
             \\    i -= 5;
             \\    return i;
+            \\}
+        , "15\n");
+
+        case.addCompareOutput(
+            \\pub export fn _start() i32 {
+            \\    var i: i32 = -2147483648;
+            \\    return i -% 1;
+            \\}
+        , "2147483647\n");
+
+        case.addCompareOutput(
+            \\pub export fn _start() i32 {
+            \\    var i: i7 = -64;
+            \\    return i -% 1;
+            \\}
+        , "63\n");
+
+        case.addCompareOutput(
+            \\pub export fn _start() u32 {
+            \\    var i: u4 = 0;
+            \\    return i -% 1;
             \\}
         , "15\n");
 
@@ -156,6 +198,27 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    return x * y;
             \\}
         , "350\n");
+
+        case.addCompareOutput(
+            \\pub export fn _start() i32 {
+            \\    var i: i32 = 2147483647;
+            \\    return i *% 2;
+            \\}
+        , "-2\n");
+
+        case.addCompareOutput(
+            \\pub export fn _start() u32 {
+            \\    var i: u3 = 3;
+            \\    return i *% 3;
+            \\}
+        , "1\n");
+
+        case.addCompareOutput(
+            \\pub export fn _start() i32 {
+            \\    var i: i4 = 3;
+            \\    return i *% 3;
+            \\}
+        , "1\n");
 
         case.addCompareOutput(
             \\pub export fn _start() u32 {
@@ -394,6 +457,10 @@ pub fn addCases(ctx: *TestContext) !void {
             \\pub export fn _start() i32 {
             \\    var number1 = Number.One;
             \\    var number2: Number = .Two;
+            \\    if (false) {
+            \\        number1;
+            \\        number2;
+            \\    }
             \\    const number3 = @intToEnum(Number, 2);
             \\
             \\    return @enumToInt(number3);
@@ -583,8 +650,6 @@ pub fn addCases(ctx: *TestContext) !void {
     }
 
     {
-        // TODO implement Type equality comparison of error unions in SEMA
-        // before we can incrementally compile functions with an error union as return type
         var case = ctx.exe("wasm error union part 2", wasi);
 
         case.addCompareOutput(
@@ -598,5 +663,81 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    return error.Bruh;
             \\}
         , "69\n");
+        case.addCompareOutput(
+            \\pub export fn _start() u32 {
+            \\    var e = foo();
+            \\    const i = e catch 42;
+            \\    return i;
+            \\}
+            \\
+            \\fn foo() anyerror!u32 {
+            \\    return error.Dab;
+            \\}
+        , "42\n");
+    }
+
+    {
+        var case = ctx.exe("wasm integer widening", wasi);
+
+        case.addCompareOutput(
+            \\pub export fn _start() u64 {
+            \\    var x: u32 = 5;
+            \\    return x;
+            \\}
+        , "5\n");
+    }
+
+    {
+        var case = ctx.exe("wasm optionals", wasi);
+
+        case.addCompareOutput(
+            \\pub export fn _start() u32 {
+            \\    var x: ?u32 = 5;
+            \\    var y: u32 = 0;
+            \\    if (x) |val| {
+            \\        y = val;
+            \\    }
+            \\    return y;
+            \\}
+        , "5\n");
+
+        case.addCompareOutput(
+            \\pub export fn _start() u32 {
+            \\    var x: ?u32 = null;
+            \\    var y: u32 = 0;
+            \\    if (x) |val| {
+            \\        y = val;
+            \\    }
+            \\    return y;
+            \\}
+        , "0\n");
+
+        case.addCompareOutput(
+            \\pub export fn _start() u32 {
+            \\    var x: ?u32 = 5;
+            \\    return x.?;
+            \\}
+        , "5\n");
+
+        case.addCompareOutput(
+            \\pub export fn _start() u32 {
+            \\    var x: u32 = 5;
+            \\    var y: ?u32 = x;
+            \\    return y.?;
+            \\}
+        , "5\n");
+
+        case.addCompareOutput(
+            \\pub export fn _start() u32 {
+            \\    var val: ?u32 = 5;
+            \\    while (val) |*v| {
+            \\        v.* -= 1;
+            \\        if (v.* == 2) {
+            \\            val = null;
+            \\        }
+            \\    }
+            \\    return 0;
+            \\}
+        , "0\n");
     }
 }

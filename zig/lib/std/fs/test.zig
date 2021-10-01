@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("../std.zig");
 const testing = std.testing;
 const builtin = std.builtin;
@@ -193,7 +188,7 @@ fn contains(entries: *const std.ArrayList(Dir.Entry), el: Dir.Entry) bool {
 
 test "Dir.realpath smoke test" {
     switch (builtin.os.tag) {
-        .linux, .windows, .macos, .ios, .watchos, .tvos => {},
+        .linux, .windows, .macos, .ios, .watchos, .tvos, .solaris => {},
         else => return error.SkipZigTest,
     }
 
@@ -278,7 +273,7 @@ test "directory operations on files" {
     try testing.expectError(error.NotDir, tmp_dir.dir.deleteDir(test_file_name));
 
     switch (builtin.os.tag) {
-        .wasi, .freebsd, .openbsd, .dragonfly => {},
+        .wasi, .freebsd, .netbsd, .openbsd, .dragonfly => {},
         else => {
             const absolute_path = try tmp_dir.dir.realpathAlloc(testing.allocator, test_file_name);
             defer testing.allocator.free(absolute_path);
@@ -308,17 +303,22 @@ test "file operations on directories" {
 
     try testing.expectError(error.IsDir, tmp_dir.dir.createFile(test_dir_name, .{}));
     try testing.expectError(error.IsDir, tmp_dir.dir.deleteFile(test_dir_name));
-    // Currently, WASI will return error.Unexpected (via ENOTCAPABLE) when attempting fd_read on a directory handle.
-    // TODO: Re-enable on WASI once https://github.com/bytecodealliance/wasmtime/issues/1935 is resolved.
-    if (builtin.os.tag != .wasi) {
-        try testing.expectError(error.IsDir, tmp_dir.dir.readFileAlloc(testing.allocator, test_dir_name, std.math.maxInt(usize)));
+    switch (builtin.os.tag) {
+        // NetBSD does not error when reading a directory.
+        .netbsd => {},
+        // Currently, WASI will return error.Unexpected (via ENOTCAPABLE) when attempting fd_read on a directory handle.
+        // TODO: Re-enable on WASI once https://github.com/bytecodealliance/wasmtime/issues/1935 is resolved.
+        .wasi => {},
+        else => {
+            try testing.expectError(error.IsDir, tmp_dir.dir.readFileAlloc(testing.allocator, test_dir_name, std.math.maxInt(usize)));
+        },
     }
     // Note: The `.write = true` is necessary to ensure the error occurs on all platforms.
     // TODO: Add a read-only test as well, see https://github.com/ziglang/zig/issues/5732
     try testing.expectError(error.IsDir, tmp_dir.dir.openFile(test_dir_name, .{ .write = true }));
 
     switch (builtin.os.tag) {
-        .wasi, .freebsd, .openbsd, .dragonfly => {},
+        .wasi, .freebsd, .netbsd, .openbsd, .dragonfly => {},
         else => {
             const absolute_path = try tmp_dir.dir.realpathAlloc(testing.allocator, test_dir_name);
             defer testing.allocator.free(absolute_path);
@@ -536,6 +536,7 @@ test "makePath, put some files in it, deleteTree" {
     try tmp.dir.writeFile("os_test_tmp" ++ fs.path.sep_str ++ "b" ++ fs.path.sep_str ++ "file2.txt", "blah");
     try tmp.dir.deleteTree("os_test_tmp");
     if (tmp.dir.openDir("os_test_tmp", .{})) |dir| {
+        _ = dir;
         @panic("expected error");
     } else |err| {
         try testing.expect(err == error.FileNotFound);
@@ -633,6 +634,7 @@ test "access file" {
 
     try tmp.dir.makePath("os_test_tmp");
     if (tmp.dir.access("os_test_tmp" ++ fs.path.sep_str ++ "file.txt", .{})) |ok| {
+        _ = ok;
         @panic("expected error");
     } else |err| {
         try testing.expect(err == error.FileNotFound);
@@ -855,11 +857,10 @@ test "open file with exclusive lock twice, make sure it waits" {
     errdefer file.close();
 
     const S = struct {
-        const C = struct { dir: *fs.Dir, evt: *std.Thread.ResetEvent };
-        fn checkFn(ctx: C) !void {
-            const file1 = try ctx.dir.createFile(filename, .{ .lock = .Exclusive });
+        fn checkFn(dir: *fs.Dir, evt: *std.Thread.ResetEvent) !void {
+            const file1 = try dir.createFile(filename, .{ .lock = .Exclusive });
             defer file1.close();
-            ctx.evt.set();
+            evt.set();
         }
     };
 
@@ -867,8 +868,8 @@ test "open file with exclusive lock twice, make sure it waits" {
     try evt.init();
     defer evt.deinit();
 
-    const t = try std.Thread.spawn(S.checkFn, S.C{ .dir = &tmp.dir, .evt = &evt });
-    defer t.wait();
+    const t = try std.Thread.spawn(.{}, S.checkFn, .{ &tmp.dir, &evt });
+    defer t.join();
 
     const SLEEP_TIMEOUT_NS = 10 * std.time.ns_per_ms;
     // Make sure we've slept enough.
@@ -903,40 +904,51 @@ test "open file with exclusive nonblocking lock twice (absolute paths)" {
 test "walker" {
     if (builtin.os.tag == .wasi) return error.SkipZigTest;
 
-    var arena = ArenaAllocator.init(testing.allocator);
-    defer arena.deinit();
-    var allocator = &arena.allocator;
-
-    var tmp = tmpDir(.{});
+    var tmp = tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
-    const nb_dirs = 8;
+    // iteration order of walker is undefined, so need lookup maps to check against
 
-    var i: usize = 0;
-    var sub_dir = tmp.dir;
-    while (i < nb_dirs) : (i += 1) {
-        const dir_name = try std.fmt.allocPrint(allocator, "{}", .{i});
-        try sub_dir.makeDir(dir_name);
-        sub_dir = try sub_dir.openDir(dir_name, .{});
+    const expected_paths = std.ComptimeStringMap(void, .{
+        .{"dir1"},
+        .{"dir2"},
+        .{"dir3"},
+        .{"dir4"},
+        .{"dir3" ++ std.fs.path.sep_str ++ "sub1"},
+        .{"dir3" ++ std.fs.path.sep_str ++ "sub2"},
+        .{"dir3" ++ std.fs.path.sep_str ++ "sub2" ++ std.fs.path.sep_str ++ "subsub1"},
+    });
+
+    const expected_basenames = std.ComptimeStringMap(void, .{
+        .{"dir1"},
+        .{"dir2"},
+        .{"dir3"},
+        .{"dir4"},
+        .{"sub1"},
+        .{"sub2"},
+        .{"subsub1"},
+    });
+
+    for (expected_paths.kvs) |kv| {
+        try tmp.dir.makePath(kv.key);
     }
 
-    const tmp_path = try fs.path.join(allocator, &[_][]const u8{ "zig-cache", "tmp", tmp.sub_path[0..] });
-
-    var walker = try fs.walkPath(testing.allocator, tmp_path);
+    var walker = try tmp.dir.walk(testing.allocator);
     defer walker.deinit();
 
-    i = 0;
-    var expected_dir_name: []const u8 = "";
-    while (i < nb_dirs) : (i += 1) {
-        const name = try std.fmt.allocPrint(allocator, "{}", .{i});
-        expected_dir_name = if (expected_dir_name.len == 0)
-            name
-        else
-            try fs.path.join(allocator, &[_][]const u8{ expected_dir_name, name });
-
-        var entry = (try walker.next()).?;
-        try testing.expectEqualStrings(expected_dir_name, try fs.path.relative(allocator, tmp_path, entry.path));
+    var num_walked: usize = 0;
+    while (try walker.next()) |entry| {
+        testing.expect(expected_basenames.has(entry.basename)) catch |err| {
+            std.debug.print("found unexpected basename: {s}\n", .{std.fmt.fmtSliceEscapeLower(entry.basename)});
+            return err;
+        };
+        testing.expect(expected_paths.has(entry.path)) catch |err| {
+            std.debug.print("found unexpected path: {s}\n", .{std.fmt.fmtSliceEscapeLower(entry.path)});
+            return err;
+        };
+        num_walked += 1;
     }
+    try testing.expectEqual(expected_paths.kvs.len, num_walked);
 }
 
 test ". and .. in fs.Dir functions" {

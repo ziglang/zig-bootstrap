@@ -73,6 +73,7 @@ void zig_stage1_build_object(struct ZigStage1 *stage1) {
     buf_init_from_mem(&g->h_file_output_path, stage1->emit_h_ptr, stage1->emit_h_len);
     buf_init_from_mem(&g->asm_file_output_path, stage1->emit_asm_ptr, stage1->emit_asm_len);
     buf_init_from_mem(&g->llvm_ir_file_output_path, stage1->emit_llvm_ir_ptr, stage1->emit_llvm_ir_len);
+    buf_init_from_mem(&g->bitcode_file_output_path, stage1->emit_bitcode_ptr, stage1->emit_bitcode_len);
     buf_init_from_mem(&g->analysis_json_output_path, stage1->emit_analysis_json_ptr, stage1->emit_analysis_json_len);
     buf_init_from_mem(&g->docs_output_path, stage1->emit_docs_ptr, stage1->emit_docs_len);
 
@@ -91,6 +92,7 @@ void zig_stage1_build_object(struct ZigStage1 *stage1) {
     g->have_pic = stage1->pic;
     g->have_pie = stage1->pie;
     g->have_lto = stage1->lto;
+    g->unwind_tables = stage1->unwind_tables;
     g->have_stack_probing = stage1->enable_stack_probing;
     g->red_zone = stage1->red_zone;
     g->is_single_threaded = stage1->is_single_threaded;
@@ -99,6 +101,7 @@ void zig_stage1_build_object(struct ZigStage1 *stage1) {
     g->link_libc = stage1->link_libc;
     g->link_libcpp = stage1->link_libcpp;
     g->function_sections = stage1->function_sections;
+    g->include_compiler_rt = stage1->include_compiler_rt;
 
     g->subsystem = stage1->subsystem;
 
@@ -106,8 +109,6 @@ void zig_stage1_build_object(struct ZigStage1 *stage1) {
     g->enable_stack_report = stage1->enable_stack_report;
     g->test_is_evented = stage1->test_is_evented;
 
-    g->verbose_tokenize = stage1->verbose_tokenize;
-    g->verbose_ast = stage1->verbose_ast;
     g->verbose_ir = stage1->verbose_ir;
     g->verbose_llvm_ir = stage1->verbose_llvm_ir;
     g->verbose_cimport = stage1->verbose_cimport;
@@ -125,7 +126,7 @@ void zig_stage1_build_object(struct ZigStage1 *stage1) {
 
     g->main_progress_node = stage1->main_progress_node;
 
-    add_package(g, stage1->root_pkg, g->main_pkg);
+    add_package(g, stage1->main_pkg, g->main_pkg);
 
     codegen_build_object(g);
 }

@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("std.zig");
 const io = std.io;
 const os = std.os;
@@ -429,7 +424,7 @@ pub fn ProgramHeaderIterator(ParseSource: anytype) type {
                 if (self.elf_header.endian == native_endian) return phdr;
 
                 // Convert fields to native endianness.
-                bswapAllFields(Elf64_Phdr, &phdr);
+                mem.bswapAllFields(Elf64_Phdr, &phdr);
                 return phdr;
             }
 
@@ -441,7 +436,7 @@ pub fn ProgramHeaderIterator(ParseSource: anytype) type {
             // ELF endianness does NOT match native endianness.
             if (self.elf_header.endian != native_endian) {
                 // Convert fields to native endianness.
-                bswapAllFields(Elf32_Phdr, &phdr);
+                mem.bswapAllFields(Elf32_Phdr, &phdr);
             }
 
             // Convert 32-bit header to 64-bit.
@@ -479,18 +474,8 @@ pub fn SectionHeaderIterator(ParseSource: anytype) type {
                 if (self.elf_header.endian == native_endian) return shdr;
 
                 // Convert fields to native endianness.
-                return Elf64_Shdr{
-                    .sh_name = @byteSwap(@TypeOf(shdr.sh_name), shdr.sh_name),
-                    .sh_type = @byteSwap(@TypeOf(shdr.sh_type), shdr.sh_type),
-                    .sh_flags = @byteSwap(@TypeOf(shdr.sh_flags), shdr.sh_flags),
-                    .sh_addr = @byteSwap(@TypeOf(shdr.sh_addr), shdr.sh_addr),
-                    .sh_offset = @byteSwap(@TypeOf(shdr.sh_offset), shdr.sh_offset),
-                    .sh_size = @byteSwap(@TypeOf(shdr.sh_size), shdr.sh_size),
-                    .sh_link = @byteSwap(@TypeOf(shdr.sh_link), shdr.sh_link),
-                    .sh_info = @byteSwap(@TypeOf(shdr.sh_info), shdr.sh_info),
-                    .sh_addralign = @byteSwap(@TypeOf(shdr.sh_addralign), shdr.sh_addralign),
-                    .sh_entsize = @byteSwap(@TypeOf(shdr.sh_entsize), shdr.sh_entsize),
-                };
+                mem.bswapAllFields(Elf64_Shdr, &shdr);
+                return shdr;
             }
 
             var shdr: Elf32_Shdr = undefined;
@@ -501,18 +486,7 @@ pub fn SectionHeaderIterator(ParseSource: anytype) type {
             // ELF endianness does NOT match native endianness.
             if (self.elf_header.endian != native_endian) {
                 // Convert fields to native endianness.
-                shdr = .{
-                    .sh_name = @byteSwap(@TypeOf(shdr.sh_name), shdr.sh_name),
-                    .sh_type = @byteSwap(@TypeOf(shdr.sh_type), shdr.sh_type),
-                    .sh_flags = @byteSwap(@TypeOf(shdr.sh_flags), shdr.sh_flags),
-                    .sh_addr = @byteSwap(@TypeOf(shdr.sh_addr), shdr.sh_addr),
-                    .sh_offset = @byteSwap(@TypeOf(shdr.sh_offset), shdr.sh_offset),
-                    .sh_size = @byteSwap(@TypeOf(shdr.sh_size), shdr.sh_size),
-                    .sh_link = @byteSwap(@TypeOf(shdr.sh_link), shdr.sh_link),
-                    .sh_info = @byteSwap(@TypeOf(shdr.sh_info), shdr.sh_info),
-                    .sh_addralign = @byteSwap(@TypeOf(shdr.sh_addralign), shdr.sh_addralign),
-                    .sh_entsize = @byteSwap(@TypeOf(shdr.sh_entsize), shdr.sh_entsize),
-                };
+                mem.bswapAllFields(Elf32_Shdr, &shdr);
             }
 
             // Convert 32-bit header to 64-bit.
@@ -550,26 +524,6 @@ pub fn int32(need_bswap: bool, int_32: anytype, comptime Int64: anytype) Int64 {
     } else {
         return int_32;
     }
-}
-
-pub fn bswapAllFields(comptime S: type, ptr: *S) void {
-    if (@typeInfo(S) != .Struct) @compileError("bswapAllFields expects a struct as the first argument");
-    inline for (std.meta.fields(S)) |f| {
-        @field(ptr, f.name) = @byteSwap(f.field_type, @field(ptr, f.name));
-    }
-}
-test "bswapAllFields" {
-    var s: Elf32_Chdr = .{
-        .ch_type = 0x12341234,
-        .ch_size = 0x56785678,
-        .ch_addralign = 0x12124242,
-    };
-    bswapAllFields(Elf32_Chdr, &s);
-    try std.testing.expectEqual(Elf32_Chdr{
-        .ch_type = 0x34123412,
-        .ch_size = 0x78567856,
-        .ch_addralign = 0x42421212,
-    }, s);
 }
 
 pub const EI_NIDENT = 16;
@@ -1637,3 +1591,100 @@ pub const PF_MASKOS = 0x0ff00000;
 
 /// Bits for processor-specific semantics.
 pub const PF_MASKPROC = 0xf0000000;
+
+// Special section indexes used in Elf{32,64}_Sym.
+pub const SHN_UNDEF = 0;
+pub const SHN_LORESERVE = 0xff00;
+pub const SHN_LOPROC = 0xff00;
+pub const SHN_HIPROC = 0xff1f;
+pub const SHN_LIVEPATCH = 0xff20;
+pub const SHN_ABS = 0xfff1;
+pub const SHN_COMMON = 0xfff2;
+pub const SHN_HIRESERVE = 0xffff;
+
+/// AMD x86-64 relocations.
+/// No reloc
+pub const R_X86_64_NONE = 0;
+/// Direct 64 bit
+pub const R_X86_64_64 = 1;
+/// PC relative 32 bit signed
+pub const R_X86_64_PC32 = 2;
+/// 32 bit GOT entry
+pub const R_X86_64_GOT32 = 3;
+/// 32 bit PLT address
+pub const R_X86_64_PLT32 = 4;
+/// Copy symbol at runtime
+pub const R_X86_64_COPY = 5;
+/// Create GOT entry
+pub const R_X86_64_GLOB_DAT = 6;
+/// Create PLT entry
+pub const R_X86_64_JUMP_SLOT = 7;
+/// Adjust by program base
+pub const R_X86_64_RELATIVE = 8;
+/// 32 bit signed PC relative offset to GOT
+pub const R_X86_64_GOTPCREL = 9;
+/// Direct 32 bit zero extended
+pub const R_X86_64_32 = 10;
+/// Direct 32 bit sign extended
+pub const R_X86_64_32S = 11;
+/// Direct 16 bit zero extended
+pub const R_X86_64_16 = 12;
+/// 16 bit sign extended pc relative
+pub const R_X86_64_PC16 = 13;
+/// Direct 8 bit sign extended
+pub const R_X86_64_8 = 14;
+/// 8 bit sign extended pc relative
+pub const R_X86_64_PC8 = 15;
+/// ID of module containing symbol
+pub const R_X86_64_DTPMOD64 = 16;
+/// Offset in module's TLS block
+pub const R_X86_64_DTPOFF64 = 17;
+/// Offset in initial TLS block
+pub const R_X86_64_TPOFF64 = 18;
+/// 32 bit signed PC relative offset to two GOT entries for GD symbol
+pub const R_X86_64_TLSGD = 19;
+/// 32 bit signed PC relative offset to two GOT entries for LD symbol
+pub const R_X86_64_TLSLD = 20;
+/// Offset in TLS block
+pub const R_X86_64_DTPOFF32 = 21;
+/// 32 bit signed PC relative offset to GOT entry for IE symbol
+pub const R_X86_64_GOTTPOFF = 22;
+/// Offset in initial TLS block
+pub const R_X86_64_TPOFF32 = 23;
+/// PC relative 64 bit
+pub const R_X86_64_PC64 = 24;
+/// 64 bit offset to GOT
+pub const R_X86_64_GOTOFF64 = 25;
+/// 32 bit signed pc relative offset to GOT
+pub const R_X86_64_GOTPC32 = 26;
+/// 64 bit GOT entry offset
+pub const R_X86_64_GOT64 = 27;
+/// 64 bit PC relative offset to GOT entry
+pub const R_X86_64_GOTPCREL64 = 28;
+/// 64 bit PC relative offset to GOT
+pub const R_X86_64_GOTPC64 = 29;
+/// Like GOT64, says PLT entry needed
+pub const R_X86_64_GOTPLT64 = 30;
+/// 64-bit GOT relative offset to PLT entry
+pub const R_X86_64_PLTOFF64 = 31;
+/// Size of symbol plus 32-bit addend
+pub const R_X86_64_SIZE32 = 32;
+/// Size of symbol plus 64-bit addend
+pub const R_X86_64_SIZE64 = 33;
+/// GOT offset for TLS descriptor
+pub const R_X86_64_GOTPC32_TLSDESC = 34;
+/// Marker for call through TLS descriptor
+pub const R_X86_64_TLSDESC_CALL = 35;
+/// TLS descriptor
+pub const R_X86_64_TLSDESC = 36;
+/// Adjust indirectly by program base
+pub const R_X86_64_IRELATIVE = 37;
+/// 64-bit adjust by program base
+pub const R_X86_64_RELATIVE64 = 38;
+/// 39 Reserved was R_X86_64_PC32_BND 
+/// 40 Reserved was R_X86_64_PLT32_BND
+/// Load from 32 bit signed pc relative offset to GOT entry without REX prefix, relaxable
+pub const R_X86_64_GOTPCRELX = 41;
+/// Load from 32 bit signed PC relative offset to GOT entry with REX prefix, relaxable
+pub const R_X86_64_REX_GOTPCRELX = 42;
+pub const R_X86_64_NUM = 43;

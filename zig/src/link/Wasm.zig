@@ -1,6 +1,7 @@
 const Wasm = @This();
 
 const std = @import("std");
+const builtin = @import("builtin");
 const mem = std.mem;
 const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
@@ -15,12 +16,18 @@ const codegen = @import("../codegen/wasm.zig");
 const link = @import("../link.zig");
 const trace = @import("../tracy.zig").trace;
 const build_options = @import("build_options");
+const wasi_libc = @import("../wasi_libc.zig");
 const Cache = @import("../Cache.zig");
 const TypedValue = @import("../TypedValue.zig");
+const LlvmObject = @import("../codegen/llvm.zig").Object;
+const Air = @import("../Air.zig");
+const Liveness = @import("../Liveness.zig");
 
 pub const base_tag = link.File.Tag.wasm;
 
 base: link.File,
+/// If this is not null, an object file is created by LLVM and linked with LLD afterwards.
+llvm_object: ?*LlvmObject = null,
 /// List of all function Decls to be written to the output file. The index of
 /// each Decl in this list at the time of writing the binary is used as the
 /// function index. In the event where ext_funcs' size is not 0, the index of
@@ -28,7 +35,7 @@ base: link.File,
 /// TODO: can/should we access some data structure in Module directly?
 funcs: std.ArrayListUnmanaged(*Module.Decl) = .{},
 /// List of all extern function Decls to be written to the `import` section of the
-/// wasm binary. The positin in the list defines the function index
+/// wasm binary. The position in the list defines the function index
 ext_funcs: std.ArrayListUnmanaged(*Module.Decl) = .{},
 /// When importing objects from the host environment, a name must be supplied.
 /// LLVM uses "env" by default when none is given. This would be a good default for Zig
@@ -110,8 +117,13 @@ pub const DeclBlock = struct {
 pub fn openPath(allocator: *Allocator, sub_path: []const u8, options: link.Options) !*Wasm {
     assert(options.object_format == .wasm);
 
-    if (options.use_llvm) return error.LLVM_BackendIsTODO_ForWasm; // TODO
-    if (options.use_lld) return error.LLD_LinkingIsTODO_ForWasm; // TODO
+    if (build_options.have_llvm and options.use_llvm) {
+        const self = try createEmpty(allocator, options);
+        errdefer self.base.destroy();
+
+        self.llvm_object = try LlvmObject.create(allocator, sub_path, options);
+        return self;
+    }
 
     // TODO: read the file and keep valid parts instead of truncating
     const file = try options.emit.?.directory.handle.createFile(sub_path, .{ .truncate = true, .read = true });
@@ -141,6 +153,9 @@ pub fn createEmpty(gpa: *Allocator, options: link.Options) !*Wasm {
 }
 
 pub fn deinit(self: *Wasm) void {
+    if (build_options.have_llvm) {
+        if (self.llvm_object) |llvm_object| llvm_object.destroy(self.base.allocator);
+    }
     for (self.symbols.items) |decl| {
         decl.fn_link.wasm.functype.deinit(self.base.allocator);
         decl.fn_link.wasm.code.deinit(self.base.allocator);
@@ -157,8 +172,8 @@ pub fn deinit(self: *Wasm) void {
 pub fn allocateDeclIndexes(self: *Wasm, decl: *Module.Decl) !void {
     if (decl.link.wasm.init) return;
 
-    try self.offset_table.ensureCapacity(self.base.allocator, self.offset_table.items.len + 1);
-    try self.symbols.ensureCapacity(self.base.allocator, self.symbols.items.len + 1);
+    try self.offset_table.ensureUnusedCapacity(self.base.allocator, 1);
+    try self.symbols.ensureUnusedCapacity(self.base.allocator, 1);
 
     const block = &decl.link.wasm;
     block.init = true;
@@ -185,10 +200,15 @@ pub fn allocateDeclIndexes(self: *Wasm, decl: *Module.Decl) !void {
     }
 }
 
-// Generate code for the Decl, storing it in memory to be later written to
-// the file on flush().
-pub fn updateDecl(self: *Wasm, module: *Module, decl: *Module.Decl) !void {
-    std.debug.assert(decl.link.wasm.init); // Must call allocateDeclIndexes()
+pub fn updateFunc(self: *Wasm, module: *Module, func: *Module.Fn, air: Air, liveness: Liveness) !void {
+    if (build_options.skip_non_native and builtin.object_format != .wasm) {
+        @panic("Attempted to compile for object format that was disabled by build configuration");
+    }
+    if (build_options.have_llvm) {
+        if (self.llvm_object) |llvm_object| return llvm_object.updateFunc(module, func, air, liveness);
+    }
+    const decl = func.owner_decl;
+    assert(decl.link.wasm.init); // Must call allocateDeclIndexes()
 
     const fn_data = &decl.fn_link.wasm;
     fn_data.functype.items.len = 0;
@@ -197,6 +217,8 @@ pub fn updateDecl(self: *Wasm, module: *Module, decl: *Module.Decl) !void {
 
     var context = codegen.Context{
         .gpa = self.base.allocator,
+        .air = air,
+        .liveness = liveness,
         .values = .{},
         .code = fn_data.code.toManaged(self.base.allocator),
         .func_type_data = fn_data.functype.toManaged(self.base.allocator),
@@ -209,22 +231,72 @@ pub fn updateDecl(self: *Wasm, module: *Module, decl: *Module.Decl) !void {
     defer context.deinit();
 
     // generate the 'code' section for the function declaration
-    const result = context.gen(.{ .ty = decl.ty, .val = decl.val }) catch |err| switch (err) {
+    const result = context.genFunc() catch |err| switch (err) {
         error.CodegenFail => {
             decl.analysis = .codegen_failure;
             try module.failed_decls.put(module.gpa, decl, context.err_msg);
             return;
         },
-        else => |e| return err,
+        else => |e| return e,
+    };
+    return self.finishUpdateDecl(decl, result, &context);
+}
+
+// Generate code for the Decl, storing it in memory to be later written to
+// the file on flush().
+pub fn updateDecl(self: *Wasm, module: *Module, decl: *Module.Decl) !void {
+    if (build_options.skip_non_native and builtin.object_format != .wasm) {
+        @panic("Attempted to compile for object format that was disabled by build configuration");
+    }
+    if (build_options.have_llvm) {
+        if (self.llvm_object) |llvm_object| return llvm_object.updateDecl(module, decl);
+    }
+    assert(decl.link.wasm.init); // Must call allocateDeclIndexes()
+
+    // TODO don't use this for non-functions
+    const fn_data = &decl.fn_link.wasm;
+    fn_data.functype.items.len = 0;
+    fn_data.code.items.len = 0;
+    fn_data.idx_refs.items.len = 0;
+
+    var context = codegen.Context{
+        .gpa = self.base.allocator,
+        .air = undefined,
+        .liveness = undefined,
+        .values = .{},
+        .code = fn_data.code.toManaged(self.base.allocator),
+        .func_type_data = fn_data.functype.toManaged(self.base.allocator),
+        .decl = decl,
+        .err_msg = undefined,
+        .locals = .{},
+        .target = self.base.options.target,
+        .global_error_set = self.base.options.module.?.global_error_set,
+    };
+    defer context.deinit();
+
+    // generate the 'code' section for the function declaration
+    const result = context.gen(decl.ty, decl.val) catch |err| switch (err) {
+        error.CodegenFail => {
+            decl.analysis = .codegen_failure;
+            try module.failed_decls.put(module.gpa, decl, context.err_msg);
+            return;
+        },
+        else => |e| return e,
     };
 
-    const code: []const u8 = switch (result) {
-        .appended => @as([]const u8, context.code.items),
-        .externally_managed => |payload| payload,
-    };
+    return self.finishUpdateDecl(decl, result, &context);
+}
+
+fn finishUpdateDecl(self: *Wasm, decl: *Module.Decl, result: codegen.Result, context: *codegen.Context) !void {
+    const fn_data: *FnData = &decl.fn_link.wasm;
 
     fn_data.code = context.code.toUnmanaged();
     fn_data.functype = context.func_type_data.toUnmanaged();
+
+    const code: []const u8 = switch (result) {
+        .appended => @as([]const u8, fn_data.code.items),
+        .externally_managed => |payload| payload,
+    };
 
     const block = &decl.link.wasm;
     if (decl.ty.zigTypeTag() == .Fn) {
@@ -257,9 +329,20 @@ pub fn updateDeclExports(
     module: *Module,
     decl: *const Module.Decl,
     exports: []const *Module.Export,
-) !void {}
+) !void {
+    if (build_options.skip_non_native and builtin.object_format != .wasm) {
+        @panic("Attempted to compile for object format that was disabled by build configuration");
+    }
+    if (build_options.have_llvm) {
+        if (self.llvm_object) |llvm_object| return llvm_object.updateDeclExports(module, decl, exports);
+    }
+}
 
 pub fn freeDecl(self: *Wasm, decl: *Module.Decl) void {
+    if (build_options.have_llvm) {
+        if (self.llvm_object) |llvm_object| return llvm_object.freeDecl(decl);
+    }
+
     if (self.getFuncidx(decl)) |func_idx| {
         switch (decl.val.tag()) {
             .function => _ = self.funcs.swapRemove(func_idx),
@@ -299,6 +382,7 @@ pub fn flush(self: *Wasm, comp: *Compilation) !void {
 }
 
 pub fn flushModule(self: *Wasm, comp: *Compilation) !void {
+    _ = comp;
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -495,7 +579,6 @@ pub fn flushModule(self: *Wasm, comp: *Compilation) !void {
     if (data_size != 0) {
         const header_offset = try reserveVecSectionHeader(file);
         const writer = file.writer();
-        var len: u32 = 0;
         // index to memory section (currently, there can only be 1 memory section in wasm)
         try leb.writeULEB128(writer, @as(u32, 0));
 
@@ -515,7 +598,7 @@ pub fn flushModule(self: *Wasm, comp: *Compilation) !void {
         var data_offset = offset_table_size;
         while (cur) |cur_block| : (cur = cur_block.next) {
             if (cur_block.size == 0) continue;
-            std.debug.assert(cur_block.init);
+            assert(cur_block.init);
 
             const offset = (cur_block.offset_index) * ptr_width;
             var buf: [4]u8 = undefined;
@@ -550,14 +633,14 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
     // If there is no Zig code to compile, then we should skip flushing the output file because it
     // will not be part of the linker line anyway.
     const module_obj_path: ?[]const u8 = if (self.base.options.module) |module| blk: {
-        const use_stage1 = build_options.is_stage1 and self.base.options.use_llvm;
+        const use_stage1 = build_options.is_stage1 and self.base.options.use_stage1;
         if (use_stage1) {
             const obj_basename = try std.zig.binNameAlloc(arena, .{
                 .root_name = self.base.options.root_name,
                 .target = self.base.options.target,
                 .output_mode = .Obj,
             });
-            const o_directory = self.base.options.module.?.zig_cache_artifact_directory;
+            const o_directory = module.zig_cache_artifact_directory;
             const full_obj_path = try o_directory.join(arena, &[_][]const u8{obj_basename});
             break :blk full_obj_path;
         }
@@ -568,13 +651,14 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
         break :blk full_obj_path;
     } else null;
 
-    const compiler_rt_path: ?[]const u8 = if (self.base.options.include_compiler_rt)
+    const is_obj = self.base.options.output_mode == .Obj;
+
+    const compiler_rt_path: ?[]const u8 = if (self.base.options.include_compiler_rt and !is_obj)
         comp.compiler_rt_static_lib.?.full_object_path
     else
         null;
 
     const target = self.base.options.target;
-    const link_in_crt = self.base.options.link_libc and self.base.options.output_mode == .Exe;
 
     const id_symlink_basename = "lld.id";
 
@@ -630,7 +714,7 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
     const full_out_path = try directory.join(arena, &[_][]const u8{self.base.options.emit.?.sub_path});
 
     if (self.base.options.output_mode == .Obj) {
-        // LLD's WASM driver does not support the equvialent of `-r` so we do a simple file copy
+        // LLD's WASM driver does not support the equivalent of `-r` so we do a simple file copy
         // here. TODO: think carefully about how we can avoid this redundant operation when doing
         // build-obj. See also the corresponding TODO in linkAsArchive.
         const the_object_path = blk: {
@@ -653,8 +737,6 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
             try fs.cwd().copyFile(the_object_path, fs.cwd(), full_out_path, .{});
         }
     } else {
-        const is_obj = self.base.options.output_mode == .Obj;
-
         // Create an LLD command line and invoke it.
         var argv = std.ArrayList([]const u8).init(self.base.allocator);
         defer argv.deinit();
@@ -662,10 +744,6 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
         // This is necessary because LLD does not behave properly as a library -
         // it calls exit() and does not reset all global data between invocations.
         try argv.appendSlice(&[_][]const u8{ comp.self_exe_path.?, "wasm-ld" });
-        if (is_obj) {
-            try argv.append("-r");
-        }
-
         try argv.append("-error-limit=0");
 
         if (self.base.options.lto) {
@@ -678,7 +756,7 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
 
         if (self.base.options.output_mode == .Exe) {
             // Increase the default stack size to a more reasonable value of 1MB instead of
-            // the default of 1 Wasm page being 64KB, unless overriden by the user.
+            // the default of 1 Wasm page being 64KB, unless overridden by the user.
             try argv.append("-z");
             const stack_size = self.base.options.stack_size_override orelse 1048576;
             const arg = try std.fmt.allocPrint(arena, "stack-size={d}", .{stack_size});
@@ -687,6 +765,13 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
             // Put stack before globals so that stack overflow results in segfault immediately
             // before corrupting globals. See https://github.com/ziglang/zig/issues/4496
             try argv.append("--stack-first");
+
+            if (self.base.options.wasi_exec_model == .reactor) {
+                // Reactor execution model does not have _start so lld doesn't look for it.
+                try argv.append("--no-entry");
+                // Make sure "_initialize" and other used-defined functions are exported if this is WASI reactor.
+                try argv.append("--export-dynamic");
+            }
         } else {
             try argv.append("--no-entry"); // So lld doesn't look for _start.
             try argv.append("--export-all");
@@ -697,16 +782,31 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
             full_out_path,
         });
 
-        if (link_in_crt) {
-            // TODO work out if we want standard crt, a reactor or a command
-            try argv.append(try comp.get_libc_crt_file(arena, "crt.o"));
-        }
+        if (target.os.tag == .wasi) {
+            const is_exe_or_dyn_lib = self.base.options.output_mode == .Exe or
+                (self.base.options.output_mode == .Lib and self.base.options.link_mode == .Dynamic);
+            if (is_exe_or_dyn_lib) {
+                const wasi_emulated_libs = self.base.options.wasi_emulated_libs;
+                for (wasi_emulated_libs) |crt_file| {
+                    try argv.append(try comp.get_libc_crt_file(
+                        arena,
+                        wasi_libc.emulatedLibCRFileLibName(crt_file),
+                    ));
+                }
 
-        if (!is_obj and self.base.options.link_libc) {
-            try argv.append(try comp.get_libc_crt_file(arena, switch (self.base.options.link_mode) {
-                .Static => "libc.a",
-                .Dynamic => unreachable,
-            }));
+                if (self.base.options.link_libc) {
+                    try argv.append(try comp.get_libc_crt_file(
+                        arena,
+                        wasi_libc.execModelCrtFileFullName(self.base.options.wasi_exec_model),
+                    ));
+                    try argv.append(try comp.get_libc_crt_file(arena, "libc.a"));
+                }
+
+                if (self.base.options.link_libcpp) {
+                    try argv.append(comp.libcxx_static_lib.?.full_object_path);
+                    try argv.append(comp.libcxxabi_static_lib.?.full_object_path);
+                }
+            }
         }
 
         // Positional arguments to the linker such as object files.

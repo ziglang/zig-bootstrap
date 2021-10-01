@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("std.zig");
 const builtin = std.builtin;
 const os = std.os;
@@ -88,12 +83,12 @@ pub fn getEnvMap(allocator: *Allocator) !BufMap {
             try result.putMove(key, value);
         }
         return result;
-    } else if (builtin.os.tag == .wasi) {
+    } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
         var environ_count: usize = undefined;
         var environ_buf_size: usize = undefined;
 
         const environ_sizes_get_ret = os.wasi.environ_sizes_get(&environ_count, &environ_buf_size);
-        if (environ_sizes_get_ret != os.wasi.ESUCCESS) {
+        if (environ_sizes_get_ret != .SUCCESS) {
             return os.unexpectedErrno(environ_sizes_get_ret);
         }
 
@@ -103,13 +98,13 @@ pub fn getEnvMap(allocator: *Allocator) !BufMap {
         defer allocator.free(environ_buf);
 
         const environ_get_ret = os.wasi.environ_get(environ.ptr, environ_buf.ptr);
-        if (environ_get_ret != os.wasi.ESUCCESS) {
+        if (environ_get_ret != .SUCCESS) {
             return os.unexpectedErrno(environ_get_ret);
         }
 
         for (environ) |env| {
             const pair = mem.spanZ(env);
-            var parts = mem.split(pair, "=");
+            var parts = mem.split(u8, pair, "=");
             const key = parts.next().?;
             const value = parts.next().?;
             try result.put(key, value);
@@ -179,6 +174,26 @@ pub fn getEnvVarOwned(allocator: *mem.Allocator, key: []const u8) GetEnvVarOwned
     }
 }
 
+pub fn hasEnvVarConstant(comptime key: []const u8) bool {
+    if (builtin.os.tag == .windows) {
+        const key_w = comptime std.unicode.utf8ToUtf16LeStringLiteral(key);
+        return std.os.getenvW(key_w) != null;
+    } else {
+        return os.getenv(key) != null;
+    }
+}
+
+pub fn hasEnvVar(allocator: *Allocator, key: []const u8) error{OutOfMemory}!bool {
+    if (builtin.os.tag == .windows) {
+        var stack_alloc = std.heap.stackFallback(256 * @sizeOf(u16), allocator);
+        const key_w = try std.unicode.utf8ToUtf16LeWithNull(&stack_alloc.allocator, key);
+        defer stack_alloc.allocator.free(key_w);
+        return std.os.getenvW(key_w) != null;
+    } else {
+        return os.getenv(key) != null;
+    }
+}
+
 test "os.getEnvVarOwned" {
     var ga = std.testing.allocator;
     try testing.expectError(error.EnvironmentVariableNotFound, getEnvVarOwned(ga, "BADENV"));
@@ -235,7 +250,7 @@ pub const ArgIteratorWasi = struct {
         var buf_size: usize = undefined;
 
         switch (w.args_sizes_get(&count, &buf_size)) {
-            w.ESUCCESS => {},
+            .SUCCESS => {},
             else => |err| return os.unexpectedErrno(err),
         }
 
@@ -245,7 +260,7 @@ pub const ArgIteratorWasi = struct {
         var argv_buf = try allocator.alloc(u8, buf_size);
 
         switch (w.args_get(argv.ptr, argv_buf.ptr)) {
-            w.ESUCCESS => {},
+            .SUCCESS => {},
             else => |err| return os.unexpectedErrno(err),
         }
 
@@ -419,6 +434,7 @@ pub const ArgIteratorWindows = struct {
         };
     }
     fn emitBackslashes(self: *ArgIteratorWindows, buf: *std.ArrayList(u16), emit_count: usize) !void {
+        _ = self;
         var i: usize = 0;
         while (i < emit_count) : (i += 1) {
             try buf.append(std.mem.nativeToLittle(u16, '\\'));
@@ -429,7 +445,7 @@ pub const ArgIteratorWindows = struct {
 pub const ArgIterator = struct {
     const InnerType = switch (builtin.os.tag) {
         .windows => ArgIteratorWindows,
-        .wasi => ArgIteratorWasi,
+        .wasi => if (builtin.link_libc) ArgIteratorPosix else ArgIteratorWasi,
         else => ArgIteratorPosix,
     };
 
@@ -448,7 +464,7 @@ pub const ArgIterator = struct {
 
     /// You must deinitialize iterator's internal buffers by calling `deinit` when done.
     pub fn initWithAllocator(allocator: *mem.Allocator) InitError!ArgIterator {
-        if (builtin.os.tag == .wasi) {
+        if (builtin.os.tag == .wasi and !builtin.link_libc) {
             return ArgIterator{ .inner = try InnerType.init(allocator) };
         }
 
@@ -486,7 +502,7 @@ pub const ArgIterator = struct {
     /// was created with `initWithAllocator` function.
     pub fn deinit(self: *ArgIterator) void {
         // Unless we're targeting WASI, this is a no-op.
-        if (builtin.os.tag == .wasi) {
+        if (builtin.os.tag == .wasi and !builtin.link_libc) {
             self.inner.deinit();
         }
     }
@@ -609,7 +625,7 @@ pub const UserInfo = struct {
 /// POSIX function which gets a uid from username.
 pub fn getUserInfo(name: []const u8) !UserInfo {
     return switch (builtin.os.tag) {
-        .linux, .macos, .watchos, .tvos, .ios, .freebsd, .netbsd, .openbsd, .haiku => posixGetUserInfo(name),
+        .linux, .macos, .watchos, .tvos, .ios, .freebsd, .netbsd, .openbsd, .haiku, .solaris => posixGetUserInfo(name),
         else => @compileError("Unsupported OS"),
     };
 }
@@ -737,6 +753,7 @@ pub fn getSelfExeSharedLibPaths(allocator: *Allocator) error{OutOfMemory}![][:0]
         .netbsd,
         .dragonfly,
         .openbsd,
+        .solaris,
         => {
             var paths = List.init(allocator);
             errdefer {
@@ -748,6 +765,7 @@ pub fn getSelfExeSharedLibPaths(allocator: *Allocator) error{OutOfMemory}![][:0]
             }
             try os.dl_iterate_phdr(&paths, error{OutOfMemory}, struct {
                 fn callback(info: *os.dl_phdr_info, size: usize, list: *List) !void {
+                    _ = size;
                     const name = info.dlpi_name orelse return;
                     if (name[0] == '/') {
                         const item = try list.allocator.dupeZ(u8, mem.spanZ(name));

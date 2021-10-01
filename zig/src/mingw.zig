@@ -187,27 +187,25 @@ pub fn buildCRTFile(comp: *Compilation, crt_file: CRTFile) !void {
                     };
                 }
             } else if (target.cpu.arch.isARM()) {
-                if (target.cpu.arch.ptrBitWidth() == 32) {
-                    for (mingwex_arm32_src) |dep| {
-                        (try c_source_files.addOne()).* = .{
-                            .src_path = try comp.zig_lib_directory.join(arena, &[_][]const u8{
-                                "libc", "mingw", dep,
-                            }),
-                            .extra_flags = extra_flags,
-                        };
-                    }
-                } else {
-                    for (mingwex_arm64_src) |dep| {
-                        (try c_source_files.addOne()).* = .{
-                            .src_path = try comp.zig_lib_directory.join(arena, &[_][]const u8{
-                                "libc", "mingw", dep,
-                            }),
-                            .extra_flags = extra_flags,
-                        };
-                    }
+                for (mingwex_arm32_src) |dep| {
+                    (try c_source_files.addOne()).* = .{
+                        .src_path = try comp.zig_lib_directory.join(arena, &[_][]const u8{
+                            "libc", "mingw", dep,
+                        }),
+                        .extra_flags = extra_flags,
+                    };
+                }
+            } else if (target.cpu.arch.isAARCH64()) {
+                for (mingwex_arm64_src) |dep| {
+                    (try c_source_files.addOne()).* = .{
+                        .src_path = try comp.zig_lib_directory.join(arena, &[_][]const u8{
+                            "libc", "mingw", dep,
+                        }),
+                        .extra_flags = extra_flags,
+                    };
                 }
             } else {
-                unreachable;
+                @panic("unsupported arch");
             }
             return comp.build_crt_file("mingwex", .Lib, c_source_files.items);
         },
@@ -314,7 +312,7 @@ pub fn buildImportLib(comp: *Compilation, lib_name: []const u8) !void {
     if (try man.hit()) {
         const digest = man.final();
 
-        try comp.crt_files.ensureCapacity(comp.gpa, comp.crt_files.count() + 1);
+        try comp.crt_files.ensureUnusedCapacity(comp.gpa, 1);
         comp.crt_files.putAssumeCapacityNoClobber(final_lib_basename, .{
             .full_object_path = try comp.global_cache_directory.join(comp.gpa, &[_][]const u8{
                 "o", &digest, final_lib_basename,
@@ -372,11 +370,9 @@ pub fn buildImportLib(comp: *Compilation, lib_name: []const u8) !void {
 
     try child.spawn();
 
-    const stdout_reader = child.stdout.?.reader();
     const stderr_reader = child.stderr.?.reader();
 
     // TODO https://github.com/ziglang/zig/issues/6343
-    const stdout = try stdout_reader.readAllAlloc(arena, std.math.maxInt(u32));
     const stderr = try stderr_reader.readAllAlloc(arena, 10 * 1024 * 1024);
 
     const term = child.wait() catch |err| {
@@ -861,6 +857,7 @@ const mingwex_generic_src = [_][]const u8{
     "stdio" ++ path.sep_str ++ "fopen64.c",
     "stdio" ++ path.sep_str ++ "fseeko32.c",
     "stdio" ++ path.sep_str ++ "fseeko64.c",
+    "stdio" ++ path.sep_str ++ "fseeki64.c",
     "stdio" ++ path.sep_str ++ "fsetpos64.c",
     "stdio" ++ path.sep_str ++ "ftello.c",
     "stdio" ++ path.sep_str ++ "ftello64.c",
@@ -1026,6 +1023,10 @@ const mingwex_arm32_src = [_][]const u8{
 };
 
 const mingwex_arm64_src = [_][]const u8{
+    "misc" ++ path.sep_str ++ "initenv.c",
+    "math" ++ path.sep_str ++ "arm-common" ++ path.sep_str ++ "log2.c",
+    "math" ++ path.sep_str ++ "arm-common" ++ path.sep_str ++ "pow.c",
+    "math" ++ path.sep_str ++ "arm-common" ++ path.sep_str ++ "scalbn.c",
     "math" ++ path.sep_str ++ "arm64" ++ path.sep_str ++ "_chgsignl.S",
     "math" ++ path.sep_str ++ "arm64" ++ path.sep_str ++ "rint.c",
     "math" ++ path.sep_str ++ "arm64" ++ path.sep_str ++ "rintf.c",

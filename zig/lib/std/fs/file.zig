@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("../std.zig");
 const builtin = std.builtin;
 const os = std.os;
@@ -17,20 +12,23 @@ const is_windows = std.Target.current.os.tag == .windows;
 
 pub const File = struct {
     /// The OS-specific file descriptor or file handle.
-    handle: os.fd_t,
+    handle: Handle,
 
-    /// On some systems, such as Linux, file system file descriptors are incapable of non-blocking I/O.
-    /// This forces us to perform asynchronous I/O on a dedicated thread, to achieve non-blocking
-    /// file-system I/O. To do this, `File` must be aware of whether it is a file system file descriptor,
-    /// or, more specifically, whether the I/O is always blocking.
+    /// On some systems, such as Linux, file system file descriptors are incapable
+    /// of non-blocking I/O. This forces us to perform asynchronous I/O on a dedicated thread,
+    /// to achieve non-blocking file-system I/O. To do this, `File` must be aware of whether
+    /// it is a file system file descriptor, or, more specifically, whether the I/O is always
+    /// blocking.
     capable_io_mode: io.ModeOverride = io.default_mode,
 
-    /// Furthermore, even when `std.io.mode` is async, it is still sometimes desirable to perform blocking I/O,
-    /// although not by default. For example, when printing a stack trace to stderr.
-    /// This field tracks both by acting as an overriding I/O mode. When not building in async I/O mode,
-    /// the type only has the `.blocking` tag, making it a zero-bit type.
+    /// Furthermore, even when `std.io.mode` is async, it is still sometimes desirable
+    /// to perform blocking I/O, although not by default. For example, when printing a
+    /// stack trace to stderr. This field tracks both by acting as an overriding I/O mode.
+    /// When not building in async I/O mode, the type only has the `.blocking` tag, making
+    /// it a zero-bit type.
     intended_io_mode: io.ModeOverride = io.default_mode,
 
+    pub const Handle = os.fd_t;
     pub const Mode = os.mode_t;
     pub const INode = os.ino_t;
 
@@ -43,6 +41,8 @@ pub const File = struct {
         File,
         UnixDomainSocket,
         Whiteout,
+        Door,
+        EventPort,
         Unknown,
     };
 
@@ -74,17 +74,28 @@ pub const File = struct {
         read: bool = true,
         write: bool = false,
 
-        /// Open the file with a lock to prevent other processes from accessing it at the
-        /// same time. An exclusive lock will prevent other processes from acquiring a lock.
-        /// A shared lock will prevent other processes from acquiring a exclusive lock, but
-        /// doesn't prevent other process from getting their own shared locks.
+        /// Open the file with an advisory lock to coordinate with other processes
+        /// accessing it at the same time. An exclusive lock will prevent other
+        /// processes from acquiring a lock. A shared lock will prevent other
+        /// processes from acquiring a exclusive lock, but does not prevent
+        /// other process from getting their own shared locks.
         ///
-        /// Note that the lock is only advisory on Linux, except in very specific cirsumstances[1].
+        /// The lock is advisory, except on Linux in very specific cirsumstances[1].
         /// This means that a process that does not respect the locking API can still get access
         /// to the file, despite the lock.
         ///
-        /// Windows' file locks are mandatory, and any process attempting to access the file will
-        /// receive an error.
+        /// On these operating systems, the lock is acquired atomically with
+        /// opening the file:
+        /// * Darwin
+        /// * DragonFlyBSD
+        /// * FreeBSD
+        /// * Haiku
+        /// * NetBSD
+        /// * OpenBSD
+        /// On these operating systems, the lock is acquired via a separate syscall
+        /// after opening the file:
+        /// * Linux
+        /// * Windows
         ///
         /// [1]: https://www.kernel.org/doc/Documentation/filesystems/mandatory-locking.txt
         lock: Lock = .None,
@@ -97,7 +108,7 @@ pub const File = struct {
         /// and `false` means `error.WouldBlock` is handled by the event loop.
         lock_nonblocking: bool = false,
 
-        /// Setting this to `.blocking` prevents `O_NONBLOCK` from being passed even
+        /// Setting this to `.blocking` prevents `O.NONBLOCK` from being passed even
         /// if `std.io.is_async`. It allows the use of `nosuspend` when calling functions
         /// related to opening the file, reading, writing, and locking.
         intended_io_mode: io.ModeOverride = io.default_mode,
@@ -120,17 +131,28 @@ pub const File = struct {
         /// `error.PathAlreadyExists` to be returned.
         exclusive: bool = false,
 
-        /// Open the file with a lock to prevent other processes from accessing it at the
-        /// same time. An exclusive lock will prevent other processes from acquiring a lock.
-        /// A shared lock will prevent other processes from acquiring a exclusive lock, but
-        /// doesn't prevent other process from getting their own shared locks.
+        /// Open the file with an advisory lock to coordinate with other processes
+        /// accessing it at the same time. An exclusive lock will prevent other
+        /// processes from acquiring a lock. A shared lock will prevent other
+        /// processes from acquiring a exclusive lock, but does not prevent
+        /// other process from getting their own shared locks.
         ///
-        /// Note that the lock is only advisory on Linux, except in very specific cirsumstances[1].
+        /// The lock is advisory, except on Linux in very specific cirsumstances[1].
         /// This means that a process that does not respect the locking API can still get access
         /// to the file, despite the lock.
         ///
-        /// Windows's file locks are mandatory, and any process attempting to access the file will
-        /// receive an error.
+        /// On these operating systems, the lock is acquired atomically with
+        /// opening the file:
+        /// * Darwin
+        /// * DragonFlyBSD
+        /// * FreeBSD
+        /// * Haiku
+        /// * NetBSD
+        /// * OpenBSD
+        /// On these operating systems, the lock is acquired via a separate syscall
+        /// after opening the file:
+        /// * Linux
+        /// * Windows
         ///
         /// [1]: https://www.kernel.org/doc/Documentation/filesystems/mandatory-locking.txt
         lock: Lock = .None,
@@ -147,7 +169,7 @@ pub const File = struct {
         /// be created with.
         mode: Mode = default_mode,
 
-        /// Setting this to `.blocking` prevents `O_NONBLOCK` from being passed even
+        /// Setting this to `.blocking` prevents `O.NONBLOCK` from being passed even
         /// if `std.io.is_async`. It allows the use of `nosuspend` when calling functions
         /// related to opening the file, reading, writing, and locking.
         intended_io_mode: io.ModeOverride = io.default_mode,
@@ -300,31 +322,40 @@ pub const File = struct {
         const atime = st.atime();
         const mtime = st.mtime();
         const ctime = st.ctime();
+        const kind: Kind = if (builtin.os.tag == .wasi and !builtin.link_libc) switch (st.filetype) {
+            .BLOCK_DEVICE => Kind.BlockDevice,
+            .CHARACTER_DEVICE => Kind.CharacterDevice,
+            .DIRECTORY => Kind.Directory,
+            .SYMBOLIC_LINK => Kind.SymLink,
+            .REGULAR_FILE => Kind.File,
+            .SOCKET_STREAM, .SOCKET_DGRAM => Kind.UnixDomainSocket,
+            else => Kind.Unknown,
+        } else blk: {
+            const m = st.mode & os.S.IFMT;
+            switch (m) {
+                os.S.IFBLK => break :blk Kind.BlockDevice,
+                os.S.IFCHR => break :blk Kind.CharacterDevice,
+                os.S.IFDIR => break :blk Kind.Directory,
+                os.S.IFIFO => break :blk Kind.NamedPipe,
+                os.S.IFLNK => break :blk Kind.SymLink,
+                os.S.IFREG => break :blk Kind.File,
+                os.S.IFSOCK => break :blk Kind.UnixDomainSocket,
+                else => {},
+            }
+            if (builtin.os.tag == .solaris) switch (m) {
+                os.S.IFDOOR => break :blk Kind.Door,
+                os.S.IFPORT => break :blk Kind.EventPort,
+                else => {},
+            };
+
+            break :blk .Unknown;
+        };
+
         return Stat{
             .inode = st.ino,
             .size = @bitCast(u64, st.size),
             .mode = st.mode,
-            .kind = switch (builtin.os.tag) {
-                .wasi => switch (st.filetype) {
-                    os.FILETYPE_BLOCK_DEVICE => Kind.BlockDevice,
-                    os.FILETYPE_CHARACTER_DEVICE => Kind.CharacterDevice,
-                    os.FILETYPE_DIRECTORY => Kind.Directory,
-                    os.FILETYPE_SYMBOLIC_LINK => Kind.SymLink,
-                    os.FILETYPE_REGULAR_FILE => Kind.File,
-                    os.FILETYPE_SOCKET_STREAM, os.FILETYPE_SOCKET_DGRAM => Kind.UnixDomainSocket,
-                    else => Kind.Unknown,
-                },
-                else => switch (st.mode & os.S_IFMT) {
-                    os.S_IFBLK => Kind.BlockDevice,
-                    os.S_IFCHR => Kind.CharacterDevice,
-                    os.S_IFDIR => Kind.Directory,
-                    os.S_IFIFO => Kind.NamedPipe,
-                    os.S_IFLNK => Kind.SymLink,
-                    os.S_IFREG => Kind.File,
-                    os.S_IFSOCK => Kind.UnixDomainSocket,
-                    else => Kind.Unknown,
-                },
-            },
+            .kind = kind,
             .atime = @as(i128, atime.tv_sec) * std.time.ns_per_s + atime.tv_nsec,
             .mtime = @as(i128, mtime.tv_sec) * std.time.ns_per_s + mtime.tv_nsec,
             .ctime = @as(i128, ctime.tv_sec) * std.time.ns_per_s + ctime.tv_nsec,
@@ -828,5 +859,168 @@ pub const File = struct {
 
     pub fn seekableStream(file: File) SeekableStream {
         return .{ .context = file };
+    }
+
+    const range_off: windows.LARGE_INTEGER = 0;
+    const range_len: windows.LARGE_INTEGER = 1;
+
+    pub const LockError = error{
+        SystemResources,
+        FileLocksNotSupported,
+    } || os.UnexpectedError;
+
+    /// Blocks when an incompatible lock is held by another process.
+    /// A process may hold only one type of lock (shared or exclusive) on
+    /// a file. When a process terminates in any way, the lock is released.
+    ///
+    /// Assumes the file is unlocked.
+    ///
+    /// TODO: integrate with async I/O
+    pub fn lock(file: File, l: Lock) LockError!void {
+        if (is_windows) {
+            var io_status_block: windows.IO_STATUS_BLOCK = undefined;
+            const exclusive = switch (l) {
+                .None => return,
+                .Shared => false,
+                .Exclusive => true,
+            };
+            return windows.LockFile(
+                file.handle,
+                null,
+                null,
+                null,
+                &io_status_block,
+                &range_off,
+                &range_len,
+                null,
+                windows.FALSE, // non-blocking=false
+                @boolToInt(exclusive),
+            ) catch |err| switch (err) {
+                error.WouldBlock => unreachable, // non-blocking=false
+                else => |e| return e,
+            };
+        } else {
+            return os.flock(file.handle, switch (l) {
+                .None => os.LOCK.UN,
+                .Shared => os.LOCK.SH,
+                .Exclusive => os.LOCK.EX,
+            }) catch |err| switch (err) {
+                error.WouldBlock => unreachable, // non-blocking=false
+                else => |e| return e,
+            };
+        }
+    }
+
+    /// Assumes the file is locked.
+    pub fn unlock(file: File) void {
+        if (is_windows) {
+            var io_status_block: windows.IO_STATUS_BLOCK = undefined;
+            return windows.UnlockFile(
+                file.handle,
+                &io_status_block,
+                &range_off,
+                &range_len,
+                null,
+            ) catch |err| switch (err) {
+                error.RangeNotLocked => unreachable, // Function assumes unlocked.
+                error.Unexpected => unreachable, // Resource deallocation must succeed.
+            };
+        } else {
+            return os.flock(file.handle, os.LOCK.UN) catch |err| switch (err) {
+                error.WouldBlock => unreachable, // unlocking can't block
+                error.SystemResources => unreachable, // We are deallocating resources.
+                error.FileLocksNotSupported => unreachable, // We already got the lock.
+                error.Unexpected => unreachable, // Resource deallocation must succeed.
+            };
+        }
+    }
+
+    /// Attempts to obtain a lock, returning `true` if the lock is
+    /// obtained, and `false` if there was an existing incompatible lock held.
+    /// A process may hold only one type of lock (shared or exclusive) on
+    /// a file. When a process terminates in any way, the lock is released.
+    ///
+    /// Assumes the file is unlocked.
+    ///
+    /// TODO: integrate with async I/O
+    pub fn tryLock(file: File, l: Lock) LockError!bool {
+        if (is_windows) {
+            var io_status_block: windows.IO_STATUS_BLOCK = undefined;
+            const exclusive = switch (l) {
+                .None => return,
+                .Shared => false,
+                .Exclusive => true,
+            };
+            windows.LockFile(
+                file.handle,
+                null,
+                null,
+                null,
+                &io_status_block,
+                &range_off,
+                &range_len,
+                null,
+                windows.TRUE, // non-blocking=true
+                @boolToInt(exclusive),
+            ) catch |err| switch (err) {
+                error.WouldBlock => return false,
+                else => |e| return e,
+            };
+        } else {
+            os.flock(file.handle, switch (l) {
+                .None => os.LOCK.UN,
+                .Shared => os.LOCK.SH | os.LOCK.NB,
+                .Exclusive => os.LOCK.EX | os.LOCK.NB,
+            }) catch |err| switch (err) {
+                error.WouldBlock => return false,
+                else => |e| return e,
+            };
+        }
+        return true;
+    }
+
+    /// Assumes the file is already locked in exclusive mode.
+    /// Atomically modifies the lock to be in shared mode, without releasing it.
+    ///
+    /// TODO: integrate with async I/O
+    pub fn downgradeLock(file: File) LockError!void {
+        if (is_windows) {
+            // On Windows it works like a semaphore + exclusivity flag. To implement this
+            // function, we first obtain another lock in shared mode. This changes the
+            // exclusivity flag, but increments the semaphore to 2. So we follow up with
+            // an NtUnlockFile which decrements the semaphore but does not modify the
+            // exclusivity flag.
+            var io_status_block: windows.IO_STATUS_BLOCK = undefined;
+            windows.LockFile(
+                file.handle,
+                null,
+                null,
+                null,
+                &io_status_block,
+                &range_off,
+                &range_len,
+                null,
+                windows.TRUE, // non-blocking=true
+                windows.FALSE, // exclusive=false
+            ) catch |err| switch (err) {
+                error.WouldBlock => unreachable, // File was not locked in exclusive mode.
+                else => |e| return e,
+            };
+            return windows.UnlockFile(
+                file.handle,
+                &io_status_block,
+                &range_off,
+                &range_len,
+                null,
+            ) catch |err| switch (err) {
+                error.RangeNotLocked => unreachable, // File was not locked.
+                error.Unexpected => unreachable, // Resource deallocation must succeed.
+            };
+        } else {
+            return os.flock(file.handle, os.LOCK.SH | os.LOCK.NB) catch |err| switch (err) {
+                error.WouldBlock => unreachable, // File was not locked in exclusive mode.
+                else => |e| return e,
+            };
+        }
     }
 };

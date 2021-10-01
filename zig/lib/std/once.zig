@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("std.zig");
 const builtin = std.builtin;
 const testing = std.testing;
@@ -55,15 +50,16 @@ test "Once executes its function just once" {
         global_once.call();
         global_once.call();
     } else {
-        var threads: [10]*std.Thread = undefined;
-        defer for (threads) |handle| handle.wait();
+        var threads: [10]std.Thread = undefined;
+        defer for (threads) |handle| handle.join();
 
         for (threads) |*handle| {
-            handle.* = try std.Thread.spawn(struct {
+            handle.* = try std.Thread.spawn(.{}, struct {
                 fn thread_fn(x: u8) void {
+                    _ = x;
                     global_once.call();
                 }
-            }.thread_fn, 0);
+            }.thread_fn, .{0});
         }
     }
 

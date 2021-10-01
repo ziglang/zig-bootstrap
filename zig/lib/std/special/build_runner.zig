@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const root = @import("@build");
 const std = @import("std");
 const builtin = @import("builtin");
@@ -61,6 +56,13 @@ pub fn main() !void {
     const stdout_stream = io.getStdOut().writer();
 
     var install_prefix: ?[]const u8 = null;
+    var dir_list = Builder.DirList{};
+
+    // before arg parsing, check for the NO_COLOR environment variable
+    // if it exists, default the color setting to .off
+    // explicit --color arguments will still override this setting.
+    builder.color = if (std.process.hasEnvVarConstant("NO_COLOR")) .off else .auto;
+
     while (nextArg(args, &arg_idx)) |arg| {
         if (mem.startsWith(u8, arg, "-D")) {
             const option_contents = arg[2..];
@@ -87,12 +89,39 @@ pub fn main() !void {
                     warn("Expected argument after {s}\n\n", .{arg});
                     return usageAndErr(builder, false, stderr_stream);
                 };
+            } else if (mem.eql(u8, arg, "--prefix-lib-dir")) {
+                dir_list.lib_dir = nextArg(args, &arg_idx) orelse {
+                    warn("Expected argument after {s}\n\n", .{arg});
+                    return usageAndErr(builder, false, stderr_stream);
+                };
+            } else if (mem.eql(u8, arg, "--prefix-exe-dir")) {
+                dir_list.exe_dir = nextArg(args, &arg_idx) orelse {
+                    warn("Expected argument after {s}\n\n", .{arg});
+                    return usageAndErr(builder, false, stderr_stream);
+                };
+            } else if (mem.eql(u8, arg, "--prefix-include-dir")) {
+                dir_list.include_dir = nextArg(args, &arg_idx) orelse {
+                    warn("Expected argument after {s}\n\n", .{arg});
+                    return usageAndErr(builder, false, stderr_stream);
+                };
+            } else if (mem.eql(u8, arg, "--sysroot")) {
+                const sysroot = nextArg(args, &arg_idx) orelse {
+                    warn("Expected argument after --sysroot\n\n", .{});
+                    return usageAndErr(builder, false, stderr_stream);
+                };
+                builder.sysroot = sysroot;
             } else if (mem.eql(u8, arg, "--search-prefix")) {
                 const search_prefix = nextArg(args, &arg_idx) orelse {
                     warn("Expected argument after --search-prefix\n\n", .{});
                     return usageAndErr(builder, false, stderr_stream);
                 };
                 builder.addSearchPrefix(search_prefix);
+            } else if (mem.eql(u8, arg, "--libc")) {
+                const libc_file = nextArg(args, &arg_idx) orelse {
+                    warn("Expected argument after --libc\n\n", .{});
+                    return usageAndErr(builder, false, stderr_stream);
+                };
+                builder.libc_file = libc_file;
             } else if (mem.eql(u8, arg, "--color")) {
                 const next_arg = nextArg(args, &arg_idx) orelse {
                     warn("expected [auto|on|off] after --color", .{});
@@ -102,9 +131,9 @@ pub fn main() !void {
                     warn("expected [auto|on|off] after --color, found '{s}'", .{next_arg});
                     return usageAndErr(builder, false, stderr_stream);
                 };
-            } else if (mem.eql(u8, arg, "--override-lib-dir")) {
+            } else if (mem.eql(u8, arg, "--zig-lib-dir")) {
                 builder.override_lib_dir = nextArg(args, &arg_idx) orelse {
-                    warn("Expected argument after --override-lib-dir\n\n", .{});
+                    warn("Expected argument after --zig-lib-dir\n\n", .{});
                     return usageAndErr(builder, false, stderr_stream);
                 };
             } else if (mem.eql(u8, arg, "--verbose-tokenize")) {
@@ -113,8 +142,8 @@ pub fn main() !void {
                 builder.verbose_ast = true;
             } else if (mem.eql(u8, arg, "--verbose-link")) {
                 builder.verbose_link = true;
-            } else if (mem.eql(u8, arg, "--verbose-ir")) {
-                builder.verbose_ir = true;
+            } else if (mem.eql(u8, arg, "--verbose-air")) {
+                builder.verbose_air = true;
             } else if (mem.eql(u8, arg, "--verbose-llvm-ir")) {
                 builder.verbose_llvm_ir = true;
             } else if (mem.eql(u8, arg, "--verbose-cimport")) {
@@ -123,6 +152,8 @@ pub fn main() !void {
                 builder.verbose_cc = true;
             } else if (mem.eql(u8, arg, "--verbose-llvm-cpu-features")) {
                 builder.verbose_llvm_cpu_features = true;
+            } else if (mem.eql(u8, arg, "--prominent-compile-errors")) {
+                builder.prominent_compile_errors = true;
             } else if (mem.eql(u8, arg, "--")) {
                 builder.args = argsRest(args, arg_idx);
                 break;
@@ -135,7 +166,7 @@ pub fn main() !void {
         }
     }
 
-    builder.resolveInstallPrefix(install_prefix);
+    builder.resolveInstallPrefix(install_prefix, dir_list);
     try runBuild(builder);
 
     if (builder.validateUserInputDidItFail())
@@ -163,7 +194,7 @@ fn runBuild(builder: *Builder) anyerror!void {
 fn usage(builder: *Builder, already_ran_build: bool, out_stream: anytype) !void {
     // run the build script to collect the options
     if (!already_ran_build) {
-        builder.resolveInstallPrefix(null);
+        builder.resolveInstallPrefix(null, .{});
         try runBuild(builder);
     }
 
@@ -180,17 +211,25 @@ fn usage(builder: *Builder, already_ran_build: bool, out_stream: anytype) !void 
             try fmt.allocPrint(allocator, "{s} (default)", .{top_level_step.step.name})
         else
             top_level_step.step.name;
-        try out_stream.print("  {s:<27} {s}\n", .{ name, top_level_step.description });
+        try out_stream.print("  {s:<28} {s}\n", .{ name, top_level_step.description });
     }
 
     try out_stream.writeAll(
         \\
         \\General Options:
-        \\  -h, --help                  Print this help and exit
-        \\  --verbose                   Print commands before executing them
-        \\  -p, --prefix [path]         Override default install prefix
-        \\  --search-prefix [path]      Add a path to look for binaries, libraries, headers
-        \\  --color [auto|off|on]       Enable or disable colored error messages
+        \\  -p, --prefix [path]          Override default install prefix
+        \\  --prefix-lib-dir [path]      Override default library directory path
+        \\  --prefix-exe-dir [path]      Override default executable directory path
+        \\  --prefix-include-dir [path]  Override default include directory path
+        \\
+        \\  --sysroot [path]             Set the system root directory (usually /)
+        \\  --search-prefix [path]       Add a path to look for binaries, libraries, headers
+        \\  --libc [file]                Provide a file which specifies libc paths
+        \\
+        \\  -h, --help                   Print this help and exit
+        \\  --verbose                    Print commands before executing them
+        \\  --color [auto|off|on]        Enable or disable colored error messages
+        \\  --prominent-compile-errors   Output compile errors formatted for a human to read
         \\
         \\Project-Specific Options:
         \\
@@ -202,27 +241,34 @@ fn usage(builder: *Builder, already_ran_build: bool, out_stream: anytype) !void 
         for (builder.available_options_list.items) |option| {
             const name = try fmt.allocPrint(allocator, "  -D{s}=[{s}]", .{
                 option.name,
-                Builder.typeIdName(option.type_id),
+                @tagName(option.type_id),
             });
             defer allocator.free(name);
-            try out_stream.print("{s:<29} {s}\n", .{ name, option.description });
+            try out_stream.print("{s:<30} {s}\n", .{ name, option.description });
+            if (option.enum_options) |enum_options| {
+                const padding = " " ** 33;
+                try out_stream.writeAll(padding ++ "Supported Values:\n");
+                for (enum_options) |enum_option| {
+                    try out_stream.print(padding ++ "  {s}\n", .{enum_option});
+                }
+            }
         }
     }
 
     try out_stream.writeAll(
         \\
         \\Advanced Options:
-        \\  --build-file [file]         Override path to build.zig
-        \\  --cache-dir [path]          Override path to zig cache directory
-        \\  --override-lib-dir [arg]    Override path to Zig lib directory
-        \\  --verbose-tokenize          Enable compiler debug output for tokenization
-        \\  --verbose-ast               Enable compiler debug output for parsing into an AST
-        \\  --verbose-link              Enable compiler debug output for linking
-        \\  --verbose-ir                Enable compiler debug output for Zig IR
-        \\  --verbose-llvm-ir           Enable compiler debug output for LLVM IR
-        \\  --verbose-cimport           Enable compiler debug output for C imports
-        \\  --verbose-cc                Enable compiler debug output for C compilation
-        \\  --verbose-llvm-cpu-features Enable compiler debug output for LLVM CPU features
+        \\  --build-file [file]          Override path to build.zig
+        \\  --cache-dir [path]           Override path to zig cache directory
+        \\  --zig-lib-dir [arg]          Override path to Zig lib directory
+        \\  --verbose-tokenize           Enable compiler debug output for tokenization
+        \\  --verbose-ast                Enable compiler debug output for parsing into an AST
+        \\  --verbose-link               Enable compiler debug output for linking
+        \\  --verbose-air                Enable compiler debug output for Zig AIR
+        \\  --verbose-llvm-ir            Enable compiler debug output for LLVM IR
+        \\  --verbose-cimport            Enable compiler debug output for C imports
+        \\  --verbose-cc                 Enable compiler debug output for C compilation
+        \\  --verbose-llvm-cpu-features  Enable compiler debug output for LLVM CPU features
         \\
     );
 }

@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("./std.zig");
 const builtin = std.builtin;
 const assert = std.debug.assert;
@@ -210,7 +205,7 @@ pub fn utf8ValidateSlice(s: []const u8) bool {
                 return false;
             }
             i += cp_len;
-        } else |err| {
+        } else |_| {
             return false;
         }
     }
@@ -247,7 +242,6 @@ pub const Utf8View = struct {
         } else |err| switch (err) {
             error.InvalidUtf8 => {
                 @compileError("invalid utf8");
-                unreachable;
             },
         }
     }
@@ -318,9 +312,9 @@ pub const Utf16LeIterator = struct {
         assert(it.i <= it.bytes.len);
         if (it.i == it.bytes.len) return null;
         const c0: u21 = mem.readIntLittle(u16, it.bytes[it.i..][0..2]);
+        it.i += 2;
         if (c0 & ~@as(u21, 0x03ff) == 0xd800) {
             // surrogate pair
-            it.i += 2;
             if (it.i >= it.bytes.len) return error.DanglingSurrogateHalf;
             const c1: u21 = mem.readIntLittle(u16, it.bytes[it.i..][0..2]);
             if (c1 & ~@as(u21, 0x03ff) != 0xdc00) return error.ExpectedSecondSurrogateHalf;
@@ -329,7 +323,6 @@ pub const Utf16LeIterator = struct {
         } else if (c0 & ~@as(u21, 0x03ff) == 0xdc00) {
             return error.UnexpectedSecondSurrogateHalf;
         } else {
-            it.i += 2;
             return c0;
         }
     }
@@ -560,8 +553,9 @@ fn testDecode(bytes: []const u8) !u21 {
 /// Caller must free returned memory.
 pub fn utf16leToUtf8Alloc(allocator: *mem.Allocator, utf16le: []const u16) ![]u8 {
     var result = std.ArrayList(u8).init(allocator);
+    errdefer result.deinit();
     // optimistically guess that it will all be ascii.
-    try result.ensureCapacity(utf16le.len);
+    try result.ensureTotalCapacity(utf16le.len);
     var out_index: usize = 0;
     var it = Utf16LeIterator.init(utf16le);
     while (try it.nextCodepoint()) |codepoint| {
@@ -576,9 +570,10 @@ pub fn utf16leToUtf8Alloc(allocator: *mem.Allocator, utf16le: []const u16) ![]u8
 
 /// Caller must free returned memory.
 pub fn utf16leToUtf8AllocZ(allocator: *mem.Allocator, utf16le: []const u16) ![:0]u8 {
-    var result = try std.ArrayList(u8).initCapacity(allocator, utf16le.len);
+    var result = std.ArrayList(u8).init(allocator);
+    errdefer result.deinit();
     // optimistically guess that it will all be ascii.
-    try result.ensureCapacity(utf16le.len);
+    try result.ensureTotalCapacity(utf16le.len);
     var out_index: usize = 0;
     var it = Utf16LeIterator.init(utf16le);
     while (try it.nextCodepoint()) |codepoint| {
@@ -660,12 +655,20 @@ test "utf16leToUtf8" {
         defer std.testing.allocator.free(utf8);
         try testing.expect(mem.eql(u8, utf8, "\xf4\x8f\xb0\x80"));
     }
+
+    {
+        mem.writeIntSliceLittle(u16, utf16le_as_bytes[0..], 0xdcdc);
+        mem.writeIntSliceLittle(u16, utf16le_as_bytes[2..], 0xdcdc);
+        const result = utf16leToUtf8Alloc(std.testing.allocator, &utf16le);
+        try std.testing.expectError(error.UnexpectedSecondSurrogateHalf, result);
+    }
 }
 
 pub fn utf8ToUtf16LeWithNull(allocator: *mem.Allocator, utf8: []const u8) ![:0]u16 {
     var result = std.ArrayList(u16).init(allocator);
+    errdefer result.deinit();
     // optimistically guess that it will not require surrogate pairs
-    try result.ensureCapacity(utf8.len + 1);
+    try result.ensureTotalCapacity(utf8.len + 1);
 
     const view = try Utf8View.init(utf8);
     var it = view.iterator();
@@ -725,6 +728,10 @@ test "utf8ToUtf16Le" {
         try testing.expectEqual(@as(usize, 2), length);
         try testing.expectEqualSlices(u8, "\xff\xdb\xff\xdf", mem.sliceAsBytes(utf16le[0..]));
     }
+    {
+        const result = utf8ToUtf16Le(utf16le[0..], "\xf4\x90\x80\x80");
+        try testing.expectError(error.InvalidUtf8, result);
+    }
 }
 
 test "utf8ToUtf16LeWithNull" {
@@ -739,6 +746,10 @@ test "utf8ToUtf16LeWithNull" {
         defer testing.allocator.free(utf16);
         try testing.expectEqualSlices(u8, "\xff\xdb\xff\xdf", mem.sliceAsBytes(utf16[0..]));
         try testing.expect(utf16[2] == 0);
+    }
+    {
+        const result = utf8ToUtf16LeWithNull(testing.allocator, "\xf4\x90\x80\x80");
+        try testing.expectError(error.InvalidUtf8, result);
     }
 }
 
@@ -768,6 +779,48 @@ fn calcUtf16LeLen(utf8: []const u8) usize {
         src_i = next_src_i;
     }
     return dest_len;
+}
+
+/// Print the given `utf16le` string
+fn formatUtf16le(
+    utf16le: []const u16,
+    comptime fmt: []const u8,
+    options: std.fmt.FormatOptions,
+    writer: anytype,
+) !void {
+    const unknown_codepoint = 0xfffd;
+    _ = fmt;
+    _ = options;
+    var buf: [300]u8 = undefined; // just a random size I chose
+    var it = Utf16LeIterator.init(utf16le);
+    var u8len: usize = 0;
+    while (it.nextCodepoint() catch unknown_codepoint) |codepoint| {
+        u8len += utf8Encode(codepoint, buf[u8len..]) catch
+            utf8Encode(unknown_codepoint, buf[u8len..]) catch unreachable;
+        if (u8len + 3 >= buf.len) {
+            try writer.writeAll(buf[0..u8len]);
+            u8len = 0;
+        }
+    }
+    try writer.writeAll(buf[0..u8len]);
+}
+
+/// Return a Formatter for a Utf16le string
+pub fn fmtUtf16le(utf16le: []const u16) std.fmt.Formatter(formatUtf16le) {
+    return .{ .data = utf16le };
+}
+
+test "fmtUtf16le" {
+    const expectFmt = std.testing.expectFmt;
+    try expectFmt("", "{}", .{fmtUtf16le(utf8ToUtf16LeStringLiteral(""))});
+    try expectFmt("foo", "{}", .{fmtUtf16le(utf8ToUtf16LeStringLiteral("foo"))});
+    try expectFmt("𐐷", "{}", .{fmtUtf16le(utf8ToUtf16LeStringLiteral("𐐷"))});
+    try expectFmt("퟿", "{}", .{fmtUtf16le(&[_]u16{std.mem.readIntNative(u16, "\xff\xd7")})});
+    try expectFmt("�", "{}", .{fmtUtf16le(&[_]u16{std.mem.readIntNative(u16, "\x00\xd8")})});
+    try expectFmt("�", "{}", .{fmtUtf16le(&[_]u16{std.mem.readIntNative(u16, "\xff\xdb")})});
+    try expectFmt("�", "{}", .{fmtUtf16le(&[_]u16{std.mem.readIntNative(u16, "\x00\xdc")})});
+    try expectFmt("�", "{}", .{fmtUtf16le(&[_]u16{std.mem.readIntNative(u16, "\xff\xdf")})});
+    try expectFmt("", "{}", .{fmtUtf16le(&[_]u16{std.mem.readIntNative(u16, "\x00\xe0")})});
 }
 
 test "utf8ToUtf16LeStringLiteral" {

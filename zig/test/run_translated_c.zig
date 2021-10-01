@@ -3,6 +3,16 @@ const tests = @import("tests.zig");
 const nl = std.cstr.line_sep;
 
 pub fn addCases(cases: *tests.RunTranslatedCContext) void {
+    cases.add("dereference address of",
+        \\#include <stdlib.h>
+        \\int main(void) {
+        \\    int i = 0;
+        \\    *&i = 42;
+        \\    if (i != 42) abort();
+        \\	  return 0;
+        \\}
+    , "");
+
     cases.add("division of floating literals",
         \\#define _NO_CRT_STDIO_INLINE 1
         \\#include <stdio.h>
@@ -14,7 +24,7 @@ pub fn addCases(cases: *tests.RunTranslatedCContext) void {
         \\}
     , "DEG2RAD is: 0.017453" ++ nl);
 
-    cases.add("use global scope for record/enum/typedef type transalation if needed",
+    cases.add("use global scope for record/enum/typedef type translation if needed",
         \\void bar(void);
         \\void baz(void);
         \\struct foo { int x; };
@@ -384,7 +394,7 @@ pub fn addCases(cases: *tests.RunTranslatedCContext) void {
         \\}
     , "");
 
-    cases.add("ensure array casts outisde +=",
+    cases.add("ensure array casts outside +=",
         \\#include <stdlib.h>
         \\static int hash_binary(int k)
         \\{
@@ -1233,7 +1243,7 @@ pub fn addCases(cases: *tests.RunTranslatedCContext) void {
         \\}
     , "");
 
-    // See __builtin_alloca_with_align comment in std.c.builtins
+    // See __builtin_alloca_with_align comment in std.zig.c_builtins
     cases.add("use of unimplemented builtin in unused function does not prevent compilation",
         \\#include <stdlib.h>
         \\void unused() {
@@ -1506,6 +1516,255 @@ pub fn addCases(cases: *tests.RunTranslatedCContext) void {
         \\    doit();
         \\    if (cleanup_count != 3) abort();
         \\    return 0;
+        \\}
+    , "");
+
+    cases.add("enum used as boolean expression",
+        \\#include <stdlib.h>
+        \\enum FOO {BAR, BAZ};
+        \\int main(void) {
+        \\    enum FOO x = BAR;
+        \\    if (x) abort();
+        \\    if (!BAZ) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("Flexible arrays",
+        \\#include <stdlib.h>
+        \\#include <stdint.h>
+        \\typedef struct { char foo; int bar; } ITEM;
+        \\typedef struct { size_t count; ITEM items[]; } ITEM_LIST;
+        \\typedef struct { unsigned char count; int items[]; } INT_LIST;
+        \\#define SIZE 10
+        \\int main(void) {
+        \\    ITEM_LIST *list = malloc(sizeof(ITEM_LIST) + SIZE * sizeof(ITEM));
+        \\    for (int i = 0; i < SIZE; i++) list->items[i] = (ITEM) {.foo = i, .bar = i + 1};
+        \\    const ITEM_LIST *const c_list = list;
+        \\    for (int i = 0; i < SIZE; i++) if (c_list->items[i].foo != i || c_list->items[i].bar != i + 1) abort();
+        \\    INT_LIST *int_list = malloc(sizeof(INT_LIST) + SIZE * sizeof(int));
+        \\    for (int i = 0; i < SIZE; i++) int_list->items[i] = i;
+        \\    const INT_LIST *const c_int_list = int_list;
+        \\    const int *const ints = int_list->items;
+        \\    for (int i = 0; i < SIZE; i++) if (ints[i] != i) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("enum with value that fits in c_uint but not c_int, issue #8003",
+        \\#include <stdlib.h>
+        \\enum my_enum {
+        \\    FORCE_UINT = 0xffffffff
+        \\};
+        \\int main(void) {
+        \\    if(FORCE_UINT != 0xffffffff) abort();
+        \\}
+    , "");
+
+    cases.add("block-scope static variable shadows function parameter. Issue #8208",
+        \\#include <stdlib.h>
+        \\int func1(int foo) { return foo + 1; }
+        \\int func2(void) {
+        \\    static int foo = 5;
+        \\    return foo++;
+        \\}
+        \\int main(void) {
+        \\    if (func1(42) != 43) abort();
+        \\    if (func2() != 5) abort();
+        \\    if (func2() != 6) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("nested same-name static locals",
+        \\#include <stdlib.h>
+        \\int func(int val) {
+        \\    static int foo;
+        \\    if (foo != val) abort();
+        \\    {
+        \\        foo += 1;
+        \\        static int foo = 2;
+        \\        if (foo != val + 2) abort();
+        \\        foo += 1;
+        \\    }
+        \\    return foo;
+        \\}
+        \\int main(void) {
+        \\    int foo = 1;
+        \\    if (func(0) != 1) abort();
+        \\    if (func(1) != 2) abort();
+        \\    if (func(2) != 3) abort();
+        \\    if (foo != 1) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("Enum constants are assigned correct type. Issue #9153",
+        \\enum A { A0, A1=0xFFFFFFFF };
+        \\enum B { B0=-1, B1=0xFFFFFFFF };
+        \\enum C { C0=-1, C1=0 };
+        \\enum D { D0, D1=0xFFFFFFFFFFL };
+        \\enum E { E0=-1, E1=0xFFFFFFFFFFL };
+        \\int main(void) {
+        \\   signed char a0 = A0, a1 = A1;
+        \\   signed char b0 = B0, b1 = B1;
+        \\   signed char c0 = C0, c1 = C1;
+        \\   signed char d0 = D0, d1 = D1;
+        \\   signed char e0 = E0, e1 = E1;
+        \\   return 0;
+        \\}
+    , "");
+
+    cases.add("Enum constant matches enum name; multiple enumerations with same value",
+        \\#include <stdlib.h>
+        \\enum FOO {
+        \\    FOO = 1,
+        \\    BAR = 2,
+        \\    BAZ = 1,
+        \\};
+        \\int main(void) {
+        \\    enum FOO x = BAZ;
+        \\    if (x != 1) abort();
+        \\    if (x != BAZ) abort();
+        \\    if (x != FOO) abort();
+        \\}
+    , "");
+
+    cases.add("Scoped enums",
+        \\#include <stdlib.h>
+        \\int main(void) {
+        \\   enum Foo { A, B, C };
+        \\   enum Foo a = B;
+        \\   if (a != B) abort();
+        \\   if (a != 1) abort();
+        \\   {
+        \\      enum Foo { A = 5, B = 6, C = 7 };
+        \\      enum Foo a = B;
+        \\      if (a != B) abort();
+        \\      if (a != 6) abort();
+        \\   }
+        \\   if (a != B) abort();
+        \\   if (a != 1) abort();
+        \\}
+    , "");
+
+    cases.add("Underscore identifiers",
+        \\#include <stdlib.h>
+        \\int _ = 10;
+        \\typedef struct { int _; } S;
+        \\int main(void) {
+        \\    if (_ != 10) abort();
+        \\    S foo = { ._ = _ };
+        \\    if (foo._ != _) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("__builtin_choose_expr (unchosen expression is not evaluated)",
+        \\#include <stdlib.h>
+        \\int main(void) {
+        \\    int x = 0.0;
+        \\    int y = 0.0;
+        \\    int res;
+        \\    res = __builtin_choose_expr(1, 1, x / y);
+        \\    if (res != 1) abort();
+        \\    res = __builtin_choose_expr(0, x / y, 2);
+        \\    if (res != 2) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    // TODO: add isnan check for long double once bitfield support is added
+    //       (needed for x86_64-windows-gnu)
+    // TODO: add isinf check for long double once std.math.isInf supports c_longdouble
+    cases.add("NAN and INFINITY",
+        \\#include <math.h>
+        \\#include <stdint.h>
+        \\#include <stdlib.h>
+        \\union uf { uint32_t u; float f; };
+        \\#define CHECK_NAN(STR, VAL) { \
+        \\    union uf unpack = {.f = __builtin_nanf(STR)}; \
+        \\    if (!isnan(unpack.f)) abort(); \
+        \\    if (unpack.u != VAL) abort(); \
+        \\}
+        \\int main(void) {
+        \\    float f_nan = NAN;
+        \\    if (!isnan(f_nan)) abort();
+        \\    double d_nan = NAN;
+        \\    if (!isnan(d_nan)) abort();
+        \\    CHECK_NAN("0", 0x7FC00000);
+        \\    CHECK_NAN("", 0x7FC00000);
+        \\    CHECK_NAN("1", 0x7FC00001);
+        \\    CHECK_NAN("0x7FC00000", 0x7FC00000);
+        \\    CHECK_NAN("0x7FC0000F", 0x7FC0000F);
+        \\    CHECK_NAN("0x7FC000F0", 0x7FC000F0);
+        \\    CHECK_NAN("0x7FC00F00", 0x7FC00F00);
+        \\    CHECK_NAN("0x7FC0F000", 0x7FC0F000);
+        \\    CHECK_NAN("0x7FCF0000", 0x7FCF0000);
+        \\    CHECK_NAN("0xFFFFFFFF", 0x7FFFFFFF);
+        \\    float f_inf = INFINITY;
+        \\    if (!isinf(f_inf)) abort();
+        \\    double d_inf = INFINITY;
+        \\    if (!isinf(d_inf)) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("signed array subscript. Issue #8556",
+        \\#include <stdint.h>
+        \\#include <stdlib.h>
+        \\#define TEST_NEGATIVE(type) { type x = -1; if (ptr[x] != 42) abort(); }
+        \\#define TEST_UNSIGNED(type) { type x = 2; if (arr[x] != 42) abort(); }
+        \\int main(void) {
+        \\    int arr[] = {40, 41, 42, 43};
+        \\    int *ptr = arr + 3;
+        \\    if (ptr[-1] != 42) abort();
+        \\    TEST_NEGATIVE(int);
+        \\    TEST_NEGATIVE(long);
+        \\    TEST_NEGATIVE(long long);
+        \\    TEST_NEGATIVE(int64_t);
+        \\    TEST_NEGATIVE(__int128);
+        \\    TEST_UNSIGNED(unsigned);
+        \\    TEST_UNSIGNED(unsigned long);
+        \\    TEST_UNSIGNED(unsigned long long);
+        \\    TEST_UNSIGNED(uint64_t);
+        \\    TEST_UNSIGNED(size_t);
+        \\    TEST_UNSIGNED(unsigned __int128);
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("Ensure side-effects only evaluated once for signed array indices",
+        \\#include <stdlib.h>
+        \\int main(void) {
+        \\    int foo[] = {1, 2, 3, 4};
+        \\    int *p = foo;
+        \\    int idx = 1;
+        \\    if ((++p)[--idx] != 2) abort();
+        \\    if (p != foo + 1) abort();
+        \\    if (idx != 0) abort();
+        \\    if ((p++)[idx++] != 2) abort();
+        \\    if (p != foo + 2) abort();
+        \\    if (idx != 1) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("Allow non-const char* string literals. Issue #9126",
+        \\#include <stdlib.h>
+        \\int func(char *x) { return x[0]; }
+        \\struct S { char *member; };
+        \\struct S global_struct = { .member = "global" };
+        \\char *g = "global";
+        \\int main(void) {
+        \\   if (g[0] != 'g') abort();
+        \\   if (global_struct.member[0] != 'g') abort();
+        \\   char *string = "hello";
+        \\   if (string[0] != 'h') abort();
+        \\   struct S s = {.member = "hello"};
+        \\   if (s.member[0] != 'h') abort();
+        \\   if (func("foo") != 'f') abort();
+        \\   return 0;
         \\}
     , "");
 }

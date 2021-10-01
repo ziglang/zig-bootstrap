@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("../std.zig");
 const mem = std.mem;
 const math = std.math;
@@ -95,6 +90,7 @@ fn Sha2x32(comptime params: Sha2Params32) type {
         total_len: u64 = 0,
 
         pub fn init(options: Options) Self {
+            _ = options;
             return Self{
                 .s = [_]u32{
                     params.iv0,
@@ -462,6 +458,7 @@ fn Sha2x64(comptime params: Sha2Params64) type {
         total_len: u128 = 0,
 
         pub fn init(options: Options) Self {
+            _ = options;
             return Self{
                 .s = [_]u64{
                     params.iv0,

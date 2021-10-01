@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const uefi = @import("std").os.uefi;
 const Guid = uefi.Guid;
 const Handle = uefi.Handle;
@@ -31,5 +26,7 @@ pub const EdidOverrideProtocol = extern struct {
 pub const EdidOverrideProtocolAttributes = packed struct {
     dont_override: bool,
     enable_hot_plug: bool,
-    _pad1: u30,
+    _pad1: u6,
+    _pad2: u8,
+    _pad3: u16,
 };

@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("std");
 const crypto = std.crypto;
 const debug = std.debug;
@@ -346,7 +341,7 @@ test "ed25519 test vectors" {
             .expected = error.IdentityElement, // 11 - small-order A
         },
     };
-    for (entries) |entry, i| {
+    for (entries) |entry| {
         var msg: [entry.msg_hex.len / 2]u8 = undefined;
         _ = try fmt.hexToBytes(&msg, entry.msg_hex);
         var public_key: [32]u8 = undefined;

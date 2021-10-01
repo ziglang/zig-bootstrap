@@ -1,9 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
-
 const std = @import("std");
 const builtin = std.builtin;
 const common = @import("../common.zig");
@@ -63,7 +57,7 @@ pub fn add(a: CompressedScalar, b: CompressedScalar, endian: builtin.Endian) Non
 
 /// Return -s (mod L)
 pub fn neg(s: CompressedScalar, endian: builtin.Endian) NonCanonicalError!CompressedScalar {
-    return (try Scalar.fromBytes(a, endian)).neg().toBytes(endian);
+    return (try Scalar.fromBytes(s, endian)).neg().toBytes(endian);
 }
 
 /// Return (a-b) (mod L)

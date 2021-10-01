@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("../std.zig");
 const builtin = std.builtin;
 const assert = std.debug.assert;
@@ -308,7 +303,6 @@ test "std.event.Channel wraparound" {
 
     // add items to channel and pull them out until
     // the buffer wraps around, make sure it doesn't crash.
-    var result: i32 = undefined;
     channel.put(5);
     try testing.expectEqual(@as(i32, 5), channel.get());
     channel.put(6);

@@ -1,8 +1,3 @@
-// SPDX-License-Identifier: MIT
-// Copyright (c) 2015-2021 Zig Contributors
-// This file is part of [zig](https://ziglang.org/), which is MIT licensed.
-// The MIT license requires this copyright notice to be included in all copies
-// and substantial portions of the software.
 const std = @import("../std.zig");
 const builtin = std.builtin;
 const Lock = std.event.Lock;
@@ -130,7 +125,7 @@ test "std.event.Group" {
     // TODO this file has bit-rotted. repair it
     if (true) return error.SkipZigTest;
 
-    const handle = async testGroup(std.heap.page_allocator);
+    _ = async testGroup(std.heap.page_allocator);
 }
 fn testGroup(allocator: *Allocator) callconv(.Async) void {
     var count: usize = 0;
