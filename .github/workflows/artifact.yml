@@ -14,14 +14,12 @@ jobs:
         with:
           version: 12
           platform: x64
-      - name: Read zig version
-        run: echo "ZIG_VERSION=$(cat zig-version)" >> $GITHUB_ENV
       - run: |
           ./build -j$(nproc) x86_64-windows-gnu baseline
           ./package
         shell: bash
       - uses: actions/upload-artifact@v2
         with:
-          name: zig+llvm+lld+clang-x86_64-windows-gnu-${{ env.ZIG_VERSION }}
+          name: zig+llvm+lld+clang-x86_64-windows-gnu-0.9.0-dev.1240+3eb729b44
           path: out/windows-devkit
           if-no-files-found: error
