@@ -927,7 +927,8 @@ private:
            "Map index doesn't point back to a slice with this user.");
   }
 
-  // Disable SRoA for any intrinsics except for lifetime invariants.
+  // Disable SRoA for any intrinsics except for lifetime invariants and
+  // invariant group.
   // FIXME: What about debug intrinsics? This matches old behavior, but
   // doesn't make sense.
   void visitIntrinsicInst(IntrinsicInst &II) {
@@ -944,6 +945,11 @@ private:
       uint64_t Size = std::min(AllocSize - Offset.getLimitedValue(),
                                Length->getLimitedValue());
       insertUse(II, Offset, Size, true);
+      return;
+    }
+
+    if (II.isLaunderOrStripInvariantGroup()) {
+      enqueueUsers(II);
       return;
     }
 
@@ -2462,14 +2468,17 @@ private:
       Pass.DeadInsts.push_back(I);
   }
 
-  Value *rewriteVectorizedLoadInst() {
+  Value *rewriteVectorizedLoadInst(LoadInst &LI) {
     unsigned BeginIndex = getIndex(NewBeginOffset);
     unsigned EndIndex = getIndex(NewEndOffset);
     assert(EndIndex > BeginIndex && "Empty vector!");
 
-    Value *V = IRB.CreateAlignedLoad(NewAI.getAllocatedType(), &NewAI,
-                                     NewAI.getAlign(), "load");
-    return extractVector(IRB, V, BeginIndex, EndIndex, "vec");
+    LoadInst *Load = IRB.CreateAlignedLoad(NewAI.getAllocatedType(), &NewAI,
+                                           NewAI.getAlign(), "load");
+
+    Load->copyMetadata(LI, {LLVMContext::MD_mem_parallel_loop_access,
+                            LLVMContext::MD_access_group});
+    return extractVector(IRB, Load, BeginIndex, EndIndex, "vec");
   }
 
   Value *rewriteIntegerLoad(LoadInst &LI) {
@@ -2513,7 +2522,7 @@ private:
     bool IsPtrAdjusted = false;
     Value *V;
     if (VecTy) {
-      V = rewriteVectorizedLoadInst();
+      V = rewriteVectorizedLoadInst(LI);
     } else if (IntTy && LI.getType()->isIntegerTy()) {
       V = rewriteIntegerLoad(LI);
     } else if (NewBeginOffset == NewAllocaBeginOffset &&
@@ -2567,6 +2576,8 @@ private:
         NewLI->setAAMetadata(AATags.shift(NewBeginOffset - BeginOffset));
       if (LI.isVolatile())
         NewLI->setAtomic(LI.getOrdering(), LI.getSyncScopeID());
+      NewLI->copyMetadata(LI, {LLVMContext::MD_mem_parallel_loop_access,
+                               LLVMContext::MD_access_group});
 
       V = NewLI;
       IsPtrAdjusted = true;
@@ -2626,6 +2637,8 @@ private:
       V = insertVector(IRB, Old, V, BeginIndex, "vec");
     }
     StoreInst *Store = IRB.CreateAlignedStore(V, &NewAI, NewAI.getAlign());
+    Store->copyMetadata(SI, {LLVMContext::MD_mem_parallel_loop_access,
+                             LLVMContext::MD_access_group});
     if (AATags)
       Store->setAAMetadata(AATags.shift(NewBeginOffset - BeginOffset));
     Pass.DeadInsts.push_back(&SI);
@@ -2776,7 +2789,7 @@ private:
 
     // If the memset has a variable size, it cannot be split, just adjust the
     // pointer to the new alloca.
-    if (!isa<Constant>(II.getLength())) {
+    if (!isa<ConstantInt>(II.getLength())) {
       assert(!IsSplit);
       assert(NewBeginOffset == BeginOffset);
       II.setDest(getNewAllocaSlicePtr(IRB, OldPtr->getType()));
@@ -2798,10 +2811,11 @@ private:
       if (BeginOffset > NewAllocaBeginOffset ||
           EndOffset < NewAllocaEndOffset)
         return false;
+      // Length must be in range for FixedVectorType.
       auto *C = cast<ConstantInt>(II.getLength());
-      if (C->getBitWidth() > 64)
+      const uint64_t Len = C->getLimitedValue();
+      if (Len > std::numeric_limits<unsigned>::max())
         return false;
-      const auto Len = C->getZExtValue();
       auto *Int8Ty = IntegerType::getInt8Ty(NewAI.getContext());
       auto *SrcTy = FixedVectorType::get(Int8Ty, Len);
       return canConvertValue(DL, SrcTy, AllocaTy) &&
@@ -2885,6 +2899,8 @@ private:
 
     StoreInst *New =
         IRB.CreateAlignedStore(V, &NewAI, NewAI.getAlign(), II.isVolatile());
+    New->copyMetadata(II, {LLVMContext::MD_mem_parallel_loop_access,
+                           LLVMContext::MD_access_group});
     if (AATags)
       New->setAAMetadata(AATags.shift(NewBeginOffset - BeginOffset));
     LLVM_DEBUG(dbgs() << "          to: " << *New << "\n");
@@ -3060,6 +3076,8 @@ private:
     } else {
       LoadInst *Load = IRB.CreateAlignedLoad(OtherTy, SrcPtr, SrcAlign,
                                              II.isVolatile(), "copyload");
+      Load->copyMetadata(II, {LLVMContext::MD_mem_parallel_loop_access,
+                              LLVMContext::MD_access_group});
       if (AATags)
         Load->setAAMetadata(AATags.shift(NewBeginOffset - BeginOffset));
       Src = Load;
@@ -3080,6 +3098,8 @@ private:
 
     StoreInst *Store = cast<StoreInst>(
         IRB.CreateAlignedStore(Src, DstPtr, DstAlign, II.isVolatile()));
+    Store->copyMetadata(II, {LLVMContext::MD_mem_parallel_loop_access,
+                             LLVMContext::MD_access_group});
     if (AATags)
       Store->setAAMetadata(AATags.shift(NewBeginOffset - BeginOffset));
     LLVM_DEBUG(dbgs() << "          to: " << *Store << "\n");
@@ -3489,20 +3509,22 @@ private:
     SmallVector<Value *, 4> Index(GEPI.indices());
     bool IsInBounds = GEPI.isInBounds();
 
+    Type *Ty = GEPI.getSourceElementType();
     Value *True = Sel->getTrueValue();
     Value *NTrue =
         IsInBounds
-            ? Builder.CreateInBoundsGEP(True, Index,
+            ? Builder.CreateInBoundsGEP(Ty, True, Index,
                                         True->getName() + ".sroa.gep")
-            : Builder.CreateGEP(True, Index, True->getName() + ".sroa.gep");
+            : Builder.CreateGEP(Ty, True, Index, True->getName() + ".sroa.gep");
 
     Value *False = Sel->getFalseValue();
 
     Value *NFalse =
         IsInBounds
-            ? Builder.CreateInBoundsGEP(False, Index,
+            ? Builder.CreateInBoundsGEP(Ty, False, Index,
                                         False->getName() + ".sroa.gep")
-            : Builder.CreateGEP(False, Index, False->getName() + ".sroa.gep");
+            : Builder.CreateGEP(Ty, False, Index,
+                                False->getName() + ".sroa.gep");
 
     Value *NSel = Builder.CreateSelect(Sel->getCondition(), NTrue, NFalse,
                                        Sel->getName() + ".sroa.sel");
@@ -3556,9 +3578,10 @@ private:
         Instruction *In = cast<Instruction>(PHI->getIncomingValue(I));
 
         IRBuilderTy B(In->getParent(), std::next(In->getIterator()));
+        Type *Ty = GEPI.getSourceElementType();
         NewVal = IsInBounds
-            ? B.CreateInBoundsGEP(In, Index, In->getName() + ".sroa.gep")
-            : B.CreateGEP(In, Index, In->getName() + ".sroa.gep");
+            ? B.CreateInBoundsGEP(Ty, In, Index, In->getName() + ".sroa.gep")
+            : B.CreateGEP(Ty, In, Index, In->getName() + ".sroa.gep");
       }
       NewPN->addIncoming(NewVal, B);
     }
@@ -4068,7 +4091,7 @@ bool SROA::presplitLoadsAndStores(AllocaInst &AI, AllocaSlices &AS) {
                            PartPtrTy, StoreBasePtr->getName() + "."),
             getAdjustedAlignment(SI, PartOffset),
             /*IsVolatile*/ false);
-        PStore->copyMetadata(*LI, {LLVMContext::MD_mem_parallel_loop_access,
+        PStore->copyMetadata(*SI, {LLVMContext::MD_mem_parallel_loop_access,
                                    LLVMContext::MD_access_group});
         LLVM_DEBUG(dbgs() << "      +" << PartOffset << ":" << *PStore << "\n");
       }
@@ -4154,6 +4177,8 @@ bool SROA::presplitLoadsAndStores(AllocaInst &AI, AllocaSlices &AS) {
                            LoadPartPtrTy, LoadBasePtr->getName() + "."),
             getAdjustedAlignment(LI, PartOffset),
             /*IsVolatile*/ false, LI->getName());
+        PLoad->copyMetadata(*LI, {LLVMContext::MD_mem_parallel_loop_access,
+                                  LLVMContext::MD_access_group});
       }
 
       // And store this partition.
@@ -4166,6 +4191,8 @@ bool SROA::presplitLoadsAndStores(AllocaInst &AI, AllocaSlices &AS) {
                          StorePartPtrTy, StoreBasePtr->getName() + "."),
           getAdjustedAlignment(SI, PartOffset),
           /*IsVolatile*/ false);
+      PStore->copyMetadata(*SI, {LLVMContext::MD_mem_parallel_loop_access,
+                                 LLVMContext::MD_access_group});
 
       // Now build a new slice for the alloca.
       NewSlices.push_back(
@@ -4774,7 +4801,6 @@ PreservedAnalyses SROA::runImpl(Function &F, DominatorTree &RunDT,
 
   PreservedAnalyses PA;
   PA.preserveSet<CFGAnalyses>();
-  PA.preserve<GlobalsAA>();
   return PA;
 }
 

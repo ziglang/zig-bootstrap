@@ -58,8 +58,8 @@ std::string toString(const WasmGlobalType &type) {
          toString(static_cast<ValType>(type.Type));
 }
 
-std::string toString(const WasmEventType &type) {
-  if (type.Attribute == WASM_EVENT_ATTRIBUTE_EXCEPTION)
+std::string toString(const WasmTagType &type) {
+  if (type.Attribute == WASM_TAG_ATTRIBUTE_EXCEPTION)
     return "exception";
   return "unknown";
 }
@@ -67,7 +67,7 @@ std::string toString(const WasmEventType &type) {
 static std::string toString(const llvm::wasm::WasmLimits &limits) {
   std::string ret;
   ret += "flags=0x" + std::to_string(limits.Flags);
-  ret += "; initial=" + std::to_string(limits.Initial);
+  ret += "; min=" + std::to_string(limits.Minimum);
   if (limits.Flags & WASM_LIMITS_FLAG_HAS_MAX)
     ret += "; max=" + std::to_string(limits.Maximum);
   return ret;
@@ -191,7 +191,7 @@ void writeInitExpr(raw_ostream &os, const WasmInitExpr &initExpr) {
 
 void writeLimits(raw_ostream &os, const WasmLimits &limits) {
   writeU8(os, limits.Flags, "limits flags");
-  writeUleb128(os, limits.Initial, "limits initial");
+  writeUleb128(os, limits.Minimum, "limits min");
   if (limits.Flags & WASM_LIMITS_FLAG_HAS_MAX)
     writeUleb128(os, limits.Maximum, "limits max");
 }
@@ -202,18 +202,13 @@ void writeGlobalType(raw_ostream &os, const WasmGlobalType &type) {
   writeU8(os, type.Mutable, "global mutable");
 }
 
-void writeGlobal(raw_ostream &os, const WasmGlobal &global) {
-  writeGlobalType(os, global.Type);
-  writeInitExpr(os, global.InitExpr);
-}
-
-void writeEventType(raw_ostream &os, const WasmEventType &type) {
-  writeUleb128(os, type.Attribute, "event attribute");
+void writeTagType(raw_ostream &os, const WasmTagType &type) {
+  writeUleb128(os, type.Attribute, "tag attribute");
   writeUleb128(os, type.SigIndex, "sig index");
 }
 
-void writeEvent(raw_ostream &os, const WasmEvent &event) {
-  writeEventType(os, event.Type);
+void writeTag(raw_ostream &os, const WasmTag &tag) {
+  writeTagType(os, tag.Type);
 }
 
 void writeTableType(raw_ostream &os, const WasmTableType &type) {
@@ -232,8 +227,8 @@ void writeImport(raw_ostream &os, const WasmImport &import) {
   case WASM_EXTERNAL_GLOBAL:
     writeGlobalType(os, import.Global);
     break;
-  case WASM_EXTERNAL_EVENT:
-    writeEventType(os, import.Event);
+  case WASM_EXTERNAL_TAG:
+    writeTagType(os, import.Tag);
     break;
   case WASM_EXTERNAL_MEMORY:
     writeLimits(os, import.Memory);
@@ -256,8 +251,8 @@ void writeExport(raw_ostream &os, const WasmExport &export_) {
   case WASM_EXTERNAL_GLOBAL:
     writeUleb128(os, export_.Index, "global index");
     break;
-  case WASM_EXTERNAL_EVENT:
-    writeUleb128(os, export_.Index, "event index");
+  case WASM_EXTERNAL_TAG:
+    writeUleb128(os, export_.Index, "tag index");
     break;
   case WASM_EXTERNAL_MEMORY:
     writeUleb128(os, export_.Index, "memory index");

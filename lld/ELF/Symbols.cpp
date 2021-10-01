@@ -160,7 +160,9 @@ uint64_t Symbol::getGotVA() const {
   return in.got->getVA() + getGotOffset();
 }
 
-uint64_t Symbol::getGotOffset() const { return gotIndex * config->wordsize; }
+uint64_t Symbol::getGotOffset() const {
+  return gotIndex * target->gotEntrySize;
+}
 
 uint64_t Symbol::getGotPltVA() const {
   if (isInIplt)
@@ -170,8 +172,8 @@ uint64_t Symbol::getGotPltVA() const {
 
 uint64_t Symbol::getGotPltOffset() const {
   if (isInIplt)
-    return pltIndex * config->wordsize;
-  return (pltIndex + target->gotPltHeaderEntriesNum) * config->wordsize;
+    return pltIndex * target->gotEntrySize;
+  return (pltIndex + target->gotPltHeaderEntriesNum) * target->gotEntrySize;
 }
 
 uint64_t Symbol::getPltVA() const {
@@ -206,6 +208,9 @@ OutputSection *Symbol::getOutputSection() const {
 // If a symbol name contains '@', the characters after that is
 // a symbol version name. This function parses that.
 void Symbol::parseSymbolVersion() {
+  // Return if localized by a local: pattern in a version script.
+  if (versionId == VER_NDX_LOCAL)
+    return;
   StringRef s = getName();
   size_t pos = s.find('@');
   if (pos == 0 || pos == StringRef::npos)
@@ -277,7 +282,7 @@ uint8_t Symbol::computeBinding() const {
   if (config->relocatable)
     return binding;
   if ((visibility != STV_DEFAULT && visibility != STV_PROTECTED) ||
-      (versionId == VER_NDX_LOCAL && isDefined()))
+      (versionId == VER_NDX_LOCAL && !isLazy()))
     return STB_LOCAL;
   if (!config->gnuUnique && binding == STB_GNU_UNIQUE)
     return STB_GLOBAL;
@@ -366,8 +371,12 @@ bool elf::computeIsPreemptible(const Symbol &sym) {
 
   // If -Bsymbolic or --dynamic-list is specified, or -Bsymbolic-functions is
   // specified and the symbol is STT_FUNC, the symbol is preemptible iff it is
-  // in the dynamic list.
-  if (config->symbolic || (config->bsymbolicFunctions && sym.isFunc()))
+  // in the dynamic list. -Bsymbolic-non-weak-functions is a non-weak subset of
+  // -Bsymbolic-functions.
+  if (config->symbolic ||
+      (config->bsymbolic == BsymbolicKind::Functions && sym.isFunc()) ||
+      (config->bsymbolic == BsymbolicKind::NonWeakFunctions && sym.isFunc() &&
+       sym.binding != STB_WEAK))
     return sym.inDynamicList;
   return true;
 }
@@ -698,7 +707,7 @@ static void replaceCommon(Symbol &oldSym, const LazyT &newSym) {
 
 template <class LazyT> void Symbol::resolveLazy(const LazyT &other) {
   // For common objects, we want to look for global or weak definitions that
-  // should be fetched as the cannonical definition instead.
+  // should be fetched as the canonical definition instead.
   if (isCommon() && elf::config->fortranCommon) {
     if (auto *laSym = dyn_cast<LazyArchive>(&other)) {
       ArchiveFile *archive = cast<ArchiveFile>(laSym->file);
