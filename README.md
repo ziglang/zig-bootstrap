@@ -24,7 +24,8 @@ For other versions, check the git tags of this repository.
 
 ## Host System Dependencies
 
- * C++ compiler capable of building LLVM, Clang, and LLD from source (GCC 5.1+)
+ * C++ compiler capable of building LLVM, Clang, and LLD from source (GCC 5.1+
+   or Clang)
  * cmake 3.13.4 or later
  * make
  * POSIX system (bash, mkdir, cd)
