@@ -2,6 +2,7 @@
 // Source: https://github.com/BLAKE3-team/BLAKE3
 
 const std = @import("../std.zig");
+const builtin = @import("builtin");
 const fmt = std.fmt;
 const math = std.math;
 const mem = std.mem;
@@ -200,7 +201,7 @@ const CompressGeneric = struct {
     }
 };
 
-const compress = if (std.Target.current.cpu.arch == .x86_64) CompressVectorized.compress else CompressGeneric.compress;
+const compress = if (builtin.cpu.arch == .x86_64) CompressVectorized.compress else CompressGeneric.compress;
 
 fn first8Words(words: [16]u32) [8]u32 {
     return @ptrCast(*const [8]u32, &words).*;
@@ -470,6 +471,18 @@ pub const Blake3 = struct {
             );
         }
         output.rootOutputBytes(out_slice);
+    }
+
+    pub const Error = error{};
+    pub const Writer = std.io.Writer(*Blake3, Error, write);
+
+    fn write(self: *Blake3, bytes: []const u8) Error!usize {
+        self.update(bytes);
+        return bytes.len;
+    }
+
+    pub fn writer(self: *Blake3) Writer {
+        return .{ .context = self };
     }
 };
 

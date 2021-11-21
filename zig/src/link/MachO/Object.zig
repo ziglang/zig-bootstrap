@@ -6,7 +6,7 @@ const assert = std.debug.assert;
 const dwarf = std.dwarf;
 const fs = std.fs;
 const io = std.io;
-const log = std.log.scoped(.object);
+const log = std.log.scoped(.link);
 const macho = std.macho;
 const math = std.math;
 const mem = std.mem;
@@ -174,7 +174,13 @@ pub fn free(self: *Object, allocator: *Allocator, macho_file: *MachO) void {
             if (atom.local_sym_index != 0) {
                 macho_file.locals_free_list.append(allocator, atom.local_sym_index) catch {};
                 const local = &macho_file.locals.items[atom.local_sym_index];
-                local.n_type = 0;
+                local.* = .{
+                    .n_strx = 0,
+                    .n_type = 0,
+                    .n_sect = 0,
+                    .n_desc = 0,
+                    .n_value = 0,
+                };
                 atom.local_sym_index = 0;
             }
             if (atom == last_atom) {
@@ -261,7 +267,7 @@ pub fn readLoadCommands(self: *Object, allocator: *Allocator, reader: anytype) !
     const header = self.header orelse unreachable; // Unreachable here signifies a fatal unexplored condition.
     const offset = self.file_offset orelse 0;
 
-    try self.load_commands.ensureTotalCapacity(allocator, header.ncmds);
+    try self.load_commands.ensureUnusedCapacity(allocator, header.ncmds);
 
     var i: u16 = 0;
     while (i < header.ncmds) : (i += 1) {
@@ -387,9 +393,8 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, macho_file: *MachO) 
     // local < extern defined < undefined. Unfortunately, this is not guaranteed! For instance,
     // the GO compiler does not necessarily respect that therefore we sort immediately by type
     // and address within.
-    var sorted_all_nlists = std.ArrayList(NlistWithIndex).init(allocator);
+    var sorted_all_nlists = try std.ArrayList(NlistWithIndex).initCapacity(allocator, self.symtab.items.len);
     defer sorted_all_nlists.deinit();
-    try sorted_all_nlists.ensureTotalCapacity(self.symtab.items.len);
 
     for (self.symtab.items) |nlist, index| {
         sorted_all_nlists.appendAssumeCapacity(.{
@@ -481,7 +486,6 @@ pub fn parseIntoAtoms(self: *Object, allocator: *Allocator, macho_file: *MachO) 
 
         try atom.parseRelocs(relocs, .{
             .base_addr = sect.addr,
-            .base_offset = 0,
             .allocator = allocator,
             .object = self,
             .macho_file = macho_file,

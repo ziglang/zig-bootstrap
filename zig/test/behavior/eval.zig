@@ -183,3 +183,271 @@ test "@setEvalBranchQuota" {
         try expect(sum == 500500);
     }
 }
+
+test "constant struct with negation" {
+    try expect(vertices[0].x == @as(f32, -0.6));
+}
+const Vertex = struct {
+    x: f32,
+    y: f32,
+    r: f32,
+    g: f32,
+    b: f32,
+};
+const vertices = [_]Vertex{
+    Vertex{
+        .x = -0.6,
+        .y = -0.4,
+        .r = 1.0,
+        .g = 0.0,
+        .b = 0.0,
+    },
+    Vertex{
+        .x = 0.6,
+        .y = -0.4,
+        .r = 0.0,
+        .g = 1.0,
+        .b = 0.0,
+    },
+    Vertex{
+        .x = 0.0,
+        .y = 0.6,
+        .r = 0.0,
+        .g = 0.0,
+        .b = 1.0,
+    },
+};
+
+test "statically initialized list" {
+    try expect(static_point_list[0].x == 1);
+    try expect(static_point_list[0].y == 2);
+    try expect(static_point_list[1].x == 3);
+    try expect(static_point_list[1].y == 4);
+}
+const Point = struct {
+    x: i32,
+    y: i32,
+};
+const static_point_list = [_]Point{
+    makePoint(1, 2),
+    makePoint(3, 4),
+};
+fn makePoint(x: i32, y: i32) Point {
+    return Point{
+        .x = x,
+        .y = y,
+    };
+}
+
+test "statically initialized array literal" {
+    const y: [4]u8 = st_init_arr_lit_x;
+    try expect(y[3] == 4);
+}
+const st_init_arr_lit_x = [_]u8{ 1, 2, 3, 4 };
+
+const CmdFn = struct {
+    name: []const u8,
+    func: fn (i32) i32,
+};
+
+const cmd_fns = [_]CmdFn{
+    CmdFn{
+        .name = "one",
+        .func = one,
+    },
+    CmdFn{
+        .name = "two",
+        .func = two,
+    },
+    CmdFn{
+        .name = "three",
+        .func = three,
+    },
+};
+fn one(value: i32) i32 {
+    return value + 1;
+}
+fn two(value: i32) i32 {
+    return value + 2;
+}
+fn three(value: i32) i32 {
+    return value + 3;
+}
+
+fn performFn(comptime prefix_char: u8, start_value: i32) i32 {
+    var result: i32 = start_value;
+    comptime var i = 0;
+    inline while (i < cmd_fns.len) : (i += 1) {
+        if (cmd_fns[i].name[0] == prefix_char) {
+            result = cmd_fns[i].func(result);
+        }
+    }
+    return result;
+}
+
+test "comptime iterate over fn ptr list" {
+    try expect(performFn('t', 1) == 6);
+    try expect(performFn('o', 0) == 1);
+    try expect(performFn('w', 99) == 99);
+}
+
+test "create global array with for loop" {
+    try expect(global_array[5] == 5 * 5);
+    try expect(global_array[9] == 9 * 9);
+}
+
+const global_array = x: {
+    var result: [10]usize = undefined;
+    for (result) |*item, index| {
+        item.* = index * index;
+    }
+    break :x result;
+};
+
+fn generateTable(comptime T: type) [1010]T {
+    var res: [1010]T = undefined;
+    var i: usize = 0;
+    while (i < 1010) : (i += 1) {
+        res[i] = @intCast(T, i);
+    }
+    return res;
+}
+
+fn doesAlotT(comptime T: type, value: usize) T {
+    @setEvalBranchQuota(5000);
+    const table = comptime blk: {
+        break :blk generateTable(T);
+    };
+    return table[value];
+}
+
+test "@setEvalBranchQuota at same scope as generic function call" {
+    try expect(doesAlotT(u32, 2) == 2);
+}
+
+pub const Info = struct {
+    version: u8,
+};
+
+pub const diamond_info = Info{ .version = 0 };
+
+test "comptime modification of const struct field" {
+    comptime {
+        var res = diamond_info;
+        res.version = 1;
+        try expect(diamond_info.version == 0);
+        try expect(res.version == 1);
+    }
+}
+
+test "refer to the type of a generic function" {
+    const Func = fn (type) void;
+    const f: Func = doNothingWithType;
+    f(i32);
+}
+
+fn doNothingWithType(comptime T: type) void {
+    _ = T;
+}
+
+test "zero extend from u0 to u1" {
+    var zero_u0: u0 = 0;
+    var zero_u1: u1 = zero_u0;
+    try expect(zero_u1 == 0);
+}
+
+test "return 0 from function that has u0 return type" {
+    const S = struct {
+        fn foo_zero() u0 {
+            return 0;
+        }
+    };
+    comptime {
+        if (S.foo_zero() != 0) {
+            @compileError("test failed");
+        }
+    }
+}
+
+test "statically initialized struct" {
+    st_init_str_foo.x += 1;
+    try expect(st_init_str_foo.x == 14);
+}
+const StInitStrFoo = struct {
+    x: i32,
+    y: bool,
+};
+var st_init_str_foo = StInitStrFoo{
+    .x = 13,
+    .y = true,
+};
+
+test "inline for with same type but different values" {
+    var res: usize = 0;
+    inline for ([_]type{ [2]u8, [1]u8, [2]u8 }) |T| {
+        var a: T = undefined;
+        res += a.len;
+    }
+    try expect(res == 5);
+}
+
+test "f32 at compile time is lossy" {
+    try expect(@as(f32, 1 << 24) + 1 == 1 << 24);
+}
+
+test "f64 at compile time is lossy" {
+    try expect(@as(f64, 1 << 53) + 1 == 1 << 53);
+}
+
+test {
+    comptime try expect(@as(f128, 1 << 113) == 10384593717069655257060992658440192);
+}
+
+fn copyWithPartialInline(s: []u32, b: []u8) void {
+    comptime var i: usize = 0;
+    inline while (i < 4) : (i += 1) {
+        s[i] = 0;
+        s[i] |= @as(u32, b[i * 4 + 0]) << 24;
+        s[i] |= @as(u32, b[i * 4 + 1]) << 16;
+        s[i] |= @as(u32, b[i * 4 + 2]) << 8;
+        s[i] |= @as(u32, b[i * 4 + 3]) << 0;
+    }
+}
+
+test "binary math operator in partially inlined function" {
+    var s: [4]u32 = undefined;
+    var b: [16]u8 = undefined;
+
+    for (b) |*r, i|
+        r.* = @intCast(u8, i + 1);
+
+    copyWithPartialInline(s[0..], b[0..]);
+    try expect(s[0] == 0x1020304);
+    try expect(s[1] == 0x5060708);
+    try expect(s[2] == 0x90a0b0c);
+    try expect(s[3] == 0xd0e0f10);
+}
+
+test "comptime shl" {
+    var a: u128 = 3;
+    var b: u7 = 63;
+    var c: u128 = 3 << 63;
+    try expect((a << b) == c);
+}
+
+test "comptime bitwise operators" {
+    comptime {
+        try expect(3 & 1 == 1);
+        try expect(3 & -1 == 3);
+        try expect(-3 & -1 == -3);
+        try expect(3 | -1 == -1);
+        try expect(-3 | -1 == -1);
+        try expect(3 ^ -1 == -4);
+        try expect(-3 ^ -1 == 2);
+        try expect(~@as(i8, -1) == 0);
+        try expect(~@as(i128, -1) == 0);
+        try expect(18446744073709551615 & 18446744073709551611 == 18446744073709551611);
+        try expect(-18446744073709551615 & -18446744073709551611 == -18446744073709551615);
+        try expect(~@as(u128, 0) == 0xffffffffffffffffffffffffffffffff);
+    }
+}

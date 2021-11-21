@@ -41,6 +41,7 @@
 #include <io.h>
 #include <fcntl.h>
 #include <ntsecapi.h>
+#include <math.h>
 
 // Workaround an upstream LLVM issue.
 // See https://github.com/ziglang/zig/issues/7614#issuecomment-752939981
@@ -473,6 +474,11 @@ static Buf os_path_resolve_windows(Buf **paths_ptr, size_t paths_len) {
         result_disk_designator = parsed_cwd.disk_designator;
         if (parsed_cwd.kind == WindowsPathKindDrive) {
             result.ptr[0] = asciiUpper(result.ptr[0]);
+            // Remove the trailing slash if present, eg. if the cwd is a root
+            // directory.
+            if (buf_ends_with_mem(&cwd, "\\", 1)) {
+                result_index -= 1;
+            }
         }
         have_drive_kind = parsed_cwd.kind;
     }
@@ -480,7 +486,7 @@ static Buf os_path_resolve_windows(Buf **paths_ptr, size_t paths_len) {
     // Now we know the disk designator to use, if any, and what kind it is. And our result
     // is big enough to append all the paths to.
     bool correct_disk_designator = true;
-    for (size_t i = 0; i < paths_len; i += 1) {
+    for (size_t i = first_index; i < paths_len; i += 1) {
         Slice<uint8_t> p = buf_to_slice(paths_ptr[i]);
         WindowsPath parsed = windowsParsePath(p);
 

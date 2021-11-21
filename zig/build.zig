@@ -110,6 +110,8 @@ pub fn build(b: *Builder) !void {
         return;
 
     const tracy = b.option([]const u8, "tracy", "Enable Tracy integration. Supply path to Tracy source");
+    const tracy_callstack = b.option(bool, "tracy-callstack", "Include callstack information with Tracy data. Does nothing if -Dtracy is not provided") orelse false;
+    const tracy_allocation = b.option(bool, "tracy-allocation", "Include allocation information with Tracy data. Does nothing if -Dtracy is not provided") orelse false;
     const link_libc = b.option(bool, "force-link-libc", "Force self-hosted compiler to link libc") orelse enable_llvm;
     const strip = b.option(bool, "strip", "Omit debug information") orelse false;
 
@@ -205,6 +207,7 @@ pub fn build(b: *Builder) !void {
     }
 
     const enable_logging = b.option(bool, "log", "Whether to enable logging") orelse false;
+    const enable_link_snapshots = b.option(bool, "link-snapshot", "Whether to enable linker state snapshots") orelse false;
 
     const opt_version_string = b.option([]const u8, "version-string", "Override Zig version string. Default is to find out with git.");
     const version = if (opt_version_string) |version| version else v: {
@@ -261,7 +264,10 @@ pub fn build(b: *Builder) !void {
     exe_options.addOption(std.SemanticVersion, "semver", semver);
 
     exe_options.addOption(bool, "enable_logging", enable_logging);
+    exe_options.addOption(bool, "enable_link_snapshots", enable_link_snapshots);
     exe_options.addOption(bool, "enable_tracy", tracy != null);
+    exe_options.addOption(bool, "enable_tracy_callstack", tracy_callstack);
+    exe_options.addOption(bool, "enable_tracy_allocation", tracy_allocation);
     exe_options.addOption(bool, "is_stage1", is_stage1);
     exe_options.addOption(bool, "omit_stage2", omit_stage2);
     if (tracy) |tracy_path| {
@@ -301,6 +307,7 @@ pub fn build(b: *Builder) !void {
     test_stage2.addOptions("build_options", test_stage2_options);
 
     test_stage2_options.addOption(bool, "enable_logging", enable_logging);
+    test_stage2_options.addOption(bool, "enable_link_snapshots", enable_link_snapshots);
     test_stage2_options.addOption(bool, "skip_non_native", skip_non_native);
     test_stage2_options.addOption(bool, "skip_compile_errors", skip_compile_errors);
     test_stage2_options.addOption(bool, "is_stage1", is_stage1);
@@ -523,6 +530,8 @@ fn addStaticLlvmOptionsToExe(
     for (llvm_libs) |lib_name| {
         exe.linkSystemLibrary(lib_name);
     }
+
+    exe.linkSystemLibrary("z");
 
     // This means we rely on clang-or-zig-built LLVM, Clang, LLD libraries.
     exe.linkSystemLibrary("c++");
@@ -914,6 +923,7 @@ const llvm_libs = [_][]const u8{
     "LLVMWebAssemblyAsmParser",
     "LLVMWebAssemblyCodeGen",
     "LLVMWebAssemblyDesc",
+    "LLVMWebAssemblyUtils",
     "LLVMWebAssemblyInfo",
     "LLVMSystemZDisassembler",
     "LLVMSystemZAsmParser",
@@ -989,11 +999,12 @@ const llvm_libs = [_][]const u8{
     "LLVMOrcJIT",
     "LLVMMCJIT",
     "LLVMJITLink",
-    "LLVMOrcTargetProcess",
-    "LLVMOrcShared",
     "LLVMInterpreter",
     "LLVMExecutionEngine",
     "LLVMRuntimeDyld",
+    "LLVMOrcTargetProcess",
+    "LLVMOrcShared",
+    "LLVMDWP",
     "LLVMSymbolize",
     "LLVMDebugInfoPDB",
     "LLVMDebugInfoGSYM",
@@ -1006,7 +1017,6 @@ const llvm_libs = [_][]const u8{
     "LLVMCFGuard",
     "LLVMCoroutines",
     "LLVMObjCARCOpts",
-    "LLVMHelloNew",
     "LLVMipo",
     "LLVMVectorize",
     "LLVMLinker",
@@ -1018,6 +1028,7 @@ const llvm_libs = [_][]const u8{
     "LLVMGlobalISel",
     "LLVMMIRParser",
     "LLVMAsmPrinter",
+    "LLVMDebugInfoMSF",
     "LLVMDebugInfoDWARF",
     "LLVMSelectionDAG",
     "LLVMCodeGen",
@@ -1039,7 +1050,6 @@ const llvm_libs = [_][]const u8{
     "LLVMMCParser",
     "LLVMMC",
     "LLVMDebugInfoCodeView",
-    "LLVMDebugInfoMSF",
     "LLVMBitReader",
     "LLVMCore",
     "LLVMRemarks",

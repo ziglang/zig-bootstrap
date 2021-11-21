@@ -1,5 +1,5 @@
 const std = @import("std.zig");
-const builtin = std.builtin;
+const builtin = @import("builtin");
 const io = std.io;
 const fs = std.fs;
 const mem = std.mem;
@@ -62,7 +62,7 @@ pub const Builder = struct {
     build_root: []const u8,
     cache_root: []const u8,
     global_cache_root: []const u8,
-    release_mode: ?builtin.Mode,
+    release_mode: ?std.builtin.Mode,
     is_release: bool,
     override_lib_dir: ?[]const u8,
     vcpkg_root: VcpkgRoot,
@@ -204,10 +204,10 @@ pub const Builder = struct {
     pub fn resolveInstallPrefix(self: *Builder, install_prefix: ?[]const u8, dir_list: DirList) void {
         if (self.dest_dir) |dest_dir| {
             self.install_prefix = install_prefix orelse "/usr";
-            self.install_path = fs.path.join(self.allocator, &[_][]const u8{ dest_dir, self.install_prefix }) catch unreachable;
+            self.install_path = self.pathJoin(&.{ dest_dir, self.install_prefix });
         } else {
             self.install_prefix = install_prefix orelse
-                (fs.path.join(self.allocator, &[_][]const u8{ self.build_root, "zig-out" }) catch unreachable);
+                (self.pathJoin(&.{ self.build_root, "zig-out" }));
             self.install_path = self.install_prefix;
         }
 
@@ -230,9 +230,9 @@ pub const Builder = struct {
             h_list[1] = dir;
         }
 
-        self.lib_dir = fs.path.join(self.allocator, &lib_list) catch unreachable;
-        self.exe_dir = fs.path.join(self.allocator, &exe_list) catch unreachable;
-        self.h_dir = fs.path.join(self.allocator, &h_list) catch unreachable;
+        self.lib_dir = self.pathJoin(&lib_list);
+        self.exe_dir = self.pathJoin(&exe_list);
+        self.h_dir = self.pathJoin(&h_list);
     }
 
     fn convertOptionalPathToFileSource(path: ?[]const u8) ?FileSource {
@@ -633,18 +633,18 @@ pub const Builder = struct {
     }
 
     /// This provides the -Drelease option to the build user and does not give them the choice.
-    pub fn setPreferredReleaseMode(self: *Builder, mode: builtin.Mode) void {
+    pub fn setPreferredReleaseMode(self: *Builder, mode: std.builtin.Mode) void {
         if (self.release_mode != null) {
             @panic("setPreferredReleaseMode must be called before standardReleaseOptions and may not be called twice");
         }
         const description = self.fmt("Create a release build ({s})", .{@tagName(mode)});
         self.is_release = self.option(bool, "release", description) orelse false;
-        self.release_mode = if (self.is_release) mode else builtin.Mode.Debug;
+        self.release_mode = if (self.is_release) mode else std.builtin.Mode.Debug;
     }
 
     /// If you call this without first calling `setPreferredReleaseMode` then it gives the build user
     /// the choice of what kind of release.
-    pub fn standardReleaseOptions(self: *Builder) builtin.Mode {
+    pub fn standardReleaseOptions(self: *Builder) std.builtin.Mode {
         if (self.release_mode) |mode| return mode;
 
         const release_safe = self.option(bool, "release-safe", "Optimizations on and safety on") orelse false;
@@ -652,17 +652,17 @@ pub const Builder = struct {
         const release_small = self.option(bool, "release-small", "Size optimizations on and safety off") orelse false;
 
         const mode = if (release_safe and !release_fast and !release_small)
-            builtin.Mode.ReleaseSafe
+            std.builtin.Mode.ReleaseSafe
         else if (release_fast and !release_safe and !release_small)
-            builtin.Mode.ReleaseFast
+            std.builtin.Mode.ReleaseFast
         else if (release_small and !release_fast and !release_safe)
-            builtin.Mode.ReleaseSmall
+            std.builtin.Mode.ReleaseSmall
         else if (!release_fast and !release_safe and !release_small)
-            builtin.Mode.Debug
+            std.builtin.Mode.Debug
         else x: {
             warn("Multiple release modes (of -Drelease-safe, -Drelease-fast and -Drelease-small)\n\n", .{});
             self.markInvalidUserInput();
-            break :x builtin.Mode.Debug;
+            break :x std.builtin.Mode.Debug;
         };
         self.is_release = mode != .Debug;
         self.release_mode = mode;
@@ -1086,6 +1086,11 @@ pub const Builder = struct {
         return fs.path.resolve(self.allocator, &[_][]const u8{ self.build_root, rel_path }) catch unreachable;
     }
 
+    /// Shorthand for `std.fs.path.join(builder.allocator, paths) catch unreachable`
+    pub fn pathJoin(self: *Builder, paths: []const []const u8) []u8 {
+        return fs.path.join(self.allocator, paths) catch unreachable;
+    }
+
     pub fn fmt(self: *Builder, comptime format: []const u8, args: anytype) []u8 {
         return fmt_lib.allocPrint(self.allocator, format, args) catch unreachable;
     }
@@ -1098,7 +1103,7 @@ pub const Builder = struct {
                 if (fs.path.isAbsolute(name)) {
                     return name;
                 }
-                const full_path = try fs.path.join(self.allocator, &[_][]const u8{
+                const full_path = self.pathJoin(&.{
                     search_prefix,
                     "bin",
                     self.fmt("{s}{s}", .{ name, exe_extension }),
@@ -1113,7 +1118,7 @@ pub const Builder = struct {
                 }
                 var it = mem.tokenize(u8, PATH, &[_]u8{fs.path.delimiter});
                 while (it.next()) |path| {
-                    const full_path = try fs.path.join(self.allocator, &[_][]const u8{
+                    const full_path = self.pathJoin(&.{
                         path,
                         self.fmt("{s}{s}", .{ name, exe_extension }),
                     });
@@ -1126,7 +1131,7 @@ pub const Builder = struct {
                 return name;
             }
             for (paths) |path| {
-                const full_path = try fs.path.join(self.allocator, &[_][]const u8{
+                const full_path = self.pathJoin(&.{
                     path,
                     self.fmt("{s}{s}", .{ name, exe_extension }),
                 });
@@ -1225,7 +1230,7 @@ pub const Builder = struct {
             .bin => self.exe_dir,
             .lib => self.lib_dir,
             .header => self.h_dir,
-            .custom => |path| fs.path.join(self.allocator, &[_][]const u8{ self.install_path, path }) catch unreachable,
+            .custom => |path| self.pathJoin(&.{ self.install_path, path }),
         };
         return fs.path.resolve(
             self.allocator,
@@ -1290,7 +1295,7 @@ test "builder.findProgram compiles" {
 }
 
 /// Deprecated. Use `std.builtin.Version`.
-pub const Version = builtin.Version;
+pub const Version = std.builtin.Version;
 
 /// Deprecated. Use `std.zig.CrossTarget`.
 pub const Target = std.zig.CrossTarget;
@@ -1417,8 +1422,8 @@ pub const LibExeObjStep = struct {
     version_script: ?[]const u8 = null,
     out_filename: []const u8,
     linkage: ?Linkage = null,
-    version: ?Version,
-    build_mode: builtin.Mode,
+    version: ?std.builtin.Version,
+    build_mode: std.builtin.Mode,
     kind: Kind,
     major_only_filename: ?[]const u8,
     name_only_filename: ?[]const u8,
@@ -1439,6 +1444,10 @@ pub const LibExeObjStep = struct {
     disable_sanitize_c: bool,
     sanitize_thread: bool,
     rdynamic: bool,
+    import_memory: bool = false,
+    initial_memory: ?u64 = null,
+    max_memory: ?u64 = null,
+    global_base: ?u64 = null,
     c_std: Builder.CStd,
     override_lib_dir: ?[]const u8,
     main_pkg_path: ?[]const u8,
@@ -1447,8 +1456,8 @@ pub const LibExeObjStep = struct {
     filter: ?[]const u8,
     single_threaded: bool,
     test_evented_io: bool = false,
-    code_model: builtin.CodeModel = .default,
-    wasi_exec_model: ?builtin.WasiExecModel = null,
+    code_model: std.builtin.CodeModel = .default,
+    wasi_exec_model: ?std.builtin.WasiExecModel = null,
 
     root_src: ?FileSource,
     out_h_filename: []const u8,
@@ -1489,6 +1498,9 @@ pub const LibExeObjStep = struct {
 
     linker_allow_shlib_undefined: ?bool = null,
 
+    /// Permit read-only relocations in read-only segments. Disallowed by default.
+    link_z_notext: bool = false,
+
     /// Uses system Wine installation to run cross compiled Windows build artifacts.
     enable_wine: bool = false,
 
@@ -1514,6 +1526,8 @@ pub const LibExeObjStep = struct {
     pie: ?bool = null,
 
     red_zone: ?bool = null,
+
+    omit_frame_pointer: ?bool = null,
 
     subsystem: ?std.Target.SubSystem = null,
 
@@ -1550,7 +1564,7 @@ pub const LibExeObjStep = struct {
     };
 
     const SharedLibKind = union(enum) {
-        versioned: Version,
+        versioned: std.builtin.Version,
         unversioned: void,
     };
 
@@ -1585,7 +1599,7 @@ pub const LibExeObjStep = struct {
         root_src_raw: ?FileSource,
         kind: Kind,
         linkage: ?Linkage,
-        ver: ?Version,
+        ver: ?std.builtin.Version,
     ) *LibExeObjStep {
         const name = builder.dupe(name_raw);
         const root_src: ?FileSource = if (root_src_raw) |rsrc| rsrc.dupe(builder) else null;
@@ -1599,7 +1613,7 @@ pub const LibExeObjStep = struct {
             .builder = builder,
             .verbose_link = false,
             .verbose_cc = false,
-            .build_mode = builtin.Mode.Debug,
+            .build_mode = std.builtin.Mode.Debug,
             .linkage = linkage,
             .kind = kind,
             .root_src = root_src,
@@ -1696,11 +1710,9 @@ pub const LibExeObjStep = struct {
                 }
             }
             if (self.output_dir != null) {
-                self.output_lib_path_source.path =
-                    fs.path.join(
-                    self.builder.allocator,
-                    &[_][]const u8{ self.output_dir.?, self.out_lib_filename },
-                ) catch unreachable;
+                self.output_lib_path_source.path = self.builder.pathJoin(
+                    &.{ self.output_dir.?, self.out_lib_filename },
+                );
             }
         }
     }
@@ -1988,7 +2000,7 @@ pub const LibExeObjStep = struct {
         self.verbose_cc = value;
     }
 
-    pub fn setBuildMode(self: *LibExeObjStep, mode: builtin.Mode) void {
+    pub fn setBuildMode(self: *LibExeObjStep, mode: std.builtin.Mode) void {
         self.build_mode = mode;
     }
 
@@ -2127,14 +2139,14 @@ pub const LibExeObjStep = struct {
                 const triplet = try self.target.vcpkgTriplet(allocator, if (linkage == .static) .Static else .Dynamic);
                 defer self.builder.allocator.free(triplet);
 
-                const include_path = try fs.path.join(allocator, &[_][]const u8{ root, "installed", triplet, "include" });
+                const include_path = self.builder.pathJoin(&.{ root, "installed", triplet, "include" });
                 errdefer allocator.free(include_path);
                 try self.include_dirs.append(IncludeDir{ .raw_path = include_path });
 
-                const lib_path = try fs.path.join(allocator, &[_][]const u8{ root, "installed", triplet, "lib" });
+                const lib_path = self.builder.pathJoin(&.{ root, "installed", triplet, "lib" });
                 try self.lib_paths.append(lib_path);
 
-                self.vcpkg_bin_path = try fs.path.join(allocator, &[_][]const u8{ root, "installed", triplet, "bin" });
+                self.vcpkg_bin_path = self.builder.pathJoin(&.{ root, "installed", triplet, "bin" });
             },
         }
     }
@@ -2352,6 +2364,10 @@ pub const LibExeObjStep = struct {
         if (self.linker_allow_shlib_undefined) |x| {
             try zig_args.append(if (x) "-fallow-shlib-undefined" else "-fno-allow-shlib-undefined");
         }
+        if (self.link_z_notext) {
+            try zig_args.append("-z");
+            try zig_args.append("notext");
+        }
         if (self.single_threaded) {
             try zig_args.append("--single-threaded");
         }
@@ -2406,6 +2422,13 @@ pub const LibExeObjStep = struct {
                 try zig_args.append("-mno-red-zone");
             }
         }
+        if (self.omit_frame_pointer) |omit_frame_pointer| {
+            if (omit_frame_pointer) {
+                try zig_args.append("-fomit-frame-pointer");
+            } else {
+                try zig_args.append("-fno-omit-frame-pointer");
+            }
+        }
         if (self.disable_sanitize_c) {
             try zig_args.append("-fno-sanitize-c");
         }
@@ -2414,6 +2437,18 @@ pub const LibExeObjStep = struct {
         }
         if (self.rdynamic) {
             try zig_args.append("-rdynamic");
+        }
+        if (self.import_memory) {
+            try zig_args.append("--import-memory");
+        }
+        if (self.initial_memory) |initial_memory| {
+            try zig_args.append(builder.fmt("--initial-memory={d}", .{initial_memory}));
+        }
+        if (self.max_memory) |max_memory| {
+            try zig_args.append(builder.fmt("--max-memory={d}", .{max_memory}));
+        }
+        if (self.global_base) |global_base| {
+            try zig_args.append(builder.fmt("--global-base={d}", .{global_base}));
         }
 
         if (self.code_model != .default) {
@@ -2553,7 +2588,7 @@ pub const LibExeObjStep = struct {
 
                     const resolved_include_path = self.builder.pathFromRoot(include_path);
 
-                    const common_include_path = if (std.Target.current.os.tag == .windows and builder.sysroot != null and fs.path.isAbsolute(resolved_include_path)) blk: {
+                    const common_include_path = if (builtin.os.tag == .windows and builder.sysroot != null and fs.path.isAbsolute(resolved_include_path)) blk: {
                         // We need to check for disk designator and strip it out from dir path so
                         // that zig/clang can concat resolved_include_path with sysroot.
                         const disk_designator = fs.path.diskDesignatorWindows(resolved_include_path);
@@ -2623,11 +2658,11 @@ pub const LibExeObjStep = struct {
 
         for (builder.search_prefixes.items) |search_prefix| {
             try zig_args.append("-L");
-            try zig_args.append(try fs.path.join(builder.allocator, &[_][]const u8{
+            try zig_args.append(builder.pathJoin(&.{
                 search_prefix, "lib",
             }));
             try zig_args.append("-isystem");
-            try zig_args.append(try fs.path.join(builder.allocator, &[_][]const u8{
+            try zig_args.append(builder.pathJoin(&.{
                 search_prefix, "include",
             }));
         }
@@ -2732,26 +2767,20 @@ pub const LibExeObjStep = struct {
 
         // Update generated files
         if (self.output_dir != null) {
-            self.output_path_source.path =
-                fs.path.join(
-                self.builder.allocator,
-                &[_][]const u8{ self.output_dir.?, self.out_filename },
-            ) catch unreachable;
+            self.output_path_source.path = builder.pathJoin(
+                &.{ self.output_dir.?, self.out_filename },
+            );
 
             if (self.emit_h) {
-                self.output_h_path_source.path =
-                    fs.path.join(
-                    self.builder.allocator,
-                    &[_][]const u8{ self.output_dir.?, self.out_h_filename },
-                ) catch unreachable;
+                self.output_h_path_source.path = builder.pathJoin(
+                    &.{ self.output_dir.?, self.out_h_filename },
+                );
             }
 
             if (self.target.isWindows() or self.target.isUefi()) {
-                self.output_pdb_path_source.path =
-                    fs.path.join(
-                    self.builder.allocator,
-                    &[_][]const u8{ self.output_dir.?, self.out_pdb_filename },
-                ) catch unreachable;
+                self.output_pdb_path_source.path = builder.pathJoin(
+                    &.{ self.output_dir.?, self.out_pdb_filename },
+                );
             }
         }
 
@@ -2932,11 +2961,11 @@ pub const InstallDirStep = struct {
                 }
             }
 
-            const full_path = try fs.path.join(self.builder.allocator, &[_][]const u8{
+            const full_path = self.builder.pathJoin(&.{
                 full_src_dir, entry.path,
             });
 
-            const dest_path = try fs.path.join(self.builder.allocator, &[_][]const u8{
+            const dest_path = self.builder.pathJoin(&.{
                 dest_prefix, entry.path,
             });
 
@@ -3237,7 +3266,7 @@ test "LibExeObjStep.addPackage" {
 test {
     // The only purpose of this test is to get all these untested functions
     // to be referenced to avoid regression so it is okay to skip some targets.
-    if (comptime std.Target.current.cpu.arch.ptrBitWidth() == 64) {
+    if (comptime builtin.cpu.arch.ptrBitWidth() == 64) {
         std.testing.refAllDecls(@This());
         std.testing.refAllDecls(Builder);
 

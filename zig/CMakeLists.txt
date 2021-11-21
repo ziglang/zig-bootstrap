@@ -104,9 +104,9 @@ else()
     set(ZIG_USE_LLVM_CONFIG OFF CACHE BOOL "use llvm-config to find LLVM libraries")
 endif()
 
-find_package(llvm)
-find_package(clang)
-find_package(lld)
+find_package(llvm 13)
+find_package(clang 13)
+find_package(lld 13)
 
 if(ZIG_STATIC_ZLIB)
     list(REMOVE_ITEM LLVM_LIBRARIES "-lz")
@@ -555,6 +555,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/arch/arm/bits.zig"
     "${CMAKE_SOURCE_DIR}/src/arch/riscv64/bits.zig"
     "${CMAKE_SOURCE_DIR}/src/arch/x86_64/bits.zig"
+    "${CMAKE_SOURCE_DIR}/src/arch/wasm/CodeGen.zig"
     "${CMAKE_SOURCE_DIR}/src/clang.zig"
     "${CMAKE_SOURCE_DIR}/src/clang_options.zig"
     "${CMAKE_SOURCE_DIR}/src/clang_options_data.zig"
@@ -562,7 +563,6 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/codegen/c.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen/llvm.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen/llvm/bindings.zig"
-    "${CMAKE_SOURCE_DIR}/src/codegen/wasm.zig"
     "${CMAKE_SOURCE_DIR}/src/glibc.zig"
     "${CMAKE_SOURCE_DIR}/src/introspect.zig"
     "${CMAKE_SOURCE_DIR}/src/libc_installation.zig"

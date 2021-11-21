@@ -940,7 +940,7 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
                 }
             }
         }
-        man.hash.addStringSet(self.base.options.system_libs);
+        link.hashAddSystemLibs(&man.hash, self.base.options.system_libs);
         man.hash.addOptional(self.base.options.subsystem);
         man.hash.add(self.base.options.is_test);
         man.hash.add(self.base.options.tsaware);
@@ -1263,6 +1263,10 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
         if (self.base.options.link_libcpp) {
             try argv.append(comp.libcxxabi_static_lib.?.full_object_path);
             try argv.append(comp.libcxx_static_lib.?.full_object_path);
+        }
+
+        // libunwind dep
+        if (self.base.options.link_libunwind) {
             try argv.append(comp.libunwind_static_lib.?.full_object_path);
         }
 

@@ -111,7 +111,10 @@ const Writer = struct {
             .mul,
             .mulwrap,
             .mul_sat,
-            .div,
+            .div_float,
+            .div_trunc,
+            .div_floor,
+            .div_exact,
             .rem,
             .mod,
             .ptr_add,
@@ -128,15 +131,16 @@ const Writer = struct {
             .bool_and,
             .bool_or,
             .store,
+            .array_elem_val,
             .slice_elem_val,
-            .ptr_slice_elem_val,
             .ptr_elem_val,
-            .ptr_ptr_elem_val,
             .shl,
             .shl_exact,
             .shl_sat,
             .shr,
             .set_union_tag,
+            .min,
+            .max,
             => try w.writeBinOp(s, inst),
 
             .is_null,
@@ -150,6 +154,7 @@ const Writer = struct {
             .ptrtoint,
             .bool_to_int,
             .ret,
+            .ret_load,
             => try w.writeUnOp(s, inst),
 
             .breakpoint,
@@ -158,6 +163,7 @@ const Writer = struct {
 
             .const_ty,
             .alloc,
+            .ret_ptr,
             => try w.writeTy(s, inst),
 
             .not,
@@ -169,6 +175,7 @@ const Writer = struct {
             .trunc,
             .optional_payload,
             .optional_payload_ptr,
+            .optional_payload_ptr_set,
             .wrap_optional,
             .unwrap_errunion_payload,
             .unwrap_errunion_err,
@@ -178,6 +185,8 @@ const Writer = struct {
             .wrap_errunion_err,
             .slice_ptr,
             .slice_len,
+            .ptr_slice_len_ptr,
+            .ptr_slice_ptr_ptr,
             .struct_field_ptr_index_0,
             .struct_field_ptr_index_1,
             .struct_field_ptr_index_2,
@@ -188,13 +197,18 @@ const Writer = struct {
             .get_union_tag,
             .clz,
             .ctz,
+            .popcount,
             => try w.writeTyOp(s, inst),
 
             .block,
             .loop,
             => try w.writeBlock(s, inst),
 
-            .ptr_elem_ptr => try w.writePtrElemPtr(s, inst),
+            .slice,
+            .slice_elem_ptr,
+            .ptr_elem_ptr,
+            => try w.writeTyPlBin(s, inst),
+
             .struct_field_ptr => try w.writeStructField(s, inst),
             .struct_field_val => try w.writeStructField(s, inst),
             .constant => try w.writeConstant(s, inst),
@@ -275,7 +289,7 @@ const Writer = struct {
         try s.print(", {d}", .{extra.field_index});
     }
 
-    fn writePtrElemPtr(w: *Writer, s: anytype, inst: Air.Inst.Index) @TypeOf(s).Error!void {
+    fn writeTyPlBin(w: *Writer, s: anytype, inst: Air.Inst.Index) @TypeOf(s).Error!void {
         const ty_pl = w.air.instructions.items(.data)[inst].ty_pl;
         const extra = w.air.extraData(Air.Bin, ty_pl.payload).data;
 
@@ -363,9 +377,52 @@ const Writer = struct {
     }
 
     fn writeAssembly(w: *Writer, s: anytype, inst: Air.Inst.Index) @TypeOf(s).Error!void {
-        _ = w;
-        _ = inst;
-        try s.writeAll("TODO");
+        const ty_pl = w.air.instructions.items(.data)[inst].ty_pl;
+        const air_asm = w.air.extraData(Air.Asm, ty_pl.payload);
+        const zir = w.zir;
+        const extended = zir.instructions.items(.data)[air_asm.data.zir_index].extended;
+        const zir_extra = zir.extraData(Zir.Inst.Asm, extended.operand);
+        const asm_source = zir.nullTerminatedString(zir_extra.data.asm_source);
+        const outputs_len = @truncate(u5, extended.small);
+        const args_len = @truncate(u5, extended.small >> 5);
+        const clobbers_len = @truncate(u5, extended.small >> 10);
+        const args = @bitCast([]const Air.Inst.Ref, w.air.extra[air_asm.end..][0..args_len]);
+
+        var extra_i: usize = zir_extra.end;
+        const output_constraint: ?[]const u8 = out: {
+            var i: usize = 0;
+            while (i < outputs_len) : (i += 1) {
+                const output = zir.extraData(Zir.Inst.Asm.Output, extra_i);
+                extra_i = output.end;
+                break :out zir.nullTerminatedString(output.data.constraint);
+            }
+            break :out null;
+        };
+
+        try s.print("\"{s}\"", .{asm_source});
+
+        if (output_constraint) |constraint| {
+            const ret_ty = w.air.typeOfIndex(inst);
+            try s.print(", {s} -> {}", .{ constraint, ret_ty });
+        }
+
+        for (args) |arg| {
+            const input = zir.extraData(Zir.Inst.Asm.Input, extra_i);
+            extra_i = input.end;
+            const constraint = zir.nullTerminatedString(input.data.constraint);
+
+            try s.print(", {s} = (", .{constraint});
+            try w.writeOperand(s, inst, 0, arg);
+            try s.writeByte(')');
+        }
+
+        const clobbers = zir.extra[extra_i..][0..clobbers_len];
+        for (clobbers) |clobber_index| {
+            const clobber = zir.nullTerminatedString(clobber_index);
+            try s.writeAll(", ~{");
+            try s.writeAll(clobber);
+            try s.writeAll("}");
+        }
     }
 
     fn writeDbgStmt(w: *Writer, s: anytype, inst: Air.Inst.Index) @TypeOf(s).Error!void {

@@ -755,7 +755,7 @@ pub fn flushModule(self: *Elf, comp: *Compilation) !void {
     const module = self.base.options.module orelse return error.LinkingWithoutZigSourceUnimplemented;
 
     const target_endian = self.base.options.target.cpu.arch.endian();
-    const foreign_endian = target_endian != std.Target.current.cpu.arch.endian();
+    const foreign_endian = target_endian != builtin.cpu.arch.endian();
     const ptr_width_bytes: u8 = self.ptrWidthBytes();
     const init_len_size: usize = switch (self.ptr_width) {
         .p32 => 4,
@@ -851,12 +851,11 @@ pub fn flushModule(self: *Elf, comp: *Compilation) !void {
         const last_dbg_info_decl = self.dbg_info_decl_last.?;
         const debug_info_sect = &self.sections.items[self.debug_info_section_index.?];
 
-        var di_buf = std.ArrayList(u8).init(self.base.allocator);
-        defer di_buf.deinit();
-
         // We have a function to compute the upper bound size, because it's needed
         // for determining where to put the offset of the first `LinkBlock`.
-        try di_buf.ensureTotalCapacity(self.dbgInfoNeededHeaderBytes());
+        const needed_bytes = self.dbgInfoNeededHeaderBytes();
+        var di_buf = try std.ArrayList(u8).initCapacity(self.base.allocator, needed_bytes);
+        defer di_buf.deinit();
 
         // initial length - length of the .debug_info contribution for this compilation unit,
         // not including the initial length itself.
@@ -920,12 +919,10 @@ pub fn flushModule(self: *Elf, comp: *Compilation) !void {
     if (self.debug_aranges_section_dirty) {
         const debug_aranges_sect = &self.sections.items[self.debug_aranges_section_index.?];
 
-        var di_buf = std.ArrayList(u8).init(self.base.allocator);
-        defer di_buf.deinit();
-
         // Enough for all the data without resizing. When support for more compilation units
         // is added, the size of this section will become more variable.
-        try di_buf.ensureTotalCapacity(100);
+        var di_buf = try std.ArrayList(u8).initCapacity(self.base.allocator, 100);
+        defer di_buf.deinit();
 
         // initial length - length of the .debug_aranges contribution for this compilation unit,
         // not including the initial length itself.
@@ -998,13 +995,12 @@ pub fn flushModule(self: *Elf, comp: *Compilation) !void {
 
         const debug_line_sect = &self.sections.items[self.debug_line_section_index.?];
 
-        var di_buf = std.ArrayList(u8).init(self.base.allocator);
-        defer di_buf.deinit();
-
         // The size of this header is variable, depending on the number of directories,
         // files, and padding. We have a function to compute the upper bound size, however,
         // because it's needed for determining where to put the offset of the first `SrcFn`.
-        try di_buf.ensureTotalCapacity(self.dbgLineNeededHeaderBytes());
+        const needed_bytes = self.dbgLineNeededHeaderBytes();
+        var di_buf = try std.ArrayList(u8).initCapacity(self.base.allocator, needed_bytes);
+        defer di_buf.deinit();
 
         // initial length - length of the .debug_line contribution for this compilation unit,
         // not including the initial length itself.
@@ -1332,6 +1328,7 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
         man.hash.add(self.base.options.each_lib_rpath);
         man.hash.add(self.base.options.skip_linker_dependencies);
         man.hash.add(self.base.options.z_nodelete);
+        man.hash.add(self.base.options.z_notext);
         man.hash.add(self.base.options.z_defs);
         man.hash.add(self.base.options.z_origin);
         man.hash.add(self.base.options.z_noexecstack);
@@ -1348,7 +1345,7 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
         }
         man.hash.addOptionalBytes(self.base.options.soname);
         man.hash.addOptional(self.base.options.version);
-        man.hash.addStringSet(self.base.options.system_libs);
+        link.hashAddSystemLibs(&man.hash, self.base.options.system_libs);
         man.hash.add(allow_shlib_undefined);
         man.hash.add(self.base.options.bind_global_refs_locally);
         man.hash.add(self.base.options.tsan);
@@ -1470,6 +1467,10 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
             try argv.append("-z");
             try argv.append("nodelete");
         }
+        if (self.base.options.z_notext) {
+            try argv.append("-z");
+            try argv.append("notext");
+        }
         if (self.base.options.z_defs) {
             try argv.append("-z");
             try argv.append("defs");
@@ -1549,7 +1550,9 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
                 for (self.base.options.system_libs.keys()) |link_lib| {
                     test_path.shrinkRetainingCapacity(0);
                     const sep = fs.path.sep_str;
-                    try test_path.writer().print("{s}" ++ sep ++ "lib{s}.so", .{ lib_dir_path, link_lib });
+                    try test_path.writer().print("{s}" ++ sep ++ "lib{s}.so", .{
+                        lib_dir_path, link_lib,
+                    });
                     fs.cwd().access(test_path.items, .{}) catch |err| switch (err) {
                         error.FileNotFound => continue,
                         else => |e| return e,
@@ -1626,14 +1629,40 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
         // Shared libraries.
         if (is_exe_or_dyn_lib) {
             const system_libs = self.base.options.system_libs.keys();
-            try argv.ensureUnusedCapacity(system_libs.len);
-            for (system_libs) |link_lib| {
-                // By this time, we depend on these libs being dynamically linked libraries and not static libraries
-                // (the check for that needs to be earlier), but they could be full paths to .so files, in which
-                // case we want to avoid prepending "-l".
+            const system_libs_values = self.base.options.system_libs.values();
+
+            // Worst-case, we need an --as-needed argument for every lib, as well
+            // as one before and one after.
+            try argv.ensureUnusedCapacity(system_libs.len * 2 + 2);
+            argv.appendAssumeCapacity("--as-needed");
+            var as_needed = true;
+
+            for (system_libs) |link_lib, i| {
+                const lib_as_needed = !system_libs_values[i].needed;
+                switch ((@as(u2, @boolToInt(lib_as_needed)) << 1) | @boolToInt(as_needed)) {
+                    0b00, 0b11 => {},
+                    0b01 => {
+                        argv.appendAssumeCapacity("--no-as-needed");
+                        as_needed = false;
+                    },
+                    0b10 => {
+                        argv.appendAssumeCapacity("--as-needed");
+                        as_needed = true;
+                    },
+                }
+
+                // By this time, we depend on these libs being dynamically linked
+                // libraries and not static libraries (the check for that needs to be earlier),
+                // but they could be full paths to .so files, in which case we
+                // want to avoid prepending "-l".
                 const ext = Compilation.classifyFileExt(link_lib);
                 const arg = if (ext == .shared_library) link_lib else try std.fmt.allocPrint(arena, "-l{s}", .{link_lib});
                 argv.appendAssumeCapacity(arg);
+            }
+
+            if (!as_needed) {
+                argv.appendAssumeCapacity("--as-needed");
+                as_needed = true;
             }
 
             // libc++ dep
@@ -2295,7 +2324,8 @@ pub fn updateFunc(self: *Elf, module: *Module, func: *Module.Fn, air: Air, liven
     var code_buffer = std.ArrayList(u8).init(self.base.allocator);
     defer code_buffer.deinit();
 
-    var dbg_line_buffer = std.ArrayList(u8).init(self.base.allocator);
+    // For functions we need to add a prologue to the debug line program.
+    var dbg_line_buffer = try std.ArrayList(u8).initCapacity(self.base.allocator, 26);
     defer dbg_line_buffer.deinit();
 
     var dbg_info_buffer = std.ArrayList(u8).init(self.base.allocator);
@@ -2303,9 +2333,6 @@ pub fn updateFunc(self: *Elf, module: *Module, func: *Module.Fn, air: Air, liven
 
     var dbg_info_type_relocs: File.DbgInfoTypeRelocsTable = .{};
     defer deinitRelocs(self.base.allocator, &dbg_info_type_relocs);
-
-    // For functions we need to add a prologue to the debug line program.
-    try dbg_line_buffer.ensureTotalCapacity(26);
 
     const decl = func.owner_decl;
     const line_off = @intCast(u28, decl.src_line + func.lbrace_line);
@@ -2605,12 +2632,12 @@ fn addDbgInfoType(self: *Elf, ty: Type, dbg_info_buffer: *std.ArrayList(u8)) !vo
                 // DW.AT.name,  DW.FORM.string
                 try dbg_info_buffer.writer().print("{}\x00", .{ty});
             } else {
-                log.err("TODO implement .debug_info for type '{}'", .{ty});
+                log.debug("TODO implement .debug_info for type '{}'", .{ty});
                 try dbg_info_buffer.append(abbrev_pad1);
             }
         },
         else => {
-            log.err("TODO implement .debug_info for type '{}'", .{ty});
+            log.debug("TODO implement .debug_info for type '{}'", .{ty});
             try dbg_info_buffer.append(abbrev_pad1);
         },
     }
@@ -2827,7 +2854,7 @@ pub fn deleteExport(self: *Elf, exp: Export) void {
 }
 
 fn writeProgHeader(self: *Elf, index: usize) !void {
-    const foreign_endian = self.base.options.target.cpu.arch.endian() != std.Target.current.cpu.arch.endian();
+    const foreign_endian = self.base.options.target.cpu.arch.endian() != builtin.cpu.arch.endian();
     const offset = self.program_headers.items[index].p_offset;
     switch (self.ptr_width) {
         .p32 => {
@@ -2848,7 +2875,7 @@ fn writeProgHeader(self: *Elf, index: usize) !void {
 }
 
 fn writeSectHeader(self: *Elf, index: usize) !void {
-    const foreign_endian = self.base.options.target.cpu.arch.endian() != std.Target.current.cpu.arch.endian();
+    const foreign_endian = self.base.options.target.cpu.arch.endian() != builtin.cpu.arch.endian();
     switch (self.ptr_width) {
         .p32 => {
             var shdr: [1]elf.Elf32_Shdr = undefined;
@@ -2946,7 +2973,7 @@ fn writeSymbol(self: *Elf, index: usize) !void {
         syms_sect.sh_size = needed_size; // anticipating adding the global symbols later
         self.shdr_table_dirty = true; // TODO look into only writing one section
     }
-    const foreign_endian = self.base.options.target.cpu.arch.endian() != std.Target.current.cpu.arch.endian();
+    const foreign_endian = self.base.options.target.cpu.arch.endian() != builtin.cpu.arch.endian();
     switch (self.ptr_width) {
         .p32 => {
             var sym = [1]elf.Elf32_Sym{
@@ -2982,7 +3009,7 @@ fn writeAllGlobalSymbols(self: *Elf) !void {
         .p32 => @sizeOf(elf.Elf32_Sym),
         .p64 => @sizeOf(elf.Elf64_Sym),
     };
-    const foreign_endian = self.base.options.target.cpu.arch.endian() != std.Target.current.cpu.arch.endian();
+    const foreign_endian = self.base.options.target.cpu.arch.endian() != builtin.cpu.arch.endian();
     const global_syms_off = syms_sect.sh_offset + self.local_symbols.items.len * sym_size;
     switch (self.ptr_width) {
         .p32 => {

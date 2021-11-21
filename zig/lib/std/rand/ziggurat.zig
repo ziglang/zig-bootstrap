@@ -1,18 +1,19 @@
-// Implements ZIGNOR [1].
-//
-// [1]: Jurgen A. Doornik (2005). [*An Improved Ziggurat Method to Generate Normal Random Samples*]
-// (https://www.doornik.com/research/ziggurat.pdf). Nuffield College, Oxford.
-//
-// rust/rand used as a reference;
-//
-// NOTE: This seems interesting but reference code is a bit hard to grok:
-// https://sbarral.github.io/etf.
+//! Implements ZIGNOR [1].
+//!
+//! [1]: Jurgen A. Doornik (2005). [*An Improved Ziggurat Method to Generate Normal Random Samples*]
+//! (https://www.doornik.com/research/ziggurat.pdf). Nuffield College, Oxford.
+//!
+//! rust/rand used as a reference;
+//!
+//! NOTE: This seems interesting but reference code is a bit hard to grok:
+//! https://sbarral.github.io/etf.
 
 const std = @import("../std.zig");
+const builtin = @import("builtin");
 const math = std.math;
 const Random = std.rand.Random;
 
-pub fn next_f64(random: *Random, comptime tables: ZigTable) f64 {
+pub fn next_f64(random: Random, comptime tables: ZigTable) f64 {
     while (true) {
         // We manually construct a float from parts as we can avoid an extra random lookup here by
         // using the unused exponent for the lookup table entry.
@@ -60,7 +61,7 @@ pub const ZigTable = struct {
     // whether the distribution is symmetric
     is_symmetric: bool,
     // fallback calculation in the case we are in the 0 block
-    zero_case: fn (*Random, f64) f64,
+    zero_case: fn (Random, f64) f64,
 };
 
 // zigNorInit
@@ -70,7 +71,7 @@ fn ZigTableGen(
     comptime v: f64,
     comptime f: fn (f64) f64,
     comptime f_inv: fn (f64) f64,
-    comptime zero_case: fn (*Random, f64) f64,
+    comptime zero_case: fn (Random, f64) f64,
 ) ZigTable {
     var tables: ZigTable = undefined;
 
@@ -110,7 +111,7 @@ fn norm_f(x: f64) f64 {
 fn norm_f_inv(y: f64) f64 {
     return math.sqrt(-2.0 * math.ln(y));
 }
-fn norm_zero_case(random: *Random, u: f64) f64 {
+fn norm_zero_case(random: Random, u: f64) f64 {
     var x: f64 = 1;
     var y: f64 = 0;
 
@@ -126,15 +127,17 @@ fn norm_zero_case(random: *Random, u: f64) f64 {
     }
 }
 
-const please_windows_dont_oom = std.Target.current.os.tag == .windows;
+const please_windows_dont_oom = builtin.os.tag == .windows;
 
 test "normal dist sanity" {
     if (please_windows_dont_oom) return error.SkipZigTest;
 
     var prng = std.rand.DefaultPrng.init(0);
+    const random = prng.random();
+
     var i: usize = 0;
     while (i < 1000) : (i += 1) {
-        _ = prng.random.floatNorm(f64);
+        _ = random.floatNorm(f64);
     }
 }
 
@@ -153,7 +156,7 @@ fn exp_f(x: f64) f64 {
 fn exp_f_inv(y: f64) f64 {
     return -math.ln(y);
 }
-fn exp_zero_case(random: *Random, _: f64) f64 {
+fn exp_zero_case(random: Random, _: f64) f64 {
     return exp_r - math.ln(random.float(f64));
 }
 
@@ -161,9 +164,11 @@ test "exp dist sanity" {
     if (please_windows_dont_oom) return error.SkipZigTest;
 
     var prng = std.rand.DefaultPrng.init(0);
+    const random = prng.random();
+
     var i: usize = 0;
     while (i < 1000) : (i += 1) {
-        _ = prng.random.floatExp(f64);
+        _ = random.floatExp(f64);
     }
 }
 

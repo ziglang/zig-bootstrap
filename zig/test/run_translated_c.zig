@@ -1767,4 +1767,46 @@ pub fn addCases(cases: *tests.RunTranslatedCContext) void {
         \\   return 0;
         \\}
     , "");
+
+    cases.add("Ensure while loop under an if doesn't steal the else. Issue #9953",
+        \\#include <stdio.h>
+        \\void doWork(int id) { }
+        \\int reallyDelete(int id) { printf("deleted %d\n", id); return 1; }
+        \\int process(int id, int n, int delete) {
+        \\    if(!delete)
+        \\        while(n-- > 0) doWork(id);
+        \\    else
+        \\        return reallyDelete(id);
+        \\    return 0;
+        \\}
+        \\int main(void) {
+        \\    process(99, 3, 0);
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("Remainder operator with negative integers. Issue #10176",
+        \\#include <stdlib.h>
+        \\int main(void) {
+        \\    int denominator = -2;
+        \\    int numerator = 5;
+        \\    if (numerator % denominator != 1) abort();
+        \\    numerator = -5; denominator = 2;
+        \\    if (numerator % denominator != -1) abort();
+        \\    return 0;
+        \\}
+    , "");
+
+    cases.add("Boolean expression coerced to int. Issue #10175",
+        \\#include <stdlib.h>
+        \\int sign(int v) {
+        \\    return -(v < 0);
+        \\}
+        \\int main(void) {
+        \\    if (sign(-5) != -1) abort();
+        \\    if (sign(5) != 0) abort();
+        \\    if (sign(0) != 0) abort();
+        \\    return 0;
+        \\}
+    , "");
 }

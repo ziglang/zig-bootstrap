@@ -128,8 +128,8 @@ pub const Node = extern union {
         helpers_promoteIntLiteral,
         /// @import("std").meta.alignment(value)
         std_meta_alignment,
-        /// @rem(lhs, rhs)
-        rem,
+        /// @import("std").zig.c_translation.signedRemainder(lhs, rhs)
+        signed_remainder,
         /// @divTrunc(lhs, rhs)
         div_trunc,
         /// @boolToInt(operand)
@@ -310,7 +310,7 @@ pub const Node = extern union {
                 .bit_xor,
                 .bit_xor_assign,
                 .div_trunc,
-                .rem,
+                .signed_remainder,
                 .int_cast,
                 .as,
                 .truncate,
@@ -540,6 +540,7 @@ pub const Payload = struct {
             is_pub: bool,
             is_extern: bool,
             is_export: bool,
+            is_inline: bool,
             is_var_args: bool,
             name: ?[]const u8,
             linksection_string: ?[]const u8,
@@ -804,21 +805,8 @@ const Context = struct {
         return c.addTokenFmt(tag, "{s}", .{bytes});
     }
 
-    fn isZigPrimitiveType(name: []const u8) bool {
-        if (name.len > 1 and (name[0] == 'u' or name[0] == 'i')) {
-            for (name[1..]) |c| {
-                switch (c) {
-                    '0'...'9' => {},
-                    else => return false,
-                }
-            }
-            return true;
-        }
-        return @import("../AstGen.zig").simple_types.has(name);
-    }
-
     fn addIdentifier(c: *Context, bytes: []const u8) Allocator.Error!TokenIndex {
-        if (isZigPrimitiveType(bytes))
+        if (@import("../AstGen.zig").isPrimitive(bytes))
             return c.addTokenFmt(.identifier, "@\"{s}\"", .{bytes});
         return c.addTokenFmt(.identifier, "{s}", .{std.zig.fmtId(bytes)});
     }
@@ -1305,9 +1293,10 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
             const payload = node.castTag(.int_cast).?.data;
             return renderBuiltinCall(c, "@intCast", &.{ payload.lhs, payload.rhs });
         },
-        .rem => {
-            const payload = node.castTag(.rem).?.data;
-            return renderBuiltinCall(c, "@rem", &.{ payload.lhs, payload.rhs });
+        .signed_remainder => {
+            const payload = node.castTag(.signed_remainder).?.data;
+            const import_node = try renderStdImport(c, &.{ "zig", "c_translation", "signedRemainder" });
+            return renderCall(c, import_node, &.{ payload.lhs, payload.rhs });
         },
         .div_trunc => {
             const payload = node.castTag(.div_trunc).?.data;
@@ -2219,7 +2208,7 @@ fn renderNodeGrouped(c: *Context, node: Node) !NodeIndex {
         .noreturn_type,
         .@"anytype",
         .div_trunc,
-        .rem,
+        .signed_remainder,
         .int_cast,
         .as,
         .truncate,
@@ -2627,6 +2616,7 @@ fn renderFunc(c: *Context, node: Node) !NodeIndex {
     if (payload.is_pub) _ = try c.addToken(.keyword_pub, "pub");
     if (payload.is_extern) _ = try c.addToken(.keyword_extern, "extern");
     if (payload.is_export) _ = try c.addToken(.keyword_export, "export");
+    if (payload.is_inline) _ = try c.addToken(.keyword_inline, "inline");
     const fn_token = try c.addToken(.keyword_fn, "fn");
     if (payload.name) |some| _ = try c.addIdentifier(some);
 
@@ -2798,9 +2788,8 @@ fn renderMacroFunc(c: *Context, node: Node) !NodeIndex {
 
 fn renderParams(c: *Context, params: []Payload.Param, is_var_args: bool) !std.ArrayList(NodeIndex) {
     _ = try c.addToken(.l_paren, "(");
-    var rendered = std.ArrayList(NodeIndex).init(c.gpa);
+    var rendered = try std.ArrayList(NodeIndex).initCapacity(c.gpa, std.math.max(params.len, 1));
     errdefer rendered.deinit();
-    try rendered.ensureTotalCapacity(std.math.max(params.len, 1));
 
     for (params) |param, i| {
         if (i != 0) _ = try c.addToken(.comma, ",");

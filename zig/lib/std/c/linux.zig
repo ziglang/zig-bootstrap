@@ -90,6 +90,7 @@ pub const sigset_t = linux.sigset_t;
 pub const sockaddr = linux.sockaddr;
 pub const socklen_t = linux.socklen_t;
 pub const stack_t = linux.stack_t;
+pub const termios = linux.termios;
 pub const time_t = linux.time_t;
 pub const timespec = linux.timespec;
 pub const timeval = linux.timeval;
@@ -102,11 +103,8 @@ pub const PR = linux.PR;
 
 pub const _errno = switch (native_abi) {
     .android => struct {
-        extern "c" var __errno: c_int;
-        fn getErrno() *c_int {
-            return &__errno;
-        }
-    }.getErrno,
+        extern fn __errno() *c_int;
+    }.__errno,
     else => struct {
         extern "c" fn __errno_location() *c_int;
     }.__errno_location,

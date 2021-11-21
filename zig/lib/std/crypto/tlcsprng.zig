@@ -4,15 +4,19 @@
 //! directly to standard library users.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const root = @import("root");
 const mem = std.mem;
 const os = std.os;
 
 /// We use this as a layer of indirection because global const pointers cannot
 /// point to thread-local variables.
-pub var interface = std.rand.Random{ .fillFn = tlsCsprngFill };
+pub const interface = std.rand.Random{
+    .ptr = undefined,
+    .fillFn = tlsCsprngFill,
+};
 
-const os_has_fork = switch (std.Target.current.os.tag) {
+const os_has_fork = switch (builtin.os.tag) {
     .dragonfly,
     .freebsd,
     .ios,
@@ -29,10 +33,10 @@ const os_has_fork = switch (std.Target.current.os.tag) {
 
     else => false,
 };
-const os_has_arc4random = std.builtin.link_libc and @hasDecl(std.c, "arc4random_buf");
+const os_has_arc4random = builtin.link_libc and @hasDecl(std.c, "arc4random_buf");
 const want_fork_safety = os_has_fork and !os_has_arc4random and
     (std.meta.globalOption("crypto_fork_safety", bool) orelse true);
-const maybe_have_wipe_on_fork = std.Target.current.os.isAtLeast(.linux, .{
+const maybe_have_wipe_on_fork = builtin.os.isAtLeast(.linux, .{
     .major = 4,
     .minor = 14,
 }) orelse true;
@@ -54,8 +58,8 @@ var install_atfork_handler = std.once(struct {
 
 threadlocal var wipe_mem: []align(mem.page_size) u8 = &[_]u8{};
 
-fn tlsCsprngFill(_: *const std.rand.Random, buffer: []u8) void {
-    if (std.builtin.link_libc and @hasDecl(std.c, "arc4random_buf")) {
+fn tlsCsprngFill(_: *c_void, buffer: []u8) void {
+    if (builtin.link_libc and @hasDecl(std.c, "arc4random_buf")) {
         // arc4random is already a thread-local CSPRNG.
         return std.c.arc4random_buf(buffer.ptr, buffer.len);
     }

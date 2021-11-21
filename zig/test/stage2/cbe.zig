@@ -501,6 +501,19 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    return 69 - i;
             \\}
         , "");
+        case.addCompareOutput(
+            \\const E = error{e};
+            \\const S = struct { x: u32 };
+            \\fn f() E!u32 {
+            \\    const x = (try @as(E!S, S{ .x = 1 })).x;
+            \\    return x;
+            \\}
+            \\pub export fn main() c_int {
+            \\    const x = f() catch @as(u32, 0);
+            \\    if (x != 1) unreachable;
+            \\    return 0;
+            \\}
+        , "");
     }
 
     {
@@ -568,6 +581,40 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    return p.y - p.x - p.z - p.a - p.b;
             \\}
         , "");
+    }
+
+    {
+        var case = ctx.exeFromCompiledC("unions", .{});
+
+        case.addError(
+            \\const U = union {
+            \\    a: u32,
+            \\    b
+            \\};
+        , &.{
+            ":3:5: error: union field missing type",
+        });
+
+        case.addError(
+            \\const E = enum { a, b };
+            \\const U = union(E) {
+            \\    a: u32 = 1,
+            \\    b: f32 = 2,
+            \\};
+        , &.{
+            ":2:11: error: explicitly valued tagged union requires inferred enum tag type",
+            ":3:14: note: tag value specified here",
+        });
+
+        case.addError(
+            \\const U = union(enum) {
+            \\    a: u32 = 1,
+            \\    b: f32 = 2,
+            \\};
+        , &.{
+            ":1:11: error: explicitly valued tagged union missing integer tag type",
+            ":2:14: note: tag value specified here",
+        });
     }
 
     {
@@ -805,7 +852,7 @@ pub fn addCases(ctx: *TestContext) !void {
             \\    _ = E.d;
             \\}
         , &.{
-            ":3:10: error: enum 'tmp.E' has no member named 'd'",
+            ":3:11: error: enum 'tmp.E' has no member named 'd'",
             ":1:11: note: enum declared here",
         });
 

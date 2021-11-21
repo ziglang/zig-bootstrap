@@ -57,6 +57,9 @@ static const char *symbols_that_llvm_depends_on[] = {
     "log10",
     "log2",
     "fma",
+    "fmaf",
+    "fmal",
+    "fmaq",
     "fabs",
     "minnum",
     "maxnum",
@@ -360,10 +363,6 @@ static bool cc_want_sret_attr(CallingConvention cc) {
     zig_unreachable();
 }
 
-static bool codegen_have_frame_pointer(CodeGen *g) {
-    return g->build_mode == BuildModeDebug;
-}
-
 static void add_common_fn_attributes(CodeGen *g, LLVMValueRef llvm_fn) {
     if (!g->red_zone) {
         addLLVMFnAttr(llvm_fn, "noredzone");
@@ -600,7 +599,7 @@ static LLVMValueRef make_fn_llvm_value(CodeGen *g, ZigFn *fn) {
         addLLVMFnAttrInt(llvm_fn, "alignstack", fn->alignstack_value);
     }
 
-    if (codegen_have_frame_pointer(g) && cc != CallingConventionInline) {
+    if (!g->omit_frame_pointer && cc != CallingConventionInline) {
         ZigLLVMAddFunctionAttr(llvm_fn, "frame-pointer", "all");
     }
     if (fn->section_name) {
@@ -832,10 +831,25 @@ static LLVMValueRef get_float_fn(CodeGen *g, ZigType *type_entry, ZigLLVMFnId fn
 
     bool is_vector = (type_entry->id == ZigTypeIdVector);
     ZigType *float_type = is_vector ? type_entry->data.vector.elem_type : type_entry;
+    uint32_t float_bits = float_type->data.floating.bit_count;
+
+    // LLVM incorrectly lowers the fma builtin for f128 to fmal, which is for
+    // `long double`. On some targets this will be correct; on others it will be incorrect.
+    if (fn_id == ZigLLVMFnIdFMA && float_bits == 128 &&
+        !target_long_double_is_f128(g->zig_target))
+    {
+        LLVMValueRef existing_llvm_fn = LLVMGetNamedFunction(g->module, "fmaq");
+        if (existing_llvm_fn != nullptr) return existing_llvm_fn;
+
+        LLVMTypeRef float_type_ref = get_llvm_type(g, type_entry);
+        LLVMTypeRef return_elem_types[3] = { float_type_ref, float_type_ref, float_type_ref };
+        LLVMTypeRef fn_type = LLVMFunctionType(float_type_ref, return_elem_types, 3, false);
+        return LLVMAddFunction(g->module, "fmaq", fn_type);
+    }
 
     ZigLLVMFnKey key = {};
     key.id = fn_id;
-    key.data.floating.bit_count = (uint32_t)float_type->data.floating.bit_count;
+    key.data.floating.bit_count = float_bits;
     key.data.floating.vector_len = is_vector ? (uint32_t)type_entry->data.vector.len : 0;
     key.data.floating.op = op;
 
@@ -861,11 +875,7 @@ static LLVMValueRef get_float_fn(CodeGen *g, ZigType *type_entry, ZigLLVMFnId fn
     else
         sprintf(fn_name, "llvm.%s.f%" PRIu32, name, key.data.floating.bit_count);
     LLVMTypeRef float_type_ref = get_llvm_type(g, type_entry);
-    LLVMTypeRef return_elem_types[3] = {
-        float_type_ref,
-        float_type_ref,
-        float_type_ref,
-    };
+    LLVMTypeRef return_elem_types[3] = { float_type_ref, float_type_ref, float_type_ref };
     LLVMTypeRef fn_type = LLVMFunctionType(float_type_ref, return_elem_types, num_args, false);
     LLVMValueRef fn_val = LLVMAddFunction(g->module, fn_name, fn_type);
     assert(LLVMGetIntrinsicID(fn_val));
@@ -1209,7 +1219,7 @@ static LLVMValueRef get_add_error_return_trace_addr_fn(CodeGen *g) {
     // Error return trace memory is in the stack, which is impossible to be at address 0
     // on any architecture.
     addLLVMArgAttr(fn_val, (unsigned)0, "nonnull");
-    if (codegen_have_frame_pointer(g)) {
+    if (!g->omit_frame_pointer) {
         ZigLLVMAddFunctionAttr(fn_val, "frame-pointer", "all");
     }
 
@@ -1285,7 +1295,7 @@ static LLVMValueRef get_return_err_fn(CodeGen *g) {
     LLVMSetLinkage(fn_val, LLVMInternalLinkage);
     ZigLLVMFunctionSetCallingConv(fn_val, get_llvm_cc(g, CallingConventionUnspecified));
     add_common_fn_attributes(g, fn_val);
-    if (codegen_have_frame_pointer(g)) {
+    if (!g->omit_frame_pointer) {
         ZigLLVMAddFunctionAttr(fn_val, "frame-pointer", "all");
     }
 
@@ -1367,7 +1377,7 @@ static LLVMValueRef get_safety_crash_err_fn(CodeGen *g) {
     LLVMSetLinkage(fn_val, LLVMInternalLinkage);
     ZigLLVMFunctionSetCallingConv(fn_val, get_llvm_cc(g, CallingConventionUnspecified));
     add_common_fn_attributes(g, fn_val);
-    if (codegen_have_frame_pointer(g)) {
+    if (!g->omit_frame_pointer) {
         ZigLLVMAddFunctionAttr(fn_val, "frame-pointer", "all");
     }
     // Not setting alignment here. See the comment above about
@@ -2375,7 +2385,7 @@ static LLVMValueRef get_merge_err_ret_traces_fn_val(CodeGen *g) {
 
     addLLVMArgAttr(fn_val, (unsigned)1, "noalias");
     addLLVMArgAttr(fn_val, (unsigned)1, "readonly");
-    if (codegen_have_frame_pointer(g)) {
+    if (!g->omit_frame_pointer) {
         ZigLLVMAddFunctionAttr(fn_val, "frame-pointer", "all");
     }
 
@@ -2950,33 +2960,7 @@ static LLVMValueRef gen_div(CodeGen *g, bool want_runtime_safety, bool want_fast
                 }
                 return result;
             case DivKindTrunc:
-                {
-                    LLVMBasicBlockRef ltz_block = LLVMAppendBasicBlock(g->cur_fn_val, "DivTruncLTZero");
-                    LLVMBasicBlockRef gez_block = LLVMAppendBasicBlock(g->cur_fn_val, "DivTruncGEZero");
-                    LLVMBasicBlockRef end_block = LLVMAppendBasicBlock(g->cur_fn_val, "DivTruncEnd");
-                    LLVMValueRef ltz = LLVMBuildFCmp(g->builder, LLVMRealOLT, val1, zero, "");
-                    if (operand_type->id == ZigTypeIdVector) {
-                        ltz = ZigLLVMBuildOrReduce(g->builder, ltz);
-                    }
-                    LLVMBuildCondBr(g->builder, ltz, ltz_block, gez_block);
-
-                    LLVMPositionBuilderAtEnd(g->builder, ltz_block);
-                    LLVMValueRef ceiled = gen_float_op(g, result, operand_type, BuiltinFnIdCeil);
-                    LLVMBasicBlockRef ceiled_end_block = LLVMGetInsertBlock(g->builder);
-                    LLVMBuildBr(g->builder, end_block);
-
-                    LLVMPositionBuilderAtEnd(g->builder, gez_block);
-                    LLVMValueRef floored = gen_float_op(g, result, operand_type, BuiltinFnIdFloor);
-                    LLVMBasicBlockRef floored_end_block = LLVMGetInsertBlock(g->builder);
-                    LLVMBuildBr(g->builder, end_block);
-
-                    LLVMPositionBuilderAtEnd(g->builder, end_block);
-                    LLVMValueRef phi = LLVMBuildPhi(g->builder, get_llvm_type(g, operand_type), "");
-                    LLVMValueRef incoming_values[] = { ceiled, floored };
-                    LLVMBasicBlockRef incoming_blocks[] = { ceiled_end_block, floored_end_block };
-                    LLVMAddIncoming(phi, incoming_values, incoming_blocks, 2);
-                    return phi;
-                }
+                return gen_float_op(g, result, operand_type, BuiltinFnIdTrunc);
             case DivKindFloor:
                 return gen_float_op(g, result, operand_type, BuiltinFnIdFloor);
         }
@@ -5191,11 +5175,13 @@ static LLVMValueRef get_int_builtin_fn(CodeGen *g, ZigType *expr_type, BuiltinFn
         n_args = 2;
         key.id = ZigLLVMFnIdCtz;
         key.data.ctz.bit_count = (uint32_t)int_type->data.integral.bit_count;
+        key.data.ctz.vector_len = vector_len;
     } else if (fn_id == BuiltinFnIdClz) {
         fn_name = "ctlz";
         n_args = 2;
         key.id = ZigLLVMFnIdClz;
         key.data.clz.bit_count = (uint32_t)int_type->data.integral.bit_count;
+        key.data.clz.vector_len = vector_len;
     } else if (fn_id == BuiltinFnIdPopCount) {
         fn_name = "ctpop";
         n_args = 1;
@@ -5213,6 +5199,7 @@ static LLVMValueRef get_int_builtin_fn(CodeGen *g, ZigType *expr_type, BuiltinFn
         n_args = 1;
         key.id = ZigLLVMFnIdBitReverse;
         key.data.bit_reverse.bit_count = (uint32_t)int_type->data.integral.bit_count;
+        key.data.bit_reverse.vector_len = vector_len;
     } else {
         zig_unreachable();
     }
@@ -5430,7 +5417,7 @@ static LLVMValueRef get_enum_tag_name_function(CodeGen *g, ZigType *enum_type) {
     LLVMSetLinkage(fn_val, LLVMInternalLinkage);
     ZigLLVMFunctionSetCallingConv(fn_val, get_llvm_cc(g, CallingConventionUnspecified));
     add_common_fn_attributes(g, fn_val);
-    if (codegen_have_frame_pointer(g)) {
+    if (!g->omit_frame_pointer) {
         ZigLLVMAddFunctionAttr(fn_val, "frame-pointer", "all");
     }
 
@@ -6583,11 +6570,7 @@ static LLVMValueRef ir_render_mul_add(CodeGen *g, Stage1Air *executable, Stage1A
     assert(instruction->base.value->type->id == ZigTypeIdFloat ||
            instruction->base.value->type->id == ZigTypeIdVector);
     LLVMValueRef fn_val = get_float_fn(g, instruction->base.value->type, ZigLLVMFnIdFMA, BuiltinFnIdMulAdd);
-    LLVMValueRef args[3] = {
-        op1,
-        op2,
-        op3,
-    };
+    LLVMValueRef args[3] = { op1, op2, op3 };
     return LLVMBuildCall(g->builder, fn_val, args, 3, "");
 }
 
@@ -8919,6 +8902,10 @@ static void define_builtin_types(CodeGen *g) {
             break;
         case ZigLLVM_bpfel:
         case ZigLLVM_bpfeb:
+            add_fp_entry(g, "c_longdouble", 64, LLVMDoubleType(), &g->builtin_types.entry_c_longdouble);
+            break;
+        case ZigLLVM_nvptx:
+        case ZigLLVM_nvptx64:
             add_fp_entry(g, "c_longdouble", 64, LLVMDoubleType(), &g->builtin_types.entry_c_longdouble);
             break;
         default:

@@ -5,45 +5,6 @@ const maxInt = std.math.maxInt;
 const Vector = std.meta.Vector;
 const native_endian = @import("builtin").target.cpu.arch.endian();
 
-test "pointer reinterpret const float to int" {
-    // The hex representation is 0x3fe3333333333303.
-    const float: f64 = 5.99999999999994648725e-01;
-    const float_ptr = &float;
-    const int_ptr = @ptrCast(*const i32, float_ptr);
-    const int_val = int_ptr.*;
-    if (native_endian == .Little)
-        try expect(int_val == 0x33333303)
-    else
-        try expect(int_val == 0x3fe33333);
-}
-
-test "implicitly cast indirect pointer to maybe-indirect pointer" {
-    const S = struct {
-        const Self = @This();
-        x: u8,
-        fn constConst(p: *const *const Self) u8 {
-            return p.*.x;
-        }
-        fn maybeConstConst(p: ?*const *const Self) u8 {
-            return p.?.*.x;
-        }
-        fn constConstConst(p: *const *const *const Self) u8 {
-            return p.*.*.x;
-        }
-        fn maybeConstConstConst(p: ?*const *const *const Self) u8 {
-            return p.?.*.*.x;
-        }
-    };
-    const s = S{ .x = 42 };
-    const p = &s;
-    const q = &p;
-    const r = &q;
-    try expect(42 == S.constConst(q));
-    try expect(42 == S.maybeConstConst(q));
-    try expect(42 == S.constConstConst(r));
-    try expect(42 == S.maybeConstConstConst(r));
-}
-
 test "explicit cast from integer to error type" {
     try testCastIntToErr(error.ItBroke);
     comptime try testCastIntToErr(error.ItBroke);
@@ -121,22 +82,6 @@ fn returnNullLitFromOptionalTypeErrorRef() anyerror!?*A {
     return null;
 }
 
-test "peer type resolution: ?T and T" {
-    try expect(peerTypeTAndOptionalT(true, false).? == 0);
-    try expect(peerTypeTAndOptionalT(false, false).? == 3);
-    comptime {
-        try expect(peerTypeTAndOptionalT(true, false).? == 0);
-        try expect(peerTypeTAndOptionalT(false, false).? == 3);
-    }
-}
-fn peerTypeTAndOptionalT(c: bool, b: bool) ?usize {
-    if (c) {
-        return if (b) null else @as(usize, 0);
-    }
-
-    return @as(usize, 3);
-}
-
 test "peer type resolution: [0]u8 and []const u8" {
     try expect(peerTypeEmptyArrayAndSlice(true, "hi").len == 0);
     try expect(peerTypeEmptyArrayAndSlice(false, "hi").len == 1);
@@ -203,18 +148,7 @@ fn peerTypeEmptyArrayAndSliceAndError(a: bool, slice: []u8) anyerror![]u8 {
     return slice[0..1];
 }
 
-test "resolve undefined with integer" {
-    try testResolveUndefWithInt(true, 1234);
-    comptime try testResolveUndefWithInt(true, 1234);
-}
-fn testResolveUndefWithInt(b: bool, x: i32) !void {
-    const value = if (b) x else undefined;
-    if (b) {
-        try expect(value == x);
-    }
-}
-
-test "implicit cast from &const [N]T to []const T" {
+test "implicit cast from *const [N]T to []const T" {
     try testCastConstArrayRefToConstSlice();
     comptime try testCastConstArrayRefToConstSlice();
 }
@@ -257,29 +191,6 @@ fn testPeerErrorAndArray2(x: u8) anyerror![]const u8 {
     };
 }
 
-test "@floatToInt" {
-    try testFloatToInts();
-    comptime try testFloatToInts();
-}
-
-fn testFloatToInts() !void {
-    const x = @as(i32, 1e4);
-    try expect(x == 10000);
-    const y = @floatToInt(i32, @as(f32, 1e4));
-    try expect(y == 10000);
-    try expectFloatToInt(f16, 255.1, u8, 255);
-    try expectFloatToInt(f16, 127.2, i8, 127);
-    try expectFloatToInt(f16, -128.2, i8, -128);
-    try expectFloatToInt(f32, 255.1, u8, 255);
-    try expectFloatToInt(f32, 127.2, i8, 127);
-    try expectFloatToInt(f32, -128.2, i8, -128);
-    try expectFloatToInt(comptime_int, 1234, i16, 1234);
-}
-
-fn expectFloatToInt(comptime F: type, f: F, comptime I: type, i: I) !void {
-    try expect(@floatToInt(I, f) == i);
-}
-
 test "cast u128 to f128 and back" {
     comptime try testCast128();
     try testCast128();
@@ -297,7 +208,7 @@ fn cast128Float(x: u128) f128 {
     return @bitCast(f128, x);
 }
 
-test "single-item pointer of array to slice and to unknown length pointer" {
+test "single-item pointer of array to slice to unknown length pointer" {
     try testCastPtrOfArrayToSliceAndPtr();
     comptime try testCastPtrOfArrayToSliceAndPtr();
 }
@@ -329,33 +240,30 @@ test "cast *[1][*]const u8 to [*]const ?[*]const u8" {
     try expect(mem.eql(u8, std.mem.spanZ(@ptrCast([*:0]const u8, x[0].?)), "window name"));
 }
 
-test "@intCast comptime_int" {
-    const result = @intCast(i32, 1234);
-    try expect(@TypeOf(result) == i32);
-    try expect(result == 1234);
+test "cast f16 to wider types" {
+    const S = struct {
+        fn doTheTest() !void {
+            var x: f16 = 1234.0;
+            try std.testing.expectEqual(@as(f32, 1234.0), x);
+            try std.testing.expectEqual(@as(f64, 1234.0), x);
+            try std.testing.expectEqual(@as(f128, 1234.0), x);
+        }
+    };
+    try S.doTheTest();
+    comptime try S.doTheTest();
 }
 
-test "@floatCast comptime_int and comptime_float" {
-    {
-        const result = @floatCast(f16, 1234);
-        try expect(@TypeOf(result) == f16);
-        try expect(result == 1234.0);
-    }
-    {
-        const result = @floatCast(f16, 1234.0);
-        try expect(@TypeOf(result) == f16);
-        try expect(result == 1234.0);
-    }
-    {
-        const result = @floatCast(f32, 1234);
-        try expect(@TypeOf(result) == f32);
-        try expect(result == 1234.0);
-    }
-    {
-        const result = @floatCast(f32, 1234.0);
-        try expect(@TypeOf(result) == f32);
-        try expect(result == 1234.0);
-    }
+test "cast f128 to narrower types" {
+    const S = struct {
+        fn doTheTest() !void {
+            var x: f128 = 1234.0;
+            try std.testing.expectEqual(@as(f16, 1234.0), @floatCast(f16, x));
+            try std.testing.expectEqual(@as(f32, 1234.0), @floatCast(f32, x));
+            try std.testing.expectEqual(@as(f64, 1234.0), @floatCast(f64, x));
+        }
+    };
+    try S.doTheTest();
+    comptime try S.doTheTest();
 }
 
 test "vector casts" {
@@ -395,42 +303,6 @@ test "vector casts" {
     comptime try S.doTheTestFloat();
 }
 
-test "comptime_int @intToFloat" {
-    {
-        const result = @intToFloat(f16, 1234);
-        try expect(@TypeOf(result) == f16);
-        try expect(result == 1234.0);
-    }
-    {
-        const result = @intToFloat(f32, 1234);
-        try expect(@TypeOf(result) == f32);
-        try expect(result == 1234.0);
-    }
-    {
-        const result = @intToFloat(f64, 1234);
-        try expect(@TypeOf(result) == f64);
-        try expect(result == 1234.0);
-    }
-    {
-        const result = @intToFloat(f128, 1234);
-        try expect(@TypeOf(result) == f128);
-        try expect(result == 1234.0);
-    }
-    // big comptime_int (> 64 bits) to f128 conversion
-    {
-        const result = @intToFloat(f128, 0x1_0000_0000_0000_0000);
-        try expect(@TypeOf(result) == f128);
-        try expect(result == 0x1_0000_0000_0000_0000.0);
-    }
-}
-
-test "@intCast i32 to u7" {
-    var x: u128 = maxInt(u128);
-    var y: i32 = 120;
-    var z = x >> @intCast(u7, y);
-    try expect(z == 0xff);
-}
-
 test "@floatCast cast down" {
     {
         var double: f64 = 0.001534;
@@ -444,23 +316,6 @@ test "@floatCast cast down" {
     }
 }
 
-test "implicit cast undefined to optional" {
-    try expect(MakeType(void).getNull() == null);
-    try expect(MakeType(void).getNonNull() != null);
-}
-
-fn MakeType(comptime T: type) type {
-    return struct {
-        fn getNull() ?T {
-            return null;
-        }
-
-        fn getNonNull() ?T {
-            return @as(T, undefined);
-        }
-    };
-}
-
 test "implicit cast from *[N]T to ?[*]T" {
     var x: ?[*]u16 = null;
     var y: [4]u16 = [4]u16{ 0, 1, 2, 3 };
@@ -472,16 +327,6 @@ test "implicit cast from *[N]T to ?[*]T" {
     try expect(std.mem.eql(u16, x.?[0..4], y[0..4]));
 }
 
-test "implicit cast from *[N]T to [*c]T" {
-    var x: [4]u16 = [4]u16{ 0, 1, 2, 3 };
-    var y: [*c]u16 = &x;
-
-    try expect(std.mem.eql(u16, x[0..4], y[0..4]));
-    x[0] = 8;
-    y[3] = 6;
-    try expect(std.mem.eql(u16, x[0..4], y[0..4]));
-}
-
 test "implicit cast from *T to ?*c_void" {
     var a: u8 = 1;
     incrementVoidPtrValue(&a);
@@ -490,76 +335,6 @@ test "implicit cast from *T to ?*c_void" {
 
 fn incrementVoidPtrValue(value: ?*c_void) void {
     @ptrCast(*u8, value.?).* += 1;
-}
-
-test "implicit cast from [*]T to ?*c_void" {
-    var a = [_]u8{ 3, 2, 1 };
-    var runtime_zero: usize = 0;
-    incrementVoidPtrArray(a[runtime_zero..].ptr, 3);
-    try expect(std.mem.eql(u8, &a, &[_]u8{ 4, 3, 2 }));
-}
-
-fn incrementVoidPtrArray(array: ?*c_void, len: usize) void {
-    var n: usize = 0;
-    while (n < len) : (n += 1) {
-        @ptrCast([*]u8, array.?)[n] += 1;
-    }
-}
-
-test "*usize to *void" {
-    var i = @as(usize, 0);
-    var v = @ptrCast(*void, &i);
-    v.* = {};
-}
-
-test "compile time int to ptr of function" {
-    try foobar(FUNCTION_CONSTANT);
-}
-
-pub const FUNCTION_CONSTANT = @intToPtr(PFN_void, maxInt(usize));
-pub const PFN_void = fn (*c_void) callconv(.C) void;
-
-fn foobar(func: PFN_void) !void {
-    try std.testing.expect(@ptrToInt(func) == maxInt(usize));
-}
-
-test "implicit ptr to *c_void" {
-    var a: u32 = 1;
-    var ptr: *align(@alignOf(u32)) c_void = &a;
-    var b: *u32 = @ptrCast(*u32, ptr);
-    try expect(b.* == 1);
-    var ptr2: ?*align(@alignOf(u32)) c_void = &a;
-    var c: *u32 = @ptrCast(*u32, ptr2.?);
-    try expect(c.* == 1);
-}
-
-test "@intCast to comptime_int" {
-    try expect(@intCast(comptime_int, 0) == 0);
-}
-
-test "implicit cast comptime numbers to any type when the value fits" {
-    const a: u64 = 255;
-    var b: u8 = a;
-    try expect(b == 255);
-}
-
-test "@intToEnum passed a comptime_int to an enum with one item" {
-    const E = enum {
-        A,
-    };
-    const x = @intToEnum(E, 0);
-    try expect(x == E.A);
-}
-
-test "@intCast to u0 and use the result" {
-    const S = struct {
-        fn doTheTest(zero: u1, one: u1, bigzero: i32) !void {
-            try expect((one << @intCast(u0, bigzero)) == 1);
-            try expect((zero << @intCast(u0, bigzero)) == 0);
-        }
-    };
-    try S.doTheTest(0, 1, 0);
-    comptime try S.doTheTest(0, 1, 0);
 }
 
 test "peer type resolution: unreachable, null, slice" {
@@ -597,11 +372,6 @@ test "peer type resolution: unreachable, error set, unreachable" {
         error.Unexpected => unreachable,
     };
     try expect(transformed_err == error.SystemResources);
-}
-
-test "implicit cast comptime_int to comptime_float" {
-    comptime try expect(@as(comptime_float, 10) == @as(f32, 10));
-    try expect(2 == 2.0);
 }
 
 test "implicit cast *[0]T to E![]const u8" {
@@ -645,12 +415,7 @@ test "*const [N]null u8 to ?[]const u8" {
 
 test "peer resolution of string literals" {
     const S = struct {
-        const E = enum {
-            a,
-            b,
-            c,
-            d,
-        };
+        const E = enum { a, b, c, d };
 
         fn doTheTest(e: E) !void {
             const cmd = switch (e) {
@@ -748,27 +513,6 @@ test "return u8 coercing into ?u32 return type" {
     };
     try S.doTheTest();
     comptime try S.doTheTest();
-}
-
-test "peer result null and comptime_int" {
-    const S = struct {
-        fn blah(n: i32) ?i32 {
-            if (n == 0) {
-                return null;
-            } else if (n < 0) {
-                return -1;
-            } else {
-                return 1;
-            }
-        }
-    };
-
-    try expect(S.blah(0) == null);
-    comptime try expect(S.blah(0) == null);
-    try expect(S.blah(10).? == 1);
-    comptime try expect(S.blah(10).? == 1);
-    try expect(S.blah(-10).? == -1);
-    comptime try expect(S.blah(-10).? == -1);
 }
 
 test "peer type resolution implicit cast to return type" {
@@ -897,6 +641,13 @@ test "comptime float casts" {
     const b = @floatToInt(comptime_int, 2);
     try expect(b == 2);
     try expect(@TypeOf(b) == comptime_int);
+
+    try expectFloatToInt(comptime_int, 1234, i16, 1234);
+    try expectFloatToInt(comptime_float, 12.3, comptime_int, 12);
+}
+
+fn expectFloatToInt(comptime F: type, f: F, comptime I: type, i: I) !void {
+    try expect(@floatToInt(I, f) == i);
 }
 
 test "cast from ?[*]T to ??[*]T" {

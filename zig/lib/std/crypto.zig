@@ -108,15 +108,17 @@ pub const pwhash = struct {
         phc,
         crypt,
     };
-    pub const KdfError = errors.Error || std.mem.Allocator.Error;
-    pub const HasherError = KdfError || phc_format.Error;
+
     pub const Error = HasherError || error{AllocatorRequired};
+    pub const HasherError = KdfError || phc_format.Error;
+    pub const KdfError = errors.Error || std.mem.Allocator.Error || std.Thread.SpawnError;
 
-    pub const phc_format = @import("crypto/phc_encoding.zig");
-
+    pub const argon2 = @import("crypto/argon2.zig");
     pub const bcrypt = @import("crypto/bcrypt.zig");
     pub const scrypt = @import("crypto/scrypt.zig");
     pub const pbkdf2 = @import("crypto/pbkdf2.zig").pbkdf2;
+
+    pub const phc_format = @import("crypto/phc_encoding.zig");
 };
 
 /// Digital signature functions.
@@ -163,7 +165,7 @@ const std = @import("std.zig");
 pub const errors = @import("crypto/errors.zig");
 
 test "crypto" {
-    const please_windows_dont_oom = std.Target.current.os.tag == .windows;
+    const please_windows_dont_oom = @import("builtin").os.tag == .windows;
     if (please_windows_dont_oom) return error.SkipZigTest;
 
     inline for (std.meta.declarations(@This())) |decl| {

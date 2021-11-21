@@ -1,5 +1,5 @@
 const std = @import("std.zig");
-const builtin = std.builtin;
+const builtin = @import("builtin");
 const testing = std.testing;
 
 pub fn once(comptime f: fn () void) Once(f) {
@@ -26,8 +26,8 @@ pub fn Once(comptime f: fn () void) type {
         fn callSlow(self: *@This()) void {
             @setCold(true);
 
-            const T = self.mutex.acquire();
-            defer T.release();
+            self.mutex.lock();
+            defer self.mutex.unlock();
 
             // The first thread to acquire the mutex gets to run the initializer
             if (!self.done) {

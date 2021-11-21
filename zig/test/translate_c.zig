@@ -1,9 +1,10 @@
-const tests = @import("tests.zig");
 const std = @import("std");
+const builtin = @import("builtin");
+const tests = @import("tests.zig");
 const CrossTarget = std.zig.CrossTarget;
 
 pub fn addCases(cases: *tests.TranslateCContext) void {
-    const default_enum_type = if (std.Target.current.abi == .msvc) "c_int" else "c_uint";
+    const default_enum_type = if (builtin.abi == .msvc) "c_int" else "c_uint";
 
     cases.add("field access is grouped if necessary",
         \\unsigned long foo(unsigned long x) {
@@ -848,6 +849,16 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\pub extern fn foo() noreturn;
     });
 
+    cases.add("always_inline attribute",
+        \\__attribute__((always_inline)) int foo() {
+        \\    return 5;
+        \\}
+    , &[_][]const u8{
+        \\pub inline fn foo() c_int {
+        \\    return 5;
+        \\}
+    });
+
     cases.add("add, sub, mul, div, rem",
         \\int s() {
         \\    int a, b, c;
@@ -874,7 +885,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\    c = a - b;
         \\    c = a * b;
         \\    c = @divTrunc(a, b);
-        \\    c = @rem(a, b);
+        \\    c = @import("std").zig.c_translation.signedRemainder(a, b);
         \\    return 0;
         \\}
         \\pub export fn u() c_uint {
@@ -1153,7 +1164,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\pub export fn foo() void {}
     });
 
-    if (std.Target.current.os.tag != .windows) {
+    if (builtin.os.tag != .windows) {
         // Windows treats this as an enum with type c_int
         cases.add("big negative enum init values when C ABI supports long long enums",
             \\enum EnumWithInits {
@@ -1558,7 +1569,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\}
     });
 
-    if (std.Target.current.os.tag != .windows) {
+    if (builtin.os.tag != .windows) {
         // sysv_abi not currently supported on windows
         cases.add("Macro qualified functions",
             \\void __attribute__((sysv_abi)) foo(void);
@@ -2160,7 +2171,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\}
     });
 
-    if (std.Target.current.os.tag != .windows) {
+    if (builtin.os.tag != .windows) {
         // When clang uses the <arch>-windows-none triple it behaves as MSVC and
         // interprets the inner `struct Bar` as an anonymous structure
         cases.add("type referenced struct",
@@ -2921,9 +2932,9 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\        ref.* = @divTrunc(ref.*, @as(c_int, 1));
         \\        break :blk ref.*;
         \\    });
-        \\    a = @rem(a, blk: {
+        \\    a = @import("std").zig.c_translation.signedRemainder(a, blk: {
         \\        const ref = &a;
-        \\        ref.* = @rem(ref.*, @as(c_int, 1));
+        \\        ref.* = @import("std").zig.c_translation.signedRemainder(ref.*, @as(c_int, 1));
         \\        break :blk ref.*;
         \\    });
         \\    b /= blk: {
@@ -3398,7 +3409,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\pub const FOO = @import("std").zig.c_translation.cast(c_int, @import("std").zig.c_translation.promoteIntLiteral(c_int, 0x8000, .hexadecimal));
     });
 
-    if (std.Target.current.abi == .msvc) {
+    if (builtin.abi == .msvc) {
         cases.add("nameless struct fields",
             \\typedef struct NAMED
             \\{

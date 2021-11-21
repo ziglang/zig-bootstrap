@@ -109,8 +109,7 @@ pub fn buildLibCXX(comp: *Compilation) !void {
 
     const cxxabi_include_path = try comp.zig_lib_directory.join(arena, &[_][]const u8{ "libcxxabi", "include" });
     const cxx_include_path = try comp.zig_lib_directory.join(arena, &[_][]const u8{ "libcxx", "include" });
-    var c_source_files = std.ArrayList(Compilation.CSourceFile).init(arena);
-    try c_source_files.ensureTotalCapacity(libcxx_files.len);
+    var c_source_files = try std.ArrayList(Compilation.CSourceFile).initCapacity(arena, libcxx_files.len);
 
     for (libcxx_files) |cxx_src| {
         var cflags = std.ArrayList([]const u8).init(arena);
@@ -134,6 +133,7 @@ pub fn buildLibCXX(comp: *Compilation) !void {
         try cflags.append("-DLIBCXX_BUILDING_LIBCXXABI");
         try cflags.append("-D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS");
         try cflags.append("-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS");
+        try cflags.append("-D_LIBCPP_DISABLE_NEW_DELETE_DEFINITIONS");
         try cflags.append("-D_LIBCPP_HAS_NO_VENDOR_AVAILABILITY_ANNOTATIONS");
         try cflags.append("-fvisibility=hidden");
         try cflags.append("-fvisibility-inlines-hidden");
@@ -189,6 +189,7 @@ pub fn buildLibCXX(comp: *Compilation) !void {
         .want_sanitize_c = false,
         .want_stack_check = false,
         .want_red_zone = comp.bin_file.options.red_zone,
+        .omit_frame_pointer = comp.bin_file.options.omit_frame_pointer,
         .want_valgrind = false,
         .want_tsan = comp.bin_file.options.tsan,
         .want_pic = comp.bin_file.options.pic,
@@ -255,8 +256,7 @@ pub fn buildLibCXXABI(comp: *Compilation) !void {
 
     const cxxabi_include_path = try comp.zig_lib_directory.join(arena, &[_][]const u8{ "libcxxabi", "include" });
     const cxx_include_path = try comp.zig_lib_directory.join(arena, &[_][]const u8{ "libcxx", "include" });
-    var c_source_files = std.ArrayList(Compilation.CSourceFile).init(arena);
-    try c_source_files.ensureTotalCapacity(libcxxabi_files.len);
+    var c_source_files = try std.ArrayList(Compilation.CSourceFile).initCapacity(arena, libcxxabi_files.len);
 
     for (libcxxabi_files) |cxxabi_src| {
         var cflags = std.ArrayList([]const u8).init(arena);
@@ -321,6 +321,7 @@ pub fn buildLibCXXABI(comp: *Compilation) !void {
         .want_sanitize_c = false,
         .want_stack_check = false,
         .want_red_zone = comp.bin_file.options.red_zone,
+        .omit_frame_pointer = comp.bin_file.options.omit_frame_pointer,
         .want_valgrind = false,
         .want_tsan = comp.bin_file.options.tsan,
         .want_pic = comp.bin_file.options.pic,

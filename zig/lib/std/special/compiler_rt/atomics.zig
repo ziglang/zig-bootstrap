@@ -1,8 +1,8 @@
 const std = @import("std");
-const builtin = std.builtin;
-const arch = std.Target.current.cpu.arch;
+const builtin = @import("builtin");
+const arch = builtin.cpu.arch;
 
-const linkage: builtin.GlobalLinkage = if (builtin.is_test) .Internal else .Weak;
+const linkage: std.builtin.GlobalLinkage = if (builtin.is_test) .Internal else .Weak;
 
 // This parameter is true iff the target architecture supports the bare minimum
 // to implement the atomic load/store intrinsics.
@@ -10,13 +10,13 @@ const linkage: builtin.GlobalLinkage = if (builtin.is_test) .Internal else .Weak
 // detail to keep the export logic clean and because we need some kind of CAS to
 // implement the spinlocks.
 const supports_atomic_ops = switch (arch) {
-    .msp430, .avr => false,
+    .msp430, .avr, .bpfel, .bpfeb => false,
     .arm, .armeb, .thumb, .thumbeb =>
     // The ARM v6m ISA has no ldrex/strex and so it's impossible to do CAS
     // operations (unless we're targeting Linux, the kernel provides a way to
     // perform CAS operations).
     // XXX: The Linux code path is not implemented yet.
-    !std.Target.arm.featureSetHas(std.Target.current.cpu.features, .has_v6m),
+    !std.Target.arm.featureSetHas(builtin.cpu.features, .has_v6m),
     else => true,
 };
 
@@ -257,7 +257,7 @@ comptime {
     }
 }
 
-fn fetchFn(comptime T: type, comptime op: builtin.AtomicRmwOp) fn (*T, T, i32) callconv(.C) T {
+fn fetchFn(comptime T: type, comptime op: std.builtin.AtomicRmwOp) fn (*T, T, i32) callconv(.C) T {
     return struct {
         pub fn fetch_op_N(ptr: *T, val: T, model: i32) callconv(.C) T {
             _ = model;

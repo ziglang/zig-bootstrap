@@ -1,18 +1,18 @@
-// This file contains thin wrappers around OS-specific APIs, with these
-// specific goals in mind:
-// * Convert "errno"-style error codes into Zig errors.
-// * When null-terminated byte buffers are required, provide APIs which accept
-//   slices as well as APIs which accept null-terminated byte buffers. Same goes
-//   for UTF-16LE encoding.
-// * Where operating systems share APIs, e.g. POSIX, these thin wrappers provide
-//   cross platform abstracting.
-// * When there exists a corresponding libc function and linking libc, the libc
-//   implementation is used. Exceptions are made for known buggy areas of libc.
-//   On Linux libc can be side-stepped by using `std.os.linux` directly.
-// * For Windows, this file represents the API that libc would provide for
-//   Windows. For thin wrappers around Windows-specific APIs, see `std.os.windows`.
-// Note: The Zig standard library does not support POSIX thread cancellation, and
-// in general EINTR is handled by trying again.
+//! This file contains thin wrappers around OS-specific APIs, with these
+//! specific goals in mind:
+//! * Convert "errno"-style error codes into Zig errors.
+//! * When null-terminated byte buffers are required, provide APIs which accept
+//!   slices as well as APIs which accept null-terminated byte buffers. Same goes
+//!   for UTF-16LE encoding.
+//! * Where operating systems share APIs, e.g. POSIX, these thin wrappers provide
+//!   cross platform abstracting.
+//! * When there exists a corresponding libc function and linking libc, the libc
+//!   implementation is used. Exceptions are made for known buggy areas of libc.
+//!   On Linux libc can be side-stepped by using `std.os.linux` directly.
+//! * For Windows, this file represents the API that libc would provide for
+//!   Windows. For thin wrappers around Windows-specific APIs, see `std.os.windows`.
+//! Note: The Zig standard library does not support POSIX thread cancellation, and
+//! in general EINTR is handled by trying again.
 
 const root = @import("root");
 const std = @import("std.zig");
@@ -33,6 +33,7 @@ pub const netbsd = std.c;
 pub const openbsd = std.c;
 pub const solaris = std.c;
 pub const linux = @import("os/linux.zig");
+pub const plan9 = @import("os/plan9.zig");
 pub const uefi = @import("os/uefi.zig");
 pub const wasi = @import("os/wasi.zig");
 pub const windows = @import("os/windows.zig");
@@ -240,7 +241,7 @@ pub fn close(fd: fd_t) void {
         _ = wasi.fd_close(fd);
         return;
     }
-    if (comptime std.Target.current.isDarwin()) {
+    if (comptime builtin.target.isDarwin()) {
         // This avoids the EINTR problem.
         switch (darwin.getErrno(darwin.@"close$NOCANCEL"(fd))) {
             .BADF => unreachable, // Always a race condition.
@@ -251,6 +252,87 @@ pub fn close(fd: fd_t) void {
         .BADF => unreachable, // Always a race condition.
         .INTR => return, // This is still a success. See https://github.com/ziglang/zig/issues/2425
         else => return,
+    }
+}
+
+pub const FChmodError = error{
+    AccessDenied,
+    InputOutput,
+    SymLinkLoop,
+    FileNotFound,
+    SystemResources,
+    ReadOnlyFileSystem,
+} || UnexpectedError;
+
+/// Changes the mode of the file referred to by the file descriptor.
+/// The process must have the correct privileges in order to do this
+/// successfully, or must have the effective user ID matching the owner
+/// of the file.
+pub fn fchmod(fd: fd_t, mode: mode_t) FChmodError!void {
+    if (builtin.os.tag == .windows or builtin.os.tag == .wasi)
+        @compileError("Unsupported OS");
+
+    while (true) {
+        const res = system.fchmod(fd, mode);
+
+        switch (system.getErrno(res)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            .BADF => unreachable, // Can be reached if the fd refers to a directory opened without `OpenDirOptions{ .iterate = true }`
+
+            .FAULT => unreachable,
+            .INVAL => unreachable,
+            .ACCES => return error.AccessDenied,
+            .IO => return error.InputOutput,
+            .LOOP => return error.SymLinkLoop,
+            .NOENT => return error.FileNotFound,
+            .NOMEM => return error.SystemResources,
+            .NOTDIR => return error.FileNotFound,
+            .PERM => return error.AccessDenied,
+            .ROFS => return error.ReadOnlyFileSystem,
+            else => |err| return unexpectedErrno(err),
+        }
+    }
+}
+
+pub const FChownError = error{
+    AccessDenied,
+    InputOutput,
+    SymLinkLoop,
+    FileNotFound,
+    SystemResources,
+    ReadOnlyFileSystem,
+} || UnexpectedError;
+
+/// Changes the owner and group of the file referred to by the file descriptor.
+/// The process must have the correct privileges in order to do this
+/// successfully. The group may be changed by the owner of the directory to
+/// any group of which the owner is a member. If the owner or group is
+/// specified as `null`, the ID is not changed.
+pub fn fchown(fd: fd_t, owner: ?uid_t, group: ?gid_t) FChownError!void {
+    if (builtin.os.tag == .windows or builtin.os.tag == .wasi)
+        @compileError("Unsupported OS");
+
+    while (true) {
+        const res = system.fchown(fd, owner orelse @as(u32, 0) -% 1, group orelse @as(u32, 0) -% 1);
+
+        switch (system.getErrno(res)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            .BADF => unreachable, // Can be reached if the fd refers to a directory opened without `OpenDirOptions{ .iterate = true }`
+
+            .FAULT => unreachable,
+            .INVAL => unreachable,
+            .ACCES => return error.AccessDenied,
+            .IO => return error.InputOutput,
+            .LOOP => return error.SymLinkLoop,
+            .NOENT => return error.FileNotFound,
+            .NOMEM => return error.SystemResources,
+            .NOTDIR => return error.FileNotFound,
+            .PERM => return error.AccessDenied,
+            .ROFS => return error.ReadOnlyFileSystem,
+            else => |err| return unexpectedErrno(err),
+        }
     }
 }
 
@@ -487,12 +569,12 @@ pub fn read(fd: fd_t, buf: []u8) ReadError!usize {
     }
 
     // Prevents EINVAL.
-    const max_count = switch (std.Target.current.os.tag) {
+    const max_count = switch (builtin.os.tag) {
         .linux => 0x7ffff000,
         .macos, .ios, .watchos, .tvos => math.maxInt(i32),
         else => math.maxInt(isize),
     };
-    const adjusted_len = math.min(max_count, buf.len);
+    const adjusted_len = @minimum(max_count, buf.len);
 
     while (true) {
         const rc = system.read(fd, buf.ptr, adjusted_len);
@@ -525,7 +607,7 @@ pub fn read(fd: fd_t, buf: []u8) ReadError!usize {
 /// * Windows
 /// On these systems, the read races with concurrent writes to the same file descriptor.
 pub fn readv(fd: fd_t, iov: []const iovec) ReadError!usize {
-    if (std.Target.current.os.tag == .windows) {
+    if (builtin.os.tag == .windows) {
         // TODO improve this to use ReadFileScatter
         if (iov.len == 0) return @as(usize, 0);
         const first = iov[0];
@@ -616,12 +698,12 @@ pub fn pread(fd: fd_t, buf: []u8, offset: u64) PReadError!usize {
     }
 
     // Prevent EINVAL.
-    const max_count = switch (std.Target.current.os.tag) {
+    const max_count = switch (builtin.os.tag) {
         .linux => 0x7ffff000,
         .macos, .ios, .watchos, .tvos => math.maxInt(i32),
         else => math.maxInt(isize),
     };
-    const adjusted_len = math.min(max_count, buf.len);
+    const adjusted_len = @minimum(max_count, buf.len);
 
     const pread_sym = if (builtin.os.tag == .linux and builtin.link_libc)
         system.pread64
@@ -662,7 +744,7 @@ pub const TruncateError = error{
 } || UnexpectedError;
 
 pub fn ftruncate(fd: fd_t, length: u64) TruncateError!void {
-    if (std.Target.current.os.tag == .windows) {
+    if (builtin.os.tag == .windows) {
         var io_status_block: windows.IO_STATUS_BLOCK = undefined;
         var eof_info = windows.FILE_END_OF_FILE_INFORMATION{
             .EndOfFile = @bitCast(windows.LARGE_INTEGER, length),
@@ -683,7 +765,7 @@ pub fn ftruncate(fd: fd_t, length: u64) TruncateError!void {
             else => return windows.unexpectedStatus(rc),
         }
     }
-    if (std.Target.current.os.tag == .wasi and !builtin.link_libc) {
+    if (builtin.os.tag == .wasi and !builtin.link_libc) {
         switch (wasi.fd_filestat_set_size(fd, length)) {
             .SUCCESS => return,
             .INTR => unreachable,
@@ -733,7 +815,7 @@ pub fn ftruncate(fd: fd_t, length: u64) TruncateError!void {
 /// * Windows
 /// On these systems, the read races with concurrent writes to the same file descriptor.
 pub fn preadv(fd: fd_t, iov: []const iovec, offset: u64) PReadError!usize {
-    const have_pread_but_not_preadv = switch (std.Target.current.os.tag) {
+    const have_pread_but_not_preadv = switch (builtin.os.tag) {
         .windows, .macos, .ios, .watchos, .tvos, .haiku => true,
         else => false,
     };
@@ -868,12 +950,12 @@ pub fn write(fd: fd_t, bytes: []const u8) WriteError!usize {
         }
     }
 
-    const max_count = switch (std.Target.current.os.tag) {
+    const max_count = switch (builtin.os.tag) {
         .linux => 0x7ffff000,
         .macos, .ios, .watchos, .tvos => math.maxInt(i32),
         else => math.maxInt(isize),
     };
-    const adjusted_len = math.min(max_count, bytes.len);
+    const adjusted_len = @minimum(max_count, bytes.len);
 
     while (true) {
         const rc = system.write(fd, bytes.ptr, adjusted_len);
@@ -916,7 +998,7 @@ pub fn write(fd: fd_t, bytes: []const u8) WriteError!usize {
 ///
 /// If `iov.len` is larger than `IOV_MAX`, a partial write will occur.
 pub fn writev(fd: fd_t, iov: []const iovec_const) WriteError!usize {
-    if (std.Target.current.os.tag == .windows) {
+    if (builtin.os.tag == .windows) {
         // TODO improve this to use WriteFileScatter
         if (iov.len == 0) return @as(usize, 0);
         const first = iov[0];
@@ -991,7 +1073,7 @@ pub const PWriteError = WriteError || error{Unseekable};
 /// The limit on Darwin is `0x7fffffff`, trying to write more than that returns EINVAL.
 /// The corresponding POSIX limit is `math.maxInt(isize)`.
 pub fn pwrite(fd: fd_t, bytes: []const u8, offset: u64) PWriteError!usize {
-    if (std.Target.current.os.tag == .windows) {
+    if (builtin.os.tag == .windows) {
         return windows.WriteFile(fd, bytes, offset, std.io.default_mode);
     }
     if (builtin.os.tag == .wasi and !builtin.link_libc) {
@@ -1024,12 +1106,12 @@ pub fn pwrite(fd: fd_t, bytes: []const u8, offset: u64) PWriteError!usize {
     }
 
     // Prevent EINVAL.
-    const max_count = switch (std.Target.current.os.tag) {
+    const max_count = switch (builtin.os.tag) {
         .linux => 0x7ffff000,
         .macos, .ios, .watchos, .tvos => math.maxInt(i32),
         else => math.maxInt(isize),
     };
-    const adjusted_len = math.min(max_count, bytes.len);
+    const adjusted_len = @minimum(max_count, bytes.len);
 
     const pwrite_sym = if (builtin.os.tag == .linux and builtin.link_libc)
         system.pwrite64
@@ -1083,7 +1165,7 @@ pub fn pwrite(fd: fd_t, bytes: []const u8, offset: u64) PWriteError!usize {
 ///
 /// If `iov.len` is larger than `IOV_MAX`, a partial write will occur.
 pub fn pwritev(fd: fd_t, iov: []const iovec_const, offset: u64) PWriteError!usize {
-    const have_pwrite_but_not_pwritev = switch (std.Target.current.os.tag) {
+    const have_pwrite_but_not_pwritev = switch (builtin.os.tag) {
         .windows, .macos, .ios, .watchos, .tvos, .haiku => true,
         else => false,
     };
@@ -1199,7 +1281,7 @@ pub const OpenError = error{
 /// Open and possibly create a file. Keeps trying if it gets interrupted.
 /// See also `openZ`.
 pub fn open(file_path: []const u8, flags: u32, perm: mode_t) OpenError!fd_t {
-    if (std.Target.current.os.tag == .windows) {
+    if (builtin.os.tag == .windows) {
         const file_path_w = try windows.sliceToPrefixedFileW(file_path);
         return openW(file_path_w.span(), flags, perm);
     }
@@ -1212,7 +1294,7 @@ pub const openC = @compileError("deprecated: renamed to openZ");
 /// Open and possibly create a file. Keeps trying if it gets interrupted.
 /// See also `open`.
 pub fn openZ(file_path: [*:0]const u8, flags: u32, perm: mode_t) OpenError!fd_t {
-    if (std.Target.current.os.tag == .windows) {
+    if (builtin.os.tag == .windows) {
         const file_path_w = try windows.cStrToPrefixedFileW(file_path);
         return openW(file_path_w.span(), flags, perm);
     }
@@ -2592,6 +2674,7 @@ pub const ReadLinkError = error{
     NameTooLong,
     FileNotFound,
     SystemResources,
+    NotLink,
     NotDir,
     InvalidUtf8,
     BadPathName,
@@ -2633,7 +2716,7 @@ pub fn readlinkZ(file_path: [*:0]const u8, out_buffer: []u8) ReadLinkError![]u8 
         .SUCCESS => return out_buffer[0..@bitCast(usize, rc)],
         .ACCES => return error.AccessDenied,
         .FAULT => unreachable,
-        .INVAL => unreachable,
+        .INVAL => return error.NotLink,
         .IO => return error.FileSystem,
         .LOOP => return error.SymLinkLoop,
         .NAMETOOLONG => return error.NameTooLong,
@@ -2669,7 +2752,7 @@ pub fn readlinkatWasi(dirfd: fd_t, file_path: []const u8, out_buffer: []u8) Read
         .SUCCESS => return out_buffer[0..bufused],
         .ACCES => return error.AccessDenied,
         .FAULT => unreachable,
-        .INVAL => unreachable,
+        .INVAL => return error.NotLink,
         .IO => return error.FileSystem,
         .LOOP => return error.SymLinkLoop,
         .NAMETOOLONG => return error.NameTooLong,
@@ -2699,7 +2782,7 @@ pub fn readlinkatZ(dirfd: fd_t, file_path: [*:0]const u8, out_buffer: []u8) Read
         .SUCCESS => return out_buffer[0..@bitCast(usize, rc)],
         .ACCES => return error.AccessDenied,
         .FAULT => unreachable,
-        .INVAL => unreachable,
+        .INVAL => return error.NotLink,
         .IO => return error.FileSystem,
         .LOOP => return error.SymLinkLoop,
         .NAMETOOLONG => return error.NameTooLong,
@@ -2900,7 +2983,7 @@ pub fn socket(domain: u32, socket_type: u32, protocol: u32) SocketError!socket_t
         return rc;
     }
 
-    const have_sock_flags = comptime !std.Target.current.isDarwin();
+    const have_sock_flags = comptime !builtin.target.isDarwin();
     const filtered_sock_type = if (!have_sock_flags)
         socket_type & ~@as(u32, SOCK.NONBLOCK | SOCK.CLOEXEC)
     else
@@ -3199,7 +3282,7 @@ pub fn accept(
     ///   description  of the `O.CLOEXEC` flag in `open` for reasons why this may be useful.
     flags: u32,
 ) AcceptError!socket_t {
-    const have_accept4 = comptime !(std.Target.current.isDarwin() or builtin.os.tag == .windows);
+    const have_accept4 = comptime !(builtin.target.isDarwin() or builtin.os.tag == .windows);
     assert(0 == (flags & ~@as(u32, SOCK.NONBLOCK | SOCK.CLOEXEC))); // Unsupported flag(s)
 
     const accepted_sock = while (true) {
@@ -4676,6 +4759,7 @@ pub fn getFdPath(fd: fd_t, out_buffer: *[MAX_PATH_BYTES]u8) RealPathError![]u8 {
             const target = readlinkZ(std.meta.assumeSentinel(proc_path.ptr, 0), out_buffer) catch |err| {
                 switch (err) {
                     error.UnsupportedReparsePointType => unreachable, // Windows only,
+                    error.NotLink => unreachable,
                     else => |e| return e,
                 }
             };
@@ -4687,6 +4771,7 @@ pub fn getFdPath(fd: fd_t, out_buffer: *[MAX_PATH_BYTES]u8) RealPathError![]u8 {
 
             const target = readlinkZ(proc_path, out_buffer) catch |err| switch (err) {
                 error.UnsupportedReparsePointType => unreachable,
+                error.NotLink => unreachable,
                 else => |e| return e,
             };
             return target;
@@ -4807,7 +4892,7 @@ pub const ClockGetTimeError = error{UnsupportedClock} || UnexpectedError;
 /// TODO: change this to return the timespec as a return value
 /// TODO: look into making clk_id an enum
 pub fn clock_gettime(clk_id: i32, tp: *timespec) ClockGetTimeError!void {
-    if (std.Target.current.os.tag == .wasi and !builtin.link_libc) {
+    if (builtin.os.tag == .wasi and !builtin.link_libc) {
         var ts: timestamp_t = undefined;
         switch (system.clock_time_get(@bitCast(u32, clk_id), 1, &ts)) {
             .SUCCESS => {
@@ -4821,7 +4906,7 @@ pub fn clock_gettime(clk_id: i32, tp: *timespec) ClockGetTimeError!void {
         }
         return;
     }
-    if (std.Target.current.os.tag == .windows) {
+    if (builtin.os.tag == .windows) {
         if (clk_id == CLOCK.REALTIME) {
             var ft: windows.FILETIME = undefined;
             windows.kernel32.GetSystemTimeAsFileTime(&ft);
@@ -4848,7 +4933,7 @@ pub fn clock_gettime(clk_id: i32, tp: *timespec) ClockGetTimeError!void {
 }
 
 pub fn clock_getres(clk_id: i32, res: *timespec) ClockGetTimeError!void {
-    if (std.Target.current.os.tag == .wasi and !builtin.link_libc) {
+    if (builtin.os.tag == .wasi and !builtin.link_libc) {
         var ts: timestamp_t = undefined;
         switch (system.clock_res_get(@bitCast(u32, clk_id), &ts)) {
             .SUCCESS => res.* = .{
@@ -5416,19 +5501,19 @@ pub fn sendfile(
 
     // Prevents EOVERFLOW.
     const size_t = std.meta.Int(.unsigned, @typeInfo(usize).Int.bits - 1);
-    const max_count = switch (std.Target.current.os.tag) {
+    const max_count = switch (builtin.os.tag) {
         .linux => 0x7ffff000,
         .macos, .ios, .watchos, .tvos => math.maxInt(i32),
         else => math.maxInt(size_t),
     };
 
-    switch (std.Target.current.os.tag) {
+    switch (builtin.os.tag) {
         .linux => sf: {
             // sendfile() first appeared in Linux 2.2, glibc 2.1.
             const call_sf = comptime if (builtin.link_libc)
                 std.c.versionCheck(.{ .major = 2, .minor = 1 }).ok
             else
-                std.Target.current.os.version_range.linux.range.max.order(.{ .major = 2, .minor = 2 }) != .lt;
+                builtin.os.version_range.linux.range.max.order(.{ .major = 2, .minor = 2 }) != .lt;
             if (!call_sf) break :sf;
 
             if (headers.len != 0) {
@@ -5439,7 +5524,9 @@ pub fn sendfile(
             }
 
             // Here we match BSD behavior, making a zero count value send as many bytes as possible.
-            const adjusted_count = if (in_len == 0) max_count else math.min(in_len, @as(size_t, max_count));
+            const adjusted_count_tmp = if (in_len == 0) max_count else @minimum(in_len, @as(size_t, max_count));
+            // TODO we should not need this cast; improve return type of @minimum
+            const adjusted_count = @intCast(usize, adjusted_count_tmp);
 
             const sendfile_sym = if (builtin.link_libc)
                 system.sendfile64
@@ -5522,7 +5609,7 @@ pub fn sendfile(
                 hdtr = &hdtr_data;
             }
 
-            const adjusted_count = math.min(in_len, max_count);
+            const adjusted_count = @minimum(in_len, max_count);
 
             while (true) {
                 var sbytes: off_t = undefined;
@@ -5601,7 +5688,9 @@ pub fn sendfile(
                 hdtr = &hdtr_data;
             }
 
-            const adjusted_count = math.min(in_len, @as(u63, max_count));
+            const adjusted_count_temporary = @minimum(in_len, @as(u63, max_count));
+            // TODO we should not need this int cast; improve the return type of `@minimum`
+            const adjusted_count = @intCast(u63, adjusted_count_temporary);
 
             while (true) {
                 var sbytes: off_t = adjusted_count;
@@ -5655,7 +5744,9 @@ pub fn sendfile(
     rw: {
         var buf: [8 * 4096]u8 = undefined;
         // Here we match BSD behavior, making a zero count value send as many bytes as possible.
-        const adjusted_count = if (in_len == 0) buf.len else math.min(buf.len, in_len);
+        const adjusted_count_tmp = if (in_len == 0) buf.len else @minimum(buf.len, in_len);
+        // TODO we should not need this cast; improve return type of @minimum
+        const adjusted_count = @intCast(usize, adjusted_count_tmp);
         const amt_read = try pread(in_fd, buf[0..adjusted_count], in_offset);
         if (amt_read == 0) {
             if (in_len == 0) {
@@ -5719,13 +5810,13 @@ var has_copy_file_range_syscall = std.atomic.Atomic(bool).init(true);
 ///
 /// Maximum offsets on Linux are `math.maxInt(i64)`.
 pub fn copy_file_range(fd_in: fd_t, off_in: u64, fd_out: fd_t, off_out: u64, len: usize, flags: u32) CopyFileRangeError!usize {
-    const call_cfr = comptime if (std.Target.current.os.tag == .wasi)
+    const call_cfr = comptime if (builtin.os.tag == .wasi)
         // WASI-libc doesn't have copy_file_range.
         false
     else if (builtin.link_libc)
         std.c.versionCheck(.{ .major = 2, .minor = 27, .patch = 0 }).ok
     else
-        std.Target.current.os.isAtLeast(.linux, .{ .major = 4, .minor = 5 }) orelse true;
+        builtin.os.isAtLeast(.linux, .{ .major = 4, .minor = 5 }) orelse true;
 
     if (call_cfr and has_copy_file_range_syscall.load(.Monotonic)) {
         var off_in_copy = @bitCast(i64, off_in);
@@ -5756,7 +5847,7 @@ pub fn copy_file_range(fd_in: fd_t, off_in: u64, fd_out: fd_t, off_out: u64, len
     }
 
     var buf: [8 * 4096]u8 = undefined;
-    const adjusted_count = math.min(buf.len, len);
+    const adjusted_count = @minimum(buf.len, len);
     const amt_read = try pread(fd_in, buf[0..adjusted_count], off_in);
     // TODO without @as the line below fails to compile for wasm32-wasi:
     // error: integer value 0 cannot be coerced to type 'os.PWriteError!usize'
@@ -5817,7 +5908,8 @@ pub fn ppoll(fds: []pollfd, timeout: ?*const timespec, mask: ?*const sigset_t) P
         ts_ptr = &ts;
         ts = timeout_ns.*;
     }
-    const rc = system.ppoll(fds.ptr, fds.len, ts_ptr, mask);
+    const fds_count = math.cast(nfds_t, fds.len) catch return error.SystemResources;
+    const rc = system.ppoll(fds.ptr, fds_count, ts_ptr, mask);
     switch (errno(rc)) {
         .SUCCESS => return @intCast(usize, rc),
         .FAULT => unreachable,
@@ -5919,7 +6011,7 @@ pub fn dn_expand(
     const end = msg.ptr + msg.len;
     if (p == end or exp_dn.len == 0) return error.InvalidDnsPacket;
     var dest = exp_dn.ptr;
-    const dend = dest + std.math.min(exp_dn.len, 254);
+    const dend = dest + @minimum(exp_dn.len, 254);
     // detect reference loop using an iteration counter
     var i: usize = 0;
     while (i < msg.len) : (i += 2) {
@@ -6179,7 +6271,7 @@ pub fn syncfs(fd: fd_t) SyncError!void {
 
 /// Write all pending file contents and metadata modifications for the specified file descriptor to the underlying filesystem.
 pub fn fsync(fd: fd_t) SyncError!void {
-    if (std.Target.current.os.tag == .windows) {
+    if (builtin.os.tag == .windows) {
         if (windows.kernel32.FlushFileBuffers(fd) != 0)
             return;
         switch (windows.kernel32.GetLastError()) {
@@ -6203,7 +6295,7 @@ pub fn fsync(fd: fd_t) SyncError!void {
 
 /// Write all pending file contents for the specified file descriptor to the underlying filesystem, but not necessarily the metadata.
 pub fn fdatasync(fd: fd_t) SyncError!void {
-    if (std.Target.current.os.tag == .windows) {
+    if (builtin.os.tag == .windows) {
         return fsync(fd) catch |err| switch (err) {
             SyncError.AccessDenied => return, // fdatasync doesn't promise that the access time was synced
             else => return err,
@@ -6340,6 +6432,90 @@ pub fn madvise(ptr: [*]align(mem.page_size) u8, length: usize, advice: u32) Madv
         .IO => return error.WouldExceedMaximumResidentSetSize,
         .NOMEM => return error.OutOfMemory,
         .NOSYS => return error.MadviseUnavailable,
+        else => |err| return unexpectedErrno(err),
+    }
+}
+
+pub const PerfEventOpenError = error{
+    /// Returned if the perf_event_attr size value is too small (smaller
+    /// than PERF_ATTR_SIZE_VER0), too big (larger than the page  size),
+    /// or  larger  than the kernel supports and the extra bytes are not
+    /// zero.  When E2BIG is returned, the perf_event_attr size field is
+    /// overwritten by the kernel to be the size of the structure it was
+    /// expecting.
+    TooBig,
+    /// Returned when the requested event requires CAP_SYS_ADMIN permis‐
+    /// sions  (or a more permissive perf_event paranoid setting).  Some
+    /// common cases where an unprivileged process  may  encounter  this
+    /// error:  attaching  to a process owned by a different user; moni‐
+    /// toring all processes on a given CPU (i.e.,  specifying  the  pid
+    /// argument  as  -1); and not setting exclude_kernel when the para‐
+    /// noid setting requires it.
+    /// Also:
+    /// Returned on many (but not all) architectures when an unsupported
+    /// exclude_hv,  exclude_idle,  exclude_user, or exclude_kernel set‐
+    /// ting is specified.
+    /// It can also happen, as with EACCES, when the requested event re‐
+    /// quires   CAP_SYS_ADMIN   permissions   (or   a  more  permissive
+    /// perf_event paranoid setting).  This includes  setting  a  break‐
+    /// point on a kernel address, and (since Linux 3.13) setting a ker‐
+    /// nel function-trace tracepoint.
+    PermissionDenied,
+    /// Returned if another event already has exclusive  access  to  the
+    /// PMU.
+    DeviceBusy,
+    /// Each  opened  event uses one file descriptor.  If a large number
+    /// of events are opened, the per-process limit  on  the  number  of
+    /// open file descriptors will be reached, and no more events can be
+    /// created.
+    ProcessResources,
+    EventRequiresUnsupportedCpuFeature,
+    /// Returned if  you  try  to  add  more  breakpoint
+    /// events than supported by the hardware.
+    TooManyBreakpoints,
+    /// Returned  if PERF_SAMPLE_STACK_USER is set in sample_type and it
+    /// is not supported by hardware.
+    SampleStackNotSupported,
+    /// Returned if an event requiring a specific  hardware  feature  is
+    /// requested  but  there is no hardware support.  This includes re‐
+    /// questing low-skid events if not supported, branch tracing if  it
+    /// is not available, sampling if no PMU interrupt is available, and
+    /// branch stacks for software events.
+    EventNotSupported,
+    /// Returned  if  PERF_SAMPLE_CALLCHAIN  is   requested   and   sam‐
+    /// ple_max_stack   is   larger   than   the  maximum  specified  in
+    /// /proc/sys/kernel/perf_event_max_stack.
+    SampleMaxStackOverflow,
+    /// Returned if attempting to attach to a process that does not  exist.
+    ProcessNotFound,
+} || UnexpectedError;
+
+pub fn perf_event_open(
+    attr: *linux.perf_event_attr,
+    pid: pid_t,
+    cpu: i32,
+    group_fd: fd_t,
+    flags: usize,
+) PerfEventOpenError!fd_t {
+    const rc = system.perf_event_open(attr, pid, cpu, group_fd, flags);
+    switch (errno(rc)) {
+        .SUCCESS => return @intCast(fd_t, rc),
+        .@"2BIG" => return error.TooBig,
+        .ACCES => return error.PermissionDenied,
+        .BADF => unreachable, // group_fd file descriptor is not valid.
+        .BUSY => return error.DeviceBusy,
+        .FAULT => unreachable, // Segmentation fault.
+        .INVAL => unreachable, // Bad attr settings.
+        .INTR => unreachable, // Mixed perf and ftrace handling for a uprobe.
+        .MFILE => return error.ProcessResources,
+        .NODEV => return error.EventRequiresUnsupportedCpuFeature,
+        .NOENT => unreachable, // Invalid type setting.
+        .NOSPC => return error.TooManyBreakpoints,
+        .NOSYS => return error.SampleStackNotSupported,
+        .OPNOTSUPP => return error.EventNotSupported,
+        .OVERFLOW => return error.SampleMaxStackOverflow,
+        .PERM => return error.PermissionDenied,
+        .SRCH => return error.ProcessNotFound,
         else => |err| return unexpectedErrno(err),
     }
 }

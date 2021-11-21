@@ -1,4 +1,5 @@
 const std = @import("std.zig");
+const builtin = @import("builtin");
 const cstr = std.cstr;
 const unicode = std.unicode;
 const io = std.io;
@@ -12,8 +13,7 @@ const mem = std.mem;
 const math = std.math;
 const debug = std.debug;
 const BufMap = std.BufMap;
-const builtin = std.builtin;
-const Os = builtin.Os;
+const Os = std.builtin.Os;
 const TailQueue = std.TailQueue;
 const maxInt = std.math.maxInt;
 const assert = std.debug.assert;
@@ -354,7 +354,7 @@ pub const ChildProcess = struct {
 
         // TODO collect output in a deadlock-avoiding way on Windows.
         // https://github.com/ziglang/zig/issues/6343
-        if (builtin.os.tag == .windows or builtin.os.tag == .haiku) {
+        if (builtin.os.tag == .haiku) {
             const stdout_in = child.stdout.?.reader();
             const stderr_in = child.stderr.?.reader();
 
@@ -561,9 +561,9 @@ pub const ChildProcess = struct {
             if (self.env_map) |env_map| {
                 const envp_buf = try createNullDelimitedEnvMap(arena, env_map);
                 break :m envp_buf.ptr;
-            } else if (std.builtin.link_libc) {
+            } else if (builtin.link_libc) {
                 break :m std.c.environ;
-            } else if (std.builtin.output_mode == .Exe) {
+            } else if (builtin.output_mode == .Exe) {
                 // Then we have Zig start code and this works.
                 // TODO type-safety for null-termination of `os.environ`.
                 break :m @ptrCast([*:null]?[*:0]u8, os.environ.ptr);

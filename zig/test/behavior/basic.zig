@@ -1,6 +1,8 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const mem = std.mem;
 const expect = std.testing.expect;
+const expectEqualStrings = std.testing.expectEqualStrings;
 
 // normal comment
 
@@ -18,6 +20,22 @@ test "truncate" {
 }
 fn testTruncate(x: u32) u8 {
     return @truncate(u8, x);
+}
+
+test "truncate to non-power-of-two integers" {
+    try testTrunc(u32, u1, 0b10101, 0b1);
+    try testTrunc(u32, u1, 0b10110, 0b0);
+    try testTrunc(u32, u2, 0b10101, 0b01);
+    try testTrunc(u32, u2, 0b10110, 0b10);
+    try testTrunc(i32, i5, -4, -4);
+    try testTrunc(i32, i5, 4, 4);
+    try testTrunc(i32, i5, -28, 4);
+    try testTrunc(i32, i5, 28, -4);
+    try testTrunc(i32, i5, std.math.maxInt(i32), -1);
+}
+
+fn testTrunc(comptime Big: type, comptime Little: type, big: Big, little: Little) !void {
+    try expect(@truncate(Little, big) == little);
 }
 
 const g1: i32 = 1233 + 1;
@@ -149,20 +167,6 @@ test "multiline string comments at multiple places" {
     try expect(mem.eql(u8, s1, s2));
 }
 
-test "call result of if else expression" {
-    try expect(mem.eql(u8, f2(true), "a"));
-    try expect(mem.eql(u8, f2(false), "b"));
-}
-fn f2(x: bool) []const u8 {
-    return (if (x) fA else fB)();
-}
-fn fA() []const u8 {
-    return "a";
-}
-fn fB() []const u8 {
-    return "b";
-}
-
 test "string concatenation" {
     try expect(mem.eql(u8, "OK" ++ " IT " ++ "WORKED", "OK IT WORKED"));
 }
@@ -171,20 +175,120 @@ test "array mult operator" {
     try expect(mem.eql(u8, "ab" ** 5, "ababababab"));
 }
 
-test "memcpy and memset intrinsics" {
-    try testMemcpyMemset();
-    // TODO add comptime test coverage
-    //comptime try testMemcpyMemset();
+const OpaqueA = opaque {};
+const OpaqueB = opaque {};
+
+test "opaque types" {
+    try expect(*OpaqueA != *OpaqueB);
+    if (!builtin.zig_is_stage2) {
+        try expect(mem.eql(u8, @typeName(OpaqueA), "OpaqueA"));
+        try expect(mem.eql(u8, @typeName(OpaqueB), "OpaqueB"));
+    }
 }
 
-fn testMemcpyMemset() !void {
-    var foo: [20]u8 = undefined;
-    var bar: [20]u8 = undefined;
+const global_a: i32 = 1234;
+const global_b: *const i32 = &global_a;
+const global_c: *const f32 = @ptrCast(*const f32, global_b);
+test "compile time global reinterpret" {
+    const d = @ptrCast(*const i32, global_c);
+    try expect(d.* == 1234);
+}
 
-    @memset(&foo, 'A', foo.len);
-    @memcpy(&bar, &foo, bar.len);
+test "cast undefined" {
+    const array: [100]u8 = undefined;
+    const slice = @as([]const u8, &array);
+    testCastUndefined(slice);
+}
+fn testCastUndefined(x: []const u8) void {
+    _ = x;
+}
 
-    try expect(bar[0] == 'A');
-    try expect(bar[11] == 'A');
-    try expect(bar[19] == 'A');
+test "implicit cast after unreachable" {
+    try expect(outer() == 1234);
+}
+fn inner() i32 {
+    return 1234;
+}
+fn outer() i64 {
+    return inner();
+}
+
+test "comptime if inside runtime while which unconditionally breaks" {
+    testComptimeIfInsideRuntimeWhileWhichUnconditionallyBreaks(true);
+    comptime testComptimeIfInsideRuntimeWhileWhichUnconditionallyBreaks(true);
+}
+fn testComptimeIfInsideRuntimeWhileWhichUnconditionallyBreaks(cond: bool) void {
+    while (cond) {
+        if (false) {}
+        break;
+    }
+}
+
+test "implicit comptime while" {
+    while (false) {
+        @compileError("bad");
+    }
+}
+
+fn fnThatClosesOverLocalConst() type {
+    const c = 1;
+    return struct {
+        fn g() i32 {
+            return c;
+        }
+    };
+}
+
+test "function closes over local const" {
+    const x = fnThatClosesOverLocalConst().g();
+    try expect(x == 1);
+}
+
+test "volatile load and store" {
+    var number: i32 = 1234;
+    const ptr = @as(*volatile i32, &number);
+    ptr.* += 1;
+    try expect(ptr.* == 1235);
+}
+
+fn fA() []const u8 {
+    return "a";
+}
+fn fB() []const u8 {
+    return "b";
+}
+
+test "call function pointer in struct" {
+    try expect(mem.eql(u8, f3(true), "a"));
+    try expect(mem.eql(u8, f3(false), "b"));
+}
+
+fn f3(x: bool) []const u8 {
+    var wrapper: FnPtrWrapper = .{
+        .fn_ptr = fB,
+    };
+
+    if (x) {
+        wrapper.fn_ptr = fA;
+    }
+
+    return wrapper.fn_ptr();
+}
+
+const FnPtrWrapper = struct {
+    fn_ptr: fn () []const u8,
+};
+
+test "const ptr from var variable" {
+    var x: u64 = undefined;
+    var y: u64 = undefined;
+
+    x = 78;
+    copy(&x, &y);
+
+    try expect(x == y);
+}
+
+fn copy(src: *const u64, dst: *u64) void {
+    dst.* = src.*;
 }

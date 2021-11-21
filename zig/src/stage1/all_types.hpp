@@ -1957,6 +1957,7 @@ struct ZigLLVMFnKey {
         } bswap;
         struct {
             uint32_t bit_count;
+            uint32_t vector_len; // 0 means not a vector
         } bit_reverse;
     } data;
 };
@@ -2175,6 +2176,7 @@ struct CodeGen {
     bool dll_export_fns;
     bool have_stack_probing;
     bool red_zone;
+    bool omit_frame_pointer;
     bool function_sections;
     bool include_compiler_rt;
     bool test_is_evented;

@@ -65,3 +65,26 @@ test "labeled break inside comptime if inside runtime if" {
     }
     try expect(answer == 42);
 }
+
+test "const result loc, runtime if cond, else unreachable" {
+    const Num = enum { One, Two };
+
+    var t = true;
+    const x = if (t) Num.Two else unreachable;
+    try expect(x == .Two);
+}
+
+test "if copies its payload" {
+    const S = struct {
+        fn doTheTest() !void {
+            var tmp: ?i32 = 10;
+            if (tmp) |value| {
+                // Modify the original variable
+                tmp = null;
+                try expect(value == 10);
+            } else unreachable;
+        }
+    };
+    try S.doTheTest();
+    comptime try S.doTheTest();
+}

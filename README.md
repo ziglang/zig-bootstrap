@@ -49,12 +49,6 @@ All parameters are required:
 
 If it succeeds, the output will be in `out/zig-triple-mcpu/`.
 
-To create the "Windows Compiler Devkit" run the `package` script:
-
-```
-package
-```
-
 ### Supported Triples
 
 If you try a "not tested" one and find a problem please file an issue,

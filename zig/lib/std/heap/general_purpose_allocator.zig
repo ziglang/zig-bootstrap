@@ -93,6 +93,7 @@
 //! in a `std.HashMap` using the backing allocator.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const log = std.log.scoped(.gpa);
 const math = std.math;
 const assert = std.debug.assert;
@@ -104,7 +105,7 @@ const StackTrace = std.builtin.StackTrace;
 /// Integer type for pointing to slots in a small allocation
 const SlotIndex = std.meta.Int(.unsigned, math.log2(page_size) + 1);
 
-const sys_can_stack_trace = switch (std.Target.current.cpu.arch) {
+const sys_can_stack_trace = switch (builtin.cpu.arch) {
     // Observed to go into an infinite loop.
     // TODO: Make this work.
     .mips,
@@ -115,13 +116,13 @@ const sys_can_stack_trace = switch (std.Target.current.cpu.arch) {
     // "Non-Emscripten WebAssembly hasn't implemented __builtin_return_address".
     .wasm32,
     .wasm64,
-    => std.Target.current.os.tag == .emscripten,
+    => builtin.os.tag == .emscripten,
 
     else => true,
 };
-const default_test_stack_trace_frames: usize = if (std.builtin.is_test) 8 else 4;
+const default_test_stack_trace_frames: usize = if (builtin.is_test) 8 else 4;
 const default_sys_stack_trace_frames: usize = if (sys_can_stack_trace) default_test_stack_trace_frames else 0;
-const default_stack_trace_frames: usize = switch (std.builtin.mode) {
+const default_stack_trace_frames: usize = switch (builtin.mode) {
     .Debug => default_sys_stack_trace_frames,
     else => 0,
 };
@@ -141,7 +142,7 @@ pub const Config = struct {
     safety: bool = std.debug.runtime_safety,
 
     /// Whether the allocator may be used simultaneously from multiple threads.
-    thread_safe: bool = !std.builtin.single_threaded,
+    thread_safe: bool = !builtin.single_threaded,
 
     /// What type of mutex you'd like to use, for thread safety.
     /// when specfied, the mutex type must have the same shape as `std.Thread.Mutex` and
@@ -209,6 +210,7 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
 
         const LargeAlloc = struct {
             bytes: []u8,
+            requested_size: if (config.enable_memory_limit) usize else void,
             stack_addresses: [trace_n][stack_n]usize,
             freed: if (config.retain_metadata) bool else void,
             ptr_align: if (config.never_unmap and config.retain_metadata) u29 else void,
@@ -527,13 +529,9 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
             if (config.retain_metadata and entry.value_ptr.freed) {
                 if (config.safety) {
                     reportDoubleFree(ret_addr, entry.value_ptr.getStackTrace(.alloc), entry.value_ptr.getStackTrace(.free));
-                    if (new_size == 0) {
-                        // Recoverable. Restore self.total_requested_bytes if needed.
-                        if (config.enable_memory_limit) {
-                            self.total_requested_bytes += old_mem.len;
-                        }
+                    // Recoverable if this is a free.
+                    if (new_size == 0)
                         return @as(usize, 0);
-                    }
                     @panic("Unrecoverable double free");
                 } else {
                     unreachable;
@@ -555,7 +553,29 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
                 });
             }
 
-            const result_len = if (config.never_unmap and new_size == 0) 0 else try self.backing_allocator.resizeFn(self.backing_allocator, old_mem, old_align, new_size, len_align, ret_addr);
+            // Do memory limit accounting with requested sizes rather than what backing_allocator returns
+            // because if we want to return error.OutOfMemory, we have to leave allocation untouched, and
+            // that is impossible to guarantee after calling backing_allocator.resizeFn.
+            const prev_req_bytes = self.total_requested_bytes;
+            if (config.enable_memory_limit) {
+                const new_req_bytes = prev_req_bytes + new_size - entry.value_ptr.requested_size;
+                if (new_req_bytes > prev_req_bytes and new_req_bytes > self.requested_memory_limit) {
+                    return error.OutOfMemory;
+                }
+                self.total_requested_bytes = new_req_bytes;
+            }
+            errdefer if (config.enable_memory_limit) {
+                self.total_requested_bytes = prev_req_bytes;
+            };
+
+            const result_len = if (config.never_unmap and new_size == 0)
+                0
+            else
+                try self.backing_allocator.resizeFn(self.backing_allocator, old_mem, old_align, new_size, len_align, ret_addr);
+
+            if (config.enable_memory_limit) {
+                entry.value_ptr.requested_size = new_size;
+            }
 
             if (result_len == 0) {
                 if (config.verbose_log) {
@@ -595,20 +615,8 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
         ) Error!usize {
             const self = @fieldParentPtr(Self, "allocator", allocator);
 
-            const held = self.mutex.acquire();
-            defer held.release();
-
-            const prev_req_bytes = self.total_requested_bytes;
-            if (config.enable_memory_limit) {
-                const new_req_bytes = prev_req_bytes + new_size - old_mem.len;
-                if (new_req_bytes > prev_req_bytes and new_req_bytes > self.requested_memory_limit) {
-                    return error.OutOfMemory;
-                }
-                self.total_requested_bytes = new_req_bytes;
-            }
-            errdefer if (config.enable_memory_limit) {
-                self.total_requested_bytes = prev_req_bytes;
-            };
+            self.mutex.lock();
+            defer self.mutex.unlock();
 
             assert(old_mem.len != 0);
 
@@ -650,19 +658,28 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
             if (!is_used) {
                 if (config.safety) {
                     reportDoubleFree(ret_addr, bucketStackTrace(bucket, size_class, slot_index, .alloc), bucketStackTrace(bucket, size_class, slot_index, .free));
-                    if (new_size == 0) {
-                        // Recoverable. Restore self.total_requested_bytes if needed, as we
-                        // don't return an error value so the errdefer above does not run.
-                        if (config.enable_memory_limit) {
-                            self.total_requested_bytes = prev_req_bytes;
-                        }
+                    // Recoverable if this is a free.
+                    if (new_size == 0)
                         return @as(usize, 0);
-                    }
                     @panic("Unrecoverable double free");
                 } else {
                     unreachable;
                 }
             }
+
+            // Definitely an in-use small alloc now.
+            const prev_req_bytes = self.total_requested_bytes;
+            if (config.enable_memory_limit) {
+                const new_req_bytes = prev_req_bytes + new_size - old_mem.len;
+                if (new_req_bytes > prev_req_bytes and new_req_bytes > self.requested_memory_limit) {
+                    return error.OutOfMemory;
+                }
+                self.total_requested_bytes = new_req_bytes;
+            }
+            errdefer if (config.enable_memory_limit) {
+                self.total_requested_bytes = prev_req_bytes;
+            };
+
             if (new_size == 0) {
                 // Capture stack trace to be the "first free", in case a double free happens.
                 bucket.captureStackTrace(ret_addr, size_class, slot_index, .free);
@@ -741,23 +758,17 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
         fn alloc(allocator: *Allocator, len: usize, ptr_align: u29, len_align: u29, ret_addr: usize) Error![]u8 {
             const self = @fieldParentPtr(Self, "allocator", allocator);
 
-            const held = self.mutex.acquire();
-            defer held.release();
+            self.mutex.lock();
+            defer self.mutex.unlock();
+
+            if (!self.isAllocationAllowed(len)) {
+                return error.OutOfMemory;
+            }
 
             const new_aligned_size = math.max(len, ptr_align);
             if (new_aligned_size > largest_bucket_object_size) {
                 try self.large_allocations.ensureUnusedCapacity(self.backing_allocator, 1);
-
                 const slice = try self.backing_allocator.allocFn(self.backing_allocator, len, ptr_align, len_align, ret_addr);
-
-                // The backing allocator may return a memory block bigger than
-                // `len`, use the effective size for bookkeeping purposes
-                if (!self.isAllocationAllowed(slice.len)) {
-                    // Free the block so no memory is leaked
-                    const new_len = try self.backing_allocator.resizeFn(self.backing_allocator, slice, ptr_align, 0, 0, ret_addr);
-                    assert(new_len == 0);
-                    return error.OutOfMemory;
-                }
 
                 const gop = self.large_allocations.getOrPutAssumeCapacity(@ptrToInt(slice.ptr));
                 if (config.retain_metadata and !config.never_unmap) {
@@ -767,6 +778,8 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
                     assert(!gop.found_existing); // This would mean the kernel double-mapped pages.
                 }
                 gop.value_ptr.bytes = slice;
+                if (config.enable_memory_limit)
+                    gop.value_ptr.requested_size = len;
                 gop.value_ptr.captureStackTrace(ret_addr, .alloc);
                 if (config.retain_metadata) {
                     gop.value_ptr.freed = false;
@@ -779,10 +792,6 @@ pub fn GeneralPurposeAllocator(comptime config: Config) type {
                     log.info("large alloc {d} bytes at {*}", .{ slice.len, slice.ptr });
                 }
                 return slice;
-            }
-
-            if (!self.isAllocationAllowed(len)) {
-                return error.OutOfMemory;
             }
 
             const new_size_class = math.ceilPowerOfTwoAssert(usize, new_aligned_size);
@@ -988,7 +997,7 @@ test "shrink large object to large object with larger alignment" {
     var slice = try allocator.alignedAlloc(u8, 16, alloc_size);
     defer allocator.free(slice);
 
-    const big_alignment: usize = switch (std.Target.current.os.tag) {
+    const big_alignment: usize = switch (builtin.os.tag) {
         .windows => page_size * 32, // Windows aligns to 64K.
         else => page_size * 2,
     };
@@ -1058,7 +1067,7 @@ test "realloc large object to larger alignment" {
     var slice = try allocator.alignedAlloc(u8, 16, page_size * 2 + 50);
     defer allocator.free(slice);
 
-    const big_alignment: usize = switch (std.Target.current.os.tag) {
+    const big_alignment: usize = switch (builtin.os.tag) {
         .windows => page_size * 32, // Windows aligns to 64K.
         else => page_size * 2,
     };
@@ -1181,4 +1190,15 @@ test "double frees" {
     try std.testing.expect(GPA.searchBucket(gpa.buckets[index], @ptrToInt(normal_small.ptr)) != null);
     try std.testing.expect(gpa.large_allocations.contains(@ptrToInt(normal_large.ptr)));
     try std.testing.expect(!gpa.large_allocations.contains(@ptrToInt(large.ptr)));
+}
+
+test "bug 9995 fix, large allocs count requested size not backing size" {
+    // with AtLeast, buffer likely to be larger than requested, especially when shrinking
+    var gpa = GeneralPurposeAllocator(.{ .enable_memory_limit = true }){};
+    var buf = try gpa.allocator.allocAdvanced(u8, 1, page_size + 1, .at_least);
+    try std.testing.expect(gpa.total_requested_bytes == page_size + 1);
+    buf = try gpa.allocator.reallocAtLeast(buf, 1);
+    try std.testing.expect(gpa.total_requested_bytes == 1);
+    buf = try gpa.allocator.reallocAtLeast(buf, 2);
+    try std.testing.expect(gpa.total_requested_bytes == 2);
 }

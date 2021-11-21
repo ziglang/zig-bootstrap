@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
 const io = std.io;
 const fs = std.fs;
@@ -9,6 +10,7 @@ const ArrayList = std.ArrayList;
 const Ast = std.zig.Ast;
 const warn = std.log.warn;
 
+const tracy = @import("tracy.zig");
 const Compilation = @import("Compilation.zig");
 const link = @import("link.zig");
 const Package = @import("Package.zig");
@@ -26,7 +28,7 @@ const crash_report = @import("crash_report.zig");
 pub usingnamespace crash_report.root_decls;
 
 pub fn fatal(comptime format: []const u8, args: anytype) noreturn {
-    std.log.emerg(format, args);
+    std.log.err(format, args);
     process.exit(1);
 }
 
@@ -34,7 +36,7 @@ pub fn fatal(comptime format: []const u8, args: anytype) noreturn {
 /// be byte-indexed with a u32 integer.
 pub const max_src_size = std.math.maxInt(u32);
 
-pub const debug_extensions_enabled = std.builtin.mode == .Debug;
+pub const debug_extensions_enabled = builtin.mode == .Debug;
 
 pub const Color = enum {
     auto,
@@ -90,10 +92,10 @@ const debug_usage = normal_usage ++
 
 const usage = if (debug_extensions_enabled) debug_usage else normal_usage;
 
-pub const log_level: std.log.Level = switch (std.builtin.mode) {
+pub const log_level: std.log.Level = switch (builtin.mode) {
     .Debug => .debug,
     .ReleaseSafe, .ReleaseFast => .info,
-    .ReleaseSmall => .crit,
+    .ReleaseSmall => .err,
 };
 
 var log_scopes: std.ArrayListUnmanaged([]const u8) = .{};
@@ -119,14 +121,7 @@ pub fn log(
         } else return;
     }
 
-    // We only recognize 4 log levels in this application.
-    const level_txt = switch (level) {
-        .emerg, .alert, .crit, .err => "error",
-        .warn => "warning",
-        .notice, .info => "info",
-        .debug => "debug",
-    };
-    const prefix1 = level_txt;
+    const prefix1 = comptime level.asText();
     const prefix2 = if (scope == .default) ": " else "(" ++ @tagName(scope) ++ "): ";
 
     // Print the message to stderr, silently ignoring any errors
@@ -142,7 +137,7 @@ pub fn main() anyerror!void {
 
     var gpa_need_deinit = false;
     const gpa = gpa: {
-        if (!std.builtin.link_libc) {
+        if (!builtin.link_libc) {
             gpa_need_deinit = true;
             break :gpa &general_purpose_allocator.allocator;
         }
@@ -161,6 +156,12 @@ pub fn main() anyerror!void {
     const arena = &arena_instance.allocator;
 
     const args = try process.argsAlloc(arena);
+
+    if (tracy.enable_allocation) {
+        var gpa_tracy = tracy.tracyAllocator(gpa);
+        return mainArgs(&gpa_tracy.allocator, arena, args);
+    }
+
     return mainArgs(gpa, arena, args);
 }
 
@@ -329,7 +330,9 @@ const usage_build_generic =
     \\            medium|large]
     \\  -mred-zone                Force-enable the "red-zone"
     \\  -mno-red-zone             Force-disable the "red-zone"
-    \\  -mexec-model=[value]      Execution model (WASI only)
+    \\  -fomit-frame-pointer      Omit the stack frame pointer
+    \\  -fno-omit-frame-pointer   Store the stack frame pointer
+    \\  -mexec-model=[value]      (WASI) Execution model
     \\  --name [name]             Override root name (not a file path)
     \\  -O [mode]                 Choose what to optimize for
     \\    Debug                   (default) Optimizations off, safety on
@@ -384,7 +387,9 @@ const usage_build_generic =
     \\  -ffunction-sections       Places each function in a separate section
     \\
     \\Link Options:
-    \\  -l[lib], --library [lib]       Link against system library
+    \\  -l[lib], --library [lib]       Link against system library (only if actually used)
+    \\  -needed-l[lib],                Link against system library (even if unused)
+    \\    --needed-library [lib]
     \\  -L[d], --library-directory [d] Add a directory to the library search path
     \\  -T[script], --script [script]  Use a custom linker script
     \\  --version-script [path]        Provide a version .map file
@@ -405,6 +410,14 @@ const usage_build_generic =
     \\  -fno-allow-shlib-undefined     Disallows undefined symbols in shared libraries
     \\  --eh-frame-hdr                 Enable C++ exception handling by passing --eh-frame-hdr to linker
     \\  --emit-relocs                  Enable output of relocation sections for post build tools
+    \\  -z [arg]                       Set linker extension flags
+    \\    nodelete                     Indicate that the object cannot be deleted from a process
+    \\    notext                       Permit read-only relocations in read-only segments
+    \\    defs                         Force a fatal error if any undefined symbols remain
+    \\    origin                       Indicate that the object must have its origin processed
+    \\    noexecstack                  Indicate that the object requires an executable stack
+    \\    now                          Force all relocations to be processed on load
+    \\    relro                        Force all relocations to be resolved and be read-only on load
     \\  -dynamic                       Force output to be dynamically linked
     \\  -static                        Force output to be statically linked
     \\  -Bsymbolic                     Bind global references locally
@@ -413,6 +426,10 @@ const usage_build_generic =
     \\  --image-base [addr]            Set base address for executable image
     \\  -framework [name]              (Darwin) link against framework
     \\  -F[dir]                        (Darwin) add search path for frameworks
+    \\  --import-memory                (WebAssembly) import memory from the environment
+    \\  --initial-memory=[bytes]       (WebAssembly) initial size of the linear memory
+    \\  --max-memory=[bytes]           (WebAssembly) maximum size of the linear memory
+    \\  --global-base=[addr]           (WebAssembly) where to start to place global data
     \\
     \\Test Options:
     \\  --test-filter [text]           Skip tests that do not match filter
@@ -420,6 +437,7 @@ const usage_build_generic =
     \\  --test-cmd [arg]               Specify test execution command one arg at a time
     \\  --test-cmd-bin                 Appends test binary path to test cmd args
     \\  --test-evented-io              Runs the test in evented I/O mode
+    \\  --test-no-exec                 Compiles test binary without running it
     \\
     \\Debug Options (Zig Compiler Development):
     \\  -ftime-report                Print timing diagnostics
@@ -431,6 +449,8 @@ const usage_build_generic =
     \\  --verbose-cimport            Enable compiler debug output for C imports
     \\  --verbose-llvm-cpu-features  Enable compiler debug output for LLVM CPU features
     \\  --debug-log [scope]          Enable printing debug/info log messages for scope
+    \\  --debug-compile-errors       Crash with helpful diagnostics at the first compile error
+    \\  --debug-link-snapshot        Enable dumping of the linker's state in JSON format
     \\
 ;
 
@@ -547,6 +567,7 @@ fn buildOutputType(
     var single_threaded = false;
     var function_sections = false;
     var watch = false;
+    var debug_compile_errors = false;
     var verbose_link = std.process.hasEnvVarConstant("ZIG_VERBOSE_LINK");
     var verbose_cc = std.process.hasEnvVarConstant("ZIG_VERBOSE_CC");
     var verbose_air = false;
@@ -583,6 +604,7 @@ fn buildOutputType(
     var want_sanitize_c: ?bool = null;
     var want_stack_check: ?bool = null;
     var want_red_zone: ?bool = null;
+    var omit_frame_pointer: ?bool = null;
     var want_valgrind: ?bool = null;
     var want_tsan: ?bool = null;
     var want_compiler_rt: ?bool = null;
@@ -593,7 +615,12 @@ fn buildOutputType(
     var linker_gc_sections: ?bool = null;
     var linker_allow_shlib_undefined: ?bool = null;
     var linker_bind_global_refs_locally: ?bool = null;
+    var linker_import_memory: ?bool = null;
+    var linker_initial_memory: ?u64 = null;
+    var linker_max_memory: ?u64 = null;
+    var linker_global_base: ?u64 = null;
     var linker_z_nodelete = false;
+    var linker_z_notext = false;
     var linker_z_defs = false;
     var linker_z_origin = false;
     var linker_z_noexecstack = false;
@@ -603,6 +630,7 @@ fn buildOutputType(
     var linker_nxcompat = false;
     var linker_dynamicbase = false;
     var test_evented_io = false;
+    var test_no_exec = false;
     var stack_size_override: ?u64 = null;
     var image_base_override: ?u64 = null;
     var use_llvm: ?bool = null;
@@ -627,8 +655,9 @@ fn buildOutputType(
     var major_subsystem_version: ?u32 = null;
     var minor_subsystem_version: ?u32 = null;
     var wasi_exec_model: ?std.builtin.WasiExecModel = null;
+    var enable_link_snapshots: bool = false;
 
-    var system_libs = std.ArrayList([]const u8).init(gpa);
+    var system_libs = std.StringArrayHashMap(Compilation.SystemLib).init(gpa);
     defer system_libs.deinit();
 
     var wasi_emulated_libs = std.ArrayList(wasi_libc.CRTFile).init(gpa);
@@ -833,10 +862,14 @@ fn buildOutputType(
                         version_script = args[i];
                     } else if (mem.eql(u8, arg, "--library") or mem.eql(u8, arg, "-l")) {
                         if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        // We don't know whether this library is part of libc or libc++ until we resolve the target.
-                        // So we simply append to the list for now.
+                        // We don't know whether this library is part of libc or libc++ until
+                        // we resolve the target, so we simply append to the list for now.
                         i += 1;
-                        try system_libs.append(args[i]);
+                        try system_libs.put(args[i], .{ .needed = false });
+                    } else if (mem.eql(u8, arg, "--needed-library") or mem.eql(u8, arg, "-needed-l")) {
+                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
+                        i += 1;
+                        try system_libs.put(args[i], .{ .needed = true });
                     } else if (mem.eql(u8, arg, "-D") or
                         mem.eql(u8, arg, "-isystem") or
                         mem.eql(u8, arg, "-I") or
@@ -924,6 +957,12 @@ fn buildOutputType(
                         } else {
                             try log_scopes.append(gpa, args[i]);
                         }
+                    } else if (mem.eql(u8, arg, "--debug-link-snapshot")) {
+                        if (!build_options.enable_link_snapshots) {
+                            std.log.warn("Zig was compiled without linker snapshots enabled (-Dlink-snapshot). --debug-link-snapshot has no effect.", .{});
+                        } else {
+                            enable_link_snapshots = true;
+                        }
                     } else if (mem.eql(u8, arg, "-fcompiler-rt")) {
                         want_compiler_rt = true;
                     } else if (mem.eql(u8, arg, "-fno-compiler-rt")) {
@@ -938,6 +977,8 @@ fn buildOutputType(
                         try test_exec_args.append(null);
                     } else if (mem.eql(u8, arg, "--test-evented-io")) {
                         test_evented_io = true;
+                    } else if (mem.eql(u8, arg, "--test-no-exec")) {
+                        test_no_exec = true;
                     } else if (mem.eql(u8, arg, "--watch")) {
                         watch = true;
                     } else if (mem.eql(u8, arg, "-ftime-report")) {
@@ -968,6 +1009,10 @@ fn buildOutputType(
                         want_red_zone = true;
                     } else if (mem.eql(u8, arg, "-mno-red-zone")) {
                         want_red_zone = false;
+                    } else if (mem.eql(u8, arg, "-fomit-frame-pointer")) {
+                        omit_frame_pointer = true;
+                    } else if (mem.eql(u8, arg, "-fno-omit-frame-pointer")) {
+                        omit_frame_pointer = false;
                     } else if (mem.eql(u8, arg, "-fsanitize-c")) {
                         want_sanitize_c = true;
                     } else if (mem.eql(u8, arg, "-fno-sanitize-c")) {
@@ -1071,8 +1116,41 @@ fn buildOutputType(
                         linker_allow_shlib_undefined = true;
                     } else if (mem.eql(u8, arg, "-fno-allow-shlib-undefined")) {
                         linker_allow_shlib_undefined = false;
+                    } else if (mem.eql(u8, arg, "-z")) {
+                        i += 1;
+                        if (i >= args.len) {
+                            fatal("expected linker extension flag after '{s}'", .{arg});
+                        }
+                        const z_arg = args[i];
+                        if (mem.eql(u8, z_arg, "nodelete")) {
+                            linker_z_nodelete = true;
+                        } else if (mem.eql(u8, z_arg, "notext")) {
+                            linker_z_notext = true;
+                        } else if (mem.eql(u8, z_arg, "defs")) {
+                            linker_z_defs = true;
+                        } else if (mem.eql(u8, z_arg, "origin")) {
+                            linker_z_origin = true;
+                        } else if (mem.eql(u8, z_arg, "noexecstack")) {
+                            linker_z_noexecstack = true;
+                        } else if (mem.eql(u8, z_arg, "now")) {
+                            linker_z_now = true;
+                        } else if (mem.eql(u8, z_arg, "relro")) {
+                            linker_z_relro = true;
+                        } else {
+                            warn("unsupported linker extension flag: -z {s}", .{z_arg});
+                        }
+                    } else if (mem.eql(u8, arg, "--import-memory")) {
+                        linker_import_memory = true;
+                    } else if (mem.startsWith(u8, arg, "--initial-memory=")) {
+                        linker_initial_memory = parseIntSuffix(arg, "--initial-memory=".len);
+                    } else if (mem.startsWith(u8, arg, "--max-memory=")) {
+                        linker_max_memory = parseIntSuffix(arg, "--max-memory=".len);
+                    } else if (mem.startsWith(u8, arg, "--global-base=")) {
+                        linker_global_base = parseIntSuffix(arg, "--global-base=".len);
                     } else if (mem.eql(u8, arg, "-Bsymbolic")) {
                         linker_bind_global_refs_locally = true;
+                    } else if (mem.eql(u8, arg, "--debug-compile-errors")) {
+                        debug_compile_errors = true;
                     } else if (mem.eql(u8, arg, "--verbose-link")) {
                         verbose_link = true;
                     } else if (mem.eql(u8, arg, "--verbose-cc")) {
@@ -1092,9 +1170,11 @@ fn buildOutputType(
                     } else if (mem.startsWith(u8, arg, "-F")) {
                         try framework_dirs.append(arg[2..]);
                     } else if (mem.startsWith(u8, arg, "-l")) {
-                        // We don't know whether this library is part of libc or libc++ until we resolve the target.
-                        // So we simply append to the list for now.
-                        try system_libs.append(arg[2..]);
+                        // We don't know whether this library is part of libc or libc++ until
+                        // we resolve the target, so we simply append to the list for now.
+                        try system_libs.put(arg["-l".len..], .{ .needed = false });
+                    } else if (mem.startsWith(u8, arg, "-needed-l")) {
+                        try system_libs.put(arg["-needed-l".len..], .{ .needed = true });
                     } else if (mem.startsWith(u8, arg, "-D") or
                         mem.startsWith(u8, arg, "-I"))
                     {
@@ -1158,6 +1238,7 @@ fn buildOutputType(
             var linker_args = std.ArrayList([]const u8).init(arena);
             var it = ClangArgIterator.init(arena, all_args);
             var emit_llvm = false;
+            var needed = false;
             while (it.has_next) {
                 it.next() catch |err| {
                     fatal("unable to parse command line parameters: {s}", .{@errorName(err)});
@@ -1190,9 +1271,9 @@ fn buildOutputType(
                     },
                     .l => {
                         // -l
-                        // We don't know whether this library is part of libc or libc++ until we resolve the target.
-                        // So we simply append to the list for now.
-                        try system_libs.append(it.only_arg);
+                        // We don't know whether this library is part of libc or libc++ until
+                        // we resolve the target, so we simply append to the list for now.
+                        try system_libs.put(it.only_arg, .{ .needed = needed });
                     },
                     .ignore => {},
                     .driver_punt => {
@@ -1207,6 +1288,8 @@ fn buildOutputType(
                     .no_lto => want_lto = false,
                     .red_zone => want_red_zone = true,
                     .no_red_zone => want_red_zone = false,
+                    .omit_frame_pointer => omit_frame_pointer = true,
+                    .no_omit_frame_pointer => omit_frame_pointer = false,
                     .unwind_tables => want_unwind_tables = true,
                     .no_unwind_tables => want_unwind_tables = false,
                     .nostdlib => ensure_libc_on_non_freestanding = false,
@@ -1228,8 +1311,13 @@ fn buildOutputType(
                                     continue;
                                 }
                             }
-
-                            try linker_args.append(linker_arg);
+                            if (mem.eql(u8, linker_arg, "--as-needed")) {
+                                needed = false;
+                            } else if (mem.eql(u8, linker_arg, "--no-as-needed")) {
+                                needed = true;
+                            } else {
+                                try linker_args.append(linker_arg);
+                            }
                         }
                     },
                     .optimize => {
@@ -1395,14 +1483,24 @@ fn buildOutputType(
                     linker_allow_shlib_undefined = false;
                 } else if (mem.eql(u8, arg, "-Bsymbolic")) {
                     linker_bind_global_refs_locally = true;
+                } else if (mem.eql(u8, arg, "--import-memory")) {
+                    linker_import_memory = true;
+                } else if (mem.startsWith(u8, arg, "--initial-memory=")) {
+                    linker_initial_memory = parseIntSuffix(arg, "--initial-memory=".len);
+                } else if (mem.startsWith(u8, arg, "--max-memory=")) {
+                    linker_max_memory = parseIntSuffix(arg, "--max-memory=".len);
+                } else if (mem.startsWith(u8, arg, "--global-base=")) {
+                    linker_global_base = parseIntSuffix(arg, "--global-base=".len);
                 } else if (mem.eql(u8, arg, "-z")) {
                     i += 1;
                     if (i >= linker_args.items.len) {
-                        fatal("expected linker arg after '{s}'", .{arg});
+                        fatal("expected linker extension flag after '{s}'", .{arg});
                     }
                     const z_arg = linker_args.items[i];
                     if (mem.eql(u8, z_arg, "nodelete")) {
                         linker_z_nodelete = true;
+                    } else if (mem.eql(u8, z_arg, "notext")) {
+                        linker_z_notext = true;
                     } else if (mem.eql(u8, z_arg, "defs")) {
                         linker_z_defs = true;
                     } else if (mem.eql(u8, z_arg, "origin")) {
@@ -1414,7 +1512,7 @@ fn buildOutputType(
                     } else if (mem.eql(u8, z_arg, "relro")) {
                         linker_z_relro = true;
                     } else {
-                        warn("unsupported linker arg: -z {s}", .{z_arg});
+                        warn("unsupported linker extension flag: -z {s}", .{z_arg});
                     }
                 } else if (mem.eql(u8, arg, "--major-image-version")) {
                     i += 1;
@@ -1641,21 +1739,22 @@ fn buildOutputType(
     // existence via flags instead.
     {
         var i: usize = 0;
-        while (i < system_libs.items.len) {
-            const lib_name = system_libs.items[i];
+        while (i < system_libs.count()) {
+            const lib_name = system_libs.keys()[i];
+
             if (target_util.is_libc_lib_name(target_info.target, lib_name)) {
                 link_libc = true;
-                _ = system_libs.orderedRemove(i);
+                _ = system_libs.orderedRemove(lib_name);
                 continue;
             }
             if (target_util.is_libcpp_lib_name(target_info.target, lib_name)) {
                 link_libcpp = true;
-                _ = system_libs.orderedRemove(i);
+                _ = system_libs.orderedRemove(lib_name);
                 continue;
             }
             if (mem.eql(u8, lib_name, "unwind")) {
                 link_libunwind = true;
-                _ = system_libs.orderedRemove(i);
+                _ = system_libs.orderedRemove(lib_name);
                 continue;
             }
             if (std.fs.path.isAbsolute(lib_name)) {
@@ -1664,7 +1763,7 @@ fn buildOutputType(
             if (target_info.target.os.tag == .wasi) {
                 if (wasi_libc.getEmulatedLibCRTFile(lib_name)) |crt_file| {
                     try wasi_emulated_libs.append(crt_file);
-                    _ = system_libs.orderedRemove(i);
+                    _ = system_libs.orderedRemove(lib_name);
                     continue;
                 }
             }
@@ -1684,16 +1783,16 @@ fn buildOutputType(
         }
     }
 
-    if (comptime std.Target.current.isDarwin()) {
+    if (comptime builtin.target.isDarwin()) {
         // If we want to link against frameworks, we need system headers.
         if (framework_dirs.items.len > 0 or frameworks.items.len > 0)
             want_native_include_dirs = true;
     }
 
-    const is_darwin_on_darwin = (comptime std.Target.current.isDarwin()) and cross_target.isDarwin();
+    const is_darwin_on_darwin = (comptime builtin.target.isDarwin()) and cross_target.isDarwin();
 
     if (sysroot == null and (cross_target.isNativeOs() or is_darwin_on_darwin) and
-        (system_libs.items.len != 0 or want_native_include_dirs))
+        (system_libs.count() != 0 or want_native_include_dirs))
     {
         const paths = std.zig.system.NativePaths.detect(arena, target_info) catch |err| {
             fatal("unable to detect native system paths: {s}", .{@errorName(err)});
@@ -1702,7 +1801,7 @@ fn buildOutputType(
             warn("{s}", .{warning});
         }
 
-        const has_sysroot = if (comptime std.Target.current.isDarwin()) outer: {
+        const has_sysroot = if (comptime builtin.target.isDarwin()) outer: {
             const should_get_sdk_path = if (cross_target.isNativeOs() and target_info.target.os.tag == .macos) inner: {
                 const min = target_info.target.os.getVersionRange().semver.min;
                 const at_least_mojave = min.major >= 11 or (min.major >= 10 and min.minor >= 14);
@@ -2060,7 +2159,8 @@ fn buildOutputType(
         .link_objects = link_objects.items,
         .framework_dirs = framework_dirs.items,
         .frameworks = frameworks.items,
-        .system_libs = system_libs.items,
+        .system_lib_names = system_libs.keys(),
+        .system_lib_infos = system_libs.values(),
         .wasi_emulated_libs = wasi_emulated_libs.items,
         .link_libc = link_libc,
         .link_libcpp = link_libcpp,
@@ -2072,6 +2172,7 @@ fn buildOutputType(
         .want_sanitize_c = want_sanitize_c,
         .want_stack_check = want_stack_check,
         .want_red_zone = want_red_zone,
+        .omit_frame_pointer = omit_frame_pointer,
         .want_valgrind = want_valgrind,
         .want_tsan = want_tsan,
         .want_compiler_rt = want_compiler_rt,
@@ -2087,7 +2188,12 @@ fn buildOutputType(
         .linker_gc_sections = linker_gc_sections,
         .linker_allow_shlib_undefined = linker_allow_shlib_undefined,
         .linker_bind_global_refs_locally = linker_bind_global_refs_locally,
+        .linker_import_memory = linker_import_memory,
+        .linker_initial_memory = linker_initial_memory,
+        .linker_max_memory = linker_max_memory,
+        .linker_global_base = linker_global_base,
         .linker_z_nodelete = linker_z_nodelete,
+        .linker_z_notext = linker_z_notext,
         .linker_z_defs = linker_z_defs,
         .linker_z_origin = linker_z_origin,
         .linker_z_noexecstack = linker_z_noexecstack,
@@ -2129,6 +2235,8 @@ fn buildOutputType(
         .disable_lld_caching = !have_enable_cache,
         .subsystem = subsystem,
         .wasi_exec_model = wasi_exec_model,
+        .debug_compile_errors = debug_compile_errors,
+        .enable_link_snapshots = enable_link_snapshots,
     }) catch |err| {
         fatal("unable to create compilation: {s}", .{@errorName(err)});
     };
@@ -2166,8 +2274,19 @@ fn buildOutputType(
         warn("--watch is not recommended with the stage1 backend; it leaks memory and is not capable of incremental compilation", .{});
     }
 
+    if (test_exec_args.items.len == 0 and object_format == .c) default_exec_args: {
+        // Default to using `zig run` to execute the produced .c code from `zig test`.
+        const c_code_loc = emit_bin_loc orelse break :default_exec_args;
+        const c_code_directory = c_code_loc.directory orelse comp.bin_file.options.emit.?.directory;
+        const c_code_path = try fs.path.join(arena, &[_][]const u8{
+            c_code_directory.path orelse ".", c_code_loc.basename,
+        });
+        try test_exec_args.appendSlice(&.{ self_exe_path, "run", "-lc", c_code_path });
+    }
+
     const run_or_test = switch (arg_mode) {
-        .run, .zig_test => true,
+        .run => true,
+        .zig_test => !test_no_exec,
         else => false,
     };
     if (run_or_test) {
@@ -2229,6 +2348,7 @@ fn buildOutputType(
             last_cmd = cmd;
             switch (cmd) {
                 .update => {
+                    tracy.frameMark();
                     if (output_mode == .Exe) {
                         try comp.makeBinFileWritable();
                     }
@@ -2241,6 +2361,7 @@ fn buildOutputType(
                     try stderr.writeAll(repl_help);
                 },
                 .run => {
+                    tracy.frameMark();
                     try runOrTest(
                         comp,
                         gpa,
@@ -2257,6 +2378,7 @@ fn buildOutputType(
                     );
                 },
                 .update_and_run => {
+                    tracy.frameMark();
                     if (output_mode == .Exe) {
                         try comp.makeBinFileWritable();
                     }
@@ -2350,7 +2472,7 @@ fn runOrTest(
     defer argv.deinit();
 
     if (test_exec_args.len == 0) {
-        if (!std.Target.current.canExecBinariesOf(target)) {
+        if (!builtin.target.canExecBinariesOf(target)) {
             switch (arg_mode) {
                 .zig_test => {
                     warn("created {s} but skipping execution because it is non-native", .{exe_path});
@@ -2788,8 +2910,7 @@ pub fn cmdInit(
     const build_zig_contents = template_dir.readFileAlloc(arena, "build.zig", max_bytes) catch |err| {
         fatal("unable to read template file 'build.zig': {s}", .{@errorName(err)});
     };
-    var modified_build_zig_contents = std.ArrayList(u8).init(arena);
-    try modified_build_zig_contents.ensureTotalCapacity(build_zig_contents.len);
+    var modified_build_zig_contents = try std.ArrayList(u8).initCapacity(arena, build_zig_contents.len);
     for (build_zig_contents) |c| {
         if (c == '$') {
             try modified_build_zig_contents.appendSlice(cwd_basename);
@@ -3233,7 +3354,7 @@ pub fn cmdFmt(gpa: *Allocator, arena: *Allocator, args: []const []const u8) !voi
             const Module = @import("Module.zig");
             const AstGen = @import("AstGen.zig");
 
-            var file: Module.Scope.File = .{
+            var file: Module.File = .{
                 .status = .never_loaded,
                 .source_loaded = true,
                 .zir_loaded = false,
@@ -3429,7 +3550,7 @@ fn fmtPathFile(
         const Module = @import("Module.zig");
         const AstGen = @import("AstGen.zig");
 
-        var file: Module.Scope.File = .{
+        var file: Module.File = .{
             .status = .never_loaded,
             .source_loaded = true,
             .zir_loaded = false,
@@ -3695,6 +3816,8 @@ pub const ClangArgIterator = struct {
         nostdlibinc,
         red_zone,
         no_red_zone,
+        omit_frame_pointer,
+        no_omit_frame_pointer,
         strip,
         exec_model,
         emit_llvm,
@@ -3910,7 +4033,7 @@ fn gimmeMoreOfThoseSweetSweetFileDescriptors() void {
     const posix = std.os;
 
     var lim = posix.getrlimit(.NOFILE) catch return; // Oh well; we tried.
-    if (comptime std.Target.current.isDarwin()) {
+    if (comptime builtin.target.isDarwin()) {
         // On Darwin, `NOFILE` is bounded by a hardcoded value `OPEN_MAX`.
         // According to the man pages for setrlimit():
         //   setrlimit() now returns with errno set to EINVAL in places that historically succeeded.
@@ -3954,7 +4077,7 @@ fn detectNativeTargetInfo(gpa: *Allocator, cross_target: std.zig.CrossTarget) !s
 /// check for resource leaks can be accurate. In release builds, this
 /// calls exit(0), and does not return.
 pub fn cleanExit() void {
-    if (std.builtin.mode == .Debug) {
+    if (builtin.mode == .Debug) {
         return;
     } else {
         process.exit(0);
@@ -4019,7 +4142,7 @@ pub fn cmdAstCheck(
         }
     }
 
-    var file: Module.Scope.File = .{
+    var file: Module.File = .{
         .status = .never_loaded,
         .source_loaded = false,
         .tree_loaded = false,
@@ -4170,7 +4293,7 @@ pub fn cmdChangelist(
     if (stat.size > max_src_size)
         return error.FileTooBig;
 
-    var file: Module.Scope.File = .{
+    var file: Module.File = .{
         .status = .never_loaded,
         .source_loaded = false,
         .tree_loaded = false,
@@ -4291,4 +4414,10 @@ pub fn cmdChangelist(
         }
     }
     try bw.flush();
+}
+
+fn parseIntSuffix(arg: []const u8, prefix_len: usize) u64 {
+    return std.fmt.parseUnsigned(u64, arg[prefix_len..], 0) catch |err| {
+        fatal("unable to parse '{s}': {s}", .{ arg, @errorName(err) });
+    };
 }

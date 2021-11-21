@@ -233,7 +233,10 @@ fn analyzeInst(
         .mul,
         .mulwrap,
         .mul_sat,
-        .div,
+        .div_float,
+        .div_trunc,
+        .div_floor,
+        .div_exact,
         .rem,
         .mod,
         .ptr_add,
@@ -250,10 +253,9 @@ fn analyzeInst(
         .bool_and,
         .bool_or,
         .store,
+        .array_elem_val,
         .slice_elem_val,
-        .ptr_slice_elem_val,
         .ptr_elem_val,
-        .ptr_ptr_elem_val,
         .shl,
         .shl_exact,
         .shl_sat,
@@ -263,6 +265,8 @@ fn analyzeInst(
         .atomic_store_release,
         .atomic_store_seq_cst,
         .set_union_tag,
+        .min,
+        .max,
         => {
             const o = inst_datas[inst].bin_op;
             return trackOperands(a, new_set, inst, main_tomb, .{ o.lhs, o.rhs, .none });
@@ -270,6 +274,7 @@ fn analyzeInst(
 
         .arg,
         .alloc,
+        .ret_ptr,
         .constant,
         .const_ty,
         .breakpoint,
@@ -287,6 +292,7 @@ fn analyzeInst(
         .trunc,
         .optional_payload,
         .optional_payload_ptr,
+        .optional_payload_ptr_set,
         .wrap_optional,
         .unwrap_errunion_payload,
         .unwrap_errunion_err,
@@ -296,6 +302,8 @@ fn analyzeInst(
         .wrap_errunion_err,
         .slice_ptr,
         .slice_len,
+        .ptr_slice_len_ptr,
+        .ptr_slice_ptr_ptr,
         .struct_field_ptr_index_0,
         .struct_field_ptr_index_1,
         .struct_field_ptr_index_2,
@@ -306,6 +314,7 @@ fn analyzeInst(
         .get_union_tag,
         .clz,
         .ctz,
+        .popcount,
         => {
             const o = inst_datas[inst].ty_op;
             return trackOperands(a, new_set, inst, main_tomb, .{ o.operand, .none, .none });
@@ -322,6 +331,7 @@ fn analyzeInst(
         .ptrtoint,
         .bool_to_int,
         .ret,
+        .ret_load,
         => {
             const operand = inst_datas[inst].un_op;
             return trackOperands(a, new_set, inst, main_tomb, .{ operand, .none, .none });
@@ -354,7 +364,7 @@ fn analyzeInst(
             const extra = a.air.extraData(Air.StructField, inst_datas[inst].ty_pl.payload).data;
             return trackOperands(a, new_set, inst, main_tomb, .{ extra.struct_operand, .none, .none });
         },
-        .ptr_elem_ptr => {
+        .ptr_elem_ptr, .slice_elem_ptr, .slice => {
             const extra = a.air.extraData(Air.Bin, inst_datas[inst].ty_pl.payload).data;
             return trackOperands(a, new_set, inst, main_tomb, .{ extra.lhs, extra.rhs, .none });
         },

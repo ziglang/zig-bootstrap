@@ -18,6 +18,22 @@ const wasi_libc = @import("wasi_libc.zig");
 const Air = @import("Air.zig");
 const Liveness = @import("Liveness.zig");
 
+pub const SystemLib = struct {
+    needed: bool = false,
+};
+
+pub fn hashAddSystemLibs(
+    hh: *Cache.HashHelper,
+    hm: std.StringArrayHashMapUnmanaged(SystemLib),
+) void {
+    const keys = hm.keys();
+    hh.add(keys.len);
+    hh.addListOfBytes(keys);
+    for (hm.values()) |value| {
+        hh.add(value.needed);
+    }
+}
+
 pub const producer_string = if (builtin.is_test) "zig test" else "zig " ++ build_options.version;
 
 pub const Emit = struct {
@@ -72,6 +88,7 @@ pub const Options = struct {
     emit_relocs: bool,
     rdynamic: bool,
     z_nodelete: bool,
+    z_notext: bool,
     z_defs: bool,
     z_origin: bool,
     z_noexecstack: bool,
@@ -81,6 +98,10 @@ pub const Options = struct {
     nxcompat: bool,
     dynamicbase: bool,
     bind_global_refs_locally: bool,
+    import_memory: bool,
+    initial_memory: ?u64,
+    max_memory: ?u64,
+    global_base: ?u64,
     is_native_os: bool,
     is_native_abi: bool,
     pic: bool,
@@ -90,6 +111,7 @@ pub const Options = struct {
     tsan: bool,
     stack_check: bool,
     red_zone: bool,
+    omit_frame_pointer: bool,
     single_threaded: bool,
     verbose_link: bool,
     dll_export_fns: bool,
@@ -115,7 +137,7 @@ pub const Options = struct {
     objects: []const []const u8,
     framework_dirs: []const []const u8,
     frameworks: []const []const u8,
-    system_libs: std.StringArrayHashMapUnmanaged(void),
+    system_libs: std.StringArrayHashMapUnmanaged(SystemLib),
     wasi_emulated_libs: []const wasi_libc.CRTFile,
     lib_dirs: []const []const u8,
     rpath_list: []const []const u8,
@@ -125,6 +147,9 @@ pub const Options = struct {
 
     /// WASI-only. Type of WASI execution model ("command" or "reactor").
     wasi_exec_model: std.builtin.WasiExecModel = undefined,
+
+    /// (Zig compiler development) Enable dumping of linker's state as JSON.
+    enable_link_snapshots: bool = false,
 
     pub fn effectiveOutputMode(options: Options) std.builtin.OutputMode {
         return if (options.use_lld) .Obj else options.output_mode;
@@ -192,12 +217,16 @@ pub const File = struct {
     /// rewriting it. A malicious file is detected as incremental link failure
     /// and does not cause Illegal Behavior. This operation is not atomic.
     pub fn openPath(allocator: *Allocator, options: Options) !*File {
+        if (options.object_format == .macho) {
+            return &(try MachO.openPath(allocator, options)).base;
+        }
+
         const use_stage1 = build_options.is_stage1 and options.use_stage1;
         if (use_stage1 or options.emit == null) {
             return switch (options.object_format) {
                 .coff => &(try Coff.createEmpty(allocator, options)).base,
                 .elf => &(try Elf.createEmpty(allocator, options)).base,
-                .macho => &(try MachO.createEmpty(allocator, options)).base,
+                .macho => unreachable,
                 .wasm => &(try Wasm.createEmpty(allocator, options)).base,
                 .plan9 => return &(try Plan9.createEmpty(allocator, options)).base,
                 .c => unreachable, // Reported error earlier.
@@ -215,7 +244,7 @@ pub const File = struct {
                 return switch (options.object_format) {
                     .coff => &(try Coff.createEmpty(allocator, options)).base,
                     .elf => &(try Elf.createEmpty(allocator, options)).base,
-                    .macho => &(try MachO.createEmpty(allocator, options)).base,
+                    .macho => unreachable,
                     .plan9 => &(try Plan9.createEmpty(allocator, options)).base,
                     .wasm => &(try Wasm.createEmpty(allocator, options)).base,
                     .c => unreachable, // Reported error earlier.
@@ -235,7 +264,7 @@ pub const File = struct {
         const file: *File = switch (options.object_format) {
             .coff => &(try Coff.openPath(allocator, sub_path, options)).base,
             .elf => &(try Elf.openPath(allocator, sub_path, options)).base,
-            .macho => &(try MachO.openPath(allocator, sub_path, options)).base,
+            .macho => unreachable,
             .plan9 => &(try Plan9.openPath(allocator, sub_path, options)).base,
             .wasm => &(try Wasm.openPath(allocator, sub_path, options)).base,
             .c => &(try C.openPath(allocator, sub_path, options)).base,
@@ -292,7 +321,7 @@ pub const File = struct {
                     // make executable, so we don't have to close it.
                     return;
                 }
-                if (comptime std.Target.current.isDarwin() and std.Target.current.cpu.arch == .aarch64) {
+                if (comptime builtin.target.isDarwin() and builtin.target.cpu.arch == .aarch64) {
                     if (base.options.target.cpu.arch != .aarch64) return; // If we're not targeting aarch64, nothing to do.
                     // XNU starting with Big Sur running on arm64 is caching inodes of running binaries.
                     // Any change to the binary will effectively invalidate the kernel's cache
@@ -576,7 +605,11 @@ pub const File = struct {
                 const full_obj_path = try o_directory.join(arena, &[_][]const u8{obj_basename});
                 break :blk full_obj_path;
             }
-            try base.flushModule(comp);
+            if (base.options.object_format == .macho) {
+                try base.cast(MachO).?.flushObject(comp);
+            } else {
+                try base.flushModule(comp);
+            }
             const obj_basename = base.intermediary_basename.?;
             const full_obj_path = try directory.join(arena, &[_][]const u8{obj_basename});
             break :blk full_obj_path;
@@ -637,10 +670,10 @@ pub const File = struct {
             };
         }
 
-        var object_files = std.ArrayList([*:0]const u8).init(base.allocator);
+        const num_object_files = base.options.objects.len + comp.c_object_table.count() + 2;
+        var object_files = try std.ArrayList([*:0]const u8).initCapacity(base.allocator, num_object_files);
         defer object_files.deinit();
 
-        try object_files.ensureTotalCapacity(base.options.objects.len + comp.c_object_table.count() + 2);
         for (base.options.objects) |obj_path| {
             object_files.appendAssumeCapacity(try arena.dupeZ(u8, obj_path));
         }
@@ -711,7 +744,7 @@ pub fn determineMode(options: Options) fs.File.Mode {
     // with 0o755 permissions, but it works appropriately if the system is configured
     // more leniently. As another data point, C's fopen seems to open files with the
     // 666 mode.
-    const executable_mode = if (std.Target.current.os.tag == .windows) 0 else 0o777;
+    const executable_mode = if (builtin.target.os.tag == .windows) 0 else 0o777;
     switch (options.effectiveOutputMode()) {
         .Lib => return switch (options.link_mode) {
             .Dynamic => executable_mode,

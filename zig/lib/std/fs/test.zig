@@ -1,6 +1,6 @@
 const std = @import("../std.zig");
+const builtin = @import("builtin");
 const testing = std.testing;
-const builtin = std.builtin;
 const fs = std.fs;
 const mem = std.mem;
 const wasi = std.os.wasi;
@@ -1021,4 +1021,44 @@ test ". and .. in absolute functions" {
     try testing.expectEqual(fs.PrevStatus.stale, prev_status);
 
     try fs.deleteDirAbsolute(subdir_path);
+}
+
+test "chmod" {
+    if (builtin.os.tag == .windows or builtin.os.tag == .wasi)
+        return error.SkipZigTest;
+
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile("test_file", .{ .mode = 0o600 });
+    defer file.close();
+    try testing.expect((try file.stat()).mode & 0o7777 == 0o600);
+
+    try file.chmod(0o644);
+    try testing.expect((try file.stat()).mode & 0o7777 == 0o644);
+
+    try tmp.dir.makeDir("test_dir");
+    var dir = try tmp.dir.openDir("test_dir", .{ .iterate = true });
+    defer dir.close();
+
+    try dir.chmod(0o700);
+    try testing.expect((try dir.stat()).mode & 0o7777 == 0o700);
+}
+
+test "chown" {
+    if (builtin.os.tag == .windows or builtin.os.tag == .wasi)
+        return error.SkipZigTest;
+
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile("test_file", .{});
+    defer file.close();
+    try file.chown(null, null);
+
+    try tmp.dir.makeDir("test_dir");
+
+    var dir = try tmp.dir.openDir("test_dir", .{ .iterate = true });
+    defer dir.close();
+    try dir.chown(null, null);
 }

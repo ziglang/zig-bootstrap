@@ -19,49 +19,6 @@ fn testDerefPtrOneVal() !void {
     try expect(@TypeOf(y.x) == void);
 }
 
-test "assigning integer to C pointer" {
-    var x: i32 = 0;
-    var ptr: [*c]u8 = 0;
-    var ptr2: [*c]u8 = x;
-    if (false) {
-        ptr;
-        ptr2;
-    }
-}
-
-test "implicit cast single item pointer to C pointer and back" {
-    var y: u8 = 11;
-    var x: [*c]u8 = &y;
-    var z: *u8 = x;
-    z.* += 1;
-    try expect(y == 12);
-}
-
-test "C pointer comparison and arithmetic" {
-    const S = struct {
-        fn doTheTest() !void {
-            var ptr1: [*c]u32 = 0;
-            var ptr2 = ptr1 + 10;
-            try expect(ptr1 == 0);
-            try expect(ptr1 >= 0);
-            try expect(ptr1 <= 0);
-            // expect(ptr1 < 1);
-            // expect(ptr1 < one);
-            // expect(1 > ptr1);
-            // expect(one > ptr1);
-            try expect(ptr1 < ptr2);
-            try expect(ptr2 > ptr1);
-            try expect(ptr2 >= 40);
-            try expect(ptr2 == 40);
-            try expect(ptr2 <= 40);
-            ptr2 -= 10;
-            try expect(ptr1 == ptr2);
-        }
-    };
-    try S.doTheTest();
-    comptime try S.doTheTest();
-}
-
 test "peer type resolution with C pointers" {
     var ptr_one: *u8 = undefined;
     var ptr_many: [*]u8 = undefined;
@@ -101,12 +58,6 @@ test "implicit cast error unions with non-optional to optional pointer" {
     };
     try S.doTheTest();
     comptime try S.doTheTest();
-}
-
-test "initialize const optional C pointer to null" {
-    const a: ?[*c]i32 = null;
-    try expect(a == null);
-    comptime try expect(a == null);
 }
 
 test "compare equality of optional and non-optional pointer" {

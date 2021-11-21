@@ -7,6 +7,7 @@
 //! * `initial_delay_ms`
 
 const std = @import("std");
+const builtin = @import("builtin");
 const windows = std.os.windows;
 const testing = std.testing;
 const assert = std.debug.assert;
@@ -55,7 +56,7 @@ done: bool = true,
 /// Protects the `refresh` function, as well as `node.recently_updated_child`.
 /// Without this, callsites would call `Node.end` and then free `Node` memory
 /// while it was still being accessed by the `refresh` function.
-update_lock: std.Thread.Mutex = .{},
+update_mutex: std.Thread.Mutex = .{},
 
 /// Keeps track of how many columns in the terminal have been output, so that
 /// we can move the cursor back later.
@@ -102,14 +103,14 @@ pub const Node = struct {
         self.context.maybeRefresh();
         if (self.parent) |parent| {
             {
-                const held = self.context.update_lock.acquire();
-                defer held.release();
+                self.context.update_mutex.lock();
+                defer self.context.update_mutex.unlock();
                 _ = @cmpxchgStrong(?*Node, &parent.recently_updated_child, self, null, .Monotonic, .Monotonic);
             }
             parent.completeOne();
         } else {
-            const held = self.context.update_lock.acquire();
-            defer held.release();
+            self.context.update_mutex.lock();
+            defer self.context.update_mutex.unlock();
             self.context.done = true;
             self.context.refreshWithHeldLock();
         }
@@ -144,10 +145,10 @@ pub fn start(self: *Progress, name: []const u8, estimated_total_items: usize) !*
     if (stderr.supportsAnsiEscapeCodes()) {
         self.terminal = stderr;
         self.supports_ansi_escape_codes = true;
-    } else if (std.builtin.os.tag == .windows and stderr.isTty()) {
+    } else if (builtin.os.tag == .windows and stderr.isTty()) {
         self.is_windows_terminal = true;
         self.terminal = stderr;
-    } else if (std.builtin.os.tag != .windows) {
+    } else if (builtin.os.tag != .windows) {
         // we are in a "dumb" terminal like in acme or writing to a file
         self.terminal = stderr;
     }
@@ -169,8 +170,8 @@ pub fn start(self: *Progress, name: []const u8, estimated_total_items: usize) !*
 pub fn maybeRefresh(self: *Progress) void {
     const now = self.timer.read();
     if (now < self.initial_delay_ns) return;
-    const held = self.update_lock.tryAcquire() orelse return;
-    defer held.release();
+    if (!self.update_mutex.tryLock()) return;
+    defer self.update_mutex.unlock();
     // TODO I have observed this to happen sometimes. I think we need to follow Rust's
     // lead and guarantee monotonically increasing times in the std lib itself.
     if (now < self.prev_refresh_timestamp) return;
@@ -180,8 +181,8 @@ pub fn maybeRefresh(self: *Progress) void {
 
 /// Updates the terminal and resets `self.next_refresh_timestamp`. Thread-safe.
 pub fn refresh(self: *Progress) void {
-    const held = self.update_lock.tryAcquire() orelse return;
-    defer held.release();
+    if (!self.update_mutex.tryLock()) return;
+    defer self.update_mutex.unlock();
 
     return self.refreshWithHeldLock();
 }
@@ -200,7 +201,7 @@ fn refreshWithHeldLock(self: *Progress) void {
         if (self.supports_ansi_escape_codes) {
             end += (std.fmt.bufPrint(self.output_buffer[end..], "\x1b[{d}D", .{self.columns_written}) catch unreachable).len;
             end += (std.fmt.bufPrint(self.output_buffer[end..], "\x1b[0K", .{}) catch unreachable).len;
-        } else if (std.builtin.os.tag == .windows) winapi: {
+        } else if (builtin.os.tag == .windows) winapi: {
             std.debug.assert(self.is_windows_terminal);
 
             var info: windows.CONSOLE_SCREEN_BUFFER_INFO = undefined;

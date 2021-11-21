@@ -1,6 +1,5 @@
 const std = @import("std.zig");
 const mem = std.mem;
-const builtin = std.builtin;
 const Version = std.builtin.Version;
 
 /// TODO Nearly all the functions in this namespace would be
@@ -1017,7 +1016,7 @@ pub const Target = struct {
                 };
             }
 
-            pub fn endian(arch: Arch) builtin.Endian {
+            pub fn endian(arch: Arch) std.builtin.Endian {
                 return switch (arch) {
                     .avr,
                     .arm,
@@ -1302,7 +1301,8 @@ pub const Target = struct {
         }
     };
 
-    pub const current = builtin.target;
+    /// TODO delete this deprecated declaration after 0.9.0 is released
+    pub const current = @compileError("instead of std.Target.current, use @import(\"builtin\").target");
 
     pub const stack_align = 16;
 
@@ -1710,6 +1710,13 @@ pub const Target = struct {
             .mips, .mipsel => ".v",
             // ISAs without designated characters get 'X' for lack of a better option.
             else => ".X",
+        };
+    }
+
+    pub inline fn longDoubleIsF128(target: Target) bool {
+        return switch (target.cpu.arch) {
+            .riscv64, .aarch64, .aarch64_be, .aarch64_32, .s390x, .mips64, .mips64el => true,
+            else => false,
         };
     }
 };

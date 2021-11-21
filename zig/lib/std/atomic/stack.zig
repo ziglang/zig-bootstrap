@@ -1,5 +1,6 @@
+const std = @import("../std.zig");
+const builtin = @import("builtin");
 const assert = std.debug.assert;
-const builtin = std.builtin;
 const expect = std.testing.expect;
 
 /// Many reader, many writer, non-allocating, thread-safe
@@ -67,7 +68,6 @@ pub fn Stack(comptime T: type) type {
     };
 }
 
-const std = @import("../std.zig");
 const Context = struct {
     allocator: *std.mem.Allocator,
     stack: *Stack(i32),
@@ -147,10 +147,11 @@ test "std.atomic.stack" {
 
 fn startPuts(ctx: *Context) u8 {
     var put_count: usize = puts_per_thread;
-    var r = std.rand.DefaultPrng.init(0xdeadbeef);
+    var prng = std.rand.DefaultPrng.init(0xdeadbeef);
+    const random = prng.random();
     while (put_count != 0) : (put_count -= 1) {
         std.time.sleep(1); // let the os scheduler be our fuzz
-        const x = @bitCast(i32, r.random.int(u32));
+        const x = @bitCast(i32, random.int(u32));
         const node = ctx.allocator.create(Stack(i32).Node) catch unreachable;
         node.* = Stack(i32).Node{
             .next = undefined,

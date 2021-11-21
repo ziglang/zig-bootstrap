@@ -28,6 +28,9 @@ pub const Context = opaque {
     pub const createEnumAttribute = LLVMCreateEnumAttribute;
     extern fn LLVMCreateEnumAttribute(*const Context, KindID: c_uint, Val: u64) *const Attribute;
 
+    pub const createStringAttribute = LLVMCreateStringAttribute;
+    extern fn LLVMCreateStringAttribute(*const Context, Key: [*]const u8, Key_Len: c_uint, Value: [*]const u8, Value_Len: c_uint) *const Attribute;
+
     pub const intType = LLVMIntTypeInContext;
     extern fn LLVMIntTypeInContext(C: *const Context, NumBits: c_uint) *const Type;
 
@@ -95,7 +98,12 @@ pub const Value = opaque {
     extern fn LLVMAppendExistingBasicBlock(Fn: *const Value, BB: *const BasicBlock) void;
 
     pub const addIncoming = LLVMAddIncoming;
-    extern fn LLVMAddIncoming(PhiNode: *const Value, IncomingValues: [*]*const Value, IncomingBlocks: [*]*const BasicBlock, Count: c_uint) void;
+    extern fn LLVMAddIncoming(
+        PhiNode: *const Value,
+        IncomingValues: [*]const *const Value,
+        IncomingBlocks: [*]const *const BasicBlock,
+        Count: c_uint,
+    ) void;
 
     pub const getNextInstruction = LLVMGetNextInstruction;
     extern fn LLVMGetNextInstruction(Inst: *const Value) ?*const Value;
@@ -137,6 +145,9 @@ pub const Value = opaque {
     pub const constIntToPtr = LLVMConstIntToPtr;
     extern fn LLVMConstIntToPtr(ConstantVal: *const Value, ToType: *const Type) *const Value;
 
+    pub const constPtrToInt = LLVMConstPtrToInt;
+    extern fn LLVMConstPtrToInt(ConstantVal: *const Value, ToType: *const Type) *const Value;
+
     pub const setWeak = LLVMSetWeak;
     extern fn LLVMSetWeak(CmpXchgInst: *const Value, IsWeak: Bool) void;
 
@@ -163,6 +174,21 @@ pub const Value = opaque {
 
     pub const deleteFunction = LLVMDeleteFunction;
     extern fn LLVMDeleteFunction(Fn: *const Value) void;
+
+    pub const addSretAttr = ZigLLVMAddSretAttr;
+    extern fn ZigLLVMAddSretAttr(fn_ref: *const Value, ArgNo: c_uint, type_val: *const Type) void;
+
+    pub const setCallSret = ZigLLVMSetCallSret;
+    extern fn ZigLLVMSetCallSret(Call: *const Value, return_type: *const Type) void;
+
+    pub const getParam = LLVMGetParam;
+    extern fn LLVMGetParam(Fn: *const Value, Index: c_uint) *const Value;
+
+    pub const setInitializer = LLVMSetInitializer;
+    extern fn LLVMSetInitializer(GlobalVar: *const Value, ConstantVal: *const Value) void;
+
+    pub const addCase = LLVMAddCase;
+    extern fn LLVMAddCase(Switch: *const Value, OnVal: *const Value, Dest: *const BasicBlock) void;
 };
 
 pub const Type = opaque {
@@ -182,7 +208,7 @@ pub const Type = opaque {
     extern fn LLVMConstReal(RealTy: *const Type, N: f64) *const Value;
 
     pub const constArray = LLVMConstArray;
-    extern fn LLVMConstArray(ElementTy: *const Type, ConstantVals: [*]*const Value, Length: c_uint) *const Value;
+    extern fn LLVMConstArray(ElementTy: *const Type, ConstantVals: [*]const *const Value, Length: c_uint) *const Value;
 
     pub const constNamedStruct = LLVMConstNamedStruct;
     extern fn LLVMConstNamedStruct(
@@ -200,6 +226,9 @@ pub const Type = opaque {
     pub const arrayType = LLVMArrayType;
     extern fn LLVMArrayType(ElementType: *const Type, ElementCount: c_uint) *const Type;
 
+    pub const vectorType = LLVMVectorType;
+    extern fn LLVMVectorType(ElementType: *const Type, ElementCount: c_uint) *const Type;
+
     pub const structSetBody = LLVMStructSetBody;
     extern fn LLVMStructSetBody(
         StructTy: *const Type,
@@ -208,8 +237,14 @@ pub const Type = opaque {
         Packed: Bool,
     ) void;
 
+    pub const structGetTypeAtIndex = LLVMStructGetTypeAtIndex;
+    extern fn LLVMStructGetTypeAtIndex(StructTy: *const Type, i: c_uint) *const Type;
+
     pub const getTypeKind = LLVMGetTypeKind;
     extern fn LLVMGetTypeKind(Ty: *const Type) TypeKind;
+
+    pub const getElementType = LLVMGetElementType;
+    extern fn LLVMGetElementType(Ty: *const Type) *const Type;
 };
 
 pub const Module = opaque {
@@ -292,11 +327,11 @@ pub const VerifierFailureAction = enum(c_int) {
 pub const constNeg = LLVMConstNeg;
 extern fn LLVMConstNeg(ConstantVal: *const Value) *const Value;
 
-pub const setInitializer = LLVMSetInitializer;
-extern fn LLVMSetInitializer(GlobalVar: *const Value, ConstantVal: *const Value) void;
-
-pub const getParam = LLVMGetParam;
-extern fn LLVMGetParam(Fn: *const Value, Index: c_uint) *const Value;
+pub const constVector = LLVMConstVector;
+extern fn LLVMConstVector(
+    ScalarConstantVals: [*]*const Value,
+    Size: c_uint,
+) *const Value;
 
 pub const getEnumAttributeKindForName = LLVMGetEnumAttributeKindForName;
 extern fn LLVMGetEnumAttributeKindForName(Name: [*]const u8, SLen: usize) c_uint;
@@ -359,22 +394,14 @@ pub const Builder = opaque {
         Name: [*:0]const u8,
     ) *const Value;
 
-    pub const buildCall = LLVMBuildCall;
-    extern fn LLVMBuildCall(
+    pub const buildCall = ZigLLVMBuildCall;
+    extern fn ZigLLVMBuildCall(
         *const Builder,
         Fn: *const Value,
         Args: [*]const *const Value,
         NumArgs: c_uint,
-        Name: [*:0]const u8,
-    ) *const Value;
-
-    pub const buildCall2 = LLVMBuildCall2;
-    extern fn LLVMBuildCall2(
-        *const Builder,
-        *const Type,
-        Fn: *const Value,
-        Args: [*]*const Value,
-        NumArgs: c_uint,
+        CC: CallConv,
+        attr: CallAttr,
         Name: [*:0]const u8,
     ) *const Value;
 
@@ -541,6 +568,9 @@ pub const Builder = opaque {
     pub const buildCondBr = LLVMBuildCondBr;
     extern fn LLVMBuildCondBr(*const Builder, If: *const Value, Then: *const BasicBlock, Else: *const BasicBlock) *const Value;
 
+    pub const buildSwitch = LLVMBuildSwitch;
+    extern fn LLVMBuildSwitch(*const Builder, V: *const Value, Else: *const BasicBlock, NumCases: c_uint) *const Value;
+
     pub const buildPhi = LLVMBuildPhi;
     extern fn LLVMBuildPhi(*const Builder, Ty: *const Type, Name: [*:0]const u8) *const Value;
 
@@ -549,6 +579,23 @@ pub const Builder = opaque {
         *const Builder,
         AggVal: *const Value,
         Index: c_uint,
+        Name: [*:0]const u8,
+    ) *const Value;
+
+    pub const buildExtractElement = LLVMBuildExtractElement;
+    extern fn LLVMBuildExtractElement(
+        *const Builder,
+        VecVal: *const Value,
+        Index: *const Value,
+        Name: [*:0]const u8,
+    ) *const Value;
+
+    pub const buildInsertElement = LLVMBuildInsertElement;
+    extern fn LLVMBuildInsertElement(
+        *const Builder,
+        VecVal: *const Value,
+        EltVal: *const Value,
+        Index: *const Value,
         Name: [*:0]const u8,
     ) *const Value;
 
@@ -699,6 +746,30 @@ pub const Builder = opaque {
         Size: *const Value,
         is_volatile: bool,
     ) *const Value;
+
+    pub const buildMaxNum = ZigLLVMBuildMaxNum;
+    extern fn ZigLLVMBuildMaxNum(builder: *const Builder, LHS: *const Value, RHS: *const Value, name: [*:0]const u8) *const Value;
+
+    pub const buildMinNum = ZigLLVMBuildMinNum;
+    extern fn ZigLLVMBuildMinNum(builder: *const Builder, LHS: *const Value, RHS: *const Value, name: [*:0]const u8) *const Value;
+
+    pub const buildUMax = ZigLLVMBuildUMax;
+    extern fn ZigLLVMBuildUMax(builder: *const Builder, LHS: *const Value, RHS: *const Value, name: [*:0]const u8) *const Value;
+
+    pub const buildUMin = ZigLLVMBuildUMin;
+    extern fn ZigLLVMBuildUMin(builder: *const Builder, LHS: *const Value, RHS: *const Value, name: [*:0]const u8) *const Value;
+
+    pub const buildSMax = ZigLLVMBuildSMax;
+    extern fn ZigLLVMBuildSMax(builder: *const Builder, LHS: *const Value, RHS: *const Value, name: [*:0]const u8) *const Value;
+
+    pub const buildSMin = ZigLLVMBuildSMin;
+    extern fn ZigLLVMBuildSMin(builder: *const Builder, LHS: *const Value, RHS: *const Value, name: [*:0]const u8) *const Value;
+
+    pub const buildExactUDiv = LLVMBuildExactUDiv;
+    extern fn LLVMBuildExactUDiv(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
+
+    pub const buildExactSDiv = LLVMBuildExactSDiv;
+    extern fn LLVMBuildExactSDiv(*const Builder, LHS: *const Value, RHS: *const Value, Name: [*:0]const u8) *const Value;
 };
 
 pub const IntPredicate = enum(c_uint) {
@@ -1182,6 +1253,14 @@ pub const CallConv = enum(c_uint) {
     AMDGPU_LS = 95,
     AMDGPU_ES = 96,
     AArch64_VectorCall = 97,
+};
+
+pub const CallAttr = enum(c_int) {
+    Auto,
+    NeverTail,
+    NeverInline,
+    AlwaysTail,
+    AlwaysInline,
 };
 
 pub const address_space = struct {

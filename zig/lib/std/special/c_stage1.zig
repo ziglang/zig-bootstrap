@@ -5,6 +5,7 @@ const isNan = std.math.isNan;
 const native_arch = builtin.cpu.arch;
 const native_abi = builtin.abi;
 const native_os = builtin.os.tag;
+const long_double_is_f128 = builtin.target.longDoubleIsF128();
 
 const is_wasm = switch (native_arch) {
     .wasm32, .wasm64 => true,
@@ -638,30 +639,31 @@ export fn fmod(x: f64, y: f64) f64 {
     return generic_fmod(f64, x, y);
 }
 
-// TODO add intrinsics for these (and probably the double version too)
-// and have the math stuff use the intrinsic. same as @mod and @rem
-export fn floorf(x: f32) f32 {
-    return math.floor(x);
-}
-
 export fn ceilf(x: f32) f32 {
     return math.ceil(x);
 }
-
-export fn floor(x: f64) f64 {
-    return math.floor(x);
-}
-
 export fn ceil(x: f64) f64 {
     return math.ceil(x);
+}
+export fn ceill(x: c_longdouble) c_longdouble {
+    if (!long_double_is_f128) {
+        @panic("TODO implement this");
+    }
+    return math.ceil(x);
+}
+
+export fn fmaf(a: f32, b: f32, c: f32) f32 {
+    return math.fma(f32, a, b, c);
 }
 
 export fn fma(a: f64, b: f64, c: f64) f64 {
     return math.fma(f64, a, b, c);
 }
-
-export fn fmaf(a: f32, b: f32, c: f32) f32 {
-    return math.fma(f32, a, b, c);
+export fn fmal(a: c_longdouble, b: c_longdouble, c: c_longdouble) c_longdouble {
+    if (!long_double_is_f128) {
+        @panic("TODO implement this");
+    }
+    return math.fma(c_longdouble, a, b, c);
 }
 
 export fn sin(a: f64) f64 {
@@ -743,6 +745,13 @@ export fn trunc(a: f64) f64 {
 }
 
 export fn truncf(a: f32) f32 {
+    return math.trunc(a);
+}
+
+export fn truncl(a: c_longdouble) c_longdouble {
+    if (!long_double_is_f128) {
+        @panic("TODO implement this");
+    }
     return math.trunc(a);
 }
 

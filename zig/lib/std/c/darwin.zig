@@ -1,6 +1,6 @@
 const std = @import("../std.zig");
-const assert = std.debug.assert;
 const builtin = @import("builtin");
+const assert = std.debug.assert;
 const macho = std.macho;
 const native_arch = builtin.target.cpu.arch;
 const maxInt = std.math.maxInt;
@@ -72,7 +72,7 @@ const mach_hdr = if (@sizeOf(usize) == 8) mach_header_64 else mach_header;
 var dummy_execute_header: mach_hdr = undefined;
 pub extern var _mh_execute_header: mach_hdr;
 comptime {
-    if (std.Target.current.isDarwin()) {
+    if (builtin.target.isDarwin()) {
         @export(dummy_execute_header, .{ .name = "_mh_execute_header", .linkage = .Weak });
     }
 }
@@ -1703,8 +1703,6 @@ pub const CLOCK = struct {
 /// Max open files per process
 /// https://opensource.apple.com/source/xnu/xnu-4903.221.2/bsd/sys/syslimits.h.auto.html
 pub const OPEN_MAX = 10240;
-pub const RUSAGE_SELF = 0;
-pub const RUSAGE_CHILDREN = -1;
 
 pub const rusage = extern struct {
     utime: timeval,
@@ -1723,6 +1721,9 @@ pub const rusage = extern struct {
     nsignals: isize,
     nvcsw: isize,
     nivcsw: isize,
+
+    pub const SELF = 0;
+    pub const CHILDREN = -1;
 };
 
 pub const rlimit_resource = enum(c_int) {
@@ -1764,24 +1765,27 @@ pub const SHUT = struct {
 };
 
 // Term
-pub const VEOF = 0;
-pub const VEOL = 1;
-pub const VEOL2 = 2;
-pub const VERASE = 3;
-pub const VWERASE = 4;
-pub const VKILL = 5;
-pub const VREPRINT = 6;
-pub const VINTR = 8;
-pub const VQUIT = 9;
-pub const VSUSP = 10;
-pub const VDSUSP = 11;
-pub const VSTART = 12;
-pub const VSTOP = 13;
-pub const VLNEXT = 14;
-pub const VDISCARD = 15;
-pub const VMIN = 16;
-pub const VTIME = 17;
-pub const VSTATUS = 18;
+pub const V = struct {
+    pub const EOF = 0;
+    pub const EOL = 1;
+    pub const EOL2 = 2;
+    pub const ERASE = 3;
+    pub const WERASE = 4;
+    pub const KILL = 5;
+    pub const REPRINT = 6;
+    pub const INTR = 8;
+    pub const QUIT = 9;
+    pub const SUSP = 10;
+    pub const DSUSP = 11;
+    pub const START = 12;
+    pub const STOP = 13;
+    pub const LNEXT = 14;
+    pub const DISCARD = 15;
+    pub const MIN = 16;
+    pub const TIME = 17;
+    pub const STATUS = 18;
+};
+
 pub const NCCS = 20; // 2 spares (7, 19)
 
 pub const IGNBRK = 0x00000001; // ignore BREAK condition

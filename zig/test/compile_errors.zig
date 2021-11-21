@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const TestContext = @import("../src/test.zig").TestContext;
 
 pub fn addCases(ctx: *TestContext) !void {
@@ -2898,7 +2899,7 @@ pub fn addCases(ctx: *TestContext) !void {
         "tmp.zig:2:18: error: invalid operands to binary expression: 'error{A}' and 'error{B}'",
     });
 
-    if (std.Target.current.os.tag == .linux) {
+    if (builtin.os.tag == .linux) {
         ctx.testErrStage1("implicit dependency on libc",
             \\extern "c" fn exit(u8) void;
             \\export fn entry() void {
@@ -8834,9 +8835,10 @@ pub fn addCases(ctx: *TestContext) !void {
 
     ctx.objErrStage1("Issue #9165: windows tcp server compilation error",
         \\const std = @import("std");
+        \\const builtin = @import("builtin");
         \\pub const io_mode = .evented;
         \\pub fn main() !void {
-        \\    if (std.builtin.os.tag == .windows) {
+        \\    if (builtin.os.tag == .windows) {
         \\        _ = try (std.net.StreamServer.init(.{})).accept();
         \\    } else {
         \\        @compileError("Unsupported OS");
@@ -8865,6 +8867,25 @@ pub fn addCases(ctx: *TestContext) !void {
         \\}
     , &[_][]const u8{
         "error: invalid operands to binary expression: 'f32' and 'f32'",
+    });
+
+    ctx.objErrStage1("saturating shl does not allow negative rhs at comptime",
+        \\pub fn main() !void {
+        \\    _ = @as(i32, 1) <<| @as(i32, -2);
+        \\}
+    , &[_][]const u8{
+        "error: shift by negative value -2",
+    });
+
+    ctx.objErrStage1("saturating shl assign does not allow negative rhs at comptime",
+        \\pub fn main() !void {
+        \\    comptime {
+        \\      var x = @as(i32, 1);
+        \\      x <<|= @as(i32, -2);
+        \\  }
+        \\}
+    , &[_][]const u8{
+        "error: shift by negative value -2",
     });
 
     ctx.objErrStage1("undeclared identifier in unanalyzed branch",

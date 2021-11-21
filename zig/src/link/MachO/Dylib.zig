@@ -4,7 +4,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const fs = std.fs;
 const fmt = std.fmt;
-const log = std.log.scoped(.dylib);
+const log = std.log.scoped(.link);
 const macho = std.macho;
 const math = std.math;
 const mem = std.mem;
@@ -180,7 +180,7 @@ pub fn parse(self: *Dylib, allocator: *Allocator, target: std.Target) !void {
 fn readLoadCommands(self: *Dylib, allocator: *Allocator, reader: anytype) !void {
     const should_lookup_reexports = self.header.?.flags & macho.MH_NO_REEXPORTED_DYLIBS == 0;
 
-    try self.load_commands.ensureTotalCapacity(allocator, self.header.?.ncmds);
+    try self.load_commands.ensureUnusedCapacity(allocator, self.header.?.ncmds);
 
     var i: u16 = 0;
     while (i < self.header.?.ncmds) : (i += 1) {

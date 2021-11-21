@@ -1,6 +1,6 @@
-const root = @import("root");
-const builtin = std.builtin;
 const std = @import("std.zig");
+const builtin = @import("builtin");
+const root = @import("root");
 const os = std.os;
 const mem = std.mem;
 const base64 = std.base64;
@@ -9,7 +9,7 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const math = std.math;
 
-const is_darwin = std.Target.current.os.tag.isDarwin();
+const is_darwin = builtin.os.tag.isDarwin();
 
 pub const path = @import("fs/path.zig");
 pub const File = @import("fs/file.zig").File;
@@ -2178,6 +2178,37 @@ pub const Dir = struct {
         };
         return file.stat();
     }
+
+    pub const ChmodError = File.ChmodError;
+
+    /// Changes the mode of the directory.
+    /// The process must have the correct privileges in order to do this
+    /// successfully, or must have the effective user ID matching the owner
+    /// of the directory. Additionally, the directory must have been opened
+    /// with `OpenDirOptions{ .iterate = true }`.
+    pub fn chmod(self: Dir, new_mode: File.Mode) ChmodError!void {
+        const file: File = .{
+            .handle = self.fd,
+            .capable_io_mode = .blocking,
+        };
+        try file.chmod(new_mode);
+    }
+
+    /// Changes the owner and group of the directory.
+    /// The process must have the correct privileges in order to do this
+    /// successfully. The group may be changed by the owner of the directory to
+    /// any group of which the owner is a member. Additionally, the directory
+    /// must have been opened with `OpenDirOptions{ .iterate = true }`. If the
+    /// owner or group is specified as `null`, the ID is not changed.
+    pub fn chown(self: Dir, owner: ?File.Uid, group: ?File.Gid) ChownError!void {
+        const file: File = .{
+            .handle = self.fd,
+            .capable_io_mode = .blocking,
+        };
+        try file.chown(owner, group);
+    }
+
+    pub const ChownError = File.ChownError;
 };
 
 /// Returns a handle to the current working directory. It is not opened with iteration capability.
@@ -2607,7 +2638,7 @@ const CopyFileError = error{SystemResources} || os.CopyFileRangeError || os.Send
 // The copy starts at offset 0, the initial offsets are preserved.
 // No metadata is transferred over.
 fn copy_file(fd_in: os.fd_t, fd_out: os.fd_t) CopyFileError!void {
-    if (comptime std.Target.current.isDarwin()) {
+    if (comptime builtin.target.isDarwin()) {
         const rc = os.system.fcopyfile(fd_in, fd_out, null, os.system.COPYFILE_DATA);
         switch (os.errno(rc)) {
             .SUCCESS => return,
@@ -2620,7 +2651,7 @@ fn copy_file(fd_in: os.fd_t, fd_out: os.fd_t) CopyFileError!void {
         }
     }
 
-    if (std.Target.current.os.tag == .linux) {
+    if (builtin.os.tag == .linux) {
         // Try copy_file_range first as that works at the FS level and is the
         // most efficient method (if available).
         var offset: u64 = 0;

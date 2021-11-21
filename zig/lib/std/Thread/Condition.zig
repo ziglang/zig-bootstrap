@@ -5,6 +5,7 @@
 impl: Impl = .{},
 
 const std = @import("../std.zig");
+const builtin = @import("builtin");
 const Condition = @This();
 const windows = std.os.windows;
 const linux = std.os.linux;
@@ -23,9 +24,9 @@ pub fn broadcast(cond: *Condition) void {
     cond.impl.broadcast();
 }
 
-const Impl = if (std.builtin.single_threaded)
+const Impl = if (builtin.single_threaded)
     SingleThreadedCondition
-else if (std.Target.current.os.tag == .windows)
+else if (builtin.os.tag == .windows)
     WindowsCondition
 else if (std.Thread.use_pthreads)
     PthreadCondition
@@ -101,7 +102,7 @@ pub const AtomicCondition = struct {
 
         fn wait(cond: *@This()) void {
             while (@atomicLoad(i32, &cond.futex, .Acquire) == 0) {
-                switch (std.Target.current.os.tag) {
+                switch (builtin.os.tag) {
                     .linux => {
                         switch (linux.getErrno(linux.futex_wait(
                             &cond.futex,
@@ -123,7 +124,7 @@ pub const AtomicCondition = struct {
         fn notify(cond: *@This()) void {
             @atomicStore(i32, &cond.futex, 1, .Release);
 
-            switch (std.Target.current.os.tag) {
+            switch (builtin.os.tag) {
                 .linux => {
                     switch (linux.getErrno(linux.futex_wake(
                         &cond.futex,
@@ -144,8 +145,8 @@ pub const AtomicCondition = struct {
         var waiter = QueueList.Node{ .data = .{} };
 
         {
-            const held = cond.queue_mutex.acquire();
-            defer held.release();
+            cond.queue_mutex.lock();
+            defer cond.queue_mutex.unlock();
 
             cond.queue_list.prepend(&waiter);
             @atomicStore(bool, &cond.pending, true, .SeqCst);
@@ -161,8 +162,8 @@ pub const AtomicCondition = struct {
             return;
 
         const maybe_waiter = blk: {
-            const held = cond.queue_mutex.acquire();
-            defer held.release();
+            cond.queue_mutex.lock();
+            defer cond.queue_mutex.unlock();
 
             const maybe_waiter = cond.queue_list.popFirst();
             @atomicStore(bool, &cond.pending, cond.queue_list.first != null, .SeqCst);
@@ -180,8 +181,8 @@ pub const AtomicCondition = struct {
         @atomicStore(bool, &cond.pending, false, .SeqCst);
 
         var waiters = blk: {
-            const held = cond.queue_mutex.acquire();
-            defer held.release();
+            cond.queue_mutex.lock();
+            defer cond.queue_mutex.unlock();
 
             const waiters = cond.queue_list;
             cond.queue_list = .{};

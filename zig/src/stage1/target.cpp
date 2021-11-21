@@ -680,6 +680,8 @@ uint32_t target_c_type_size_in_bits(const ZigTarget *target, CIntType id) {
         case OsSolaris:
         case OsEmscripten:
         case OsPlan9:
+        case OsCUDA:
+        case OsNVCL:
             switch (id) {
                 case CIntTypeShort:
                 case CIntTypeUShort:
@@ -741,8 +743,6 @@ uint32_t target_c_type_size_in_bits(const ZigTarget *target, CIntType id) {
         case OsRTEMS:
         case OsNaCl:
         case OsAIX:
-        case OsCUDA:
-        case OsNVCL:
         case OsAMDHSA:
         case OsPS4:
         case OsELFIAMCU:
@@ -997,6 +997,22 @@ ZigLLVM_EnvironmentType target_default_abi(ZigLLVM_ArchType arch, Os os) {
 
 bool target_has_debug_info(const ZigTarget *target) {
     return !target_is_wasm(target);
+}
+
+bool target_long_double_is_f128(const ZigTarget *target) {
+    switch (target->arch) {
+        case ZigLLVM_riscv64:
+        case ZigLLVM_aarch64:
+        case ZigLLVM_aarch64_be:
+        case ZigLLVM_aarch64_32:
+        case ZigLLVM_systemz:
+        case ZigLLVM_mips64:
+        case ZigLLVM_mips64el:
+            return true;
+
+        default:
+            return false;
+    }
 }
 
 bool target_is_riscv(const ZigTarget *target) {

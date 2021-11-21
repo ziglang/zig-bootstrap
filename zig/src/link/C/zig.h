@@ -123,6 +123,7 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <limits.h>
+
 #define int128_t __int128
 #define uint128_t unsigned __int128
 ZIG_EXTERN_C void *memcpy (void *ZIG_RESTRICT, const void *ZIG_RESTRICT, size_t);
@@ -356,6 +357,18 @@ static inline long long zig_subw_longlong(long long lhs, long long rhs, long lon
     return (long long)(((unsigned long long)lhs) - ((unsigned long long)rhs));
 }
 
+static inline float zig_bitcast_f32_u32(uint32_t arg) {
+    float dest;
+    memcpy(&dest, &arg, sizeof dest);
+    return dest;
+}
+
+static inline float zig_bitcast_f64_u64(uint64_t arg) {
+    double dest;
+    memcpy(&dest, &arg, sizeof dest);
+    return dest;
+}
+
 #define zig_add_sat_u(ZT, T) static inline T zig_adds_##ZT(T x, T y, T max) { \
     return (x > max - y) ? max : x + y; \
 }
@@ -419,7 +432,7 @@ zig_mul_sat_u(u32,   uint32_t,  uint64_t)
 zig_mul_sat_s(i32,    int32_t,   int64_t)
 zig_mul_sat_u(u64,   uint64_t, uint128_t)
 zig_mul_sat_s(i64,    int64_t,  int128_t)
-zig_mul_sat_s(isize, intptr_t, int128_t)
+zig_mul_sat_s(isize, intptr_t,  int128_t)
 zig_mul_sat_s(short,    short, int)
 zig_mul_sat_s(int,        int, long)
 zig_mul_sat_s(long,      long, long long)

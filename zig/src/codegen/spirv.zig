@@ -139,7 +139,7 @@ pub const SPIRVModule = struct {
     }
 
     fn resolveSourceFileName(self: *SPIRVModule, decl: *Decl) !ResultId {
-        const path = decl.namespace.file_scope.sub_file_path;
+        const path = decl.getFileScope().sub_file_path;
         const result = try self.file_names.getOrPut(path);
         if (!result.found_existing) {
             result.value_ptr.* = self.allocResultId();
@@ -295,7 +295,7 @@ pub const DeclGen = struct {
     fn fail(self: *DeclGen, comptime format: []const u8, args: anytype) Error {
         @setCold(true);
         const src: LazySrcLoc = .{ .node_offset = 0 };
-        const src_loc = src.toSrcLocWithDecl(self.decl);
+        const src_loc = src.toSrcLoc(self.decl);
         self.error_msg = try Module.ErrorMsg.create(self.spv.module.gpa, src_loc, format, args);
         return error.AnalysisFail;
     }
@@ -629,7 +629,7 @@ pub const DeclGen = struct {
             const params = decl.ty.fnParamLen();
             var i: usize = 0;
 
-            try self.args.ensureTotalCapacity(params);
+            try self.args.ensureUnusedCapacity(params);
             while (i < params) : (i += 1) {
                 const param_type_id = self.spv.types.get(decl.ty.fnParamType(i)).?;
                 const arg_result_id = self.spv.allocResultId();
@@ -669,7 +669,6 @@ pub const DeclGen = struct {
             .add, .addwrap => try self.airArithOp(inst, .{.OpFAdd, .OpIAdd, .OpIAdd}),
             .sub, .subwrap => try self.airArithOp(inst, .{.OpFSub, .OpISub, .OpISub}),
             .mul, .mulwrap => try self.airArithOp(inst, .{.OpFMul, .OpIMul, .OpIMul}),
-            .div           => try self.airArithOp(inst, .{.OpFDiv, .OpSDiv, .OpUDiv}),
 
             .bit_and  => try self.airBinOpSimple(inst, .OpBitwiseAnd),
             .bit_or   => try self.airBinOpSimple(inst, .OpBitwiseOr),

@@ -670,7 +670,7 @@ pub const CreateSymbolicLinkError = error{
 /// Needs either:
 /// - `SeCreateSymbolicLinkPrivilege` privilege
 /// or
-/// - Developper mode on Windows 10
+/// - Developer mode on Windows 10
 /// otherwise fails with `error.AccessDenied`. In which case `sym_link_path` may still
 /// be created on the file system but will lack reparse processing data applied to it.
 pub fn CreateSymbolicLink(
@@ -1324,8 +1324,8 @@ pub fn WSASocketW(
                     if (!first) return error.Unexpected;
                     first = false;
 
-                    var held = wsa_startup_mutex.acquire();
-                    defer held.release();
+                    wsa_startup_mutex.lock();
+                    defer wsa_startup_mutex.unlock();
 
                     // Here we could use a flag to prevent multiple threads to prevent
                     // multiple calls to WSAStartup, but it doesn't matter. We're globally
