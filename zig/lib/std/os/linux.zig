@@ -4096,55 +4096,55 @@ pub const V = switch (native_arch) {
     },
 };
 
-pub const IGNBRK = 1;
-pub const BRKINT = 2;
-pub const IGNPAR = 4;
-pub const PARMRK = 8;
-pub const INPCK = 16;
-pub const ISTRIP = 32;
-pub const INLCR = 64;
-pub const IGNCR = 128;
-pub const ICRNL = 256;
-pub const IUCLC = 512;
-pub const IXON = 1024;
-pub const IXANY = 2048;
-pub const IXOFF = 4096;
-pub const IMAXBEL = 8192;
-pub const IUTF8 = 16384;
+pub const IGNBRK: tcflag_t = 1;
+pub const BRKINT: tcflag_t = 2;
+pub const IGNPAR: tcflag_t = 4;
+pub const PARMRK: tcflag_t = 8;
+pub const INPCK: tcflag_t = 16;
+pub const ISTRIP: tcflag_t = 32;
+pub const INLCR: tcflag_t = 64;
+pub const IGNCR: tcflag_t = 128;
+pub const ICRNL: tcflag_t = 256;
+pub const IUCLC: tcflag_t = 512;
+pub const IXON: tcflag_t = 1024;
+pub const IXANY: tcflag_t = 2048;
+pub const IXOFF: tcflag_t = 4096;
+pub const IMAXBEL: tcflag_t = 8192;
+pub const IUTF8: tcflag_t = 16384;
 
-pub const OPOST = 1;
-pub const OLCUC = 2;
-pub const ONLCR = 4;
-pub const OCRNL = 8;
-pub const ONOCR = 16;
-pub const ONLRET = 32;
-pub const OFILL = 64;
-pub const OFDEL = 128;
-pub const VTDLY = 16384;
-pub const VT0 = 0;
-pub const VT1 = 16384;
+pub const OPOST: tcflag_t = 1;
+pub const OLCUC: tcflag_t = 2;
+pub const ONLCR: tcflag_t = 4;
+pub const OCRNL: tcflag_t = 8;
+pub const ONOCR: tcflag_t = 16;
+pub const ONLRET: tcflag_t = 32;
+pub const OFILL: tcflag_t = 64;
+pub const OFDEL: tcflag_t = 128;
+pub const VTDLY: tcflag_t = 16384;
+pub const VT0: tcflag_t = 0;
+pub const VT1: tcflag_t = 16384;
 
-pub const CSIZE = 48;
-pub const CS5 = 0;
-pub const CS6 = 16;
-pub const CS7 = 32;
-pub const CS8 = 48;
-pub const CSTOPB = 64;
-pub const CREAD = 128;
-pub const PARENB = 256;
-pub const PARODD = 512;
-pub const HUPCL = 1024;
-pub const CLOCAL = 2048;
+pub const CSIZE: tcflag_t = 48;
+pub const CS5: tcflag_t = 0;
+pub const CS6: tcflag_t = 16;
+pub const CS7: tcflag_t = 32;
+pub const CS8: tcflag_t = 48;
+pub const CSTOPB: tcflag_t = 64;
+pub const CREAD: tcflag_t = 128;
+pub const PARENB: tcflag_t = 256;
+pub const PARODD: tcflag_t = 512;
+pub const HUPCL: tcflag_t = 1024;
+pub const CLOCAL: tcflag_t = 2048;
 
-pub const ISIG = 1;
-pub const ICANON = 2;
-pub const ECHO = 8;
-pub const ECHOE = 16;
-pub const ECHOK = 32;
-pub const ECHONL = 64;
-pub const NOFLSH = 128;
-pub const TOSTOP = 256;
-pub const IEXTEN = 32768;
+pub const ISIG: tcflag_t = 1;
+pub const ICANON: tcflag_t = 2;
+pub const ECHO: tcflag_t = 8;
+pub const ECHOE: tcflag_t = 16;
+pub const ECHOK: tcflag_t = 32;
+pub const ECHONL: tcflag_t = 64;
+pub const NOFLSH: tcflag_t = 128;
+pub const TOSTOP: tcflag_t = 256;
+pub const IEXTEN: tcflag_t = 32768;
 
 pub const TCSA = enum(c_uint) {
     NOW,
@@ -4197,65 +4197,68 @@ pub const ifreq = extern struct {
 };
 
 // doc comments copied from musl
-pub const rlimit_resource = enum(c_int) {
-    /// Per-process CPU limit, in seconds.
-    CPU,
+pub const rlimit_resource = if (native_arch.isMIPS() or native_arch.isSPARC())
+    arch_bits.rlimit_resource
+else
+    enum(c_int) {
+        /// Per-process CPU limit, in seconds.
+        CPU,
 
-    /// Largest file that can be created, in bytes.
-    FSIZE,
+        /// Largest file that can be created, in bytes.
+        FSIZE,
 
-    /// Maximum size of data segment, in bytes.
-    DATA,
+        /// Maximum size of data segment, in bytes.
+        DATA,
 
-    /// Maximum size of stack segment, in bytes.
-    STACK,
+        /// Maximum size of stack segment, in bytes.
+        STACK,
 
-    /// Largest core file that can be created, in bytes.
-    CORE,
+        /// Largest core file that can be created, in bytes.
+        CORE,
 
-    /// Largest resident set size, in bytes.
-    /// This affects swapping; processes that are exceeding their
-    /// resident set size will be more likely to have physical memory
-    /// taken from them.
-    RSS,
+        /// Largest resident set size, in bytes.
+        /// This affects swapping; processes that are exceeding their
+        /// resident set size will be more likely to have physical memory
+        /// taken from them.
+        RSS,
 
-    /// Number of processes.
-    NPROC,
+        /// Number of processes.
+        NPROC,
 
-    /// Number of open files.
-    NOFILE,
+        /// Number of open files.
+        NOFILE,
 
-    /// Locked-in-memory address space.
-    MEMLOCK,
+        /// Locked-in-memory address space.
+        MEMLOCK,
 
-    /// Address space limit.
-    AS,
+        /// Address space limit.
+        AS,
 
-    /// Maximum number of file locks.
-    LOCKS,
+        /// Maximum number of file locks.
+        LOCKS,
 
-    /// Maximum number of pending signals.
-    SIGPENDING,
+        /// Maximum number of pending signals.
+        SIGPENDING,
 
-    /// Maximum bytes in POSIX message queues.
-    MSGQUEUE,
+        /// Maximum bytes in POSIX message queues.
+        MSGQUEUE,
 
-    /// Maximum nice priority allowed to raise to.
-    /// Nice levels 19 .. -20 correspond to 0 .. 39
-    /// values of this resource limit.
-    NICE,
+        /// Maximum nice priority allowed to raise to.
+        /// Nice levels 19 .. -20 correspond to 0 .. 39
+        /// values of this resource limit.
+        NICE,
 
-    /// Maximum realtime priority allowed for non-priviledged
-    /// processes.
-    RTPRIO,
+        /// Maximum realtime priority allowed for non-priviledged
+        /// processes.
+        RTPRIO,
 
-    /// Maximum CPU time in µs that a process scheduled under a real-time
-    /// scheduling policy may consume without making a blocking system
-    /// call before being forcibly descheduled.
-    RTTIME,
+        /// Maximum CPU time in µs that a process scheduled under a real-time
+        /// scheduling policy may consume without making a blocking system
+        /// call before being forcibly descheduled.
+        RTTIME,
 
-    _,
-};
+        _,
+    };
 
 pub const rlim_t = u64;
 

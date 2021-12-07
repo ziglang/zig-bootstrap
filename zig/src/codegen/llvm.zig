@@ -15,6 +15,7 @@ const TypedValue = @import("../TypedValue.zig");
 const Zir = @import("../Zir.zig");
 const Air = @import("../Air.zig");
 const Liveness = @import("../Liveness.zig");
+const target_util = @import("../target.zig");
 
 const Value = @import("../value.zig").Value;
 const Type = @import("../type.zig").Type;
@@ -23,7 +24,7 @@ const LazySrcLoc = Module.LazySrcLoc;
 
 const Error = error{ OutOfMemory, CodegenFail };
 
-pub fn targetTriple(allocator: *Allocator, target: std.Target) ![:0]u8 {
+pub fn targetTriple(allocator: Allocator, target: std.Target) ![:0]u8 {
     const llvm_arch = switch (target.cpu.arch) {
         .arm => "arm",
         .armeb => "armeb",
@@ -190,14 +191,14 @@ pub const Object = struct {
         std.hash_map.default_max_load_percentage,
     );
 
-    pub fn create(gpa: *Allocator, sub_path: []const u8, options: link.Options) !*Object {
+    pub fn create(gpa: Allocator, sub_path: []const u8, options: link.Options) !*Object {
         const obj = try gpa.create(Object);
         errdefer gpa.destroy(obj);
         obj.* = try Object.init(gpa, sub_path, options);
         return obj;
     }
 
-    pub fn init(gpa: *Allocator, sub_path: []const u8, options: link.Options) !Object {
+    pub fn init(gpa: Allocator, sub_path: []const u8, options: link.Options) !Object {
         const context = llvm.Context.create();
         errdefer context.dispose();
 
@@ -244,19 +245,6 @@ pub const Object = struct {
         // TODO handle float ABI better- it should depend on the ABI portion of std.Target
         const float_abi: llvm.ABIType = .Default;
 
-        // TODO a way to override this as part of std.Target ABI?
-        const abi_name: ?[*:0]const u8 = switch (options.target.cpu.arch) {
-            .riscv32 => switch (options.target.os.tag) {
-                .linux => "ilp32d",
-                else => "ilp32",
-            },
-            .riscv64 => switch (options.target.os.tag) {
-                .linux => "lp64d",
-                else => "lp64",
-            },
-            else => null,
-        };
-
         const target_machine = llvm.TargetMachine.create(
             target,
             llvm_target_triple.ptr,
@@ -267,7 +255,7 @@ pub const Object = struct {
             code_model,
             options.function_sections,
             float_abi,
-            abi_name,
+            if (target_util.llvmMachineAbi(options.target)) |s| s.ptr else null,
         );
         errdefer target_machine.dispose();
 
@@ -287,7 +275,7 @@ pub const Object = struct {
         };
     }
 
-    pub fn deinit(self: *Object, gpa: *Allocator) void {
+    pub fn deinit(self: *Object, gpa: Allocator) void {
         self.target_machine.dispose();
         self.llvm_module.dispose();
         self.context.dispose();
@@ -297,13 +285,13 @@ pub const Object = struct {
         self.* = undefined;
     }
 
-    pub fn destroy(self: *Object, gpa: *Allocator) void {
+    pub fn destroy(self: *Object, gpa: Allocator) void {
         self.deinit(gpa);
         gpa.destroy(self);
     }
 
     fn locPath(
-        arena: *Allocator,
+        arena: Allocator,
         opt_loc: ?Compilation.EmitLoc,
         cache_directory: Compilation.Directory,
     ) !?[*:0]u8 {
@@ -331,7 +319,7 @@ pub const Object = struct {
 
         var arena_allocator = std.heap.ArenaAllocator.init(comp.gpa);
         defer arena_allocator.deinit();
-        const arena = &arena_allocator.allocator;
+        const arena = arena_allocator.allocator();
 
         const mod = comp.bin_file.options.module.?;
         const cache_dir = mod.zig_cache_artifact_directory;
@@ -554,7 +542,7 @@ pub const DeclGen = struct {
     object: *Object,
     module: *Module,
     decl: *Module.Decl,
-    gpa: *Allocator,
+    gpa: Allocator,
     err_msg: ?*Module.ErrorMsg,
 
     fn todo(self: *DeclGen, comptime format: []const u8, args: anytype) Error {
@@ -779,7 +767,7 @@ pub const DeclGen = struct {
 
                 // The Type memory is ephemeral; since we want to store a longer-lived
                 // reference, we need to copy it here.
-                gop.key_ptr.* = try t.copy(&dg.object.type_map_arena.allocator);
+                gop.key_ptr.* = try t.copy(dg.object.type_map_arena.allocator());
 
                 const opaque_obj = t.castTag(.@"opaque").?.data;
                 const name = try opaque_obj.getFullyQualifiedName(gpa);
@@ -837,7 +825,7 @@ pub const DeclGen = struct {
 
                 // The Type memory is ephemeral; since we want to store a longer-lived
                 // reference, we need to copy it here.
-                gop.key_ptr.* = try t.copy(&dg.object.type_map_arena.allocator);
+                gop.key_ptr.* = try t.copy(dg.object.type_map_arena.allocator());
 
                 const struct_obj = t.castTag(.@"struct").?.data;
 
@@ -871,7 +859,7 @@ pub const DeclGen = struct {
 
                 // The Type memory is ephemeral; since we want to store a longer-lived
                 // reference, we need to copy it here.
-                gop.key_ptr.* = try t.copy(&dg.object.type_map_arena.allocator);
+                gop.key_ptr.* = try t.copy(dg.object.type_map_arena.allocator());
 
                 const union_obj = t.cast(Type.Payload.Union).?.data;
                 const target = dg.module.getTarget();
@@ -1621,7 +1609,7 @@ pub const DeclGen = struct {
 };
 
 pub const FuncGen = struct {
-    gpa: *Allocator,
+    gpa: Allocator,
     dg: *DeclGen,
     air: Air,
     liveness: Liveness,
@@ -2063,7 +2051,13 @@ pub const FuncGen = struct {
         const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
         const extra = self.air.extraData(Air.Block, ty_pl.payload);
         const body = self.air.extra[extra.end..][0..extra.data.body_len];
+        const inst_ty = self.air.typeOfIndex(inst);
         const parent_bb = self.context.createBasicBlock("Block");
+
+        if (inst_ty.isNoReturn()) {
+            try self.genBody(body);
+            return null;
+        }
 
         var break_bbs: BreakBasicBlocks = .{};
         defer break_bbs.deinit(self.gpa);
@@ -2084,7 +2078,6 @@ pub const FuncGen = struct {
         self.builder.positionBuilderAtEnd(parent_bb);
 
         // If the block does not return a value, we dont have to create a phi node.
-        const inst_ty = self.air.typeOfIndex(inst);
         if (!inst_ty.hasCodeGenBits()) return null;
 
         const raw_llvm_ty = try self.dg.llvmType(inst_ty);
@@ -2480,7 +2473,7 @@ pub const FuncGen = struct {
 
         var arena_allocator = std.heap.ArenaAllocator.init(self.gpa);
         defer arena_allocator.deinit();
-        const arena = &arena_allocator.allocator;
+        const arena = arena_allocator.allocator();
 
         const llvm_params_len = args.len;
         const llvm_param_types = try arena.alloc(*const llvm.Type, llvm_params_len);

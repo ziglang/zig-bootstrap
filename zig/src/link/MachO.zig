@@ -63,6 +63,11 @@ page_size: u16,
 /// https://github.com/ziglang/zig/issues/9567
 requires_adhoc_codesig: bool,
 
+/// If true, the linker will preallocate several sections and segments before starting the linking
+/// process. This is for example true for stage2 debug builds, however, this is false for stage1
+/// and potentially stage2 release builds in the future.
+needs_prealloc: bool = true,
+
 /// We commit 0x1000 = 4096 bytes of space to the header and
 /// the table of load commands. This should be plenty for any
 /// potential future extensions.
@@ -154,6 +159,7 @@ tentatives: std.AutoArrayHashMapUnmanaged(u32, void) = .{},
 locals_free_list: std.ArrayListUnmanaged(u32) = .{},
 globals_free_list: std.ArrayListUnmanaged(u32) = .{},
 
+mh_execute_header_index: ?u32 = null,
 dyld_stub_binder_index: ?u32 = null,
 dyld_private_atom: ?*Atom = null,
 stub_helper_preamble_atom: ?*Atom = null,
@@ -279,7 +285,7 @@ pub const SrcFn = struct {
     };
 };
 
-pub fn openPath(allocator: *Allocator, options: link.Options) !*MachO {
+pub fn openPath(allocator: Allocator, options: link.Options) !*MachO {
     assert(options.object_format == .macho);
 
     const use_stage1 = build_options.is_stage1 and options.use_stage1;
@@ -365,7 +371,7 @@ pub fn openPath(allocator: *Allocator, options: link.Options) !*MachO {
     return self;
 }
 
-pub fn createEmpty(gpa: *Allocator, options: link.Options) !*MachO {
+pub fn createEmpty(gpa: Allocator, options: link.Options) !*MachO {
     const self = try gpa.create(MachO);
     const cpu_arch = options.target.cpu.arch;
     const os_tag = options.target.os.tag;
@@ -374,6 +380,7 @@ pub fn createEmpty(gpa: *Allocator, options: link.Options) !*MachO {
     // Adhoc code signature is required when targeting aarch64-macos either directly or indirectly via the simulator
     // ABI such as aarch64-ios-simulator, etc.
     const requires_adhoc_codesig = cpu_arch == .aarch64 and (os_tag == .macos or abi == .simulator);
+    const needs_prealloc = !(build_options.is_stage1 and options.use_stage1);
 
     self.* = .{
         .base = .{
@@ -384,6 +391,7 @@ pub fn createEmpty(gpa: *Allocator, options: link.Options) !*MachO {
         },
         .page_size = page_size,
         .requires_adhoc_codesig = requires_adhoc_codesig,
+        .needs_prealloc = needs_prealloc,
     };
 
     return self;
@@ -411,7 +419,7 @@ pub fn flushModule(self: *MachO, comp: *Compilation) !void {
 
     var arena_allocator = std.heap.ArenaAllocator.init(self.base.allocator);
     defer arena_allocator.deinit();
-    const arena = &arena_allocator.allocator;
+    const arena = arena_allocator.allocator();
 
     const directory = self.base.options.emit.?.directory; // Just an alias to make it shorter to type.
 
@@ -727,8 +735,11 @@ pub fn flushModule(self: *MachO, comp: *Compilation) !void {
                 }
             }
             if (!libsystem_available) {
+                const libsystem_name = try std.fmt.allocPrint(arena, "libSystem.{d}.tbd", .{
+                    self.base.options.target.os.version_range.semver.min.major,
+                });
                 const full_path = try comp.zig_lib_directory.join(arena, &[_][]const u8{
-                    "libc", "darwin", "libSystem.B.tbd",
+                    "libc", "darwin", libsystem_name,
                 });
                 try libs.append(full_path);
             }
@@ -842,8 +853,11 @@ pub fn flushModule(self: *MachO, comp: *Compilation) !void {
                 Compilation.dump_argv(argv.items);
             }
 
-            try self.parseInputFiles(positionals.items, self.base.options.sysroot);
-            try self.parseLibs(libs.items, self.base.options.sysroot);
+            var dependent_libs = std.fifo.LinearFifo(Dylib.Id, .Dynamic).init(self.base.allocator);
+            defer dependent_libs.deinit();
+            try self.parseInputFiles(positionals.items, self.base.options.sysroot, &dependent_libs);
+            try self.parseLibs(libs.items, self.base.options.sysroot, &dependent_libs);
+            try self.parseDependentLibs(self.base.options.sysroot, &dependent_libs);
         }
 
         if (self.bss_section_index) |idx| {
@@ -857,6 +871,7 @@ pub fn flushModule(self: *MachO, comp: *Compilation) !void {
             sect.offset = self.tlv_bss_file_offset;
         }
 
+        try self.createMhExecuteHeaderAtom();
         for (self.objects.items) |*object, object_id| {
             if (object.analyzed) continue;
             try self.resolveSymbolsInObject(@intCast(u16, object_id));
@@ -870,14 +885,31 @@ pub fn flushModule(self: *MachO, comp: *Compilation) !void {
         try self.createDsoHandleAtom();
         try self.addCodeSignatureLC();
 
-        for (self.unresolved.keys()) |index| {
-            const sym = self.undefs.items[index];
-            const sym_name = self.getString(sym.n_strx);
-            const resolv = self.symbol_resolver.get(sym.n_strx) orelse unreachable;
+        {
+            var next_sym: usize = 0;
+            while (next_sym < self.unresolved.count()) {
+                const sym = &self.undefs.items[self.unresolved.keys()[next_sym]];
+                const sym_name = self.getString(sym.n_strx);
+                const resolv = self.symbol_resolver.get(sym.n_strx) orelse unreachable;
 
-            log.err("undefined reference to symbol '{s}'", .{sym_name});
-            if (resolv.file) |file| {
-                log.err("  first referenced in '{s}'", .{self.objects.items[file].name});
+                if (sym.discarded()) {
+                    sym.* = .{
+                        .n_strx = 0,
+                        .n_type = macho.N_UNDF,
+                        .n_sect = 0,
+                        .n_desc = 0,
+                        .n_value = 0,
+                    };
+                    _ = self.unresolved.swapRemove(resolv.where_index);
+                    continue;
+                }
+
+                log.err("undefined reference to symbol '{s}'", .{sym_name});
+                if (resolv.file) |file| {
+                    log.err("  first referenced in '{s}'", .{self.objects.items[file].name});
+                }
+
+                next_sym += 1;
             }
         }
         if (self.unresolved.count() > 0) {
@@ -886,42 +918,28 @@ pub fn flushModule(self: *MachO, comp: *Compilation) !void {
 
         try self.createTentativeDefAtoms();
         try self.parseObjectsIntoAtoms();
-        try self.allocateGlobalSymbols();
 
-        log.debug("locals:", .{});
-        for (self.locals.items) |sym, id| {
-            log.debug("  {d}: {s}: {}", .{ id, self.getString(sym.n_strx), sym });
-        }
-        log.debug("globals:", .{});
-        for (self.globals.items) |sym, id| {
-            log.debug("  {d}: {s}: {}", .{ id, self.getString(sym.n_strx), sym });
-        }
-        log.debug("undefs:", .{});
-        for (self.undefs.items) |sym, id| {
-            log.debug("  {d}: {s}: {}", .{ id, self.getString(sym.n_strx), sym });
-        }
-        {
-            log.debug("resolver:", .{});
-            var it = self.symbol_resolver.iterator();
-            while (it.next()) |entry| {
-                log.debug("  {s} => {}", .{ self.getString(entry.key_ptr.*), entry.value_ptr.* });
-            }
+        if (use_stage1) {
+            try self.sortSections();
+            try self.allocateTextSegment();
+            try self.allocateDataConstSegment();
+            try self.allocateDataSegment();
+            self.allocateLinkeditSegment();
+            try self.allocateLocals();
         }
 
-        log.debug("GOT entries:", .{});
-        for (self.got_entries_map.keys()) |key| {
-            switch (key) {
-                .local => |sym_index| log.debug("  {} => {d}", .{ key, sym_index }),
-                .global => |n_strx| log.debug("  {} => {s}", .{ key, self.getString(n_strx) }),
-            }
+        try self.allocateGlobals();
+
+        if (build_options.enable_logging) {
+            self.logSymtab();
+            self.logSectionOrdinals();
         }
 
-        log.debug("stubs:", .{});
-        for (self.stubs_map.keys()) |key| {
-            log.debug("  {} => {s}", .{ key, self.getString(key) });
+        if (use_stage1) {
+            try self.writeAllAtoms();
+        } else {
+            try self.writeAtoms();
         }
-
-        try self.writeAtoms();
 
         if (self.bss_section_index) |idx| {
             const seg = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
@@ -1007,7 +1025,7 @@ pub fn flushObject(self: *MachO, comp: *Compilation) !void {
 }
 
 fn resolveSearchDir(
-    arena: *Allocator,
+    arena: Allocator,
     dir: []const u8,
     syslibroot: ?[]const u8,
 ) !?[]const u8 {
@@ -1049,7 +1067,7 @@ fn resolveSearchDir(
 }
 
 fn resolveLib(
-    arena: *Allocator,
+    arena: Allocator,
     search_dirs: []const []const u8,
     name: []const u8,
     ext: []const u8,
@@ -1073,7 +1091,7 @@ fn resolveLib(
 }
 
 fn resolveFramework(
-    arena: *Allocator,
+    arena: Allocator,
     search_dirs: []const []const u8,
     name: []const u8,
     ext: []const u8,
@@ -1161,7 +1179,8 @@ const ParseDylibError = error{
 } || fs.File.OpenError || std.os.PReadError || Dylib.Id.ParseError;
 
 const DylibCreateOpts = struct {
-    syslibroot: ?[]const u8 = null,
+    syslibroot: ?[]const u8,
+    dependent_libs: *std.fifo.LinearFifo(Dylib.Id, .Dynamic),
     id: ?Dylib.Id = null,
     is_dependent: bool = false,
 };
@@ -1181,7 +1200,7 @@ pub fn parseDylib(self: *MachO, path: []const u8, opts: DylibCreateOpts) ParseDy
         .file = file,
     };
 
-    dylib.parse(self.base.allocator, self.base.options.target) catch |err| switch (err) {
+    dylib.parse(self.base.allocator, self.base.options.target, opts.dependent_libs) catch |err| switch (err) {
         error.EndOfStream, error.NotDylib => {
             try file.seekTo(0);
 
@@ -1191,7 +1210,7 @@ pub fn parseDylib(self: *MachO, path: []const u8, opts: DylibCreateOpts) ParseDy
             };
             defer lib_stub.deinit();
 
-            try dylib.parseFromStub(self.base.allocator, self.base.options.target, lib_stub);
+            try dylib.parseFromStub(self.base.allocator, self.base.options.target, lib_stub, opts.dependent_libs);
         },
         else => |e| return e,
     };
@@ -1218,14 +1237,10 @@ pub fn parseDylib(self: *MachO, path: []const u8, opts: DylibCreateOpts) ParseDy
         try self.referenced_dylibs.putNoClobber(self.base.allocator, dylib_id, {});
     }
 
-    // TODO this should not be performed if the user specifies `-flat_namespace` flag.
-    // See ld64 manpages.
-    try dylib.parseDependentLibs(self, opts.syslibroot);
-
     return true;
 }
 
-fn parseInputFiles(self: *MachO, files: []const []const u8, syslibroot: ?[]const u8) !void {
+fn parseInputFiles(self: *MachO, files: []const []const u8, syslibroot: ?[]const u8, dependent_libs: anytype) !void {
     for (files) |file_name| {
         const full_path = full_path: {
             var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
@@ -1239,21 +1254,67 @@ fn parseInputFiles(self: *MachO, files: []const []const u8, syslibroot: ?[]const
         if (try self.parseArchive(full_path)) continue;
         if (try self.parseDylib(full_path, .{
             .syslibroot = syslibroot,
+            .dependent_libs = dependent_libs,
         })) continue;
 
         log.warn("unknown filetype for positional input file: '{s}'", .{file_name});
     }
 }
 
-fn parseLibs(self: *MachO, libs: []const []const u8, syslibroot: ?[]const u8) !void {
+fn parseLibs(self: *MachO, libs: []const []const u8, syslibroot: ?[]const u8, dependent_libs: anytype) !void {
     for (libs) |lib| {
         log.debug("parsing lib path '{s}'", .{lib});
         if (try self.parseDylib(lib, .{
             .syslibroot = syslibroot,
+            .dependent_libs = dependent_libs,
         })) continue;
         if (try self.parseArchive(lib)) continue;
 
         log.warn("unknown filetype for a library: '{s}'", .{lib});
+    }
+}
+
+fn parseDependentLibs(self: *MachO, syslibroot: ?[]const u8, dependent_libs: anytype) !void {
+    // At this point, we can now parse dependents of dylibs preserving the inclusion order of:
+    // 1) anything on the linker line is parsed first
+    // 2) afterwards, we parse dependents of the included dylibs
+    // TODO this should not be performed if the user specifies `-flat_namespace` flag.
+    // See ld64 manpages.
+    var arena_alloc = std.heap.ArenaAllocator.init(self.base.allocator);
+    const arena = arena_alloc.allocator();
+    defer arena_alloc.deinit();
+
+    while (dependent_libs.readItem()) |*id| {
+        defer id.deinit(self.base.allocator);
+
+        if (self.dylibs_map.contains(id.name)) continue;
+
+        const has_ext = blk: {
+            const basename = fs.path.basename(id.name);
+            break :blk mem.lastIndexOfScalar(u8, basename, '.') != null;
+        };
+        const extension = if (has_ext) fs.path.extension(id.name) else "";
+        const without_ext = if (has_ext) blk: {
+            const index = mem.lastIndexOfScalar(u8, id.name, '.') orelse unreachable;
+            break :blk id.name[0..index];
+        } else id.name;
+
+        for (&[_][]const u8{ extension, ".tbd" }) |ext| {
+            const with_ext = try std.fmt.allocPrint(arena, "{s}{s}", .{ without_ext, ext });
+            const full_path = if (syslibroot) |root| try fs.path.join(arena, &.{ root, with_ext }) else with_ext;
+
+            log.debug("trying dependency at fully resolved path {s}", .{full_path});
+
+            const did_parse_successfully = try self.parseDylib(full_path, .{
+                .id = id.*,
+                .syslibroot = syslibroot,
+                .is_dependent = true,
+                .dependent_libs = dependent_libs,
+            });
+            if (did_parse_successfully) break;
+        } else {
+            log.warn("unable to resolve dependency {s}", .{id.name});
+        }
     }
 }
 
@@ -1269,7 +1330,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
         switch (commands.sectionType(sect)) {
             macho.S_4BYTE_LITERALS, macho.S_8BYTE_LITERALS, macho.S_16BYTE_LITERALS => {
                 if (self.text_const_section_index == null) {
-                    self.text_const_section_index = try self.allocateSection(
+                    self.text_const_section_index = try self.initSection(
                         self.text_segment_cmd_index.?,
                         "__const",
                         sect.size,
@@ -1288,7 +1349,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                     // TODO it seems the common values within the sections in objects are deduplicated/merged
                     // on merging the sections' contents.
                     if (self.objc_methname_section_index == null) {
-                        self.objc_methname_section_index = try self.allocateSection(
+                        self.objc_methname_section_index = try self.initSection(
                             self.text_segment_cmd_index.?,
                             "__objc_methname",
                             sect.size,
@@ -1303,7 +1364,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                     };
                 } else if (mem.eql(u8, sectname, "__objc_methtype")) {
                     if (self.objc_methtype_section_index == null) {
-                        self.objc_methtype_section_index = try self.allocateSection(
+                        self.objc_methtype_section_index = try self.initSection(
                             self.text_segment_cmd_index.?,
                             "__objc_methtype",
                             sect.size,
@@ -1318,7 +1379,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                     };
                 } else if (mem.eql(u8, sectname, "__objc_classname")) {
                     if (self.objc_classname_section_index == null) {
-                        self.objc_classname_section_index = try self.allocateSection(
+                        self.objc_classname_section_index = try self.initSection(
                             self.text_segment_cmd_index.?,
                             "__objc_classname",
                             sect.size,
@@ -1334,7 +1395,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                 }
 
                 if (self.cstring_section_index == null) {
-                    self.cstring_section_index = try self.allocateSection(
+                    self.cstring_section_index = try self.initSection(
                         self.text_segment_cmd_index.?,
                         "__cstring",
                         sect.size,
@@ -1353,7 +1414,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
             macho.S_LITERAL_POINTERS => {
                 if (mem.eql(u8, segname, "__DATA") and mem.eql(u8, sectname, "__objc_selrefs")) {
                     if (self.objc_selrefs_section_index == null) {
-                        self.objc_selrefs_section_index = try self.allocateSection(
+                        self.objc_selrefs_section_index = try self.initSection(
                             self.data_segment_cmd_index.?,
                             "__objc_selrefs",
                             sect.size,
@@ -1375,7 +1436,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
             },
             macho.S_MOD_INIT_FUNC_POINTERS => {
                 if (self.mod_init_func_section_index == null) {
-                    self.mod_init_func_section_index = try self.allocateSection(
+                    self.mod_init_func_section_index = try self.initSection(
                         self.data_const_segment_cmd_index.?,
                         "__mod_init_func",
                         sect.size,
@@ -1393,7 +1454,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
             },
             macho.S_MOD_TERM_FUNC_POINTERS => {
                 if (self.mod_term_func_section_index == null) {
-                    self.mod_term_func_section_index = try self.allocateSection(
+                    self.mod_term_func_section_index = try self.initSection(
                         self.data_const_segment_cmd_index.?,
                         "__mod_term_func",
                         sect.size,
@@ -1411,7 +1472,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
             },
             macho.S_ZEROFILL => {
                 if (self.bss_section_index == null) {
-                    self.bss_section_index = try self.allocateSection(
+                    self.bss_section_index = try self.initSection(
                         self.data_segment_cmd_index.?,
                         "__bss",
                         sect.size,
@@ -1429,7 +1490,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
             },
             macho.S_THREAD_LOCAL_VARIABLES => {
                 if (self.tlv_section_index == null) {
-                    self.tlv_section_index = try self.allocateSection(
+                    self.tlv_section_index = try self.initSection(
                         self.data_segment_cmd_index.?,
                         "__thread_vars",
                         sect.size,
@@ -1447,7 +1508,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
             },
             macho.S_THREAD_LOCAL_REGULAR => {
                 if (self.tlv_data_section_index == null) {
-                    self.tlv_data_section_index = try self.allocateSection(
+                    self.tlv_data_section_index = try self.initSection(
                         self.data_segment_cmd_index.?,
                         "__thread_data",
                         sect.size,
@@ -1465,7 +1526,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
             },
             macho.S_THREAD_LOCAL_ZEROFILL => {
                 if (self.tlv_bss_section_index == null) {
-                    self.tlv_bss_section_index = try self.allocateSection(
+                    self.tlv_bss_section_index = try self.initSection(
                         self.data_segment_cmd_index.?,
                         "__thread_bss",
                         sect.size,
@@ -1486,7 +1547,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                     // TODO I believe __eh_frame is currently part of __unwind_info section
                     // in the latest ld64 output.
                     if (self.eh_frame_section_index == null) {
-                        self.eh_frame_section_index = try self.allocateSection(
+                        self.eh_frame_section_index = try self.initSection(
                             self.text_segment_cmd_index.?,
                             "__eh_frame",
                             sect.size,
@@ -1503,7 +1564,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
 
                 // TODO audit this: is this the right mapping?
                 if (self.data_const_section_index == null) {
-                    self.data_const_section_index = try self.allocateSection(
+                    self.data_const_section_index = try self.initSection(
                         self.data_const_segment_cmd_index.?,
                         "__const",
                         sect.size,
@@ -1520,7 +1581,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
             macho.S_REGULAR => {
                 if (commands.sectionIsCode(sect)) {
                     if (self.text_section_index == null) {
-                        self.text_section_index = try self.allocateSection(
+                        self.text_section_index = try self.initSection(
                             self.text_segment_cmd_index.?,
                             "__text",
                             sect.size,
@@ -1551,7 +1612,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                 if (mem.eql(u8, segname, "__TEXT")) {
                     if (mem.eql(u8, sectname, "__ustring")) {
                         if (self.ustring_section_index == null) {
-                            self.ustring_section_index = try self.allocateSection(
+                            self.ustring_section_index = try self.initSection(
                                 self.text_segment_cmd_index.?,
                                 "__ustring",
                                 sect.size,
@@ -1566,7 +1627,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                         };
                     } else if (mem.eql(u8, sectname, "__gcc_except_tab")) {
                         if (self.gcc_except_tab_section_index == null) {
-                            self.gcc_except_tab_section_index = try self.allocateSection(
+                            self.gcc_except_tab_section_index = try self.initSection(
                                 self.text_segment_cmd_index.?,
                                 "__gcc_except_tab",
                                 sect.size,
@@ -1581,7 +1642,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                         };
                     } else if (mem.eql(u8, sectname, "__objc_methlist")) {
                         if (self.objc_methlist_section_index == null) {
-                            self.objc_methlist_section_index = try self.allocateSection(
+                            self.objc_methlist_section_index = try self.initSection(
                                 self.text_segment_cmd_index.?,
                                 "__objc_methlist",
                                 sect.size,
@@ -1601,7 +1662,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                         mem.eql(u8, sectname, "__gopclntab"))
                     {
                         if (self.data_const_section_index == null) {
-                            self.data_const_section_index = try self.allocateSection(
+                            self.data_const_section_index = try self.initSection(
                                 self.data_const_segment_cmd_index.?,
                                 "__const",
                                 sect.size,
@@ -1616,7 +1677,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                         };
                     } else {
                         if (self.text_const_section_index == null) {
-                            self.text_const_section_index = try self.allocateSection(
+                            self.text_const_section_index = try self.initSection(
                                 self.text_segment_cmd_index.?,
                                 "__const",
                                 sect.size,
@@ -1634,7 +1695,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
 
                 if (mem.eql(u8, segname, "__DATA_CONST")) {
                     if (self.data_const_section_index == null) {
-                        self.data_const_section_index = try self.allocateSection(
+                        self.data_const_section_index = try self.initSection(
                             self.data_const_segment_cmd_index.?,
                             "__const",
                             sect.size,
@@ -1652,7 +1713,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                 if (mem.eql(u8, segname, "__DATA")) {
                     if (mem.eql(u8, sectname, "__const")) {
                         if (self.data_const_section_index == null) {
-                            self.data_const_section_index = try self.allocateSection(
+                            self.data_const_section_index = try self.initSection(
                                 self.data_const_segment_cmd_index.?,
                                 "__const",
                                 sect.size,
@@ -1667,7 +1728,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                         };
                     } else if (mem.eql(u8, sectname, "__cfstring")) {
                         if (self.objc_cfstring_section_index == null) {
-                            self.objc_cfstring_section_index = try self.allocateSection(
+                            self.objc_cfstring_section_index = try self.initSection(
                                 self.data_const_segment_cmd_index.?,
                                 "__cfstring",
                                 sect.size,
@@ -1682,7 +1743,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                         };
                     } else if (mem.eql(u8, sectname, "__objc_classlist")) {
                         if (self.objc_classlist_section_index == null) {
-                            self.objc_classlist_section_index = try self.allocateSection(
+                            self.objc_classlist_section_index = try self.initSection(
                                 self.data_const_segment_cmd_index.?,
                                 "__objc_classlist",
                                 sect.size,
@@ -1697,7 +1758,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                         };
                     } else if (mem.eql(u8, sectname, "__objc_imageinfo")) {
                         if (self.objc_imageinfo_section_index == null) {
-                            self.objc_imageinfo_section_index = try self.allocateSection(
+                            self.objc_imageinfo_section_index = try self.initSection(
                                 self.data_const_segment_cmd_index.?,
                                 "__objc_imageinfo",
                                 sect.size,
@@ -1712,7 +1773,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                         };
                     } else if (mem.eql(u8, sectname, "__objc_const")) {
                         if (self.objc_const_section_index == null) {
-                            self.objc_const_section_index = try self.allocateSection(
+                            self.objc_const_section_index = try self.initSection(
                                 self.data_segment_cmd_index.?,
                                 "__objc_const",
                                 sect.size,
@@ -1727,7 +1788,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                         };
                     } else if (mem.eql(u8, sectname, "__objc_classrefs")) {
                         if (self.objc_classrefs_section_index == null) {
-                            self.objc_classrefs_section_index = try self.allocateSection(
+                            self.objc_classrefs_section_index = try self.initSection(
                                 self.data_segment_cmd_index.?,
                                 "__objc_classrefs",
                                 sect.size,
@@ -1742,7 +1803,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                         };
                     } else if (mem.eql(u8, sectname, "__objc_data")) {
                         if (self.objc_data_section_index == null) {
-                            self.objc_data_section_index = try self.allocateSection(
+                            self.objc_data_section_index = try self.initSection(
                                 self.data_segment_cmd_index.?,
                                 "__objc_data",
                                 sect.size,
@@ -1757,7 +1818,7 @@ pub fn getMatchingSection(self: *MachO, sect: macho.section_64) !?MatchingSectio
                         };
                     } else {
                         if (self.data_section_index == null) {
-                            self.data_section_index = try self.allocateSection(
+                            self.data_section_index = try self.initSection(
                                 self.data_segment_cmd_index.?,
                                 "__data",
                                 sect.size,
@@ -1813,7 +1874,64 @@ pub fn writeAtom(self: *MachO, atom: *Atom, match: MatchingSection) !void {
     try self.base.file.?.pwriteAll(atom.code.items, file_offset);
 }
 
-fn allocateLocalSymbols(self: *MachO, match: MatchingSection, offset: i64) !void {
+fn allocateLocals(self: *MachO) !void {
+    var it = self.atoms.iterator();
+    while (it.next()) |entry| {
+        const match = entry.key_ptr.*;
+        var atom = entry.value_ptr.*;
+
+        while (atom.prev) |prev| {
+            atom = prev;
+        }
+
+        const n_sect = @intCast(u8, self.section_ordinals.getIndex(match).? + 1);
+        const seg = self.load_commands.items[match.seg].Segment;
+        const sect = seg.sections.items[match.sect];
+        var base_vaddr = sect.addr;
+
+        log.debug("allocating local symbols in {s},{s}", .{
+            commands.segmentName(sect),
+            commands.sectionName(sect),
+        });
+
+        while (true) {
+            const alignment = try math.powi(u32, 2, atom.alignment);
+            base_vaddr = mem.alignForwardGeneric(u64, base_vaddr, alignment);
+
+            const sym = &self.locals.items[atom.local_sym_index];
+            sym.n_value = base_vaddr;
+            sym.n_sect = n_sect;
+
+            log.debug("  {d}: {s} allocated at 0x{x}", .{
+                atom.local_sym_index,
+                self.getString(sym.n_strx),
+                base_vaddr,
+            });
+
+            // Update each alias (if any)
+            for (atom.aliases.items) |index| {
+                const alias_sym = &self.locals.items[index];
+                alias_sym.n_value = base_vaddr;
+                alias_sym.n_sect = n_sect;
+            }
+
+            // Update each symbol contained within the atom
+            for (atom.contained.items) |sym_at_off| {
+                const contained_sym = &self.locals.items[sym_at_off.local_sym_index];
+                contained_sym.n_value = base_vaddr + sym_at_off.offset;
+                contained_sym.n_sect = n_sect;
+            }
+
+            base_vaddr += atom.size;
+
+            if (atom.next) |next| {
+                atom = next;
+            } else break;
+        }
+    }
+}
+
+fn shiftLocalsByOffset(self: *MachO, match: MatchingSection, offset: i64) !void {
     var atom = self.atoms.get(match) orelse return;
 
     while (true) {
@@ -1836,7 +1954,9 @@ fn allocateLocalSymbols(self: *MachO, match: MatchingSection, offset: i64) !void
     }
 }
 
-fn allocateGlobalSymbols(self: *MachO) !void {
+fn allocateGlobals(self: *MachO) !void {
+    log.debug("allocating global symbols", .{});
+
     var sym_it = self.symbol_resolver.valueIterator();
     while (sym_it.next()) |resolv| {
         if (resolv.where != .global) continue;
@@ -1846,7 +1966,60 @@ fn allocateGlobalSymbols(self: *MachO) !void {
         const sym = &self.globals.items[resolv.where_index];
         sym.n_value = local_sym.n_value;
         sym.n_sect = local_sym.n_sect;
-        log.debug("allocating global symbol {s} at 0x{x}", .{ self.getString(sym.n_strx), local_sym.n_value });
+
+        log.debug("  {d}: {s} allocated at 0x{x}", .{
+            resolv.where_index,
+            self.getString(sym.n_strx),
+            local_sym.n_value,
+        });
+    }
+}
+
+fn writeAllAtoms(self: *MachO) !void {
+    var it = self.atoms.iterator();
+    while (it.next()) |entry| {
+        const match = entry.key_ptr.*;
+        const seg = self.load_commands.items[match.seg].Segment;
+        const sect = seg.sections.items[match.sect];
+        var atom: *Atom = entry.value_ptr.*;
+
+        var buffer = std.ArrayList(u8).init(self.base.allocator);
+        defer buffer.deinit();
+        try buffer.ensureTotalCapacity(sect.size);
+
+        log.debug("writing atoms in {s},{s}", .{ commands.segmentName(sect), commands.sectionName(sect) });
+
+        while (atom.prev) |prev| {
+            atom = prev;
+        }
+
+        while (true) {
+            const atom_sym = self.locals.items[atom.local_sym_index];
+            const padding_size: usize = if (atom.next) |next| blk: {
+                const next_sym = self.locals.items[next.local_sym_index];
+                const size = next_sym.n_value - (atom_sym.n_value + atom.size);
+                break :blk try math.cast(usize, size);
+            } else 0;
+
+            log.debug("  (adding atom {s} to buffer: {})", .{ self.getString(atom_sym.n_strx), atom_sym });
+
+            try atom.resolveRelocs(self);
+            buffer.appendSliceAssumeCapacity(atom.code.items);
+
+            var i: usize = 0;
+            while (i < padding_size) : (i += 1) {
+                buffer.appendAssumeCapacity(0);
+            }
+
+            if (atom.next) |next| {
+                atom = next;
+            } else {
+                assert(buffer.items.len == sect.size);
+                log.debug("  (writing at file offset 0x{x})", .{sect.offset});
+                try self.base.file.?.pwriteAll(buffer.items, sect.offset);
+                break;
+            }
+        }
     }
 }
 
@@ -1894,6 +2067,7 @@ fn writeAtoms(self: *MachO) !void {
                 atom.dirty = false;
             } else {
                 if (file_offset) |off| {
+                    log.debug("  (writing at file offset 0x{x})", .{off});
                     try self.base.file.?.pwriteAll(buffer.items, off);
                 }
                 file_offset = null;
@@ -1904,6 +2078,7 @@ fn writeAtoms(self: *MachO) !void {
                 atom = next;
             } else {
                 if (file_offset) |off| {
+                    log.debug("  (writing at file offset 0x{x})", .{off});
                     try self.base.file.?.pwriteAll(buffer.items, off);
                 }
                 file_offset = null;
@@ -1968,10 +2143,13 @@ fn createDyldPrivateAtom(self: *MachO) !void {
         .seg = self.data_segment_cmd_index.?,
         .sect = self.data_section_index.?,
     };
-    const vaddr = try self.allocateAtom(atom, @sizeOf(u64), 8, match);
-    sym.n_value = vaddr;
+    if (self.needs_prealloc) {
+        const vaddr = try self.allocateAtom(atom, @sizeOf(u64), 8, match);
+        log.debug("allocated {s} atom at 0x{x}", .{ self.getString(sym.n_strx), vaddr });
+        sym.n_value = vaddr;
+    } else try self.addAtomAndBumpSectionSize(atom, match);
+
     sym.n_sect = @intCast(u8, self.section_ordinals.getIndex(match).? + 1);
-    log.debug("allocated {s} atom at 0x{x}", .{ self.getString(sym.n_strx), vaddr });
 }
 
 fn createStubHelperPreambleAtom(self: *MachO) !void {
@@ -2097,11 +2275,15 @@ fn createStubHelperPreambleAtom(self: *MachO) !void {
         .seg = self.text_segment_cmd_index.?,
         .sect = self.stub_helper_section_index.?,
     };
-    const alignment_pow_2 = try math.powi(u32, 2, atom.alignment);
-    const vaddr = try self.allocateAtom(atom, atom.size, alignment_pow_2, match);
-    sym.n_value = vaddr;
+
+    if (self.needs_prealloc) {
+        const alignment_pow_2 = try math.powi(u32, 2, atom.alignment);
+        const vaddr = try self.allocateAtom(atom, atom.size, alignment_pow_2, match);
+        log.debug("allocated {s} atom at 0x{x}", .{ self.getString(sym.n_strx), vaddr });
+        sym.n_value = vaddr;
+    } else try self.addAtomAndBumpSectionSize(atom, match);
+
     sym.n_sect = @intCast(u8, self.section_ordinals.getIndex(match).? + 1);
-    log.debug("allocated {s} atom at 0x{x}", .{ self.getString(sym.n_strx), vaddr });
 }
 
 pub fn createStubHelperAtom(self: *MachO) !*Atom {
@@ -2309,10 +2491,13 @@ fn createTentativeDefAtoms(self: *MachO) !void {
         resolv.local_sym_index = local_sym_index;
 
         const atom = try self.createEmptyAtom(local_sym_index, size, alignment);
-        const alignment_pow_2 = try math.powi(u32, 2, alignment);
-        const vaddr = try self.allocateAtom(atom, size, alignment_pow_2, match);
-        local_sym.n_value = vaddr;
-        global_sym.n_value = vaddr;
+
+        if (self.needs_prealloc) {
+            const alignment_pow_2 = try math.powi(u32, 2, alignment);
+            const vaddr = try self.allocateAtom(atom, size, alignment_pow_2, match);
+            local_sym.n_value = vaddr;
+            global_sym.n_value = vaddr;
+        } else try self.addAtomAndBumpSectionSize(atom, match);
     }
 }
 
@@ -2361,10 +2546,11 @@ fn createDsoHandleAtom(self: *MachO) !void {
         // TODO perhaps we should special-case special symbols? Create a separate
         // linked list of atoms?
         const atom = try self.createEmptyAtom(local_sym_index, 0, 0);
-        const sym = &self.locals.items[local_sym_index];
-        const vaddr = try self.allocateAtom(atom, 0, 1, match);
-        sym.n_value = vaddr;
-        atom.dirty = false; // We don't really want to write it to file.
+        if (self.needs_prealloc) {
+            const sym = &self.locals.items[local_sym_index];
+            const vaddr = try self.allocateAtom(atom, 0, 1, match);
+            sym.n_value = vaddr;
+        } else try self.addAtomAndBumpSectionSize(atom, match);
     }
 }
 
@@ -2377,33 +2563,32 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16) !void {
         const sym_id = @intCast(u32, id);
         const sym_name = object.getString(sym.n_strx);
 
-        if (symbolIsStab(sym)) {
+        if (sym.stab()) {
             log.err("unhandled symbol type: stab", .{});
             log.err("  symbol '{s}'", .{sym_name});
             log.err("  first definition in '{s}'", .{object.name});
             return error.UnhandledSymbolType;
         }
 
-        if (symbolIsIndr(sym)) {
+        if (sym.indr()) {
             log.err("unhandled symbol type: indirect", .{});
             log.err("  symbol '{s}'", .{sym_name});
             log.err("  first definition in '{s}'", .{object.name});
             return error.UnhandledSymbolType;
         }
 
-        if (symbolIsAbs(sym)) {
+        if (sym.abs()) {
             log.err("unhandled symbol type: absolute", .{});
             log.err("  symbol '{s}'", .{sym_name});
             log.err("  first definition in '{s}'", .{object.name});
             return error.UnhandledSymbolType;
         }
 
-        const n_strx = try self.makeString(sym_name);
-        if (symbolIsSect(sym)) {
+        if (sym.sect()) {
             // Defined symbol regardless of scope lands in the locals symbol table.
             const local_sym_index = @intCast(u32, self.locals.items.len);
             try self.locals.append(self.base.allocator, .{
-                .n_strx = n_strx,
+                .n_strx = if (symbolIsTemp(sym, sym_name)) 0 else try self.makeString(sym_name),
                 .n_type = macho.N_SECT,
                 .n_sect = 0,
                 .n_desc = 0,
@@ -2414,8 +2599,9 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16) !void {
 
             // If the symbol's scope is not local aka translation unit, then we need work out
             // if we should save the symbol as a global, or potentially flag the error.
-            if (!symbolIsExt(sym)) continue;
+            if (!sym.ext()) continue;
 
+            const n_strx = try self.makeString(sym_name);
             const local = self.locals.items[local_sym_index];
             const resolv = self.symbol_resolver.getPtr(n_strx) orelse {
                 const global_sym_index = @intCast(u32, self.globals.items.len);
@@ -2439,18 +2625,16 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16) !void {
                 .global => {
                     const global = &self.globals.items[resolv.where_index];
 
-                    if (symbolIsTentative(global.*)) {
+                    if (global.tentative()) {
                         assert(self.tentatives.swapRemove(resolv.where_index));
-                    } else if (!(symbolIsWeakDef(sym) or symbolIsPext(sym)) and
-                        !(symbolIsWeakDef(global.*) or symbolIsPext(global.*)))
-                    {
+                    } else if (!(sym.weakDef() or sym.pext()) and !(global.weakDef() or global.pext())) {
                         log.err("symbol '{s}' defined multiple times", .{sym_name});
                         if (resolv.file) |file| {
                             log.err("  first definition in '{s}'", .{self.objects.items[file].name});
                         }
                         log.err("  next definition in '{s}'", .{object.name});
                         return error.MultipleSymbolDefinitions;
-                    } else if (symbolIsWeakDef(sym) or symbolIsPext(sym)) continue; // Current symbol is weak, so skip it.
+                    } else if (sym.weakDef() or sym.pext()) continue; // Current symbol is weak, so skip it.
 
                     // Otherwise, update the resolver and the global symbol.
                     global.n_type = sym.n_type;
@@ -2486,8 +2670,9 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16) !void {
                 .local_sym_index = local_sym_index,
                 .file = object_id,
             };
-        } else if (symbolIsTentative(sym)) {
+        } else if (sym.tentative()) {
             // Symbol is a tentative definition.
+            const n_strx = try self.makeString(sym_name);
             const resolv = self.symbol_resolver.getPtr(n_strx) orelse {
                 const global_sym_index = @intCast(u32, self.globals.items.len);
                 try self.globals.append(self.base.allocator, .{
@@ -2509,7 +2694,7 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16) !void {
             switch (resolv.where) {
                 .global => {
                     const global = &self.globals.items[resolv.where_index];
-                    if (!symbolIsTentative(global.*)) continue;
+                    if (!global.tentative()) continue;
                     if (global.n_value >= sym.n_value) continue;
 
                     global.n_desc = sym.n_desc;
@@ -2545,6 +2730,7 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16) !void {
             }
         } else {
             // Symbol is undefined.
+            const n_strx = try self.makeString(sym_name);
             if (self.symbol_resolver.contains(n_strx)) continue;
 
             const undef_sym_index = @intCast(u32, self.undefs.items.len);
@@ -2552,7 +2738,7 @@ fn resolveSymbolsInObject(self: *MachO, object_id: u16) !void {
                 .n_strx = try self.makeString(sym_name),
                 .n_type = macho.N_UNDF,
                 .n_sect = 0,
-                .n_desc = 0,
+                .n_desc = sym.n_desc,
                 .n_value = 0,
             });
             try self.symbol_resolver.putNoClobber(self.base.allocator, n_strx, .{
@@ -2676,6 +2862,45 @@ fn resolveSymbolsInDylibs(self: *MachO) !void {
     }
 }
 
+fn createMhExecuteHeaderAtom(self: *MachO) !void {
+    if (self.mh_execute_header_index != null) return;
+
+    const match: MatchingSection = .{
+        .seg = self.text_segment_cmd_index.?,
+        .sect = self.text_section_index.?,
+    };
+    const n_strx = try self.makeString("__mh_execute_header");
+    const local_sym_index = @intCast(u32, self.locals.items.len);
+    var nlist = macho.nlist_64{
+        .n_strx = n_strx,
+        .n_type = macho.N_SECT,
+        .n_sect = @intCast(u8, self.section_ordinals.getIndex(match).? + 1),
+        .n_desc = 0,
+        .n_value = 0,
+    };
+    try self.locals.append(self.base.allocator, nlist);
+
+    nlist.n_type |= macho.N_EXT;
+    const global_sym_index = @intCast(u32, self.globals.items.len);
+    try self.globals.append(self.base.allocator, nlist);
+    try self.symbol_resolver.putNoClobber(self.base.allocator, n_strx, .{
+        .where = .global,
+        .where_index = global_sym_index,
+        .local_sym_index = local_sym_index,
+        .file = null,
+    });
+
+    const atom = try self.createEmptyAtom(local_sym_index, 0, 0);
+
+    if (self.needs_prealloc) {
+        const sym = &self.locals.items[local_sym_index];
+        const vaddr = try self.allocateAtom(atom, 0, 1, match);
+        sym.n_value = vaddr;
+    } else try self.addAtomAndBumpSectionSize(atom, match);
+
+    self.mh_execute_header_index = local_sym_index;
+}
+
 fn resolveDyldStubBinder(self: *MachO) !void {
     if (self.dyld_stub_binder_index != null) return;
 
@@ -2726,13 +2951,19 @@ fn resolveDyldStubBinder(self: *MachO) !void {
         .sect = self.got_section_index.?,
     };
     const atom_sym = &self.locals.items[atom.local_sym_index];
-    const vaddr = try self.allocateAtom(atom, @sizeOf(u64), 8, match);
-    atom_sym.n_value = vaddr;
+
+    if (self.needs_prealloc) {
+        const vaddr = try self.allocateAtom(atom, @sizeOf(u64), 8, match);
+        log.debug("allocated {s} atom at 0x{x}", .{ self.getString(sym.n_strx), vaddr });
+        atom_sym.n_value = vaddr;
+    } else try self.addAtomAndBumpSectionSize(atom, match);
+
     atom_sym.n_sect = @intCast(u8, self.section_ordinals.getIndex(match).? + 1);
-    log.debug("allocated {s} atom at 0x{x}", .{ self.getString(sym.n_strx), vaddr });
 }
 
 fn parseObjectsIntoAtoms(self: *MachO) !void {
+    // TODO I need to see if I can simplify this logic, or perhaps split it into two functions:
+    // one for non-prealloc traditional path, and one for incremental prealloc path.
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -2756,20 +2987,31 @@ fn parseObjectsIntoAtoms(self: *MachO) !void {
         var it = object.end_atoms.iterator();
         while (it.next()) |entry| {
             const match = entry.key_ptr.*;
-            const last_atom = entry.value_ptr.*;
-            var atom = last_atom;
+            var atom = entry.value_ptr.*;
 
+            while (atom.prev) |prev| {
+                atom = prev;
+            }
+
+            const first_atom = atom;
+
+            const seg = self.load_commands.items[match.seg].Segment;
+            const sect = seg.sections.items[match.sect];
             const metadata = try section_metadata.getOrPut(match);
             if (!metadata.found_existing) {
                 metadata.value_ptr.* = .{
-                    .size = 0,
-                    .alignment = 0,
+                    .size = sect.size,
+                    .alignment = sect.@"align",
                 };
             }
 
+            log.debug("{s},{s}", .{ commands.segmentName(sect), commands.sectionName(sect) });
+
             while (true) {
                 const alignment = try math.powi(u32, 2, atom.alignment);
-                metadata.value_ptr.size += mem.alignForwardGeneric(u64, atom.size, alignment);
+                const curr_size = metadata.value_ptr.size;
+                const curr_size_aligned = mem.alignForwardGeneric(u64, curr_size, alignment);
+                metadata.value_ptr.size = curr_size_aligned + atom.size;
                 metadata.value_ptr.alignment = math.max(metadata.value_ptr.alignment, atom.alignment);
 
                 const sym = self.locals.items[atom.local_sym_index];
@@ -2780,20 +3022,20 @@ fn parseObjectsIntoAtoms(self: *MachO) !void {
                     atom.alignment,
                 });
 
-                if (atom.prev) |prev| {
-                    atom = prev;
+                if (atom.next) |next| {
+                    atom = next;
                 } else break;
             }
 
             if (parsed_atoms.getPtr(match)) |last| {
-                last.*.next = atom;
-                atom.prev = last.*;
-                last.* = atom;
+                last.*.next = first_atom;
+                first_atom.prev = last.*;
+                last.* = first_atom;
             }
-            _ = try parsed_atoms.put(match, last_atom);
+            _ = try parsed_atoms.put(match, atom);
 
             if (!first_atoms.contains(match)) {
-                try first_atoms.putNoClobber(match, atom);
+                try first_atoms.putNoClobber(match, first_atom);
             }
         }
 
@@ -2813,67 +3055,85 @@ fn parseObjectsIntoAtoms(self: *MachO) !void {
             metadata.alignment,
         });
 
-        const sect_size = if (self.atoms.get(match)) |last| blk: {
-            const last_atom_sym = self.locals.items[last.local_sym_index];
-            break :blk last_atom_sym.n_value + last.size - sect.addr;
-        } else 0;
-
         sect.@"align" = math.max(sect.@"align", metadata.alignment);
-        const needed_size = @intCast(u32, metadata.size + sect_size);
-        try self.growSection(match, needed_size);
+        const needed_size = @intCast(u32, metadata.size);
+
+        if (self.needs_prealloc) {
+            try self.growSection(match, needed_size);
+        }
         sect.size = needed_size;
+    }
 
-        var base_vaddr = if (self.atoms.get(match)) |last| blk: {
-            const last_atom_sym = self.locals.items[last.local_sym_index];
-            break :blk last_atom_sym.n_value + last.size;
-        } else sect.addr;
-        const n_sect = @intCast(u8, self.section_ordinals.getIndex(match).? + 1);
+    for (&[_]?u16{
+        self.text_segment_cmd_index,
+        self.data_const_segment_cmd_index,
+        self.data_segment_cmd_index,
+    }) |maybe_seg_id| {
+        const seg_id = maybe_seg_id orelse continue;
+        const seg = self.load_commands.items[seg_id].Segment;
 
-        var atom = first_atoms.get(match).?;
-        while (true) {
-            const alignment = try math.powi(u32, 2, atom.alignment);
-            base_vaddr = mem.alignForwardGeneric(u64, base_vaddr, alignment);
+        for (seg.sections.items) |sect, sect_id| {
+            const match = MatchingSection{
+                .seg = seg_id,
+                .sect = @intCast(u16, sect_id),
+            };
+            if (!section_metadata.contains(match)) continue;
 
-            const sym = &self.locals.items[atom.local_sym_index];
-            sym.n_value = base_vaddr;
-            sym.n_sect = n_sect;
+            var base_vaddr = if (self.atoms.get(match)) |last| blk: {
+                const last_atom_sym = self.locals.items[last.local_sym_index];
+                break :blk last_atom_sym.n_value + last.size;
+            } else sect.addr;
 
-            log.debug("  {s}: start=0x{x}, end=0x{x}, size=0x{x}, alignment=0x{x}", .{
-                self.getString(sym.n_strx),
-                base_vaddr,
-                base_vaddr + atom.size,
-                atom.size,
-                atom.alignment,
-            });
-
-            // Update each alias (if any)
-            for (atom.aliases.items) |index| {
-                const alias_sym = &self.locals.items[index];
-                alias_sym.n_value = base_vaddr;
-                alias_sym.n_sect = n_sect;
+            if (self.atoms.getPtr(match)) |last| {
+                const first_atom = first_atoms.get(match).?;
+                last.*.next = first_atom;
+                first_atom.prev = last.*;
+                last.* = first_atom;
             }
+            _ = try self.atoms.put(self.base.allocator, match, parsed_atoms.get(match).?);
 
-            // Update each symbol contained within the atom
-            for (atom.contained.items) |sym_at_off| {
-                const contained_sym = &self.locals.items[sym_at_off.local_sym_index];
-                contained_sym.n_value = base_vaddr + sym_at_off.offset;
-                contained_sym.n_sect = n_sect;
+            if (!self.needs_prealloc) continue;
+
+            const n_sect = @intCast(u8, self.section_ordinals.getIndex(match).? + 1);
+
+            var atom = first_atoms.get(match).?;
+            while (true) {
+                const alignment = try math.powi(u32, 2, atom.alignment);
+                base_vaddr = mem.alignForwardGeneric(u64, base_vaddr, alignment);
+
+                const sym = &self.locals.items[atom.local_sym_index];
+                sym.n_value = base_vaddr;
+                sym.n_sect = n_sect;
+
+                log.debug("  {s}: start=0x{x}, end=0x{x}, size=0x{x}, alignment=0x{x}", .{
+                    self.getString(sym.n_strx),
+                    base_vaddr,
+                    base_vaddr + atom.size,
+                    atom.size,
+                    atom.alignment,
+                });
+
+                // Update each alias (if any)
+                for (atom.aliases.items) |index| {
+                    const alias_sym = &self.locals.items[index];
+                    alias_sym.n_value = base_vaddr;
+                    alias_sym.n_sect = n_sect;
+                }
+
+                // Update each symbol contained within the atom
+                for (atom.contained.items) |sym_at_off| {
+                    const contained_sym = &self.locals.items[sym_at_off.local_sym_index];
+                    contained_sym.n_value = base_vaddr + sym_at_off.offset;
+                    contained_sym.n_sect = n_sect;
+                }
+
+                base_vaddr += atom.size;
+
+                if (atom.next) |next| {
+                    atom = next;
+                } else break;
             }
-
-            base_vaddr += atom.size;
-
-            if (atom.next) |next| {
-                atom = next;
-            } else break;
         }
-
-        if (self.atoms.getPtr(match)) |last| {
-            const first_atom = first_atoms.get(match).?;
-            last.*.next = first_atom;
-            first_atom.prev = last.*;
-            last.* = first_atom;
-        }
-        _ = try self.atoms.put(self.base.allocator, match, parsed_atoms.get(match).?);
     }
 }
 
@@ -3352,7 +3612,9 @@ fn placeDecl(self: *MachO, decl: *Module.Decl, code_len: usize) !*macho.nlist_64
         decl.link.macho.size = code_len;
         decl.link.macho.dirty = true;
 
-        const new_name = try std.fmt.allocPrint(self.base.allocator, "_{s}", .{mem.spanZ(decl.name)});
+        const new_name = try std.fmt.allocPrint(self.base.allocator, "_{s}", .{
+            mem.sliceTo(decl.name, 0),
+        });
         defer self.base.allocator.free(new_name);
 
         symbol.n_strx = try self.makeString(new_name);
@@ -3360,7 +3622,9 @@ fn placeDecl(self: *MachO, decl: *Module.Decl, code_len: usize) !*macho.nlist_64
         symbol.n_sect = @intCast(u8, self.text_section_index.?) + 1;
         symbol.n_desc = 0;
     } else {
-        const decl_name = try std.fmt.allocPrint(self.base.allocator, "_{s}", .{mem.spanZ(decl.name)});
+        const decl_name = try std.fmt.allocPrint(self.base.allocator, "_{s}", .{
+            mem.sliceTo(decl.name, 0),
+        });
         defer self.base.allocator.free(decl_name);
 
         const name_str_index = try self.makeString(decl_name);
@@ -3467,9 +3731,9 @@ pub fn updateDeclExports(
 
                     const sym = &self.globals.items[resolv.where_index];
 
-                    if (symbolIsTentative(sym.*)) {
+                    if (sym.tentative()) {
                         assert(self.tentatives.swapRemove(resolv.where_index));
-                    } else if (!is_weak and !(symbolIsWeakDef(sym.*) or symbolIsPext(sym.*))) {
+                    } else if (!is_weak and !(sym.weakDef() or sym.pext())) {
                         _ = try module.failed_exports.put(
                             module.gpa,
                             exp,
@@ -3608,7 +3872,9 @@ pub fn getDeclVAddr(self: *MachO, decl: *const Module.Decl) u64 {
     return self.locals.items[decl.link.macho.local_sym_index].n_value;
 }
 
-pub fn populateMissingMetadata(self: *MachO) !void {
+fn populateMissingMetadata(self: *MachO) !void {
+    const cpu_arch = self.base.options.target.cpu.arch;
+
     if (self.pagezero_segment_cmd_index == null) {
         self.pagezero_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
         try self.load_commands.append(self.base.allocator, .{
@@ -3624,13 +3890,14 @@ pub fn populateMissingMetadata(self: *MachO) !void {
 
     if (self.text_segment_cmd_index == null) {
         self.text_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
-        const program_code_size_hint = self.base.options.program_code_size_hint;
-        const got_size_hint = @sizeOf(u64) * self.base.options.symbol_count_hint;
-        const ideal_size = self.header_pad + program_code_size_hint + got_size_hint;
-        const needed_size = mem.alignForwardGeneric(u64, padToIdeal(ideal_size), self.page_size);
-
-        log.debug("found __TEXT segment free space 0x{x} to 0x{x}", .{ 0, needed_size });
-
+        const needed_size = if (self.needs_prealloc) blk: {
+            const program_code_size_hint = self.base.options.program_code_size_hint;
+            const got_size_hint = @sizeOf(u64) * self.base.options.symbol_count_hint;
+            const ideal_size = self.header_pad + program_code_size_hint + got_size_hint;
+            const needed_size = mem.alignForwardGeneric(u64, padToIdeal(ideal_size), self.page_size);
+            log.debug("found __TEXT segment free space 0x{x} to 0x{x}", .{ 0, needed_size });
+            break :blk needed_size;
+        } else 0;
         try self.load_commands.append(self.base.allocator, .{
             .Segment = .{
                 .inner = .{
@@ -3647,13 +3914,13 @@ pub fn populateMissingMetadata(self: *MachO) !void {
     }
 
     if (self.text_section_index == null) {
-        const alignment: u2 = switch (self.base.options.target.cpu.arch) {
+        const alignment: u2 = switch (cpu_arch) {
             .x86_64 => 0,
             .aarch64 => 2,
             else => unreachable, // unhandled architecture type
         };
-        const needed_size = self.base.options.program_code_size_hint;
-        self.text_section_index = try self.allocateSection(
+        const needed_size = if (self.needs_prealloc) self.base.options.program_code_size_hint else 0;
+        self.text_section_index = try self.initSection(
             self.text_segment_cmd_index.?,
             "__text",
             needed_size,
@@ -3665,18 +3932,18 @@ pub fn populateMissingMetadata(self: *MachO) !void {
     }
 
     if (self.stubs_section_index == null) {
-        const alignment: u2 = switch (self.base.options.target.cpu.arch) {
+        const alignment: u2 = switch (cpu_arch) {
             .x86_64 => 0,
             .aarch64 => 2,
             else => unreachable, // unhandled architecture type
         };
-        const stub_size: u4 = switch (self.base.options.target.cpu.arch) {
+        const stub_size: u4 = switch (cpu_arch) {
             .x86_64 => 6,
             .aarch64 => 3 * @sizeOf(u32),
             else => unreachable, // unhandled architecture type
         };
-        const needed_size = stub_size * self.base.options.symbol_count_hint;
-        self.stubs_section_index = try self.allocateSection(
+        const needed_size = if (self.needs_prealloc) stub_size * self.base.options.symbol_count_hint else 0;
+        self.stubs_section_index = try self.initSection(
             self.text_segment_cmd_index.?,
             "__stubs",
             needed_size,
@@ -3689,23 +3956,26 @@ pub fn populateMissingMetadata(self: *MachO) !void {
     }
 
     if (self.stub_helper_section_index == null) {
-        const alignment: u2 = switch (self.base.options.target.cpu.arch) {
+        const alignment: u2 = switch (cpu_arch) {
             .x86_64 => 0,
             .aarch64 => 2,
             else => unreachable, // unhandled architecture type
         };
-        const preamble_size: u6 = switch (self.base.options.target.cpu.arch) {
+        const preamble_size: u6 = switch (cpu_arch) {
             .x86_64 => 15,
             .aarch64 => 6 * @sizeOf(u32),
             else => unreachable,
         };
-        const stub_size: u4 = switch (self.base.options.target.cpu.arch) {
+        const stub_size: u4 = switch (cpu_arch) {
             .x86_64 => 10,
             .aarch64 => 3 * @sizeOf(u32),
             else => unreachable,
         };
-        const needed_size = stub_size * self.base.options.symbol_count_hint + preamble_size;
-        self.stub_helper_section_index = try self.allocateSection(
+        const needed_size = if (self.needs_prealloc)
+            stub_size * self.base.options.symbol_count_hint + preamble_size
+        else
+            0;
+        self.stub_helper_section_index = try self.initSection(
             self.text_segment_cmd_index.?,
             "__stub_helper",
             needed_size,
@@ -3718,22 +3988,27 @@ pub fn populateMissingMetadata(self: *MachO) !void {
 
     if (self.data_const_segment_cmd_index == null) {
         self.data_const_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
-        const address_and_offset = self.nextSegmentAddressAndOffset();
-        const ideal_size = @sizeOf(u64) * self.base.options.symbol_count_hint;
-        const needed_size = mem.alignForwardGeneric(u64, padToIdeal(ideal_size), self.page_size);
-
-        log.debug("found __DATA_CONST segment free space 0x{x} to 0x{x}", .{
-            address_and_offset.offset,
-            address_and_offset.offset + needed_size,
-        });
-
+        var vmaddr: u64 = 0;
+        var fileoff: u64 = 0;
+        var needed_size: u64 = 0;
+        if (self.needs_prealloc) {
+            const address_and_offset = self.nextSegmentAddressAndOffset();
+            vmaddr = address_and_offset.address;
+            fileoff = address_and_offset.offset;
+            const ideal_size = @sizeOf(u64) * self.base.options.symbol_count_hint;
+            needed_size = mem.alignForwardGeneric(u64, padToIdeal(ideal_size), self.page_size);
+            log.debug("found __DATA_CONST segment free space 0x{x} to 0x{x}", .{
+                fileoff,
+                fileoff + needed_size,
+            });
+        }
         try self.load_commands.append(self.base.allocator, .{
             .Segment = .{
                 .inner = .{
                     .segname = makeStaticString("__DATA_CONST"),
-                    .vmaddr = address_and_offset.address,
+                    .vmaddr = vmaddr,
                     .vmsize = needed_size,
-                    .fileoff = address_and_offset.offset,
+                    .fileoff = fileoff,
                     .filesize = needed_size,
                     .maxprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE,
                     .initprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE,
@@ -3744,9 +4019,12 @@ pub fn populateMissingMetadata(self: *MachO) !void {
     }
 
     if (self.got_section_index == null) {
-        const needed_size = @sizeOf(u64) * self.base.options.symbol_count_hint;
+        const needed_size = if (self.needs_prealloc)
+            @sizeOf(u64) * self.base.options.symbol_count_hint
+        else
+            0;
         const alignment: u16 = 3; // 2^3 = @sizeOf(u64)
-        self.got_section_index = try self.allocateSection(
+        self.got_section_index = try self.initSection(
             self.data_const_segment_cmd_index.?,
             "__got",
             needed_size,
@@ -3759,19 +4037,27 @@ pub fn populateMissingMetadata(self: *MachO) !void {
 
     if (self.data_segment_cmd_index == null) {
         self.data_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
-        const address_and_offset = self.nextSegmentAddressAndOffset();
-        const ideal_size = 2 * @sizeOf(u64) * self.base.options.symbol_count_hint;
-        const needed_size = mem.alignForwardGeneric(u64, padToIdeal(ideal_size), self.page_size);
-
-        log.debug("found __DATA segment free space 0x{x} to 0x{x}", .{ address_and_offset.offset, address_and_offset.offset + needed_size });
-
+        var vmaddr: u64 = 0;
+        var fileoff: u64 = 0;
+        var needed_size: u64 = 0;
+        if (self.needs_prealloc) {
+            const address_and_offset = self.nextSegmentAddressAndOffset();
+            vmaddr = address_and_offset.address;
+            fileoff = address_and_offset.offset;
+            const ideal_size = 2 * @sizeOf(u64) * self.base.options.symbol_count_hint;
+            needed_size = mem.alignForwardGeneric(u64, padToIdeal(ideal_size), self.page_size);
+            log.debug("found __DATA segment free space 0x{x} to 0x{x}", .{
+                fileoff,
+                fileoff + needed_size,
+            });
+        }
         try self.load_commands.append(self.base.allocator, .{
             .Segment = .{
                 .inner = .{
                     .segname = makeStaticString("__DATA"),
-                    .vmaddr = address_and_offset.address,
+                    .vmaddr = vmaddr,
                     .vmsize = needed_size,
-                    .fileoff = address_and_offset.offset,
+                    .fileoff = fileoff,
                     .filesize = needed_size,
                     .maxprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE,
                     .initprot = macho.VM_PROT_READ | macho.VM_PROT_WRITE,
@@ -3782,9 +4068,12 @@ pub fn populateMissingMetadata(self: *MachO) !void {
     }
 
     if (self.la_symbol_ptr_section_index == null) {
-        const needed_size = @sizeOf(u64) * self.base.options.symbol_count_hint;
+        const needed_size = if (self.needs_prealloc)
+            @sizeOf(u64) * self.base.options.symbol_count_hint
+        else
+            0;
         const alignment: u16 = 3; // 2^3 = @sizeOf(u64)
-        self.la_symbol_ptr_section_index = try self.allocateSection(
+        self.la_symbol_ptr_section_index = try self.initSection(
             self.data_segment_cmd_index.?,
             "__la_symbol_ptr",
             needed_size,
@@ -3796,9 +4085,9 @@ pub fn populateMissingMetadata(self: *MachO) !void {
     }
 
     if (self.data_section_index == null) {
-        const needed_size = @sizeOf(u64) * self.base.options.symbol_count_hint;
+        const needed_size = if (self.needs_prealloc) @sizeOf(u64) * self.base.options.symbol_count_hint else 0;
         const alignment: u16 = 3; // 2^3 = @sizeOf(u64)
-        self.data_section_index = try self.allocateSection(
+        self.data_section_index = try self.initSection(
             self.data_segment_cmd_index.?,
             "__data",
             needed_size,
@@ -3808,9 +4097,9 @@ pub fn populateMissingMetadata(self: *MachO) !void {
     }
 
     if (self.tlv_section_index == null) {
-        const needed_size = @sizeOf(u64) * self.base.options.symbol_count_hint;
+        const needed_size = if (self.needs_prealloc) @sizeOf(u64) * self.base.options.symbol_count_hint else 0;
         const alignment: u16 = 3; // 2^3 = @sizeOf(u64)
-        self.tlv_section_index = try self.allocateSection(
+        self.tlv_section_index = try self.initSection(
             self.data_segment_cmd_index.?,
             "__thread_vars",
             needed_size,
@@ -3822,9 +4111,9 @@ pub fn populateMissingMetadata(self: *MachO) !void {
     }
 
     if (self.tlv_data_section_index == null) {
-        const needed_size = @sizeOf(u64) * self.base.options.symbol_count_hint;
+        const needed_size = if (self.needs_prealloc) @sizeOf(u64) * self.base.options.symbol_count_hint else 0;
         const alignment: u16 = 3; // 2^3 = @sizeOf(u64)
-        self.tlv_data_section_index = try self.allocateSection(
+        self.tlv_data_section_index = try self.initSection(
             self.data_segment_cmd_index.?,
             "__thread_data",
             needed_size,
@@ -3836,9 +4125,9 @@ pub fn populateMissingMetadata(self: *MachO) !void {
     }
 
     if (self.tlv_bss_section_index == null) {
-        const needed_size = @sizeOf(u64) * self.base.options.symbol_count_hint;
+        const needed_size = if (self.needs_prealloc) @sizeOf(u64) * self.base.options.symbol_count_hint else 0;
         const alignment: u16 = 3; // 2^3 = @sizeOf(u64)
-        self.tlv_bss_section_index = try self.allocateSection(
+        self.tlv_bss_section_index = try self.initSection(
             self.data_segment_cmd_index.?,
             "__thread_bss",
             needed_size,
@@ -3853,9 +4142,9 @@ pub fn populateMissingMetadata(self: *MachO) !void {
     }
 
     if (self.bss_section_index == null) {
-        const needed_size = @sizeOf(u64) * self.base.options.symbol_count_hint;
+        const needed_size = if (self.needs_prealloc) @sizeOf(u64) * self.base.options.symbol_count_hint else 0;
         const alignment: u16 = 3; // 2^3 = @sizeOf(u64)
-        self.bss_section_index = try self.allocateSection(
+        self.bss_section_index = try self.initSection(
             self.data_segment_cmd_index.?,
             "__bss",
             needed_size,
@@ -3871,16 +4160,20 @@ pub fn populateMissingMetadata(self: *MachO) !void {
 
     if (self.linkedit_segment_cmd_index == null) {
         self.linkedit_segment_cmd_index = @intCast(u16, self.load_commands.items.len);
-        const address_and_offset = self.nextSegmentAddressAndOffset();
-
-        log.debug("found __LINKEDIT segment free space at 0x{x}", .{address_and_offset.offset});
-
+        var vmaddr: u64 = 0;
+        var fileoff: u64 = 0;
+        if (self.needs_prealloc) {
+            const address_and_offset = self.nextSegmentAddressAndOffset();
+            vmaddr = address_and_offset.address;
+            fileoff = address_and_offset.offset;
+            log.debug("found __LINKEDIT segment free space at 0x{x}", .{fileoff});
+        }
         try self.load_commands.append(self.base.allocator, .{
             .Segment = .{
                 .inner = .{
                     .segname = makeStaticString("__LINKEDIT"),
-                    .vmaddr = address_and_offset.address,
-                    .fileoff = address_and_offset.offset,
+                    .vmaddr = vmaddr,
+                    .fileoff = fileoff,
                     .maxprot = macho.VM_PROT_READ,
                     .initprot = macho.VM_PROT_READ,
                 },
@@ -3958,7 +4251,7 @@ pub fn populateMissingMetadata(self: *MachO) !void {
         self.dylinker_cmd_index = @intCast(u16, self.load_commands.items.len);
         const cmdsize = @intCast(u32, mem.alignForwardGeneric(
             u64,
-            @sizeOf(macho.dylinker_command) + mem.lenZ(default_dyld_path),
+            @sizeOf(macho.dylinker_command) + mem.sliceTo(default_dyld_path, 0).len,
             @sizeOf(u64),
         ));
         var dylinker_cmd = commands.emptyGenericCommandWithData(macho.dylinker_command{
@@ -3968,7 +4261,7 @@ pub fn populateMissingMetadata(self: *MachO) !void {
         });
         dylinker_cmd.data = try self.base.allocator.alloc(u8, cmdsize - dylinker_cmd.inner.name);
         mem.set(u8, dylinker_cmd.data, 0);
-        mem.copy(u8, dylinker_cmd.data, mem.spanZ(default_dyld_path));
+        mem.copy(u8, dylinker_cmd.data, mem.sliceTo(default_dyld_path, 0));
         try self.load_commands.append(self.base.allocator, .{ .Dylinker = dylinker_cmd });
         self.load_commands_dirty = true;
     }
@@ -3992,12 +4285,16 @@ pub fn populateMissingMetadata(self: *MachO) !void {
             self.base.options.emit.?.sub_path,
         });
         defer self.base.allocator.free(install_name);
+        const current_version = self.base.options.version orelse
+            std.builtin.Version{ .major = 1, .minor = 0, .patch = 0 };
+        const compat_version = self.base.options.compatibility_version orelse
+            std.builtin.Version{ .major = 1, .minor = 0, .patch = 0 };
         var dylib_cmd = try commands.createLoadDylibCommand(
             self.base.allocator,
             install_name,
             2,
-            0x10000, // TODO forward user-provided versions
-            0x10000,
+            current_version.major << 16 | current_version.minor << 8 | current_version.patch,
+            compat_version.major << 16 | compat_version.minor << 8 | compat_version.patch,
         );
         errdefer dylib_cmd.deinit(self.base.allocator);
         dylib_cmd.inner.cmd = macho.LC_ID_DYLIB;
@@ -4024,8 +4321,16 @@ pub fn populateMissingMetadata(self: *MachO) !void {
             @sizeOf(macho.build_version_command) + @sizeOf(macho.build_tool_version),
             @sizeOf(u64),
         ));
-        const ver = self.base.options.target.os.version_range.semver.min;
-        const version = ver.major << 16 | ver.minor << 8 | ver.patch;
+        const platform_version = blk: {
+            const ver = self.base.options.target.os.version_range.semver.min;
+            const platform_version = ver.major << 16 | ver.minor << 8;
+            break :blk platform_version;
+        };
+        const sdk_version = if (self.base.options.native_darwin_sdk) |sdk| blk: {
+            const ver = sdk.version;
+            const sdk_version = ver.major << 16 | ver.minor << 8;
+            break :blk sdk_version;
+        } else platform_version;
         const is_simulator_abi = self.base.options.target.abi == .simulator;
         var cmd = commands.emptyGenericCommandWithData(macho.build_version_command{
             .cmd = macho.LC_BUILD_VERSION,
@@ -4037,8 +4342,8 @@ pub fn populateMissingMetadata(self: *MachO) !void {
                 .tvos => if (is_simulator_abi) macho.PLATFORM_TVOSSIMULATOR else macho.PLATFORM_TVOS,
                 else => unreachable,
             },
-            .minos = version,
-            .sdk = version,
+            .minos = platform_version,
+            .sdk = sdk_version,
             .ntools = 1,
         });
         const ld_ver = macho.build_tool_version{
@@ -4080,44 +4385,123 @@ pub fn populateMissingMetadata(self: *MachO) !void {
     self.cold_start = true;
 }
 
-const AllocateSectionOpts = struct {
+fn allocateTextSegment(self: *MachO) !void {
+    const seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+    const base_vmaddr = self.load_commands.items[self.pagezero_segment_cmd_index.?].Segment.inner.vmsize;
+    seg.inner.fileoff = 0;
+    seg.inner.vmaddr = base_vmaddr;
+
+    var sizeofcmds: u64 = 0;
+    for (self.load_commands.items) |lc| {
+        sizeofcmds += lc.cmdsize();
+    }
+
+    try self.allocateSegment(self.text_segment_cmd_index.?, @sizeOf(macho.mach_header_64) + sizeofcmds);
+
+    // Shift all sections to the back to minimize jump size between __TEXT and __DATA segments.
+    var min_alignment: u32 = 0;
+    for (seg.sections.items) |sect| {
+        const alignment = try math.powi(u32, 2, sect.@"align");
+        min_alignment = math.max(min_alignment, alignment);
+    }
+
+    assert(min_alignment > 0);
+    const last_sect_idx = seg.sections.items.len - 1;
+    const last_sect = seg.sections.items[last_sect_idx];
+    const shift: u32 = blk: {
+        const diff = seg.inner.filesize - last_sect.offset - last_sect.size;
+        const factor = @divTrunc(diff, min_alignment);
+        break :blk @intCast(u32, factor * min_alignment);
+    };
+
+    if (shift > 0) {
+        for (seg.sections.items) |*sect| {
+            sect.offset += shift;
+            sect.addr += shift;
+        }
+    }
+}
+
+fn allocateDataConstSegment(self: *MachO) !void {
+    const seg = &self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
+    const text_seg = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+    seg.inner.fileoff = text_seg.inner.fileoff + text_seg.inner.filesize;
+    seg.inner.vmaddr = text_seg.inner.vmaddr + text_seg.inner.vmsize;
+    try self.allocateSegment(self.data_const_segment_cmd_index.?, 0);
+}
+
+fn allocateDataSegment(self: *MachO) !void {
+    const seg = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+    const data_const_seg = self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
+    seg.inner.fileoff = data_const_seg.inner.fileoff + data_const_seg.inner.filesize;
+    seg.inner.vmaddr = data_const_seg.inner.vmaddr + data_const_seg.inner.vmsize;
+    try self.allocateSegment(self.data_segment_cmd_index.?, 0);
+}
+
+fn allocateLinkeditSegment(self: *MachO) void {
+    const seg = &self.load_commands.items[self.linkedit_segment_cmd_index.?].Segment;
+    const data_seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+    seg.inner.fileoff = data_seg.inner.fileoff + data_seg.inner.filesize;
+    seg.inner.vmaddr = data_seg.inner.vmaddr + data_seg.inner.vmsize;
+}
+
+fn allocateSegment(self: *MachO, index: u16, offset: u64) !void {
+    const seg = &self.load_commands.items[index].Segment;
+
+    // Allocate the sections according to their alignment at the beginning of the segment.
+    var start: u64 = offset;
+    for (seg.sections.items) |*sect| {
+        const alignment = try math.powi(u32, 2, sect.@"align");
+        const start_aligned = mem.alignForwardGeneric(u64, start, alignment);
+        const end = start_aligned + sect.size;
+        sect.offset = @intCast(u32, seg.inner.fileoff + start_aligned);
+        sect.addr = seg.inner.vmaddr + start_aligned;
+        start = end;
+    }
+
+    const seg_size_aligned = mem.alignForwardGeneric(u64, start, self.page_size);
+    seg.inner.filesize = seg_size_aligned;
+    seg.inner.vmsize = seg_size_aligned;
+}
+
+const InitSectionOpts = struct {
     flags: u32 = macho.S_REGULAR,
     reserved1: u32 = 0,
     reserved2: u32 = 0,
 };
 
-fn allocateSection(
+fn initSection(
     self: *MachO,
     segment_id: u16,
     sectname: []const u8,
     size: u64,
     alignment: u32,
-    opts: AllocateSectionOpts,
+    opts: InitSectionOpts,
 ) !u16 {
     const seg = &self.load_commands.items[segment_id].Segment;
     var sect = macho.section_64{
         .sectname = makeStaticString(sectname),
         .segname = seg.inner.segname,
-        .size = @intCast(u32, size),
+        .size = if (self.needs_prealloc) @intCast(u32, size) else 0,
         .@"align" = alignment,
         .flags = opts.flags,
         .reserved1 = opts.reserved1,
         .reserved2 = opts.reserved2,
     };
 
-    const alignment_pow_2 = try math.powi(u32, 2, alignment);
-    const padding: ?u64 = if (segment_id == self.text_segment_cmd_index.?) self.header_pad else null;
-    const off = self.findFreeSpace(segment_id, alignment_pow_2, padding);
-
-    log.debug("allocating {s},{s} section from 0x{x} to 0x{x}", .{
-        commands.segmentName(sect),
-        commands.sectionName(sect),
-        off,
-        off + size,
-    });
-
-    sect.addr = seg.inner.vmaddr + off - seg.inner.fileoff;
-    sect.offset = @intCast(u32, off);
+    if (self.needs_prealloc) {
+        const alignment_pow_2 = try math.powi(u32, 2, alignment);
+        const padding: ?u64 = if (segment_id == self.text_segment_cmd_index.?) self.header_pad else null;
+        const off = self.findFreeSpace(segment_id, alignment_pow_2, padding);
+        log.debug("allocating {s},{s} section from 0x{x} to 0x{x}", .{
+            commands.segmentName(sect),
+            commands.sectionName(sect),
+            off,
+            off + size,
+        });
+        sect.addr = seg.inner.vmaddr + off - seg.inner.fileoff;
+        sect.offset = @intCast(u32, off);
+    }
 
     const index = @intCast(u16, seg.sections.items.len);
     try seg.sections.append(self.base.allocator, sect);
@@ -4152,7 +4536,11 @@ fn growSegment(self: *MachO, seg_id: u16, new_size: u64) !void {
     const new_seg_size = mem.alignForwardGeneric(u64, new_size, self.page_size);
     assert(new_seg_size > seg.inner.filesize);
     const offset_amt = new_seg_size - seg.inner.filesize;
-    log.debug("growing segment {s} from 0x{x} to 0x{x}", .{ seg.inner.segname, seg.inner.filesize, new_seg_size });
+    log.debug("growing segment {s} from 0x{x} to 0x{x}", .{
+        seg.inner.segname,
+        seg.inner.filesize,
+        new_seg_size,
+    });
     seg.inner.filesize = new_seg_size;
     seg.inner.vmsize = new_seg_size;
 
@@ -4203,7 +4591,7 @@ fn growSegment(self: *MachO, seg_id: u16, new_size: u64) !void {
                 moved_sect.addr + moved_sect.size,
             });
 
-            try self.allocateLocalSymbols(.{
+            try self.shiftLocalsByOffset(.{
                 .seg = @intCast(u16, next),
                 .sect = @intCast(u16, moved_sect_id),
             }, @intCast(i64, offset_amt));
@@ -4277,7 +4665,7 @@ fn growSection(self: *MachO, match: MatchingSection, new_size: u32) !void {
                 moved_sect.addr + moved_sect.size,
             });
 
-            try self.allocateLocalSymbols(.{
+            try self.shiftLocalsByOffset(.{
                 .seg = match.seg,
                 .sect = next,
             }, @intCast(i64, offset_amt));
@@ -4416,6 +4804,21 @@ fn allocateAtom(self: *MachO, atom: *Atom, new_atom_size: u64, alignment: u64, m
     return vaddr;
 }
 
+fn addAtomAndBumpSectionSize(self: *MachO, atom: *Atom, match: MatchingSection) !void {
+    const seg = &self.load_commands.items[match.seg].Segment;
+    const sect = &seg.sections.items[match.sect];
+    const alignment = try math.powi(u32, 2, atom.alignment);
+    sect.size = mem.alignForwardGeneric(u64, sect.size, alignment) + atom.size;
+
+    if (self.atoms.getPtr(match)) |last| {
+        last.*.next = atom;
+        atom.prev = last.*;
+        last.* = atom;
+    } else {
+        try self.atoms.putNoClobber(self.base.allocator, match, atom);
+    }
+}
+
 pub fn addExternFn(self: *MachO, name: []const u8) !u32 {
     const sym_name = try std.fmt.allocPrint(self.base.allocator, "_{s}", .{name});
     defer self.base.allocator.free(sym_name);
@@ -4460,6 +4863,160 @@ fn nextSegmentAddressAndOffset(self: *MachO) NextSegmentAddressAndOffset {
         .address = address,
         .offset = offset,
     };
+}
+
+fn sortSections(self: *MachO) !void {
+    var text_index_mapping = std.AutoHashMap(u16, u16).init(self.base.allocator);
+    defer text_index_mapping.deinit();
+    var data_const_index_mapping = std.AutoHashMap(u16, u16).init(self.base.allocator);
+    defer data_const_index_mapping.deinit();
+    var data_index_mapping = std.AutoHashMap(u16, u16).init(self.base.allocator);
+    defer data_index_mapping.deinit();
+
+    {
+        // __TEXT segment
+        const seg = &self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+        var sections = seg.sections.toOwnedSlice(self.base.allocator);
+        defer self.base.allocator.free(sections);
+        try seg.sections.ensureTotalCapacity(self.base.allocator, sections.len);
+
+        const indices = &[_]*?u16{
+            &self.text_section_index,
+            &self.stubs_section_index,
+            &self.stub_helper_section_index,
+            &self.gcc_except_tab_section_index,
+            &self.cstring_section_index,
+            &self.ustring_section_index,
+            &self.text_const_section_index,
+            &self.objc_methlist_section_index,
+            &self.objc_methname_section_index,
+            &self.objc_methtype_section_index,
+            &self.objc_classname_section_index,
+            &self.eh_frame_section_index,
+        };
+        for (indices) |maybe_index| {
+            const new_index: u16 = if (maybe_index.*) |index| blk: {
+                const idx = @intCast(u16, seg.sections.items.len);
+                seg.sections.appendAssumeCapacity(sections[index]);
+                try text_index_mapping.putNoClobber(index, idx);
+                break :blk idx;
+            } else continue;
+            maybe_index.* = new_index;
+        }
+    }
+
+    {
+        // __DATA_CONST segment
+        const seg = &self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
+        var sections = seg.sections.toOwnedSlice(self.base.allocator);
+        defer self.base.allocator.free(sections);
+        try seg.sections.ensureTotalCapacity(self.base.allocator, sections.len);
+
+        const indices = &[_]*?u16{
+            &self.got_section_index,
+            &self.mod_init_func_section_index,
+            &self.mod_term_func_section_index,
+            &self.data_const_section_index,
+            &self.objc_cfstring_section_index,
+            &self.objc_classlist_section_index,
+            &self.objc_imageinfo_section_index,
+        };
+        for (indices) |maybe_index| {
+            const new_index: u16 = if (maybe_index.*) |index| blk: {
+                const idx = @intCast(u16, seg.sections.items.len);
+                seg.sections.appendAssumeCapacity(sections[index]);
+                try data_const_index_mapping.putNoClobber(index, idx);
+                break :blk idx;
+            } else continue;
+            maybe_index.* = new_index;
+        }
+    }
+
+    {
+        // __DATA segment
+        const seg = &self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+        var sections = seg.sections.toOwnedSlice(self.base.allocator);
+        defer self.base.allocator.free(sections);
+        try seg.sections.ensureTotalCapacity(self.base.allocator, sections.len);
+
+        // __DATA segment
+        const indices = &[_]*?u16{
+            &self.la_symbol_ptr_section_index,
+            &self.objc_const_section_index,
+            &self.objc_selrefs_section_index,
+            &self.objc_classrefs_section_index,
+            &self.objc_data_section_index,
+            &self.data_section_index,
+            &self.tlv_section_index,
+            &self.tlv_data_section_index,
+            &self.tlv_bss_section_index,
+            &self.bss_section_index,
+        };
+        for (indices) |maybe_index| {
+            const new_index: u16 = if (maybe_index.*) |index| blk: {
+                const idx = @intCast(u16, seg.sections.items.len);
+                seg.sections.appendAssumeCapacity(sections[index]);
+                try data_index_mapping.putNoClobber(index, idx);
+                break :blk idx;
+            } else continue;
+            maybe_index.* = new_index;
+        }
+    }
+
+    {
+        var transient: std.AutoHashMapUnmanaged(MatchingSection, *Atom) = .{};
+        try transient.ensureTotalCapacity(self.base.allocator, self.atoms.count());
+
+        var it = self.atoms.iterator();
+        while (it.next()) |entry| {
+            const old = entry.key_ptr.*;
+            const sect = if (old.seg == self.text_segment_cmd_index.?)
+                text_index_mapping.get(old.sect).?
+            else if (old.seg == self.data_const_segment_cmd_index.?)
+                data_const_index_mapping.get(old.sect).?
+            else
+                data_index_mapping.get(old.sect).?;
+            transient.putAssumeCapacityNoClobber(.{
+                .seg = old.seg,
+                .sect = sect,
+            }, entry.value_ptr.*);
+        }
+
+        self.atoms.clearAndFree(self.base.allocator);
+        self.atoms.deinit(self.base.allocator);
+        self.atoms = transient;
+    }
+
+    {
+        // Create new section ordinals.
+        self.section_ordinals.clearRetainingCapacity();
+        const text_seg = self.load_commands.items[self.text_segment_cmd_index.?].Segment;
+        for (text_seg.sections.items) |_, sect_id| {
+            const res = self.section_ordinals.getOrPutAssumeCapacity(.{
+                .seg = self.text_segment_cmd_index.?,
+                .sect = @intCast(u16, sect_id),
+            });
+            assert(!res.found_existing);
+        }
+        const data_const_seg = self.load_commands.items[self.data_const_segment_cmd_index.?].Segment;
+        for (data_const_seg.sections.items) |_, sect_id| {
+            const res = self.section_ordinals.getOrPutAssumeCapacity(.{
+                .seg = self.data_const_segment_cmd_index.?,
+                .sect = @intCast(u16, sect_id),
+            });
+            assert(!res.found_existing);
+        }
+        const data_seg = self.load_commands.items[self.data_segment_cmd_index.?].Segment;
+        for (data_seg.sections.items) |_, sect_id| {
+            const res = self.section_ordinals.getOrPutAssumeCapacity(.{
+                .seg = self.data_segment_cmd_index.?,
+                .sect = @intCast(u16, sect_id),
+            });
+            assert(!res.found_existing);
+        }
+    }
+
+    self.sections_order_dirty = false;
 }
 
 fn updateSectionOrdinals(self: *MachO) !void {
@@ -4839,7 +5396,7 @@ fn writeSymbolTable(self: *MachO) !void {
 
     for (self.locals.items) |sym| {
         if (sym.n_strx == 0) continue;
-        if (symbolIsTemp(sym, self.getString(sym.n_strx))) continue;
+        if (self.symbol_resolver.get(sym.n_strx)) |_| continue;
         try locals.append(sym);
     }
 
@@ -4897,17 +5454,9 @@ fn writeSymbolTable(self: *MachO) !void {
         }
     }
 
-    var undefs = std.ArrayList(macho.nlist_64).init(self.base.allocator);
-    defer undefs.deinit();
-
-    for (self.undefs.items) |sym| {
-        if (sym.n_strx == 0) continue;
-        try undefs.append(sym);
-    }
-
     const nlocals = locals.items.len;
     const nexports = self.globals.items.len;
-    const nundefs = undefs.items.len;
+    const nundefs = self.undefs.items.len;
 
     const locals_off = symtab.symoff;
     const locals_size = nlocals * @sizeOf(macho.nlist_64);
@@ -4922,7 +5471,7 @@ fn writeSymbolTable(self: *MachO) !void {
     const undefs_off = exports_off + exports_size;
     const undefs_size = nundefs * @sizeOf(macho.nlist_64);
     log.debug("writing undefined symbols from 0x{x} to 0x{x}", .{ undefs_off, undefs_size + undefs_off });
-    try self.base.file.?.pwriteAll(mem.sliceAsBytes(undefs.items), undefs_off);
+    try self.base.file.?.pwriteAll(mem.sliceAsBytes(self.undefs.items), undefs_off);
 
     symtab.nsyms = @intCast(u32, nlocals + nexports + nundefs);
     seg.inner.filesize += locals_size + exports_size + undefs_size;
@@ -5199,59 +5748,14 @@ pub fn makeString(self: *MachO, string: []const u8) !u32 {
     return new_off;
 }
 
-pub fn getString(self: *MachO, off: u32) []const u8 {
+pub fn getString(self: MachO, off: u32) []const u8 {
     assert(off < self.strtab.items.len);
-    return mem.spanZ(@ptrCast([*:0]const u8, self.strtab.items.ptr + off));
-}
-
-pub fn symbolIsStab(sym: macho.nlist_64) bool {
-    return (macho.N_STAB & sym.n_type) != 0;
-}
-
-pub fn symbolIsPext(sym: macho.nlist_64) bool {
-    return (macho.N_PEXT & sym.n_type) != 0;
-}
-
-pub fn symbolIsExt(sym: macho.nlist_64) bool {
-    return (macho.N_EXT & sym.n_type) != 0;
-}
-
-pub fn symbolIsSect(sym: macho.nlist_64) bool {
-    const type_ = macho.N_TYPE & sym.n_type;
-    return type_ == macho.N_SECT;
-}
-
-pub fn symbolIsUndf(sym: macho.nlist_64) bool {
-    const type_ = macho.N_TYPE & sym.n_type;
-    return type_ == macho.N_UNDF;
-}
-
-pub fn symbolIsIndr(sym: macho.nlist_64) bool {
-    const type_ = macho.N_TYPE & sym.n_type;
-    return type_ == macho.N_INDR;
-}
-
-pub fn symbolIsAbs(sym: macho.nlist_64) bool {
-    const type_ = macho.N_TYPE & sym.n_type;
-    return type_ == macho.N_ABS;
-}
-
-pub fn symbolIsWeakDef(sym: macho.nlist_64) bool {
-    return (sym.n_desc & macho.N_WEAK_DEF) != 0;
-}
-
-pub fn symbolIsWeakRef(sym: macho.nlist_64) bool {
-    return (sym.n_desc & macho.N_WEAK_REF) != 0;
-}
-
-pub fn symbolIsTentative(sym: macho.nlist_64) bool {
-    if (!symbolIsUndf(sym)) return false;
-    return sym.n_value != 0;
+    return mem.sliceTo(@ptrCast([*:0]const u8, self.strtab.items.ptr + off), 0);
 }
 
 pub fn symbolIsTemp(sym: macho.nlist_64, sym_name: []const u8) bool {
-    if (!symbolIsSect(sym)) return false;
-    if (symbolIsExt(sym)) return false;
+    if (!sym.sect()) return false;
+    if (sym.ext()) return false;
     return mem.startsWith(u8, sym_name, "l") or mem.startsWith(u8, sym_name, "L");
 }
 
@@ -5314,7 +5818,7 @@ fn snapshotState(self: *MachO) !void {
 
     var arena_allocator = std.heap.ArenaAllocator.init(self.base.allocator);
     defer arena_allocator.deinit();
-    const arena = &arena_allocator.allocator;
+    const arena = arena_allocator.allocator();
 
     const out_file = try emit.directory.handle.createFile("snapshots.json", .{
         .truncate = self.cold_start,
@@ -5536,4 +6040,56 @@ fn snapshotState(self: *MachO) !void {
 
     try std.json.stringify(snapshot, .{}, writer);
     try writer.writeByte(']');
+}
+
+fn logSymtab(self: MachO) void {
+    log.debug("locals:", .{});
+    for (self.locals.items) |sym, id| {
+        log.debug("  {d}: {s}: {}", .{ id, self.getString(sym.n_strx), sym });
+    }
+
+    log.debug("globals:", .{});
+    for (self.globals.items) |sym, id| {
+        log.debug("  {d}: {s}: {}", .{ id, self.getString(sym.n_strx), sym });
+    }
+
+    log.debug("undefs:", .{});
+    for (self.undefs.items) |sym, id| {
+        log.debug("  {d}: {s}: {}", .{ id, self.getString(sym.n_strx), sym });
+    }
+
+    {
+        log.debug("resolver:", .{});
+        var it = self.symbol_resolver.iterator();
+        while (it.next()) |entry| {
+            log.debug("  {s} => {}", .{ self.getString(entry.key_ptr.*), entry.value_ptr.* });
+        }
+    }
+
+    log.debug("GOT entries:", .{});
+    for (self.got_entries_map.keys()) |key| {
+        switch (key) {
+            .local => |sym_index| log.debug("  {} => {d}", .{ key, sym_index }),
+            .global => |n_strx| log.debug("  {} => {s}", .{ key, self.getString(n_strx) }),
+        }
+    }
+
+    log.debug("stubs:", .{});
+    for (self.stubs_map.keys()) |key| {
+        log.debug("  {} => {s}", .{ key, self.getString(key) });
+    }
+}
+
+fn logSectionOrdinals(self: MachO) void {
+    for (self.section_ordinals.keys()) |match, i| {
+        const seg = self.load_commands.items[match.seg].Segment;
+        const sect = seg.sections.items[match.sect];
+        log.debug("ord {d}: {d},{d} => {s},{s}", .{
+            i + 1,
+            match.seg,
+            match.sect,
+            commands.segmentName(sect),
+            commands.sectionName(sect),
+        });
+    }
 }

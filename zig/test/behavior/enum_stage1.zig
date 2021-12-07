@@ -2,28 +2,6 @@ const expect = @import("std").testing.expect;
 const mem = @import("std").mem;
 const Tag = @import("std").meta.Tag;
 
-const MultipleChoice = enum(u32) {
-    A = 20,
-    B = 40,
-    C = 60,
-    D = 1000,
-};
-
-fn testEnumWithSpecifiedTagValues(x: MultipleChoice) !void {
-    try expect(@enumToInt(x) == 60);
-    try expect(1234 == switch (x) {
-        MultipleChoice.A => 1,
-        MultipleChoice.B => 2,
-        MultipleChoice.C => @as(u32, 1234),
-        MultipleChoice.D => 4,
-    });
-}
-
-test "enum with specified tag values" {
-    try testEnumWithSpecifiedTagValues(MultipleChoice.C);
-    comptime try testEnumWithSpecifiedTagValues(MultipleChoice.C);
-}
-
 test "non-exhaustive enum" {
     const S = struct {
         const E = enum(u8) {
@@ -134,6 +112,16 @@ test "@tagName" {
 test "@tagName non-exhaustive enum" {
     try expect(mem.eql(u8, testEnumTagNameBare(NonExhaustive.B), "B"));
     comptime try expect(mem.eql(u8, testEnumTagNameBare(NonExhaustive.B), "B"));
+}
+
+test "@tagName is null-terminated" {
+    const S = struct {
+        fn doTheTest(n: BareNumber) !void {
+            try expect(@tagName(n)[3] == 0);
+        }
+    };
+    try S.doTheTest(.Two);
+    try comptime S.doTheTest(.Two);
 }
 
 fn testEnumTagNameBare(n: anytype) []const u8 {
@@ -422,4 +410,18 @@ test "method call on an enum" {
     };
     try S.doTheTest();
     comptime try S.doTheTest();
+}
+
+test "exporting enum type and value" {
+    const S = struct {
+        const E = enum(c_int) { one, two };
+        comptime {
+            @export(E, .{ .name = "E" });
+        }
+        const e: E = .two;
+        comptime {
+            @export(e, .{ .name = "e" });
+        }
+    };
+    try expect(S.e == .two);
 }

@@ -21,7 +21,7 @@ pub fn main() !void {
     var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
     defer arena.deinit();
 
-    const allocator = &arena.allocator;
+    const allocator = arena.allocator();
 
     var args_it = process.args();
 
@@ -342,7 +342,7 @@ const Action = enum {
     Close,
 };
 
-fn genToc(allocator: *Allocator, tokenizer: *Tokenizer) !Toc {
+fn genToc(allocator: Allocator, tokenizer: *Tokenizer) !Toc {
     var urls = std.StringHashMap(Token).init(allocator);
     errdefer urls.deinit();
 
@@ -708,7 +708,7 @@ fn genToc(allocator: *Allocator, tokenizer: *Tokenizer) !Toc {
     };
 }
 
-fn urlize(allocator: *Allocator, input: []const u8) ![]u8 {
+fn urlize(allocator: Allocator, input: []const u8) ![]u8 {
     var buf = std.ArrayList(u8).init(allocator);
     defer buf.deinit();
 
@@ -727,7 +727,7 @@ fn urlize(allocator: *Allocator, input: []const u8) ![]u8 {
     return buf.toOwnedSlice();
 }
 
-fn escapeHtml(allocator: *Allocator, input: []const u8) ![]u8 {
+fn escapeHtml(allocator: Allocator, input: []const u8) ![]u8 {
     var buf = std.ArrayList(u8).init(allocator);
     defer buf.deinit();
 
@@ -773,7 +773,7 @@ test "term color" {
     try testing.expectEqualSlices(u8, "A<span class=\"t32_1\">green</span>B", result);
 }
 
-fn termColor(allocator: *Allocator, input: []const u8) ![]u8 {
+fn termColor(allocator: Allocator, input: []const u8) ![]u8 {
     var buf = std.ArrayList(u8).init(allocator);
     defer buf.deinit();
 
@@ -883,7 +883,7 @@ fn writeEscapedLines(out: anytype, text: []const u8) !void {
 }
 
 fn tokenizeAndPrintRaw(
-    allocator: *Allocator,
+    allocator: Allocator,
     docgen_tokenizer: *Tokenizer,
     out: anytype,
     source_token: Token,
@@ -1137,7 +1137,7 @@ fn tokenizeAndPrintRaw(
 }
 
 fn tokenizeAndPrint(
-    allocator: *Allocator,
+    allocator: Allocator,
     docgen_tokenizer: *Tokenizer,
     out: anytype,
     source_token: Token,
@@ -1146,7 +1146,7 @@ fn tokenizeAndPrint(
     return tokenizeAndPrintRaw(allocator, docgen_tokenizer, out, source_token, raw_src);
 }
 
-fn printSourceBlock(allocator: *Allocator, docgen_tokenizer: *Tokenizer, out: anytype, syntax_block: SyntaxBlock) !void {
+fn printSourceBlock(allocator: Allocator, docgen_tokenizer: *Tokenizer, out: anytype, syntax_block: SyntaxBlock) !void {
     const source_type = @tagName(syntax_block.source_type);
 
     try out.print("<figure><figcaption class=\"{s}-cap\"><cite class=\"file\">{s}</cite></figcaption><pre>", .{ source_type, syntax_block.name });
@@ -1188,7 +1188,7 @@ fn printShell(out: anytype, shell_content: []const u8) !void {
 }
 
 fn genHtml(
-    allocator: *Allocator,
+    allocator: Allocator,
     tokenizer: *Tokenizer,
     toc: *Toc,
     out: anytype,
@@ -1202,6 +1202,7 @@ fn genHtml(
     var env_map = try process.getEnvMap(allocator);
     try env_map.put("ZIG_DEBUG_COLOR", "1");
 
+    const host = try std.zig.system.NativeTargetInfo.detect(allocator, .{});
     const builtin_code = try getBuiltinCode(allocator, &env_map, zig_exe);
 
     for (toc.nodes) |node| {
@@ -1424,13 +1425,17 @@ fn genHtml(
                         var test_args = std.ArrayList([]const u8).init(allocator);
                         defer test_args.deinit();
 
-                        try test_args.appendSlice(&[_][]const u8{ zig_exe, "test", tmp_source_file_name });
+                        try test_args.appendSlice(&[_][]const u8{
+                            zig_exe, "test", tmp_source_file_name,
+                        });
                         try shell_out.print("$ zig test {s}.zig ", .{code.name});
 
                         switch (code.mode) {
                             .Debug => {},
                             else => {
-                                try test_args.appendSlice(&[_][]const u8{ "-O", @tagName(code.mode) });
+                                try test_args.appendSlice(&[_][]const u8{
+                                    "-O", @tagName(code.mode),
+                                });
                                 try shell_out.print("-O {s} ", .{@tagName(code.mode)});
                             },
                         }
@@ -1441,8 +1446,26 @@ fn genHtml(
                         if (code.target_str) |triple| {
                             try test_args.appendSlice(&[_][]const u8{ "-target", triple });
                             try shell_out.print("-target {s} ", .{triple});
+
+                            const cross_target = try std.zig.CrossTarget.parse(.{
+                                .arch_os_abi = triple,
+                            });
+                            const target_info = try std.zig.system.NativeTargetInfo.detect(
+                                allocator,
+                                cross_target,
+                            );
+                            switch (host.getExternalExecutor(target_info, .{
+                                .link_libc = code.link_libc,
+                            })) {
+                                .native => {},
+                                else => {
+                                    try test_args.appendSlice(&[_][]const u8{"--test-no-exec"});
+                                    try shell_out.writeAll("--test-no-exec");
+                                },
+                            }
                         }
-                        const result = exec(allocator, &env_map, test_args.items) catch return parseError(tokenizer, code.source_token, "test failed", .{});
+                        const result = exec(allocator, &env_map, test_args.items) catch
+                            return parseError(tokenizer, code.source_token, "test failed", .{});
                         const escaped_stderr = try escapeHtml(allocator, result.stderr);
                         const escaped_stdout = try escapeHtml(allocator, result.stdout);
                         try shell_out.print("\n{s}{s}\n", .{ escaped_stderr, escaped_stdout });
@@ -1504,9 +1527,7 @@ fn genHtml(
                         defer test_args.deinit();
 
                         try test_args.appendSlice(&[_][]const u8{
-                            zig_exe,
-                            "test",
-                            tmp_source_file_name,
+                            zig_exe, "test", tmp_source_file_name,
                         });
                         var mode_arg: []const u8 = "";
                         switch (code.mode) {
@@ -1687,7 +1708,7 @@ fn genHtml(
     }
 }
 
-fn exec(allocator: *Allocator, env_map: *std.BufMap, args: []const []const u8) !ChildProcess.ExecResult {
+fn exec(allocator: Allocator, env_map: *std.BufMap, args: []const []const u8) !ChildProcess.ExecResult {
     const result = try ChildProcess.exec(.{
         .allocator = allocator,
         .argv = args,
@@ -1711,7 +1732,7 @@ fn exec(allocator: *Allocator, env_map: *std.BufMap, args: []const []const u8) !
     return result;
 }
 
-fn getBuiltinCode(allocator: *Allocator, env_map: *std.BufMap, zig_exe: []const u8) ![]const u8 {
+fn getBuiltinCode(allocator: Allocator, env_map: *std.BufMap, zig_exe: []const u8) ![]const u8 {
     const result = try exec(allocator, env_map, &[_][]const u8{ zig_exe, "build-obj", "--show-builtin" });
     return result.stdout;
 }

@@ -5,6 +5,7 @@ pub const ArchOsAbi = struct {
     arch: std.Target.Cpu.Arch,
     os: std.Target.Os.Tag,
     abi: std.Target.Abi,
+    os_ver: ?std.builtin.Version = null,
 };
 
 pub const available_libcs = [_]ArchOsAbi{
@@ -14,7 +15,8 @@ pub const available_libcs = [_]ArchOsAbi{
     .{ .arch = .aarch64, .os = .linux, .abi = .gnu },
     .{ .arch = .aarch64, .os = .linux, .abi = .musl },
     .{ .arch = .aarch64, .os = .windows, .abi = .gnu },
-    .{ .arch = .aarch64, .os = .macos, .abi = .gnu },
+    .{ .arch = .aarch64, .os = .macos, .abi = .gnu, .os_ver = .{ .major = 11, .minor = 0 } },
+    .{ .arch = .aarch64, .os = .macos, .abi = .gnu, .os_ver = .{ .major = 12, .minor = 0 } },
     .{ .arch = .armeb, .os = .linux, .abi = .gnueabi },
     .{ .arch = .armeb, .os = .linux, .abi = .gnueabihf },
     .{ .arch = .armeb, .os = .linux, .abi = .musleabi },
@@ -64,7 +66,9 @@ pub const available_libcs = [_]ArchOsAbi{
     .{ .arch = .x86_64, .os = .linux, .abi = .gnux32 },
     .{ .arch = .x86_64, .os = .linux, .abi = .musl },
     .{ .arch = .x86_64, .os = .windows, .abi = .gnu },
-    .{ .arch = .x86_64, .os = .macos, .abi = .gnu },
+    .{ .arch = .x86_64, .os = .macos, .abi = .gnu, .os_ver = .{ .major = 10, .minor = 0 } },
+    .{ .arch = .x86_64, .os = .macos, .abi = .gnu, .os_ver = .{ .major = 11, .minor = 0 } },
+    .{ .arch = .x86_64, .os = .macos, .abi = .gnu, .os_ver = .{ .major = 12, .minor = 0 } },
 };
 
 pub fn libCGenericName(target: std.Target) [:0]const u8 {
@@ -102,9 +106,29 @@ pub fn libCGenericName(target: std.Target) [:0]const u8 {
     }
 }
 
+pub fn osArchName(target: std.Target) [:0]const u8 {
+    return switch (target.os.tag) {
+        .linux => switch (target.cpu.arch) {
+            .arm, .armeb, .thumb, .thumbeb => "arm",
+            .aarch64, .aarch64_be, .aarch64_32 => "arm64",
+            .mips, .mipsel, .mips64, .mips64el => "mips",
+            .powerpc, .powerpcle, .powerpc64, .powerpc64le => "powerpc",
+            .riscv32, .riscv64 => "riscv",
+            .sparc, .sparcel, .sparcv9 => "sparc",
+            .i386, .x86_64 => "x86",
+            else => @tagName(target.cpu.arch),
+        },
+        else => @tagName(target.cpu.arch),
+    };
+}
+
 pub fn canBuildLibC(target: std.Target) bool {
     for (available_libcs) |libc| {
         if (target.cpu.arch == libc.arch and target.os.tag == libc.os and target.abi == libc.abi) {
+            if (target.os.tag == .macos) {
+                const ver = target.os.version_range.semver;
+                if (ver.min.major != libc.os_ver.?.major) continue; // no match, keep going
+            }
             return true;
         }
     }
@@ -574,4 +598,39 @@ pub fn defaultAddressSpace(
     _ = target;
     _ = context;
     return .generic;
+}
+
+pub fn llvmMachineAbi(target: std.Target) ?[:0]const u8 {
+    const have_float = switch (target.abi) {
+        .gnuilp32 => return "ilp32",
+        .gnueabihf, .musleabihf, .eabihf => true,
+        else => false,
+    };
+
+    switch (target.cpu.arch) {
+        .riscv64 => {
+            const featureSetHas = std.Target.riscv.featureSetHas;
+            if (featureSetHas(target.cpu.features, .d)) {
+                return "lp64d";
+            } else if (have_float) {
+                return "lp64f";
+            } else {
+                return "lp64";
+            }
+        },
+        .riscv32 => {
+            const featureSetHas = std.Target.riscv.featureSetHas;
+            if (featureSetHas(target.cpu.features, .d)) {
+                return "ilp32d";
+            } else if (have_float) {
+                return "ilp32f";
+            } else if (featureSetHas(target.cpu.features, .e)) {
+                return "ilp32e";
+            } else {
+                return "ilp32";
+            }
+        },
+        //TODO add ARM, Mips, and PowerPC
+        else => return null,
+    }
 }

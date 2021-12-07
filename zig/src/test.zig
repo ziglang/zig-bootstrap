@@ -10,7 +10,8 @@ const enable_qemu: bool = build_options.enable_qemu;
 const enable_wine: bool = build_options.enable_wine;
 const enable_wasmtime: bool = build_options.enable_wasmtime;
 const enable_darling: bool = build_options.enable_darling;
-const glibc_multi_install_dir: ?[]const u8 = build_options.glibc_multi_install_dir;
+const enable_rosetta: bool = build_options.enable_rosetta;
+const glibc_runtimes_dir: ?[]const u8 = build_options.glibc_runtimes_dir;
 const skip_compile_errors = build_options.skip_compile_errors;
 const ThreadPool = @import("ThreadPool.zig");
 const CrossTarget = std.zig.CrossTarget;
@@ -610,6 +611,8 @@ pub const TestContext = struct {
     }
 
     fn run(self: *TestContext) !void {
+        const host = try std.zig.system.NativeTargetInfo.detect(std.testing.allocator, .{});
+
         var progress = std.Progress{};
         const root_node = try progress.start("compiler", self.cases.items.len);
         defer root_node.end();
@@ -668,6 +671,7 @@ pub const TestContext = struct {
                 zig_lib_directory,
                 &thread_pool,
                 global_cache_directory,
+                host,
             ) catch |err| {
                 fail_count += 1;
                 print("test '{s}' failed: {s}\n\n", .{ case.name, @errorName(err) });
@@ -680,19 +684,20 @@ pub const TestContext = struct {
     }
 
     fn runOneCase(
-        allocator: *Allocator,
+        allocator: Allocator,
         root_node: *std.Progress.Node,
         case: Case,
         zig_lib_directory: Compilation.Directory,
         thread_pool: *ThreadPool,
         global_cache_directory: Compilation.Directory,
+        host: std.zig.system.NativeTargetInfo,
     ) !void {
         const target_info = try std.zig.system.NativeTargetInfo.detect(allocator, case.target);
         const target = target_info.target;
 
         var arena_allocator = std.heap.ArenaAllocator.init(allocator);
         defer arena_allocator.deinit();
-        const arena = &arena_allocator.allocator;
+        const arena = arena_allocator.allocator();
 
         var tmp = std.testing.tmpDir(.{});
         defer tmp.cleanup();
@@ -881,6 +886,7 @@ pub const TestContext = struct {
             .stage1 => true,
             else => null,
         };
+        const link_libc = case.backend == .llvm;
         const comp = try Compilation.create(allocator, .{
             .local_cache_directory = zig_cache_directory,
             .global_cache_directory = global_cache_directory,
@@ -902,7 +908,7 @@ pub const TestContext = struct {
             .is_native_os = case.target.isNativeOs(),
             .is_native_abi = case.target.isNativeAbi(),
             .dynamic_linker = target_info.dynamic_linker.get(),
-            .link_libc = case.backend == .llvm,
+            .link_libc = link_libc,
             .use_llvm = use_llvm,
             .use_stage1 = use_stage1,
             .self_exe_path = std.testing.zig_exe_path,
@@ -1112,7 +1118,7 @@ pub const TestContext = struct {
                         // child process.
                         const exe_path = try std.fmt.allocPrint(arena, "." ++ std.fs.path.sep_str ++ "{s}", .{bin_name});
                         if (case.object_format != null and case.object_format.? == .c) {
-                            if (case.target.getExternalExecutor() != .native) {
+                            if (host.getExternalExecutor(target_info, .{ .link_libc = true }) != .native) {
                                 // We wouldn't be able to run the compiled C code.
                                 return; // Pass test.
                             }
@@ -1128,15 +1134,21 @@ pub const TestContext = struct {
                                 "-lc",
                                 exe_path,
                             });
-                        } else switch (case.target.getExternalExecutor()) {
+                        } else switch (host.getExternalExecutor(target_info, .{ .link_libc = link_libc })) {
                             .native => try argv.append(exe_path),
-                            .unavailable => return, // Pass test.
+                            .bad_dl, .bad_os_or_cpu => return, // Pass test.
+
+                            .rosetta => if (enable_rosetta) {
+                                try argv.append(exe_path);
+                            } else {
+                                return; // Rosetta not available, pass test.
+                            },
 
                             .qemu => |qemu_bin_name| if (enable_qemu) {
                                 // TODO Ability for test cases to specify whether to link libc.
                                 const need_cross_glibc = false; // target.isGnuLibC() and self.is_linking_libc;
                                 const glibc_dir_arg = if (need_cross_glibc)
-                                    glibc_multi_install_dir orelse return // glibc dir not available; pass test
+                                    glibc_runtimes_dir orelse return // glibc dir not available; pass test
                                 else
                                     null;
                                 try argv.append(qemu_bin_name);

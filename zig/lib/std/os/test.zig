@@ -58,10 +58,11 @@ test "open smoke test" {
     // Get base abs path
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
+    const allocator = arena.allocator();
 
     const base_path = blk: {
-        const relative_path = try fs.path.join(&arena.allocator, &[_][]const u8{ "zig-cache", "tmp", tmp.sub_path[0..] });
-        break :blk try fs.realpathAlloc(&arena.allocator, relative_path);
+        const relative_path = try fs.path.join(allocator, &[_][]const u8{ "zig-cache", "tmp", tmp.sub_path[0..] });
+        break :blk try fs.realpathAlloc(allocator, relative_path);
     };
 
     var file_path: []u8 = undefined;
@@ -69,34 +70,34 @@ test "open smoke test" {
     const mode: os.mode_t = if (native_os == .windows) 0 else 0o666;
 
     // Create some file using `open`.
-    file_path = try fs.path.join(&arena.allocator, &[_][]const u8{ base_path, "some_file" });
+    file_path = try fs.path.join(allocator, &[_][]const u8{ base_path, "some_file" });
     fd = try os.open(file_path, os.O.RDWR | os.O.CREAT | os.O.EXCL, mode);
     os.close(fd);
 
     // Try this again with the same flags. This op should fail with error.PathAlreadyExists.
-    file_path = try fs.path.join(&arena.allocator, &[_][]const u8{ base_path, "some_file" });
+    file_path = try fs.path.join(allocator, &[_][]const u8{ base_path, "some_file" });
     try expectError(error.PathAlreadyExists, os.open(file_path, os.O.RDWR | os.O.CREAT | os.O.EXCL, mode));
 
     // Try opening without `O.EXCL` flag.
-    file_path = try fs.path.join(&arena.allocator, &[_][]const u8{ base_path, "some_file" });
+    file_path = try fs.path.join(allocator, &[_][]const u8{ base_path, "some_file" });
     fd = try os.open(file_path, os.O.RDWR | os.O.CREAT, mode);
     os.close(fd);
 
     // Try opening as a directory which should fail.
-    file_path = try fs.path.join(&arena.allocator, &[_][]const u8{ base_path, "some_file" });
+    file_path = try fs.path.join(allocator, &[_][]const u8{ base_path, "some_file" });
     try expectError(error.NotDir, os.open(file_path, os.O.RDWR | os.O.DIRECTORY, mode));
 
     // Create some directory
-    file_path = try fs.path.join(&arena.allocator, &[_][]const u8{ base_path, "some_dir" });
+    file_path = try fs.path.join(allocator, &[_][]const u8{ base_path, "some_dir" });
     try os.mkdir(file_path, mode);
 
     // Open dir using `open`
-    file_path = try fs.path.join(&arena.allocator, &[_][]const u8{ base_path, "some_dir" });
+    file_path = try fs.path.join(allocator, &[_][]const u8{ base_path, "some_dir" });
     fd = try os.open(file_path, os.O.RDONLY | os.O.DIRECTORY, mode);
     os.close(fd);
 
     // Try opening as file which should fail.
-    file_path = try fs.path.join(&arena.allocator, &[_][]const u8{ base_path, "some_dir" });
+    file_path = try fs.path.join(allocator, &[_][]const u8{ base_path, "some_dir" });
     try expectError(error.IsDir, os.open(file_path, os.O.RDWR, mode));
 }
 
@@ -693,7 +694,19 @@ test "getrlimit and setrlimit" {
     inline for (std.meta.fields(os.rlimit_resource)) |field| {
         const resource = @intToEnum(os.rlimit_resource, field.value);
         const limit = try os.getrlimit(resource);
-        try os.setrlimit(resource, limit);
+
+        // On 32 bit MIPS musl includes a fix which changes limits greater than -1UL/2 to RLIM_INFINITY.
+        // See http://git.musl-libc.org/cgit/musl/commit/src/misc/getrlimit.c?id=8258014fd1e34e942a549c88c7e022a00445c352
+        //
+        // This happens for example if RLIMIT_MEMLOCK is bigger than ~2GiB.
+        // In that case the following the limit would be RLIM_INFINITY and the following setrlimit fails with EPERM.
+        if (comptime builtin.cpu.arch.isMIPS() and builtin.link_libc) {
+            if (limit.cur != os.linux.RLIM.INFINITY) {
+                try os.setrlimit(resource, limit);
+            }
+        } else {
+            try os.setrlimit(resource, limit);
+        }
     }
 }
 

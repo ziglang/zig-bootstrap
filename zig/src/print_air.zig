@@ -8,7 +8,7 @@ const Zir = @import("Zir.zig");
 const Air = @import("Air.zig");
 const Liveness = @import("Liveness.zig");
 
-pub fn dump(gpa: *Allocator, air: Air, zir: Zir, liveness: Liveness) void {
+pub fn dump(gpa: Allocator, air: Air, zir: Zir, liveness: Liveness) void {
     const instruction_bytes = air.instructions.len *
         // Here we don't use @sizeOf(Air.Inst.Data) because it would include
         // the debug safety tag but we want to measure release size.
@@ -47,7 +47,7 @@ pub fn dump(gpa: *Allocator, air: Air, zir: Zir, liveness: Liveness) void {
 
     var writer: Writer = .{
         .gpa = gpa,
-        .arena = &arena.allocator,
+        .arena = arena.allocator(),
         .air = air,
         .zir = zir,
         .liveness = liveness,
@@ -60,8 +60,8 @@ pub fn dump(gpa: *Allocator, air: Air, zir: Zir, liveness: Liveness) void {
 }
 
 const Writer = struct {
-    gpa: *Allocator,
-    arena: *Allocator,
+    gpa: Allocator,
+    arena: Allocator,
     air: Air,
     zir: Zir,
     liveness: Liveness,
@@ -234,7 +234,7 @@ const Writer = struct {
     fn writeTyStr(w: *Writer, s: anytype, inst: Air.Inst.Index) @TypeOf(s).Error!void {
         const ty_str = w.air.instructions.items(.data)[inst].ty_str;
         const name = w.zir.nullTerminatedString(ty_str.str);
-        try s.print("\"{}\", {}", .{ std.zig.fmtEscapes(name), ty_str.ty });
+        try s.print("\"{}\", {}", .{ std.zig.fmtEscapes(name), w.air.getRefType(ty_str.ty) });
     }
 
     fn writeBinOp(w: *Writer, s: anytype, inst: Air.Inst.Index) @TypeOf(s).Error!void {
