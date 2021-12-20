@@ -169,8 +169,10 @@ test {
                 _ = @import("behavior/optional_stage1.zig");
                 _ = @import("behavior/pointers_stage1.zig");
                 _ = @import("behavior/popcount_stage1.zig");
+                _ = @import("behavior/prefetch.zig");
                 _ = @import("behavior/ptrcast_stage1.zig");
                 _ = @import("behavior/reflection.zig");
+                _ = @import("behavior/saturating_arithmetic_stage1.zig");
                 _ = @import("behavior/select.zig");
                 _ = @import("behavior/shuffle.zig");
                 _ = @import("behavior/sizeof_and_typeof_stage1.zig");
@@ -181,6 +183,7 @@ test {
                 _ = @import("behavior/switch_prong_err_enum.zig");
                 _ = @import("behavior/switch_prong_implicit_cast.zig");
                 _ = @import("behavior/switch_stage1.zig");
+                _ = @import("behavior/truncate_stage1.zig");
                 _ = @import("behavior/try.zig");
                 _ = @import("behavior/tuple.zig");
                 _ = @import("behavior/type.zig");

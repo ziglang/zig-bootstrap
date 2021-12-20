@@ -104,6 +104,7 @@ pub const Options = struct {
     import_memory: bool,
     initial_memory: ?u64,
     max_memory: ?u64,
+    export_symbol_names: []const []const u8,
     global_base: ?u64,
     is_native_os: bool,
     is_native_abi: bool,
@@ -155,6 +156,9 @@ pub const Options = struct {
 
     /// (Darwin) Path and version of the native SDK if detected.
     native_darwin_sdk: ?std.zig.system.darwin.DarwinSDK = null,
+
+    /// (Darwin) Install name for the dylib
+    install_name: ?[]const u8 = null,
 
     pub fn effectiveOutputMode(options: Options) std.builtin.OutputMode {
         return if (options.use_lld) .Obj else options.output_mode;

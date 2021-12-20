@@ -1042,6 +1042,7 @@ fn zirExtended(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
         .c_define           => return sema.zirCDefine(           block, extended),
         .wasm_memory_size   => return sema.zirWasmMemorySize(    block, extended),
         .wasm_memory_grow   => return sema.zirWasmMemoryGrow(    block, extended),
+        .prefetch           => return sema.zirPrefetch(          block, extended),
         // zig fmt: on
     }
 }
@@ -11104,6 +11105,16 @@ fn zirWasmMemoryGrow(
     return sema.fail(block, src, "TODO: implement Sema.zirWasmMemoryGrow", .{});
 }
 
+fn zirPrefetch(
+    sema: *Sema,
+    block: *Block,
+    extended: Zir.Inst.Extended.InstData,
+) CompileError!Air.Inst.Ref {
+    const extra = sema.code.extraData(Zir.Inst.BinNode, extended.operand).data;
+    const src: LazySrcLoc = .{ .node_offset = extra.node };
+    return sema.fail(block, src, "TODO: implement Sema.zirPrefetch", .{});
+}
+
 fn zirBuiltinExtern(
     sema: *Sema,
     block: *Block,
@@ -12343,9 +12354,9 @@ fn coerce(
                 }
             }
 
-            // cast from *T and [*]T to *c_void
+            // cast from *T and [*]T to *anyopaque
             // but don't do it if the source type is a double pointer
-            if (dest_info.pointee_type.tag() == .c_void and inst_ty.zigTypeTag() == .Pointer and
+            if (dest_info.pointee_type.tag() == .anyopaque and inst_ty.zigTypeTag() == .Pointer and
                 inst_ty.childType().zigTypeTag() != .Pointer)
             {
                 return sema.coerceCompatiblePtrs(block, dest_ty, inst, inst_src);
@@ -14231,6 +14242,7 @@ fn resolveTypeFields(sema: *Sema, block: *Block, src: LazySrcLoc, ty: Type) Comp
         .float_mode => return sema.resolveBuiltinTypeFields(block, src, "FloatMode"),
         .reduce_op => return sema.resolveBuiltinTypeFields(block, src, "ReduceOp"),
         .call_options => return sema.resolveBuiltinTypeFields(block, src, "CallOptions"),
+        .prefetch_options => return sema.resolveBuiltinTypeFields(block, src, "PrefetchOptions"),
 
         .@"union", .union_tagged => {
             const union_obj = ty.cast(Type.Payload.Union).?.data;
@@ -14797,7 +14809,7 @@ fn typeHasOnePossibleValue(
         .const_slice_u8,
         .const_slice,
         .mut_slice,
-        .c_void,
+        .anyopaque,
         .optional,
         .optional_single_mut_pointer,
         .optional_single_const_pointer,
@@ -14819,6 +14831,7 @@ fn typeHasOnePossibleValue(
         .float_mode,
         .reduce_op,
         .call_options,
+        .prefetch_options,
         .export_options,
         .extern_options,
         .type_info,
@@ -15013,7 +15026,7 @@ pub fn addType(sema: *Sema, ty: Type) !Air.Inst.Ref {
         .f32 => return .f32_type,
         .f64 => return .f64_type,
         .f128 => return .f128_type,
-        .c_void => return .c_void_type,
+        .anyopaque => return .anyopaque_type,
         .bool => return .bool_type,
         .void => return .void_type,
         .type => return .type_type,
@@ -15032,6 +15045,7 @@ pub fn addType(sema: *Sema, ty: Type) !Air.Inst.Ref {
         .float_mode => return .float_mode_type,
         .reduce_op => return .reduce_op_type,
         .call_options => return .call_options_type,
+        .prefetch_options => return .prefetch_options_type,
         .export_options => return .export_options_type,
         .extern_options => return .extern_options_type,
         .type_info => return .type_info_type,

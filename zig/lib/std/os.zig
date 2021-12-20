@@ -1544,32 +1544,6 @@ pub fn execveZ(
     child_argv: [*:null]const ?[*:0]const u8,
     envp: [*:null]const ?[*:0]const u8,
 ) ExecveError {
-    if (comptime builtin.target.isDarwin()) {
-        // Darwin gets its own branch because it has BADEXEC and BADARCH
-        // which are beyond posix.
-        switch (errno(system.execve(path, child_argv, envp))) {
-            .SUCCESS => unreachable,
-            .FAULT => unreachable,
-            .@"2BIG" => return error.SystemResources,
-            .MFILE => return error.ProcessFdQuotaExceeded,
-            .NAMETOOLONG => return error.NameTooLong,
-            .NFILE => return error.SystemFdQuotaExceeded,
-            .NOMEM => return error.SystemResources,
-            .ACCES => return error.AccessDenied,
-            .PERM => return error.AccessDenied,
-            .INVAL => return error.InvalidExe,
-            .NOEXEC => return error.InvalidExe,
-            .BADEXEC => return error.InvalidExe,
-            .BADARCH => return error.InvalidExe,
-            .IO => return error.FileSystem,
-            .LOOP => return error.FileSystem,
-            .ISDIR => return error.IsDir,
-            .NOENT => return error.FileNotFound,
-            .NOTDIR => return error.NotDir,
-            .TXTBSY => return error.FileBusy,
-            else => |err| return unexpectedErrno(err),
-        }
-    }
     switch (errno(system.execve(path, child_argv, envp))) {
         .SUCCESS => unreachable,
         .FAULT => unreachable,
@@ -1588,7 +1562,18 @@ pub fn execveZ(
         .NOENT => return error.FileNotFound,
         .NOTDIR => return error.NotDir,
         .TXTBSY => return error.FileBusy,
-        else => |err| return unexpectedErrno(err),
+        else => |err| switch (builtin.os.tag) {
+            .macos, .ios, .tvos, .watchos => switch (err) {
+                .BADEXEC => return error.InvalidExe,
+                .BADARCH => return error.InvalidExe,
+                else => return unexpectedErrno(err),
+            },
+            .linux, .solaris => switch (err) {
+                .LIBBAD => return error.InvalidExe,
+                else => return unexpectedErrno(err),
+            },
+            else => return unexpectedErrno(err),
+        },
     }
 }
 
@@ -2919,7 +2904,7 @@ pub fn isCygwinPty(handle: fd_t) bool {
     if (windows.kernel32.GetFileInformationByHandleEx(
         handle,
         windows.FileNameInfo,
-        @ptrCast(*c_void, &name_info_bytes),
+        @ptrCast(*anyopaque, &name_info_bytes),
         name_info_bytes.len,
     ) == 0) {
         return false;
@@ -4251,9 +4236,9 @@ pub const SysCtlError = error{
 
 pub fn sysctl(
     name: []const c_int,
-    oldp: ?*c_void,
+    oldp: ?*anyopaque,
     oldlenp: ?*usize,
-    newp: ?*c_void,
+    newp: ?*anyopaque,
     newlen: usize,
 ) SysCtlError!void {
     if (builtin.os.tag == .wasi) {
@@ -4276,9 +4261,9 @@ pub fn sysctl(
 
 pub fn sysctlbynameZ(
     name: [*:0]const u8,
-    oldp: ?*c_void,
+    oldp: ?*anyopaque,
     oldlenp: ?*usize,
-    newp: ?*c_void,
+    newp: ?*anyopaque,
     newlen: usize,
 ) SysCtlError!void {
     if (builtin.os.tag == .wasi) {
@@ -4816,12 +4801,12 @@ pub fn dl_iterate_phdr(
 
     if (builtin.link_libc) {
         switch (system.dl_iterate_phdr(struct {
-            fn callbackC(info: *dl_phdr_info, size: usize, data: ?*c_void) callconv(.C) c_int {
+            fn callbackC(info: *dl_phdr_info, size: usize, data: ?*anyopaque) callconv(.C) c_int {
                 const context_ptr = @ptrCast(*const Context, @alignCast(@alignOf(*const Context), data));
                 callback(info, size, context_ptr.*) catch |err| return @errorToInt(err);
                 return 0;
             }
-        }.callbackC, @intToPtr(?*c_void, @ptrToInt(&context)))) {
+        }.callbackC, @intToPtr(?*anyopaque, @ptrToInt(&context)))) {
             0 => return,
             else => |err| return @errSetCast(Error, @intToError(@intCast(u16, err))), // TODO don't hardcode u16
         }
