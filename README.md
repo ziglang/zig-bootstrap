@@ -10,8 +10,7 @@ to find and inspect the patch diffs.
 
  * LLVM, LLD, Clang release/13.x (13.0.1-rc1+d4a57c84)
  * zlib 1.2.11
- * Zig master branch (check the build script for the specific revision. It will
-   be 0.9.0 when the release is tagged).
+ * Zig 0.9.0
 
 For other versions, check the git tags of this repository.
 
