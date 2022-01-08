@@ -6,6 +6,24 @@ JOBS="$1"
 TARGET="$2" # Example: riscv64-linux-gnu
 MCPU="$3" # Examples: `baseline`, `native`, `generic+v7a`, or `arm1176jzf_s`
 
+if [ -z "$JOBS" ]
+then
+  echo "error: JOBS parameter missing."
+  exit 1
+fi
+
+if [ -z "$TARGET" ]
+then
+  echo "error: TARGET parameter missing."
+  exit 1
+fi
+
+if [ -z "$MCPU" ]
+then
+  echo "error: MCPU parameter missing."
+  exit 1
+fi
+
 ROOTDIR="$(pwd)"
 ZIG_VERSION="0.9.0"
 
