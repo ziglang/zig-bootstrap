@@ -1552,6 +1552,8 @@ pub const LibExeObjStep = struct {
 
     subsystem: ?std.Target.SubSystem = null,
 
+    entry_symbol_name: ?[]const u8 = null,
+
     /// Overrides the default stack size
     stack_size: ?u64 = null,
 
@@ -2253,6 +2255,11 @@ pub const LibExeObjStep = struct {
             try zig_args.append(@tagName(builder.color));
         }
 
+        if (self.entry_symbol_name) |entry| {
+            try zig_args.append("--entry");
+            try zig_args.append(entry);
+        }
+
         if (self.stack_size) |stack_size| {
             try zig_args.append("--stack");
             try zig_args.append(try std.fmt.allocPrint(builder.allocator, "{}", .{stack_size}));
@@ -2651,6 +2658,8 @@ pub const LibExeObjStep = struct {
                         try zig_args.append(bin_name);
                         try zig_args.append("--test-cmd");
                         try zig_args.append("--dir=.");
+                        try zig_args.append("--test-cmd");
+                        try zig_args.append("--allow-unknown-exports"); // TODO: Remove when stage2 is default compiler
                         try zig_args.append("--test-cmd-bin");
                     } else {
                         try zig_args.append("--test-no-exec");

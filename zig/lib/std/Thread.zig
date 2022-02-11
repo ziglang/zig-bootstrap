@@ -16,6 +16,7 @@ pub const StaticResetEvent = @import("Thread/StaticResetEvent.zig");
 pub const Mutex = @import("Thread/Mutex.zig");
 pub const Semaphore = @import("Thread/Semaphore.zig");
 pub const Condition = @import("Thread/Condition.zig");
+pub const RwLock = @import("Thread/RwLock.zig");
 
 pub const use_pthreads = target.os.tag != .windows and target.os.tag != .wasi and builtin.link_libc;
 const is_gnu = target.abi.isGnu();
@@ -1150,4 +1151,28 @@ test "Thread.detach" {
 
     event.wait();
     try std.testing.expectEqual(value, 1);
+}
+
+fn testWaitForSignal(mutex: *Mutex, cond: *Condition) void {
+    mutex.lock();
+    defer mutex.unlock();
+    cond.signal();
+    cond.wait(mutex);
+}
+
+test "Condition.signal" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var mutex = Mutex{};
+    var cond = Condition{};
+
+    var thread: Thread = undefined;
+    {
+        mutex.lock();
+        defer mutex.unlock();
+        thread = try Thread.spawn(.{}, testWaitForSignal, .{ &mutex, &cond });
+        cond.wait(&mutex);
+        cond.signal();
+    }
+    thread.join();
 }

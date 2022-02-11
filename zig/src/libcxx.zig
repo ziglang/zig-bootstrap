@@ -43,7 +43,9 @@ const libcxx_files = [_][]const u8{
     "src/exception.cpp",
     "src/experimental/memory_resource.cpp",
     "src/filesystem/directory_iterator.cpp",
-    "src/filesystem/int128_builtins.cpp",
+    // omit int128_builtins.cpp because it provides __muloti4 which is already provided
+    // by compiler_rt and crashes on Windows x86_64: https://github.com/ziglang/zig/issues/10719
+    //"src/filesystem/int128_builtins.cpp",
     "src/filesystem/operations.cpp",
     "src/format.cpp",
     "src/functional.cpp",
@@ -114,8 +116,8 @@ pub fn buildLibCXX(comp: *Compilation) !void {
     for (libcxx_files) |cxx_src| {
         var cflags = std.ArrayList([]const u8).init(arena);
 
-        if (target.os.tag == .windows or target.os.tag == .wasi) {
-            // Filesystem stuff isn't supported on WASI and Windows.
+        if ((target.os.tag == .windows and target.abi == .msvc) or target.os.tag == .wasi) {
+            // Filesystem stuff isn't supported on WASI and Windows (MSVC).
             if (std.mem.startsWith(u8, cxx_src, "src/filesystem/"))
                 continue;
         }

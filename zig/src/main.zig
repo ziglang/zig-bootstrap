@@ -294,10 +294,11 @@ const usage_build_generic =
     \\                      .s    Target-specific assembly source code
     \\                      .S    Assembly with C preprocessor (requires LLVM extensions)
     \\                      .c    C source code (requires LLVM extensions)
-    \\        .cxx .cc .C .cpp    C++ source code (requires LLVM extensions)
+    \\  .cxx .cc .C .cpp .stub    C++ source code (requires LLVM extensions)
     \\                      .m    Objective-C source code (requires LLVM extensions)
     \\                     .mm    Objective-C++ source code (requires LLVM extensions)
     \\                     .bc    LLVM IR Module (requires LLVM extensions)
+    \\                     .cu    Cuda source code (requires LLVM extensions)
     \\
     \\General Options:
     \\  -h, --help                Print this help and exit
@@ -400,6 +401,7 @@ const usage_build_generic =
     \\  --dynamic-linker [path]        Set the dynamic interpreter path (usually ld.so)
     \\  --sysroot [path]               Set the system root directory (usually /)
     \\  --version [ver]                Dynamic library semver
+    \\  --entry [name]                 Set the entrypoint symbol name
     \\  -fsoname[=name]                Override the default SONAME value
     \\  -fno-soname                    Disable emitting a SONAME
     \\  -fLLD                          Force using LLD as the linker
@@ -643,6 +645,7 @@ fn buildOutputType(
     var linker_optimization: ?u8 = null;
     var test_evented_io = false;
     var test_no_exec = false;
+    var entry: ?[]const u8 = null;
     var stack_size_override: ?u64 = null;
     var image_base_override: ?u64 = null;
     var use_llvm: ?bool = null;
@@ -670,6 +673,7 @@ fn buildOutputType(
     var enable_link_snapshots: bool = false;
     var native_darwin_sdk: ?std.zig.system.darwin.DarwinSDK = null;
     var install_name: ?[]const u8 = null;
+    var hash_style: link.HashStyle = .both;
 
     // e.g. -m3dnow or -mno-outline-atomics. They correspond to std.Target llvm cpu feature names.
     // This array is populated by zig cc frontend and then has to be converted to zig-style
@@ -701,7 +705,7 @@ fn buildOutputType(
     var c_source_files = std.ArrayList(Compilation.CSourceFile).init(gpa);
     defer c_source_files.deinit();
 
-    var link_objects = std.ArrayList([]const u8).init(gpa);
+    var link_objects = std.ArrayList(Compilation.LinkObject).init(gpa);
     defer link_objects.deinit();
 
     var framework_dirs = std.ArrayList([]const u8).init(gpa);
@@ -843,6 +847,10 @@ fn buildOutputType(
                         if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
                         i += 1;
                         optimize_mode_string = args[i];
+                    } else if (mem.eql(u8, arg, "--entry")) {
+                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
+                        i += 1;
+                        entry = args[i];
                     } else if (mem.eql(u8, arg, "--stack")) {
                         if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
                         i += 1;
@@ -1230,9 +1238,9 @@ fn buildOutputType(
                     }
                 } else switch (Compilation.classifyFileExt(arg)) {
                     .object, .static_library, .shared_library => {
-                        try link_objects.append(arg);
+                        try link_objects.append(.{ .path = arg });
                     },
-                    .assembly, .c, .cpp, .h, .ll, .bc, .m, .mm => {
+                    .assembly, .c, .cpp, .h, .ll, .bc, .m, .mm, .cu => {
                         try c_source_files.append(.{
                             .src_path = arg,
                             .extra_flags = try arena.dupe([]const u8, extra_cflags.items),
@@ -1281,6 +1289,7 @@ fn buildOutputType(
             var it = ClangArgIterator.init(arena, all_args);
             var emit_llvm = false;
             var needed = false;
+            var must_link = false;
             var force_static_libs = false;
             while (it.has_next) {
                 it.next() catch |err| {
@@ -1299,9 +1308,14 @@ fn buildOutputType(
                     .positional => {
                         const file_ext = Compilation.classifyFileExt(mem.sliceTo(it.only_arg, 0));
                         switch (file_ext) {
-                            .assembly, .c, .cpp, .ll, .bc, .h, .m, .mm => try c_source_files.append(.{ .src_path = it.only_arg }),
+                            .assembly, .c, .cpp, .ll, .bc, .h, .m, .mm, .cu => {
+                                try c_source_files.append(.{ .src_path = it.only_arg });
+                            },
                             .unknown, .shared_library, .object, .static_library => {
-                                try link_objects.append(it.only_arg);
+                                try link_objects.append(.{
+                                    .path = it.only_arg,
+                                    .must_link = must_link,
+                                });
                             },
                             .zig => {
                                 if (root_src_file) |other| {
@@ -1366,6 +1380,14 @@ fn buildOutputType(
                                 needed = false;
                             } else if (mem.eql(u8, linker_arg, "--no-as-needed")) {
                                 needed = true;
+                            } else if (mem.eql(u8, linker_arg, "--whole-archive") or
+                                mem.eql(u8, linker_arg, "-whole-archive"))
+                            {
+                                must_link = true;
+                            } else if (mem.eql(u8, linker_arg, "--no-whole-archive") or
+                                mem.eql(u8, linker_arg, "-no-whole-archive"))
+                            {
+                                must_link = false;
                             } else if (mem.eql(u8, linker_arg, "-Bdynamic") or
                                 mem.eql(u8, linker_arg, "-dy") or
                                 mem.eql(u8, linker_arg, "-call_shared"))
@@ -1467,6 +1489,12 @@ fn buildOutputType(
                         wasi_exec_model = std.meta.stringToEnum(std.builtin.WasiExecModel, it.only_arg) orelse {
                             fatal("expected [command|reactor] for -mexec-mode=[value], found '{s}'", .{it.only_arg});
                         };
+                    },
+                    .sysroot => {
+                        sysroot = it.only_arg;
+                    },
+                    .entry => {
+                        entry = it.only_arg;
                     },
                 }
             }
@@ -1609,6 +1637,12 @@ fn buildOutputType(
                         fatal("unable to parse '{s}': {s}", .{ arg, @errorName(err) });
                     };
                     have_version = true;
+                } else if (mem.eql(u8, arg, "-e") or mem.eql(u8, arg, "--entry")) {
+                    i += 1;
+                    if (i >= linker_args.items.len) {
+                        fatal("expected linker arg after '{s}'", .{arg});
+                    }
+                    entry = linker_args.items[i];
                 } else if (mem.eql(u8, arg, "--stack")) {
                     i += 1;
                     if (i >= linker_args.items.len) {
@@ -1645,6 +1679,12 @@ fn buildOutputType(
                     // This option does not do anything.
                 } else if (mem.eql(u8, arg, "--export-all-symbols")) {
                     rdynamic = true;
+                } else if (mem.eql(u8, arg, "-s") or mem.eql(u8, arg, "--strip-all") or
+                    mem.eql(u8, arg, "-S") or mem.eql(u8, arg, "--strip-debug"))
+                {
+                    // -s, --strip-all             Strip all symbols
+                    // -S, --strip-debug           Strip debugging symbols
+                    strip = true;
                 } else if (mem.eql(u8, arg, "--start-group") or
                     mem.eql(u8, arg, "--end-group"))
                 {
@@ -1733,6 +1773,28 @@ fn buildOutputType(
                         fatal("expected linker arg after '{s}'", .{arg});
                     }
                     install_name = linker_args.items[i];
+                } else if (mem.eql(u8, arg, "-force_load")) {
+                    i += 1;
+                    if (i >= linker_args.items.len) {
+                        fatal("expected linker arg after '{s}'", .{arg});
+                    }
+                    try link_objects.append(.{
+                        .path = linker_args.items[i],
+                        .must_link = true,
+                    });
+                } else if (mem.eql(u8, arg, "-hash-style") or
+                    mem.eql(u8, arg, "--hash-style"))
+                {
+                    i += 1;
+                    if (i >= linker_args.items.len) {
+                        fatal("expected linker arg after '{s}'", .{arg});
+                    }
+                    const next_arg = linker_args.items[i];
+                    hash_style = std.meta.stringToEnum(link.HashStyle, next_arg) orelse {
+                        fatal("expected [sysv|gnu|both] after --hash-style, found '{s}'", .{
+                            next_arg,
+                        });
+                    };
                 } else {
                     warn("unsupported linker arg: {s}", .{arg});
                 }
@@ -1802,8 +1864,12 @@ fn buildOutputType(
                     }
                 },
             }
-            if (c_source_files.items.len == 0 and link_objects.items.len == 0) {
+            if (c_source_files.items.len == 0 and
+                link_objects.items.len == 0 and
+                root_src_file == null)
+            {
                 // For example `zig cc` and no args should print the "no input files" message.
+                // There could be other reasons to punt to clang, for example, --help.
                 return punt_to_clang(arena, all_args);
             }
         },
@@ -1827,7 +1893,7 @@ fn buildOutputType(
             const basename = fs.path.basename(c_source_files.items[0].src_path);
             break :blk basename[0 .. basename.len - fs.path.extension(basename).len];
         } else if (link_objects.items.len >= 1) {
-            const basename = fs.path.basename(link_objects.items[0]);
+            const basename = fs.path.basename(link_objects.items[0].path);
             break :blk basename[0 .. basename.len - fs.path.extension(basename).len];
         } else if (emit_bin == .yes) {
             const basename = fs.path.basename(emit_bin.yes);
@@ -1932,6 +1998,11 @@ fn buildOutputType(
                 _ = system_libs.orderedRemove(lib_name);
                 continue;
             }
+            if (target_util.is_compiler_rt_lib_name(target_info.target, lib_name)) {
+                std.log.warn("ignoring superfluous library '{s}': this dependency is fulfilled instead by compiler-rt which zig unconditionally provides", .{lib_name});
+                _ = system_libs.orderedRemove(lib_name);
+                continue;
+            }
             if (std.fs.path.isAbsolute(lib_name)) {
                 fatal("cannot use absolute path as a system library: {s}", .{lib_name});
             }
@@ -1944,6 +2015,10 @@ fn buildOutputType(
             }
             i += 1;
         }
+    }
+    // libc++ depends on libc
+    if (link_libcpp) {
+        link_libc = true;
     }
 
     if (use_lld) |opt| {
@@ -2030,7 +2105,7 @@ fn buildOutputType(
                         test_path.items, @errorName(e),
                     }),
                 };
-                try link_objects.append(try arena.dupe(u8, test_path.items));
+                try link_objects.append(.{ .path = try arena.dupe(u8, test_path.items) });
                 break;
             } else {
                 var search_paths = std.ArrayList(u8).init(arena);
@@ -2446,6 +2521,7 @@ fn buildOutputType(
         .use_lld = use_lld,
         .use_clang = use_clang,
         .use_stage1 = use_stage1,
+        .hash_style = hash_style,
         .rdynamic = rdynamic,
         .linker_script = linker_script,
         .version_script = version_script,
@@ -2474,6 +2550,7 @@ fn buildOutputType(
         .minor_subsystem_version = minor_subsystem_version,
         .link_eh_frame_hdr = link_eh_frame_hdr,
         .link_emit_relocs = link_emit_relocs,
+        .entry = entry,
         .stack_size_override = stack_size_override,
         .image_base_override = image_base_override,
         .strip = strip,
@@ -4115,6 +4192,8 @@ pub const ClangArgIterator = struct {
         strip,
         exec_model,
         emit_llvm,
+        sysroot,
+        entry,
     };
 
     const Args = struct {

@@ -495,9 +495,21 @@ fn setupMemory(self: *Wasm) !void {
     log.debug("Setting up memory layout", .{});
     const page_size = 64 * 1024;
     const stack_size = self.base.options.stack_size_override orelse page_size * 1;
-    const stack_alignment = 16;
-    var memory_ptr: u64 = self.base.options.global_base orelse 1024;
-    memory_ptr = std.mem.alignForwardGeneric(u64, memory_ptr, stack_alignment);
+    const stack_alignment = 16; // wasm's stack alignment as specified by tool-convention
+    // Always place the stack at the start by default
+    // unless the user specified the global-base flag
+    var place_stack_first = true;
+    var memory_ptr: u64 = if (self.base.options.global_base) |base| blk: {
+        place_stack_first = false;
+        break :blk base;
+    } else 0;
+
+    if (place_stack_first) {
+        memory_ptr = std.mem.alignForwardGeneric(u64, memory_ptr, stack_alignment);
+        memory_ptr += stack_size;
+        // We always put the stack pointer global at index 0
+        self.globals.items[0].init.i32_const = @bitCast(i32, @intCast(u32, memory_ptr));
+    }
 
     var offset: u32 = @intCast(u32, memory_ptr);
     for (self.segments.items) |*segment, i| {
@@ -511,8 +523,11 @@ fn setupMemory(self: *Wasm) !void {
         offset += segment.size;
     }
 
-    memory_ptr = std.mem.alignForwardGeneric(u64, memory_ptr, stack_alignment);
-    memory_ptr += stack_size;
+    if (!place_stack_first) {
+        memory_ptr = std.mem.alignForwardGeneric(u64, memory_ptr, stack_alignment);
+        memory_ptr += stack_size;
+        self.globals.items[0].init.i32_const = @bitCast(i32, @intCast(u32, memory_ptr));
+    }
 
     // Setup the max amount of pages
     // For now we only support wasm32 by setting the maximum allowed memory size 2^32-1
@@ -555,9 +570,6 @@ fn setupMemory(self: *Wasm) !void {
         self.memories.limits.max = @intCast(u32, max_memory / page_size);
         log.debug("Maximum memory pages: {d}", .{self.memories.limits.max});
     }
-
-    // We always put the stack pointer global at index 0
-    self.globals.items[0].init.i32_const = @bitCast(i32, @intCast(u32, memory_ptr));
 }
 
 fn resetState(self: *Wasm) void {
@@ -1000,18 +1012,23 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
         // We are about to obtain this lock, so here we give other processes a chance first.
         self.base.releaseLock();
 
-        try man.addListOfFiles(self.base.options.objects);
+        for (self.base.options.objects) |obj| {
+            _ = try man.addFile(obj.path, null);
+            man.hash.add(obj.must_link);
+        }
         for (comp.c_object_table.keys()) |key| {
             _ = try man.addFile(key.status.success.object_path, null);
         }
         try man.addOptionalFile(module_obj_path);
         try man.addOptionalFile(compiler_rt_path);
+        man.hash.addOptionalBytes(self.base.options.entry);
         man.hash.addOptional(self.base.options.stack_size_override);
         man.hash.add(self.base.options.import_memory);
         man.hash.addOptional(self.base.options.initial_memory);
         man.hash.addOptional(self.base.options.max_memory);
         man.hash.addOptional(self.base.options.global_base);
         man.hash.add(self.base.options.export_symbol_names.len);
+        // strip does not need to go into the linker hash because it is part of the hash namespace
         for (self.base.options.export_symbol_names) |symbol_name| {
             man.hash.addBytes(symbol_name);
         }
@@ -1046,14 +1063,13 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
     }
 
     const full_out_path = try directory.join(arena, &[_][]const u8{self.base.options.emit.?.sub_path});
-
-    if (self.base.options.output_mode == .Obj) {
+    if (is_obj) {
         // LLD's WASM driver does not support the equivalent of `-r` so we do a simple file copy
         // here. TODO: think carefully about how we can avoid this redundant operation when doing
         // build-obj. See also the corresponding TODO in linkAsArchive.
         const the_object_path = blk: {
             if (self.base.options.objects.len != 0)
-                break :blk self.base.options.objects[0];
+                break :blk self.base.options.objects[0].path;
 
             if (comp.c_object_table.count() != 0)
                 break :blk comp.c_object_table.keys()[0].status.success.object_path;
@@ -1092,6 +1108,10 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
             try argv.append("--import-memory");
         }
 
+        if (self.base.options.strip) {
+            try argv.append("-s");
+        }
+
         if (self.base.options.initial_memory) |initial_memory| {
             const arg = try std.fmt.allocPrint(arena, "--initial-memory={d}", .{initial_memory});
             try argv.append(arg);
@@ -1105,16 +1125,58 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
         if (self.base.options.global_base) |global_base| {
             const arg = try std.fmt.allocPrint(arena, "--global-base={d}", .{global_base});
             try argv.append(arg);
+        } else {
+            // We prepend it by default, so when a stack overflow happens the runtime will trap correctly,
+            // rather than silently overwrite all global declarations. See https://github.com/ziglang/zig/issues/4496
+            //
+            // The user can overwrite this behavior by setting the global-base
+            try argv.append("--stack-first");
         }
 
+        var auto_export_symbols = true;
         // Users are allowed to specify which symbols they want to export to the wasm host.
         for (self.base.options.export_symbol_names) |symbol_name| {
             const arg = try std.fmt.allocPrint(arena, "--export={s}", .{symbol_name});
             try argv.append(arg);
+            auto_export_symbols = false;
         }
 
         if (self.base.options.rdynamic) {
             try argv.append("--export-dynamic");
+            auto_export_symbols = false;
+        }
+
+        if (auto_export_symbols) {
+            if (self.base.options.module) |module| {
+                // when we use stage1, we use the exports that stage1 provided us.
+                // For stage2, we can directly retrieve them from the module.
+                const use_stage1 = build_options.is_stage1 and self.base.options.use_stage1;
+                if (use_stage1) {
+                    for (comp.export_symbol_names.items) |symbol_name| {
+                        try argv.append(try std.fmt.allocPrint(arena, "--export={s}", .{symbol_name}));
+                    }
+                } else {
+                    const skip_export_non_fn = target.os.tag == .wasi and
+                        self.base.options.wasi_exec_model == .command;
+                    for (module.decl_exports.values()) |exports| {
+                        for (exports) |exprt| {
+                            if (skip_export_non_fn and exprt.exported_decl.ty.zigTypeTag() != .Fn) {
+                                // skip exporting symbols when we're building a WASI command
+                                // and the symbol is not a function
+                                continue;
+                            }
+                            const symbol_name = exprt.exported_decl.name;
+                            const arg = try std.fmt.allocPrint(arena, "--export={s}", .{symbol_name});
+                            try argv.append(arg);
+                        }
+                    }
+                }
+            }
+        }
+
+        if (self.base.options.entry) |entry| {
+            try argv.append("--entry");
+            try argv.append(entry);
         }
 
         if (self.base.options.output_mode == .Exe) {
@@ -1125,31 +1187,15 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
             const arg = try std.fmt.allocPrint(arena, "stack-size={d}", .{stack_size});
             try argv.append(arg);
 
-            // Put stack before globals so that stack overflow results in segfault immediately
-            // before corrupting globals. See https://github.com/ziglang/zig/issues/4496
-            try argv.append("--stack-first");
-
             if (self.base.options.wasi_exec_model == .reactor) {
                 // Reactor execution model does not have _start so lld doesn't look for it.
                 try argv.append("--no-entry");
-                // Make sure "_initialize" and other used-defined functions are exported if this is WASI reactor.
-                // If rdynamic is true, it will already be appended, so only verify if the user did not specify
-                // the flag in which case, we ensure `--export-dynamic` is called.
-                if (!self.base.options.rdynamic) {
-                    try argv.append("--export-dynamic");
-                }
             }
         } else {
             if (self.base.options.stack_size_override) |stack_size| {
                 try argv.append("-z");
                 const arg = try std.fmt.allocPrint(arena, "stack-size={d}", .{stack_size});
                 try argv.append(arg);
-            }
-
-            // Only when the user has not specified how they want to export the symbols, do we want
-            // to export all symbols.
-            if (self.base.options.export_symbol_names.len == 0 and !self.base.options.rdynamic) {
-                try argv.append("--export-all");
             }
             try argv.append("--no-entry"); // So lld doesn't look for _start.
         }
@@ -1187,7 +1233,21 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation) !void {
         }
 
         // Positional arguments to the linker such as object files.
-        try argv.appendSlice(self.base.options.objects);
+        var whole_archive = false;
+        for (self.base.options.objects) |obj| {
+            if (obj.must_link and !whole_archive) {
+                try argv.append("-whole-archive");
+                whole_archive = true;
+            } else if (!obj.must_link and whole_archive) {
+                try argv.append("-no-whole-archive");
+                whole_archive = false;
+            }
+            try argv.append(obj.path);
+        }
+        if (whole_archive) {
+            try argv.append("-no-whole-archive");
+            whole_archive = false;
+        }
 
         for (comp.c_object_table.keys()) |key| {
             try argv.append(key.status.success.object_path);

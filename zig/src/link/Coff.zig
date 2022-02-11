@@ -920,11 +920,15 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
         man = comp.cache_parent.obtain();
         self.base.releaseLock();
 
-        try man.addListOfFiles(self.base.options.objects);
+        for (self.base.options.objects) |obj| {
+            _ = try man.addFile(obj.path, null);
+            man.hash.add(obj.must_link);
+        }
         for (comp.c_object_table.keys()) |key| {
             _ = try man.addFile(key.status.success.object_path, null);
         }
         try man.addOptionalFile(module_obj_path);
+        man.hash.addOptionalBytes(self.base.options.entry);
         man.hash.addOptional(self.base.options.stack_size_override);
         man.hash.addOptional(self.base.options.image_base_override);
         man.hash.addListOfBytes(self.base.options.lib_dirs);
@@ -945,6 +949,7 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
         man.hash.add(self.base.options.tsaware);
         man.hash.add(self.base.options.nxcompat);
         man.hash.add(self.base.options.dynamicbase);
+        // strip does not need to go into the linker hash because it is part of the hash namespace
         man.hash.addOptional(self.base.options.major_subsystem_version);
         man.hash.addOptional(self.base.options.minor_subsystem_version);
 
@@ -983,7 +988,7 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
         // build-obj. See also the corresponding TODO in linkAsArchive.
         const the_object_path = blk: {
             if (self.base.options.objects.len != 0)
-                break :blk self.base.options.objects[0];
+                break :blk self.base.options.objects[0].path;
 
             if (comp.c_object_table.count() != 0)
                 break :blk comp.c_object_table.keys()[0].status.success.object_path;
@@ -1045,6 +1050,10 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
             try argv.append("-DLL");
         }
 
+        if (self.base.options.entry) |entry| {
+            try argv.append(try allocPrint(arena, "-ENTRY:{s}", .{entry}));
+        }
+
         if (self.base.options.tsaware) {
             try argv.append("-tsaware");
         }
@@ -1088,7 +1097,14 @@ fn linkWithLLD(self: *Coff, comp: *Compilation) !void {
             try argv.append(try allocPrint(arena, "-LIBPATH:{s}", .{lib_dir}));
         }
 
-        try argv.appendSlice(self.base.options.objects);
+        try argv.ensureUnusedCapacity(self.base.options.objects.len);
+        for (self.base.options.objects) |obj| {
+            if (obj.must_link) {
+                argv.appendAssumeCapacity(try allocPrint(arena, "-WHOLEARCHIVE:{s}", .{obj.path}));
+            } else {
+                argv.appendAssumeCapacity(obj.path);
+            }
+        }
 
         for (comp.c_object_table.keys()) |key| {
             try argv.append(key.status.success.object_path);

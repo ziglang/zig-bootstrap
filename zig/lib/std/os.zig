@@ -163,6 +163,7 @@ pub const sigset_t = system.sigset_t;
 pub const sockaddr = system.sockaddr;
 pub const socklen_t = system.socklen_t;
 pub const stack_t = system.stack_t;
+pub const tcflag_t = system.tcflag_t;
 pub const termios = system.termios;
 pub const time_t = system.time_t;
 pub const timespec = system.timespec;
@@ -992,7 +993,7 @@ pub fn write(fd: fd_t, bytes: []const u8) WriteError!usize {
 /// transfer further bytes or may result in an error (e.g., if the disk is now full).
 ///
 /// For POSIX systems, if `fd` is opened in non blocking mode, the function will
-/// return error.WouldBlock when EAGAIN is received.k`.
+/// return error.WouldBlock when EAGAIN is received.
 /// On Windows, if the application has a global event loop enabled, I/O Completion Ports are
 /// used to perform the I/O. `error.WouldBlock` is not possible on Windows.
 ///

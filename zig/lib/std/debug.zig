@@ -6,6 +6,7 @@ const io = std.io;
 const os = std.os;
 const fs = std.fs;
 const process = std.process;
+const testing = std.testing;
 const elf = std.elf;
 const DW = std.dwarf;
 const macho = std.macho;
@@ -559,7 +560,7 @@ pub const TTY = struct {
 
 fn machoSearchSymbols(symbols: []const MachoSymbol, address: usize) ?*const MachoSymbol {
     var min: usize = 0;
-    var max: usize = symbols.len;
+    var max: usize = symbols.len - 1;
     while (min < max) {
         const mid = min + (max - min) / 2;
         const curr = &symbols[mid];
@@ -572,7 +573,34 @@ fn machoSearchSymbols(symbols: []const MachoSymbol, address: usize) ?*const Mach
             return curr;
         }
     }
+
+    const max_sym = &symbols[symbols.len - 1];
+    if (address >= max_sym.address())
+        return max_sym;
+
     return null;
+}
+
+test "machoSearchSymbols" {
+    const symbols = [_]MachoSymbol{
+        .{ .addr = 100, .strx = undefined, .size = undefined, .ofile = undefined },
+        .{ .addr = 200, .strx = undefined, .size = undefined, .ofile = undefined },
+        .{ .addr = 300, .strx = undefined, .size = undefined, .ofile = undefined },
+    };
+
+    try testing.expectEqual(@as(?*const MachoSymbol, null), machoSearchSymbols(&symbols, 0));
+    try testing.expectEqual(@as(?*const MachoSymbol, null), machoSearchSymbols(&symbols, 99));
+    try testing.expectEqual(&symbols[0], machoSearchSymbols(&symbols, 100).?);
+    try testing.expectEqual(&symbols[0], machoSearchSymbols(&symbols, 150).?);
+    try testing.expectEqual(&symbols[0], machoSearchSymbols(&symbols, 199).?);
+
+    try testing.expectEqual(&symbols[1], machoSearchSymbols(&symbols, 200).?);
+    try testing.expectEqual(&symbols[1], machoSearchSymbols(&symbols, 250).?);
+    try testing.expectEqual(&symbols[1], machoSearchSymbols(&symbols, 299).?);
+
+    try testing.expectEqual(&symbols[2], machoSearchSymbols(&symbols, 300).?);
+    try testing.expectEqual(&symbols[2], machoSearchSymbols(&symbols, 301).?);
+    try testing.expectEqual(&symbols[2], machoSearchSymbols(&symbols, 5000).?);
 }
 
 /// TODO resources https://github.com/ziglang/zig/issues/4353
@@ -1573,8 +1601,13 @@ fn getDebugInfoAllocator() mem.Allocator {
 
 /// Whether or not the current target can print useful debug information when a segfault occurs.
 pub const have_segfault_handling_support = switch (native_os) {
-    .linux, .netbsd, .solaris => true,
-    .windows => true,
+    .linux,
+    .macos,
+    .netbsd,
+    .solaris,
+    .windows,
+    => true,
+
     .freebsd, .openbsd => @hasDecl(os.system, "ucontext_t"),
     else => false,
 };
@@ -1601,7 +1634,7 @@ pub fn attachSegfaultHandler() void {
         return;
     }
     var act = os.Sigaction{
-        .handler = .{ .sigaction = handleSegfaultLinux },
+        .handler = .{ .sigaction = handleSegfaultPosix },
         .mask = os.empty_sigset,
         .flags = (os.SA.SIGINFO | os.SA.RESTART | os.SA.RESETHAND),
     };
@@ -1629,7 +1662,7 @@ fn resetSegfaultHandler() void {
     os.sigaction(os.SIG.BUS, &act, null);
 }
 
-fn handleSegfaultLinux(sig: i32, info: *const os.siginfo_t, ctx_ptr: ?*const anyopaque) callconv(.C) noreturn {
+fn handleSegfaultPosix(sig: i32, info: *const os.siginfo_t, ctx_ptr: ?*const anyopaque) callconv(.C) noreturn {
     // Reset to the default handler so that if a segfault happens in this handler it will crash
     // the process. Also when this handler returns, the original instruction will be repeated
     // and the resulting segfault will crash the process rather than continually dump stack traces.
@@ -1637,7 +1670,7 @@ fn handleSegfaultLinux(sig: i32, info: *const os.siginfo_t, ctx_ptr: ?*const any
 
     const addr = switch (native_os) {
         .linux => @ptrToInt(info.fields.sigfault.addr),
-        .freebsd => @ptrToInt(info.addr),
+        .freebsd, .macos => @ptrToInt(info.addr),
         .netbsd => @ptrToInt(info.info.reason.fault.addr),
         .openbsd => @ptrToInt(info.data.fault.addr),
         .solaris => @ptrToInt(info.reason.fault.addr),
@@ -1668,12 +1701,14 @@ fn handleSegfaultLinux(sig: i32, info: *const os.siginfo_t, ctx_ptr: ?*const any
                 .linux, .netbsd, .solaris => @intCast(usize, ctx.mcontext.gregs[os.REG.RIP]),
                 .freebsd => @intCast(usize, ctx.mcontext.rip),
                 .openbsd => @intCast(usize, ctx.sc_rip),
+                .macos => @intCast(usize, ctx.mcontext.ss.rip),
                 else => unreachable,
             };
             const bp = switch (native_os) {
                 .linux, .netbsd, .solaris => @intCast(usize, ctx.mcontext.gregs[os.REG.RBP]),
                 .openbsd => @intCast(usize, ctx.sc_rbp),
                 .freebsd => @intCast(usize, ctx.mcontext.rbp),
+                .macos => @intCast(usize, ctx.mcontext.ss.rbp),
                 else => unreachable,
             };
             dumpStackTraceFromBase(bp, ip);
@@ -1686,9 +1721,15 @@ fn handleSegfaultLinux(sig: i32, info: *const os.siginfo_t, ctx_ptr: ?*const any
         },
         .aarch64 => {
             const ctx = @ptrCast(*const os.ucontext_t, @alignCast(@alignOf(os.ucontext_t), ctx_ptr));
-            const ip = @intCast(usize, ctx.mcontext.pc);
+            const ip = switch (native_os) {
+                .macos => @intCast(usize, ctx.mcontext.ss.pc),
+                else => @intCast(usize, ctx.mcontext.pc),
+            };
             // x29 is the ABI-designated frame pointer
-            const bp = @intCast(usize, ctx.mcontext.regs[29]);
+            const bp = switch (native_os) {
+                .macos => @intCast(usize, ctx.mcontext.ss.fp),
+                else => @intCast(usize, ctx.mcontext.regs[29]),
+            };
             dumpStackTraceFromBase(bp, ip);
         },
         else => {},

@@ -68,6 +68,7 @@ pub const Options = struct {
     /// the binary file does not already have such a section.
     program_code_size_hint: u64 = 256 * 1024,
     entry_addr: ?u64 = null,
+    entry: ?[]const u8,
     stack_size_override: ?u64,
     image_base_override: ?u64,
     include_compiler_rt: bool,
@@ -126,6 +127,7 @@ pub const Options = struct {
     disable_lld_caching: bool,
     is_test: bool,
     use_stage1: bool,
+    hash_style: HashStyle,
     major_subsystem_version: ?u32,
     minor_subsystem_version: ?u32,
     gc_sections: ?bool = null,
@@ -136,7 +138,7 @@ pub const Options = struct {
     soname: ?[]const u8,
     llvm_cpu_features: ?[*:0]const u8,
 
-    objects: []const []const u8,
+    objects: []Compilation.LinkObject,
     framework_dirs: []const []const u8,
     frameworks: []const []const u8,
     system_libs: std.StringArrayHashMapUnmanaged(SystemLib),
@@ -164,6 +166,8 @@ pub const Options = struct {
         return if (options.use_lld) .Obj else options.output_mode;
     }
 };
+
+pub const HashStyle = enum { sysv, gnu, both };
 
 pub const File = struct {
     tag: Tag,
@@ -682,7 +686,10 @@ pub const File = struct {
             // We are about to obtain this lock, so here we give other processes a chance first.
             base.releaseLock();
 
-            try man.addListOfFiles(base.options.objects);
+            for (base.options.objects) |obj| {
+                _ = try man.addFile(obj.path, null);
+                man.hash.add(obj.must_link);
+            }
             for (comp.c_object_table.keys()) |key| {
                 _ = try man.addFile(key.status.success.object_path, null);
             }
@@ -719,8 +726,8 @@ pub const File = struct {
         var object_files = try std.ArrayList([*:0]const u8).initCapacity(base.allocator, num_object_files);
         defer object_files.deinit();
 
-        for (base.options.objects) |obj_path| {
-            object_files.appendAssumeCapacity(try arena.dupeZ(u8, obj_path));
+        for (base.options.objects) |obj| {
+            object_files.appendAssumeCapacity(try arena.dupeZ(u8, obj.path));
         }
         for (comp.c_object_table.keys()) |key| {
             object_files.appendAssumeCapacity(try arena.dupeZ(u8, key.status.success.object_path));

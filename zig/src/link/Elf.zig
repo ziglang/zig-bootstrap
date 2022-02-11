@@ -1307,7 +1307,10 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
 
         try man.addOptionalFile(self.base.options.linker_script);
         try man.addOptionalFile(self.base.options.version_script);
-        try man.addListOfFiles(self.base.options.objects);
+        for (self.base.options.objects) |obj| {
+            _ = try man.addFile(obj.path, null);
+            man.hash.add(obj.must_link);
+        }
         for (comp.c_object_table.keys()) |key| {
             _ = try man.addFile(key.status.success.object_path, null);
         }
@@ -1316,6 +1319,7 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
 
         // We can skip hashing libc and libc++ components that we are in charge of building from Zig
         // installation sources because they are always a product of the compiler version + target information.
+        man.hash.addOptionalBytes(self.base.options.entry);
         man.hash.add(stack_size);
         man.hash.addOptional(self.base.options.image_base_override);
         man.hash.add(gc_sections);
@@ -1333,6 +1337,8 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
         man.hash.add(self.base.options.z_noexecstack);
         man.hash.add(self.base.options.z_now);
         man.hash.add(self.base.options.z_relro);
+        man.hash.add(self.base.options.hash_style);
+        // strip does not need to go into the linker hash because it is part of the hash namespace
         if (self.base.options.link_libc) {
             man.hash.add(self.base.options.libc_installation != null);
             if (self.base.options.libc_installation) |libc_installation| {
@@ -1391,7 +1397,7 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
         // build-obj. See also the corresponding TODO in linkAsArchive.
         const the_object_path = blk: {
             if (self.base.options.objects.len != 0)
-                break :blk self.base.options.objects[0];
+                break :blk self.base.options.objects[0].path;
 
             if (comp.c_object_table.count() != 0)
                 break :blk comp.c_object_table.keys()[0].status.success.object_path;
@@ -1438,6 +1444,17 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
             self.base.options.linker_optimization,
         }));
 
+        if (self.base.options.entry) |entry| {
+            try argv.append("--entry");
+            try argv.append(entry);
+        }
+
+        switch (self.base.options.hash_style) {
+            .gnu => try argv.append("--hash-style=gnu"),
+            .sysv => try argv.append("--hash-style=sysv"),
+            .both => {}, // this is the default
+        }
+
         if (self.base.options.output_mode == .Exe) {
             try argv.append("-z");
             try argv.append(try std.fmt.allocPrint(arena, "stack-size={d}", .{stack_size}));
@@ -1466,6 +1483,10 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
 
         if (self.base.options.rdynamic) {
             try argv.append("--export-dynamic");
+        }
+
+        if (self.base.options.strip) {
+            try argv.append("-s");
         }
 
         if (self.base.options.z_nodelete) {
@@ -1601,7 +1622,21 @@ fn linkWithLLD(self: *Elf, comp: *Compilation) !void {
         }
 
         // Positional arguments to the linker such as object files.
-        try argv.appendSlice(self.base.options.objects);
+        var whole_archive = false;
+        for (self.base.options.objects) |obj| {
+            if (obj.must_link and !whole_archive) {
+                try argv.append("-whole-archive");
+                whole_archive = true;
+            } else if (!obj.must_link and whole_archive) {
+                try argv.append("-no-whole-archive");
+                whole_archive = false;
+            }
+            try argv.append(obj.path);
+        }
+        if (whole_archive) {
+            try argv.append("-no-whole-archive");
+            whole_archive = false;
+        }
 
         for (comp.c_object_table.keys()) |key| {
             try argv.append(key.status.success.object_path);
@@ -2786,7 +2821,8 @@ pub fn updateDeclExports(
         const stb_bits: u8 = switch (exp.options.linkage) {
             .Internal => elf.STB_LOCAL,
             .Strong => blk: {
-                if (mem.eql(u8, exp.options.name, "_start")) {
+                const entry_name = self.base.options.entry orelse "_start";
+                if (mem.eql(u8, exp.options.name, entry_name)) {
                     self.entry_addr = decl_sym.st_value;
                 }
                 break :blk elf.STB_GLOBAL;

@@ -158,6 +158,10 @@ emit_docs: ?EmitLoc,
 work_queue_wait_group: WaitGroup,
 astgen_wait_group: WaitGroup,
 
+/// Exported symbol names. This is only for when the target is wasm.
+/// TODO: Remove this when Stage2 becomes the default compiler as it will already have this information.
+export_symbol_names: std.ArrayListUnmanaged([]const u8) = .{},
+
 pub const SemaError = Module.SemaError;
 
 pub const CRTFile = struct {
@@ -632,6 +636,11 @@ pub const ClangPreprocessorMode = enum {
 
 pub const SystemLib = link.SystemLib;
 
+pub const LinkObject = struct {
+    path: []const u8,
+    must_link: bool = false,
+};
+
 pub const InitOptions = struct {
     zig_lib_directory: Directory,
     local_cache_directory: Directory,
@@ -675,7 +684,7 @@ pub const InitOptions = struct {
     lib_dirs: []const []const u8 = &[0][]const u8{},
     rpath_list: []const []const u8 = &[0][]const u8{},
     c_source_files: []const CSourceFile = &[0]CSourceFile{},
-    link_objects: []const []const u8 = &[0][]const u8{},
+    link_objects: []LinkObject = &[0]LinkObject{},
     framework_dirs: []const []const u8 = &[0][]const u8{},
     frameworks: []const []const u8 = &[0][]const u8{},
     system_lib_names: []const []const u8 = &.{},
@@ -761,6 +770,8 @@ pub const InitOptions = struct {
     /// infinite recursion.
     skip_linker_dependencies: bool = false,
     parent_compilation_link_libc: bool = false,
+    hash_style: link.HashStyle = .both,
+    entry: ?[]const u8 = null,
     stack_size_override: ?u64 = null,
     image_base_override: ?u64 = null,
     self_exe_path: ?[]const u8 = null,
@@ -1022,7 +1033,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
                 if (options.system_lib_names.len != 0)
                     break :x true;
                 for (options.link_objects) |obj| {
-                    switch (classifyFileExt(obj)) {
+                    switch (classifyFileExt(obj.path)) {
                         .shared_library => break :x true,
                         else => continue,
                     }
@@ -1384,7 +1395,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             if (options.c_source_files.len >= 1) {
                 hash.addBytes(options.c_source_files[0].src_path);
             } else if (options.link_objects.len >= 1) {
-                hash.addBytes(options.link_objects[0]);
+                hash.addBytes(options.link_objects[0].path);
             }
 
             const digest = hash.final();
@@ -1474,6 +1485,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             .linker_optimization = linker_optimization,
             .major_subsystem_version = options.major_subsystem_version,
             .minor_subsystem_version = options.minor_subsystem_version,
+            .entry = options.entry,
             .stack_size_override = options.stack_size_override,
             .image_base_override = options.image_base_override,
             .include_compiler_rt = include_compiler_rt,
@@ -1509,6 +1521,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             .is_test = options.is_test,
             .wasi_exec_model = wasi_exec_model,
             .use_stage1 = use_stage1,
+            .hash_style = options.hash_style,
             .enable_link_snapshots = options.enable_link_snapshots,
             .native_darwin_sdk = options.native_darwin_sdk,
             .install_name = options.install_name,
@@ -1790,6 +1803,11 @@ pub fn destroy(self: *Compilation) void {
 
     self.work_queue_wait_group.deinit();
     self.astgen_wait_group.deinit();
+
+    for (self.export_symbol_names.items) |symbol_name| {
+        gpa.free(symbol_name);
+    }
+    self.export_symbol_names.deinit(gpa);
 
     // This destroys `self`.
     self.arena_state.promote(gpa).deinit();
@@ -3430,7 +3448,7 @@ pub fn addCCArgs(
     try argv.appendSlice(&[_][]const u8{ "-target", llvm_triple });
 
     switch (ext) {
-        .c, .cpp, .m, .mm, .h => {
+        .c, .cpp, .m, .mm, .h, .cu => {
             try argv.appendSlice(&[_][]const u8{
                 "-nostdinc",
                 "-fno-spell-checking",
@@ -3729,6 +3747,7 @@ fn failCObjWithOwnedErrorMsg(
 pub const FileExt = enum {
     c,
     cpp,
+    cu,
     h,
     m,
     mm,
@@ -3743,7 +3762,7 @@ pub const FileExt = enum {
 
     pub fn clangSupportsDepFile(ext: FileExt) bool {
         return switch (ext) {
-            .c, .cpp, .h, .m, .mm => true,
+            .c, .cpp, .h, .m, .mm, .cu => true,
 
             .ll,
             .bc,
@@ -3774,7 +3793,8 @@ pub fn hasCppExt(filename: []const u8) bool {
     return mem.endsWith(u8, filename, ".C") or
         mem.endsWith(u8, filename, ".cc") or
         mem.endsWith(u8, filename, ".cpp") or
-        mem.endsWith(u8, filename, ".cxx");
+        mem.endsWith(u8, filename, ".cxx") or
+        mem.endsWith(u8, filename, ".stub");
 }
 
 pub fn hasObjCExt(filename: []const u8) bool {
@@ -3841,6 +3861,8 @@ pub fn classifyFileExt(filename: []const u8) FileExt {
         return .static_library;
     } else if (hasObjectExt(filename)) {
         return .object;
+    } else if (mem.endsWith(u8, filename, ".cu")) {
+        return .cu;
     } else {
         return .unknown;
     }

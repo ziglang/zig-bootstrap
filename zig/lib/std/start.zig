@@ -324,7 +324,7 @@ fn _start() callconv(.Naked) noreturn {
 
 fn WinStartup() callconv(std.os.windows.WINAPI) noreturn {
     @setAlignStack(16);
-    if (!builtin.single_threaded) {
+    if (!builtin.single_threaded and !builtin.link_libc) {
         _ = @import("start_windows_tls.zig");
     }
 
@@ -335,7 +335,7 @@ fn WinStartup() callconv(std.os.windows.WINAPI) noreturn {
 
 fn wWinMainCRTStartup() callconv(std.os.windows.WINAPI) noreturn {
     @setAlignStack(16);
-    if (!builtin.single_threaded) {
+    if (!builtin.single_threaded and !builtin.link_libc) {
         _ = @import("start_windows_tls.zig");
     }
 
@@ -511,9 +511,9 @@ inline fn initEventLoopAndCallWinMain() std.os.windows.INT {
             };
             defer loop.deinit();
 
-            var result: u8 = undefined;
-            var frame: @Frame(callMainAsync) = undefined;
-            _ = @asyncCall(&frame, &result, callMainAsync, .{loop});
+            var result: std.os.windows.INT = undefined;
+            var frame: @Frame(callWinMainAsync) = undefined;
+            _ = @asyncCall(&frame, &result, callWinMainAsync, .{loop});
             loop.run();
             return result;
         }
@@ -530,6 +530,14 @@ fn callMainAsync(loop: *std.event.Loop) callconv(.Async) u8 {
     loop.beginOneEvent();
     defer loop.finishOneEvent();
     return callMain();
+}
+
+fn callWinMainAsync(loop: *std.event.Loop) callconv(.Async) std.os.windows.INT {
+    // This prevents the event loop from terminating at least until main() has returned.
+    // TODO This shouldn't be needed here; it should be in the event loop code.
+    loop.beginOneEvent();
+    defer loop.finishOneEvent();
+    return call_wWinMain();
 }
 
 // This is not marked inline because it is called with @asyncCall when

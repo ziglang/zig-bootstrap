@@ -6,6 +6,26 @@ const native_arch = builtin.target.cpu.arch;
 const maxInt = std.math.maxInt;
 const iovec_const = std.os.iovec_const;
 
+const arch_bits = switch (native_arch) {
+    .aarch64 => @import("darwin/aarch64.zig"),
+    .x86_64 => @import("darwin/x86_64.zig"),
+    else => struct {},
+};
+
+pub const ucontext_t = extern struct {
+    onstack: c_int,
+    sigmask: sigset_t,
+    stack: stack_t,
+    link: ?*ucontext_t,
+    mcsize: u64,
+    mcontext: *mcontext_t,
+};
+
+pub const mcontext_t = extern struct {
+    es: arch_bits.exception_state,
+    ss: arch_bits.thread_state,
+};
+
 extern "c" fn __error() *c_int;
 pub extern "c" fn NSVersionOfRunTimeLibrary(library_name: [*:0]const u8) u32;
 pub extern "c" fn _NSGetExecutablePath(buf: [*:0]u8, bufsize: *u32) c_int;
@@ -107,6 +127,8 @@ pub fn sigaddset(set: *sigset_t, signo: u5) void {
 }
 
 pub extern "c" fn sigaltstack(ss: ?*stack_t, old_ss: ?*stack_t) c_int;
+
+pub const IFNAMESIZE = 16;
 
 pub const AI = struct {
     /// get address to use bind()
