@@ -579,6 +579,8 @@ pub const Target = struct {
         raw,
         /// Plan 9 from Bell Labs
         plan9,
+        /// Nvidia PTX format
+        nvptx,
 
         pub fn fileExt(of: ObjectFormat, cpu_arch: Cpu.Arch) [:0]const u8 {
             return switch (of) {
@@ -589,6 +591,7 @@ pub const Target = struct {
                 .hex => ".ihex",
                 .raw => ".bin",
                 .plan9 => plan9Ext(cpu_arch),
+                .nvptx => ".ptx",
             };
         }
     };
@@ -1236,7 +1239,7 @@ pub const Target = struct {
             }
 
             fn allCpusFromDecls(comptime cpus: type) []const *const Cpu.Model {
-                const decls = std.meta.declarations(cpus);
+                const decls = @typeInfo(cpus).Struct.decls;
                 var array: [decls.len]*const Cpu.Model = undefined;
                 for (decls) |decl, i| {
                     array[i] = &@field(cpus, decl.name);
@@ -1318,9 +1321,6 @@ pub const Target = struct {
         }
     };
 
-    /// TODO delete this deprecated declaration after 0.9.0 is released
-    pub const current = @compileError("instead of std.Target.current, use @import(\"builtin\").target");
-
     pub const stack_align = 16;
 
     pub fn zigTriple(self: Target, allocator: mem.Allocator) ![]u8 {
@@ -1391,6 +1391,7 @@ pub const Target = struct {
             else => return switch (cpu_arch) {
                 .wasm32, .wasm64 => .wasm,
                 .spirv32, .spirv64 => .spirv,
+                .nvptx, .nvptx64 => .nvptx,
                 else => .elf,
             },
         };

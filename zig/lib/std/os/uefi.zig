@@ -7,6 +7,13 @@ pub const protocols = @import("uefi/protocols.zig");
 pub const Status = @import("uefi/status.zig").Status;
 pub const tables = @import("uefi/tables.zig");
 
+/// The memory type to allocate when using the pool
+/// Defaults to .LoaderData, the default data allocation type
+/// used by UEFI applications to allocate pool memory.
+pub var efi_pool_memory_type: tables.MemoryType = .LoaderData;
+pub const pool_allocator = @import("uefi/pool_allocator.zig").pool_allocator;
+pub const raw_pool_allocator = @import("uefi/pool_allocator.zig").raw_pool_allocator;
+
 /// The EFI image's handle that is passed to its entry point.
 pub var handle: Handle = undefined;
 
@@ -15,6 +22,18 @@ pub var system_table: *tables.SystemTable = undefined;
 
 /// A handle to an event structure.
 pub const Event = *opaque {};
+
+pub const MacAddress = extern struct {
+    address: [32]u8,
+};
+
+pub const Ipv4Address = extern struct {
+    address: [4]u8,
+};
+
+pub const Ipv6Address = extern struct {
+    address: [16]u8,
+};
 
 /// GUIDs must be align(8)
 pub const Guid = extern struct {
@@ -79,7 +98,6 @@ pub const Time = extern struct {
 
     /// 0 - 59
     second: u8,
-    _pad1: u8,
 
     /// 0 - 999999999
     nanosecond: u32,
@@ -96,7 +114,6 @@ pub const Time = extern struct {
         /// If true, the time is affected by daylight savings time.
         adjust_daylight: bool,
     },
-    _pad2: u8,
 
     /// Time is to be interpreted as local time
     pub const unspecified_timezone: i16 = 0x7ff;

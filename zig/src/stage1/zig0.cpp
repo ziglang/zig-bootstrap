@@ -18,10 +18,9 @@
 #include "buffer.hpp"
 #include "os.hpp"
 
-// This is the only file allowed to include config.h because config.h is
-// only produced when building with cmake. When using the zig build system,
-// zig0.cpp is never touched.
+#ifndef ZIG_VERSION_STRING
 #include "config.h"
+#endif
 
 #include <stdio.h>
 #include <string.h>
@@ -51,8 +50,6 @@ static int print_full_usage(const char *arg0, FILE *file, int return_code) {
         "  --strip                      exclude debug symbols\n"
         "  -target [name]               <arch>-<os>-<abi> see the targets command\n"
         "  -mcpu [cpu]                  specify target CPU and feature set\n"
-        "  --verbose-tokenize           enable compiler debug output for tokenization\n"
-        "  --verbose-ast                enable compiler debug output for AST parsing\n"
         "  --verbose-ir                 enable compiler debug output for Zig IR\n"
         "  --verbose-llvm-ir            enable compiler debug output for LLVM IR\n"
         "  --verbose-cimport            enable compiler debug output for C imports\n"
@@ -553,4 +550,9 @@ const char *stage2_version_string(void) {
 
 struct Stage2SemVer stage2_version(void) {
     return {ZIG_VERSION_MAJOR, ZIG_VERSION_MINOR, ZIG_VERSION_PATCH};
+}
+
+Error stage2_append_symbol(struct ZigStage1 *stage1, const char *name_ptr, size_t name_len)
+{
+    return ErrorNone;
 }

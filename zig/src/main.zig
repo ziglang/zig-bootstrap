@@ -137,7 +137,7 @@ pub fn main() anyerror!void {
 
     var gpa_need_deinit = false;
     const gpa = gpa: {
-        if (!builtin.link_libc) {
+        if (build_options.force_gpa or !builtin.link_libc) {
             gpa_need_deinit = true;
             break :gpa general_purpose_allocator.allocator();
         }
@@ -221,7 +221,7 @@ pub fn mainArgs(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
         mem.eql(u8, cmd, "lib") or
         mem.eql(u8, cmd, "ar"))
     {
-        return punt_to_llvm_ar(arena, args);
+        return process.exit(try llvmArMain(arena, args));
     } else if (mem.eql(u8, cmd, "cc")) {
         return buildOutputType(gpa, arena, args, .cc);
     } else if (mem.eql(u8, cmd, "c++")) {
@@ -231,12 +231,12 @@ pub fn mainArgs(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
     } else if (mem.eql(u8, cmd, "clang") or
         mem.eql(u8, cmd, "-cc1") or mem.eql(u8, cmd, "-cc1as"))
     {
-        return punt_to_clang(arena, args);
+        return process.exit(try clangMain(arena, args));
     } else if (mem.eql(u8, cmd, "ld.lld") or
         mem.eql(u8, cmd, "lld-link") or
         mem.eql(u8, cmd, "wasm-ld"))
     {
-        return punt_to_lld(arena, args);
+        return process.exit(try lldMain(arena, args, true));
     } else if (mem.eql(u8, cmd, "build")) {
         return cmdBuild(gpa, arena, cmd_args);
     } else if (mem.eql(u8, cmd, "fmt")) {
@@ -294,10 +294,11 @@ const usage_build_generic =
     \\                      .s    Target-specific assembly source code
     \\                      .S    Assembly with C preprocessor (requires LLVM extensions)
     \\                      .c    C source code (requires LLVM extensions)
-    \\        .cxx .cc .C .cpp    C++ source code (requires LLVM extensions)
+    \\  .cxx .cc .C .cpp .stub    C++ source code (requires LLVM extensions)
     \\                      .m    Objective-C source code (requires LLVM extensions)
     \\                     .mm    Objective-C++ source code (requires LLVM extensions)
     \\                     .bc    LLVM IR Module (requires LLVM extensions)
+    \\                     .cu    Cuda source code (requires LLVM extensions)
     \\
     \\General Options:
     \\  -h, --help                Print this help and exit
@@ -400,6 +401,7 @@ const usage_build_generic =
     \\  --dynamic-linker [path]        Set the dynamic interpreter path (usually ld.so)
     \\  --sysroot [path]               Set the system root directory (usually /)
     \\  --version [ver]                Dynamic library semver
+    \\  --entry [name]                 Set the entrypoint symbol name
     \\  -fsoname[=name]                Override the default SONAME value
     \\  -fno-soname                    Disable emitting a SONAME
     \\  -fLLD                          Force using LLD as the linker
@@ -432,8 +434,11 @@ const usage_build_generic =
     \\  -F[dir]                        (Darwin) add search path for frameworks
     \\  -install_name=[value]          (Darwin) add dylib's install name
     \\  --import-memory                (WebAssembly) import memory from the environment
+    \\  --import-table                 (WebAssembly) import function table from the host environment
+    \\  --export-table                 (WebAssembly) export function table to the host environment
     \\  --initial-memory=[bytes]       (WebAssembly) initial size of the linear memory
     \\  --max-memory=[bytes]           (WebAssembly) maximum size of the linear memory
+    \\  --shared-memory                (WebAssembly) use shared linear memory
     \\  --global-base=[addr]           (WebAssembly) where to start to place global data
     \\  --export=[value]               (WebAssembly) Force a symbol to be exported
     \\
@@ -627,8 +632,11 @@ fn buildOutputType(
     var linker_allow_shlib_undefined: ?bool = null;
     var linker_bind_global_refs_locally: ?bool = null;
     var linker_import_memory: ?bool = null;
+    var linker_import_table: bool = false;
+    var linker_export_table: bool = false;
     var linker_initial_memory: ?u64 = null;
     var linker_max_memory: ?u64 = null;
+    var linker_shared_memory: bool = false;
     var linker_global_base: ?u64 = null;
     var linker_z_nodelete = false;
     var linker_z_notext = false;
@@ -643,6 +651,7 @@ fn buildOutputType(
     var linker_optimization: ?u8 = null;
     var test_evented_io = false;
     var test_no_exec = false;
+    var entry: ?[]const u8 = null;
     var stack_size_override: ?u64 = null;
     var image_base_override: ?u64 = null;
     var use_llvm: ?bool = null;
@@ -670,6 +679,7 @@ fn buildOutputType(
     var enable_link_snapshots: bool = false;
     var native_darwin_sdk: ?std.zig.system.darwin.DarwinSDK = null;
     var install_name: ?[]const u8 = null;
+    var hash_style: link.HashStyle = .both;
 
     // e.g. -m3dnow or -mno-outline-atomics. They correspond to std.Target llvm cpu feature names.
     // This array is populated by zig cc frontend and then has to be converted to zig-style
@@ -701,8 +711,16 @@ fn buildOutputType(
     var c_source_files = std.ArrayList(Compilation.CSourceFile).init(gpa);
     defer c_source_files.deinit();
 
-    var link_objects = std.ArrayList([]const u8).init(gpa);
+    var link_objects = std.ArrayList(Compilation.LinkObject).init(gpa);
     defer link_objects.deinit();
+
+    // This map is a flag per link_objects item, used to represent the
+    // `-l :file.so` syntax from gcc/clang.
+    // This is only exposed from the `zig cc` interface. It means that the `path`
+    // field from the corresponding `link_objects` element is a suffix, and is
+    // to be tried against each library path as a prefix until an existing file is found.
+    // This map remains empty for the main CLI.
+    var link_objects_lib_search_paths: std.AutoHashMapUnmanaged(u32, void) = .{};
 
     var framework_dirs = std.ArrayList([]const u8).init(gpa);
     defer framework_dirs.deinit();
@@ -843,6 +861,10 @@ fn buildOutputType(
                         if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
                         i += 1;
                         optimize_mode_string = args[i];
+                    } else if (mem.eql(u8, arg, "--entry")) {
+                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
+                        i += 1;
+                        entry = args[i];
                     } else if (mem.eql(u8, arg, "--stack")) {
                         if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
                         i += 1;
@@ -1179,10 +1201,16 @@ fn buildOutputType(
                         }
                     } else if (mem.eql(u8, arg, "--import-memory")) {
                         linker_import_memory = true;
+                    } else if (mem.eql(u8, arg, "--import-table")) {
+                        linker_import_table = true;
+                    } else if (mem.eql(u8, arg, "--export-table")) {
+                        linker_export_table = true;
                     } else if (mem.startsWith(u8, arg, "--initial-memory=")) {
                         linker_initial_memory = parseIntSuffix(arg, "--initial-memory=".len);
                     } else if (mem.startsWith(u8, arg, "--max-memory=")) {
                         linker_max_memory = parseIntSuffix(arg, "--max-memory=".len);
+                    } else if (mem.startsWith(u8, arg, "--shared-memory")) {
+                        linker_shared_memory = true;
                     } else if (mem.startsWith(u8, arg, "--global-base=")) {
                         linker_global_base = parseIntSuffix(arg, "--global-base=".len);
                     } else if (mem.startsWith(u8, arg, "--export=")) {
@@ -1230,9 +1258,9 @@ fn buildOutputType(
                     }
                 } else switch (Compilation.classifyFileExt(arg)) {
                     .object, .static_library, .shared_library => {
-                        try link_objects.append(arg);
+                        try link_objects.append(.{ .path = arg });
                     },
-                    .assembly, .c, .cpp, .h, .ll, .bc, .m, .mm => {
+                    .assembly, .c, .cpp, .h, .ll, .bc, .m, .mm, .cu => {
                         try c_source_files.append(.{
                             .src_path = arg,
                             .extra_flags = try arena.dupe([]const u8, extra_cflags.items),
@@ -1281,6 +1309,7 @@ fn buildOutputType(
             var it = ClangArgIterator.init(arena, all_args);
             var emit_llvm = false;
             var needed = false;
+            var must_link = false;
             var force_static_libs = false;
             while (it.has_next) {
                 it.next() catch |err| {
@@ -1299,9 +1328,14 @@ fn buildOutputType(
                     .positional => {
                         const file_ext = Compilation.classifyFileExt(mem.sliceTo(it.only_arg, 0));
                         switch (file_ext) {
-                            .assembly, .c, .cpp, .ll, .bc, .h, .m, .mm => try c_source_files.append(.{ .src_path = it.only_arg }),
+                            .assembly, .c, .cpp, .ll, .bc, .h, .m, .mm, .cu => {
+                                try c_source_files.append(.{ .src_path = it.only_arg });
+                            },
                             .unknown, .shared_library, .object, .static_library => {
-                                try link_objects.append(it.only_arg);
+                                try link_objects.append(.{
+                                    .path = it.only_arg,
+                                    .must_link = must_link,
+                                });
                             },
                             .zig => {
                                 if (root_src_file) |other| {
@@ -1316,7 +1350,16 @@ fn buildOutputType(
                         // -l
                         // We don't know whether this library is part of libc or libc++ until
                         // we resolve the target, so we simply append to the list for now.
-                        if (force_static_libs) {
+                        if (mem.startsWith(u8, it.only_arg, ":")) {
+                            // This "feature" of gcc/clang means to treat this as a positional
+                            // link object, but using the library search directories as a prefix.
+                            try link_objects.append(.{
+                                .path = it.only_arg[1..],
+                                .must_link = must_link,
+                            });
+                            const index = @intCast(u32, link_objects.items.len - 1);
+                            try link_objects_lib_search_paths.put(arena, index, {});
+                        } else if (force_static_libs) {
                             try static_libs.append(it.only_arg);
                         } else {
                             try system_libs.put(it.only_arg, .{ .needed = needed });
@@ -1325,7 +1368,7 @@ fn buildOutputType(
                     .ignore => {},
                     .driver_punt => {
                         // Never mind what we're doing, just pass the args directly. For example --help.
-                        return punt_to_clang(arena, all_args);
+                        return process.exit(try clangMain(arena, all_args));
                     },
                     .pic => want_pic = true,
                     .no_pic => want_pic = false,
@@ -1366,6 +1409,14 @@ fn buildOutputType(
                                 needed = false;
                             } else if (mem.eql(u8, linker_arg, "--no-as-needed")) {
                                 needed = true;
+                            } else if (mem.eql(u8, linker_arg, "--whole-archive") or
+                                mem.eql(u8, linker_arg, "-whole-archive"))
+                            {
+                                must_link = true;
+                            } else if (mem.eql(u8, linker_arg, "--no-whole-archive") or
+                                mem.eql(u8, linker_arg, "-no-whole-archive"))
+                            {
+                                must_link = false;
                             } else if (mem.eql(u8, linker_arg, "-Bdynamic") or
                                 mem.eql(u8, linker_arg, "-dy") or
                                 mem.eql(u8, linker_arg, "-call_shared"))
@@ -1468,13 +1519,21 @@ fn buildOutputType(
                             fatal("expected [command|reactor] for -mexec-mode=[value], found '{s}'", .{it.only_arg});
                         };
                     },
+                    .sysroot => {
+                        sysroot = it.only_arg;
+                    },
+                    .entry => {
+                        entry = it.only_arg;
+                    },
                 }
             }
             // Parse linker args.
             var i: usize = 0;
             while (i < linker_args.items.len) : (i += 1) {
                 const arg = linker_args.items[i];
-                if (mem.eql(u8, arg, "-soname")) {
+                if (mem.eql(u8, arg, "-soname") or
+                    mem.eql(u8, arg, "--soname"))
+                {
                     i += 1;
                     if (i >= linker_args.items.len) {
                         fatal("expected linker arg after '{s}'", .{arg});
@@ -1560,10 +1619,16 @@ fn buildOutputType(
                     linker_bind_global_refs_locally = true;
                 } else if (mem.eql(u8, arg, "--import-memory")) {
                     linker_import_memory = true;
+                } else if (mem.eql(u8, arg, "--import-table")) {
+                    linker_import_table = true;
+                } else if (mem.eql(u8, arg, "--export-table")) {
+                    linker_export_table = true;
                 } else if (mem.startsWith(u8, arg, "--initial-memory=")) {
                     linker_initial_memory = parseIntSuffix(arg, "--initial-memory=".len);
                 } else if (mem.startsWith(u8, arg, "--max-memory=")) {
                     linker_max_memory = parseIntSuffix(arg, "--max-memory=".len);
+                } else if (mem.startsWith(u8, arg, "--shared-memory")) {
+                    linker_shared_memory = true;
                 } else if (mem.startsWith(u8, arg, "--global-base=")) {
                     linker_global_base = parseIntSuffix(arg, "--global-base=".len);
                 } else if (mem.startsWith(u8, arg, "--export=")) {
@@ -1609,6 +1674,12 @@ fn buildOutputType(
                         fatal("unable to parse '{s}': {s}", .{ arg, @errorName(err) });
                     };
                     have_version = true;
+                } else if (mem.eql(u8, arg, "-e") or mem.eql(u8, arg, "--entry")) {
+                    i += 1;
+                    if (i >= linker_args.items.len) {
+                        fatal("expected linker arg after '{s}'", .{arg});
+                    }
+                    entry = linker_args.items[i];
                 } else if (mem.eql(u8, arg, "--stack")) {
                     i += 1;
                     if (i >= linker_args.items.len) {
@@ -1645,6 +1716,12 @@ fn buildOutputType(
                     // This option does not do anything.
                 } else if (mem.eql(u8, arg, "--export-all-symbols")) {
                     rdynamic = true;
+                } else if (mem.eql(u8, arg, "-s") or mem.eql(u8, arg, "--strip-all") or
+                    mem.eql(u8, arg, "-S") or mem.eql(u8, arg, "--strip-debug"))
+                {
+                    // -s, --strip-all             Strip all symbols
+                    // -S, --strip-debug           Strip debugging symbols
+                    strip = true;
                 } else if (mem.eql(u8, arg, "--start-group") or
                     mem.eql(u8, arg, "--end-group"))
                 {
@@ -1733,6 +1810,28 @@ fn buildOutputType(
                         fatal("expected linker arg after '{s}'", .{arg});
                     }
                     install_name = linker_args.items[i];
+                } else if (mem.eql(u8, arg, "-force_load")) {
+                    i += 1;
+                    if (i >= linker_args.items.len) {
+                        fatal("expected linker arg after '{s}'", .{arg});
+                    }
+                    try link_objects.append(.{
+                        .path = linker_args.items[i],
+                        .must_link = true,
+                    });
+                } else if (mem.eql(u8, arg, "-hash-style") or
+                    mem.eql(u8, arg, "--hash-style"))
+                {
+                    i += 1;
+                    if (i >= linker_args.items.len) {
+                        fatal("expected linker arg after '{s}'", .{arg});
+                    }
+                    const next_arg = linker_args.items[i];
+                    hash_style = std.meta.stringToEnum(link.HashStyle, next_arg) orelse {
+                        fatal("expected [sysv|gnu|both] after --hash-style, found '{s}'", .{
+                            next_arg,
+                        });
+                    };
                 } else {
                     warn("unsupported linker arg: {s}", .{arg});
                 }
@@ -1792,7 +1891,7 @@ fn buildOutputType(
                     // An error message is generated when there is more than 1 C source file.
                     if (c_source_files.items.len != 1) {
                         // For example `zig cc` and no args should print the "no input files" message.
-                        return punt_to_clang(arena, all_args);
+                        return process.exit(try clangMain(arena, all_args));
                     }
                     if (out_path) |p| {
                         emit_bin = .{ .yes = p };
@@ -1802,9 +1901,13 @@ fn buildOutputType(
                     }
                 },
             }
-            if (c_source_files.items.len == 0 and link_objects.items.len == 0) {
+            if (c_source_files.items.len == 0 and
+                link_objects.items.len == 0 and
+                root_src_file == null)
+            {
                 // For example `zig cc` and no args should print the "no input files" message.
-                return punt_to_clang(arena, all_args);
+                // There could be other reasons to punt to clang, for example, --help.
+                return process.exit(try clangMain(arena, all_args));
             }
         },
     }
@@ -1827,7 +1930,7 @@ fn buildOutputType(
             const basename = fs.path.basename(c_source_files.items[0].src_path);
             break :blk basename[0 .. basename.len - fs.path.extension(basename).len];
         } else if (link_objects.items.len >= 1) {
-            const basename = fs.path.basename(link_objects.items[0]);
+            const basename = fs.path.basename(link_objects.items[0].path);
             break :blk basename[0 .. basename.len - fs.path.extension(basename).len];
         } else if (emit_bin == .yes) {
             const basename = fs.path.basename(emit_bin.yes);
@@ -1909,41 +2012,95 @@ fn buildOutputType(
             link_libcpp = true;
     }
 
+    if (target_info.target.cpu.arch.isWasm() and linker_shared_memory) {
+        if (output_mode == .Obj) {
+            fatal("shared memory is not allowed in object files", .{});
+        }
+
+        if (!target_info.target.cpu.features.isEnabled(@enumToInt(std.Target.wasm.Feature.atomics)) or
+            !target_info.target.cpu.features.isEnabled(@enumToInt(std.Target.wasm.Feature.bulk_memory)))
+        {
+            fatal("'atomics' and 'bulk-memory' features must be enabled to use shared memory", .{});
+        }
+    }
+
     // Now that we have target info, we can find out if any of the system libraries
     // are part of libc or libc++. We remove them from the list and communicate their
     // existence via flags instead.
     {
+        // Similarly, if any libs in this list are statically provided, we remove
+        // them from this list and populate the link_objects array instead.
+        const sep = fs.path.sep_str;
+        var test_path = std.ArrayList(u8).init(gpa);
+        defer test_path.deinit();
+
         var i: usize = 0;
-        while (i < system_libs.count()) {
+        syslib: while (i < system_libs.count()) {
             const lib_name = system_libs.keys()[i];
 
             if (target_util.is_libc_lib_name(target_info.target, lib_name)) {
                 link_libc = true;
-                _ = system_libs.orderedRemove(lib_name);
+                system_libs.orderedRemoveAt(i);
                 continue;
             }
             if (target_util.is_libcpp_lib_name(target_info.target, lib_name)) {
                 link_libcpp = true;
-                _ = system_libs.orderedRemove(lib_name);
+                system_libs.orderedRemoveAt(i);
                 continue;
             }
-            if (mem.eql(u8, lib_name, "unwind")) {
-                link_libunwind = true;
-                _ = system_libs.orderedRemove(lib_name);
-                continue;
+            switch (target_util.classifyCompilerRtLibName(target_info.target, lib_name)) {
+                .none => {},
+                .only_libunwind, .both => {
+                    link_libunwind = true;
+                    system_libs.orderedRemoveAt(i);
+                    continue;
+                },
+                .only_compiler_rt => {
+                    std.log.warn("ignoring superfluous library '{s}': this dependency is fulfilled instead by compiler-rt which zig unconditionally provides", .{lib_name});
+                    system_libs.orderedRemoveAt(i);
+                    continue;
+                },
             }
+
             if (std.fs.path.isAbsolute(lib_name)) {
                 fatal("cannot use absolute path as a system library: {s}", .{lib_name});
             }
+
             if (target_info.target.os.tag == .wasi) {
                 if (wasi_libc.getEmulatedLibCRTFile(lib_name)) |crt_file| {
                     try wasi_emulated_libs.append(crt_file);
-                    _ = system_libs.orderedRemove(lib_name);
+                    system_libs.orderedRemoveAt(i);
                     continue;
                 }
             }
+
+            for (lib_dirs.items) |lib_dir_path| {
+                test_path.clearRetainingCapacity();
+                try test_path.writer().print("{s}" ++ sep ++ "{s}{s}{s}", .{
+                    lib_dir_path,
+                    target_info.target.libPrefix(),
+                    lib_name,
+                    target_info.target.staticLibSuffix(),
+                });
+                fs.cwd().access(test_path.items, .{}) catch |err| switch (err) {
+                    error.FileNotFound => continue,
+                    else => |e| fatal("unable to search for static library '{s}': {s}", .{
+                        test_path.items, @errorName(e),
+                    }),
+                };
+                try link_objects.append(.{ .path = try arena.dupe(u8, test_path.items) });
+                system_libs.orderedRemoveAt(i);
+                continue :syslib;
+            }
+
+            std.log.scoped(.cli).debug("depending on system for -l{s}", .{lib_name});
+
             i += 1;
         }
+    }
+    // libc++ depends on libc
+    if (link_libcpp) {
+        link_libc = true;
     }
 
     if (use_lld) |opt| {
@@ -1964,7 +2121,9 @@ fn buildOutputType(
             want_native_include_dirs = true;
     }
 
-    if (sysroot == null and cross_target.isNativeOs() and (system_libs.count() != 0 or want_native_include_dirs)) {
+    if (sysroot == null and cross_target.isNativeOs() and
+        (system_libs.count() != 0 or want_native_include_dirs))
+    {
         const paths = std.zig.system.NativePaths.detect(arena, target_info) catch |err| {
             fatal("unable to detect native system paths: {s}", .{@errorName(err)});
         };
@@ -2030,7 +2189,7 @@ fn buildOutputType(
                         test_path.items, @errorName(e),
                     }),
                 };
-                try link_objects.append(try arena.dupe(u8, test_path.items));
+                try link_objects.append(.{ .path = try arena.dupe(u8, test_path.items) });
                 break;
             } else {
                 var search_paths = std.ArrayList(u8).init(arena);
@@ -2046,6 +2205,30 @@ fn buildOutputType(
                 fatal("static library '{s}' not found. search paths: {s}", .{
                     static_lib, search_paths.items,
                 });
+            }
+        }
+    }
+
+    // Resolve `-l :file.so` syntax from `zig cc`. We use a separate map for this data
+    // since this is an uncommon case.
+    {
+        var it = link_objects_lib_search_paths.iterator();
+        while (it.next()) |item| {
+            const link_object_i = item.key_ptr.*;
+            const suffix = link_objects.items[link_object_i].path;
+
+            for (lib_dirs.items) |lib_dir_path| {
+                const test_path = try fs.path.join(arena, &.{ lib_dir_path, suffix });
+                fs.cwd().access(test_path, .{}) catch |err| switch (err) {
+                    error.FileNotFound => continue,
+                    else => |e| fatal("unable to search for library '{s}': {s}", .{
+                        test_path, @errorName(e),
+                    }),
+                };
+                link_objects.items[link_object_i].path = test_path;
+                break;
+            } else {
+                fatal("library '{s}' not found", .{suffix});
             }
         }
     }
@@ -2446,6 +2629,7 @@ fn buildOutputType(
         .use_lld = use_lld,
         .use_clang = use_clang,
         .use_stage1 = use_stage1,
+        .hash_style = hash_style,
         .rdynamic = rdynamic,
         .linker_script = linker_script,
         .version_script = version_script,
@@ -2455,8 +2639,11 @@ fn buildOutputType(
         .linker_allow_shlib_undefined = linker_allow_shlib_undefined,
         .linker_bind_global_refs_locally = linker_bind_global_refs_locally,
         .linker_import_memory = linker_import_memory,
+        .linker_import_table = linker_import_table,
+        .linker_export_table = linker_export_table,
         .linker_initial_memory = linker_initial_memory,
         .linker_max_memory = linker_max_memory,
+        .linker_shared_memory = linker_shared_memory,
         .linker_global_base = linker_global_base,
         .linker_export_symbol_names = linker_export_symbol_names.items,
         .linker_z_nodelete = linker_z_nodelete,
@@ -2474,6 +2661,7 @@ fn buildOutputType(
         .minor_subsystem_version = minor_subsystem_version,
         .link_eh_frame_hdr = link_eh_frame_hdr,
         .link_emit_relocs = link_emit_relocs,
+        .entry = entry,
         .stack_size_override = stack_size_override,
         .image_base_override = image_base_override,
         .strip = strip,
@@ -2529,6 +2717,9 @@ fn buildOutputType(
             }
             process.exit(1);
         },
+        error.ExportTableAndImportTableConflict => {
+            fatal("--import-table and --export-table may not be used together", .{});
+        },
         else => fatal("unable to create compilation: {s}", .{@errorName(err)}),
     };
     var comp_destroyed = false;
@@ -2538,7 +2729,8 @@ fn buildOutputType(
         return std.io.getStdOut().writeAll(try comp.generateBuiltinZigSource(arena));
     }
     if (arg_mode == .translate_c) {
-        return cmdTranslateC(comp, arena, have_enable_cache);
+        const stage1_mode = use_stage1 orelse build_options.is_stage1;
+        return cmdTranslateC(comp, arena, have_enable_cache, stage1_mode);
     }
 
     const hook: AfterUpdateHook = blk: {
@@ -2547,9 +2739,7 @@ fn buildOutputType(
 
         switch (emit_bin) {
             .no => break :blk .none,
-            .yes_default_path => break :blk .{
-                .print = comp.bin_file.options.emit.?.directory.path orelse ".",
-            },
+            .yes_default_path => break :blk .print_emit_bin_dir_path,
             .yes => |full_path| break :blk .{ .update = full_path },
             .yes_a_out => break :blk .{ .update = a_out_basename },
         }
@@ -2560,10 +2750,6 @@ fn buildOutputType(
         else => |e| return e,
     };
     try comp.makeBinFileExecutable();
-
-    if (build_options.is_stage1 and comp.stage1_lock != null and watch) {
-        warn("--watch is not recommended with the stage1 backend; it leaks memory and is not capable of incremental compilation", .{});
-    }
 
     if (test_exec_args.items.len == 0 and object_format == .c) default_exec_args: {
         // Default to using `zig run` to execute the produced .c code from `zig test`.
@@ -2585,7 +2771,6 @@ fn buildOutputType(
             comp,
             gpa,
             arena,
-            emit_bin_loc,
             test_exec_args.items,
             self_exe_path,
             arg_mode,
@@ -2658,7 +2843,6 @@ fn buildOutputType(
                         comp,
                         gpa,
                         arena,
-                        emit_bin_loc,
                         test_exec_args.items,
                         self_exe_path,
                         arg_mode,
@@ -2684,7 +2868,6 @@ fn buildOutputType(
                         comp,
                         gpa,
                         arena,
-                        emit_bin_loc,
                         test_exec_args.items,
                         self_exe_path,
                         arg_mode,
@@ -2749,7 +2932,6 @@ fn runOrTest(
     comp: *Compilation,
     gpa: Allocator,
     arena: Allocator,
-    emit_bin_loc: ?Compilation.EmitLoc,
     test_exec_args: []const ?[]const u8,
     self_exe_path: []const u8,
     arg_mode: ArgMode,
@@ -2760,10 +2942,11 @@ fn runOrTest(
     runtime_args_start: ?usize,
     link_libc: bool,
 ) !void {
-    const exe_loc = emit_bin_loc orelse return;
-    const exe_directory = exe_loc.directory orelse comp.bin_file.options.emit.?.directory;
+    const exe_emit = comp.bin_file.options.emit orelse return;
+    // A naive `directory.join` here will indeed get the correct path to the binary,
+    // however, in the case of cwd, we actually want `./foo` so that the path can be executed.
     const exe_path = try fs.path.join(arena, &[_][]const u8{
-        exe_directory.path orelse ".", exe_loc.basename,
+        exe_emit.directory.path orelse ".", exe_emit.sub_path,
     });
 
     var argv = std.ArrayList([]const u8).init(gpa);
@@ -2800,9 +2983,9 @@ fn runOrTest(
         // execv releases the locks; no need to destroy the Compilation here.
         const err = std.process.execv(gpa, argv.items);
         try warnAboutForeignBinaries(gpa, arena, arg_mode, target_info, link_libc);
-        const cmd = try argvCmd(arena, argv.items);
+        const cmd = try std.mem.join(arena, " ", argv.items);
         fatal("the following command failed to execve with '{s}':\n{s}", .{ @errorName(err), cmd });
-    } else {
+    } else if (std.process.can_spawn) {
         const child = try std.ChildProcess.init(argv.items, gpa);
         defer child.deinit();
 
@@ -2819,7 +3002,7 @@ fn runOrTest(
 
         const term = child.spawnAndWait() catch |err| {
             try warnAboutForeignBinaries(gpa, arena, arg_mode, target_info, link_libc);
-            const cmd = try argvCmd(arena, argv.items);
+            const cmd = try std.mem.join(arena, " ", argv.items);
             fatal("the following command failed with '{s}':\n{s}", .{ @errorName(err), cmd });
         };
         switch (arg_mode) {
@@ -2850,24 +3033,27 @@ fn runOrTest(
                         if (code == 0) {
                             if (!watch) return cleanExit();
                         } else {
-                            const cmd = try argvCmd(arena, argv.items);
+                            const cmd = try std.mem.join(arena, " ", argv.items);
                             fatal("the following test command failed with exit code {d}:\n{s}", .{ code, cmd });
                         }
                     },
                     else => {
-                        const cmd = try argvCmd(arena, argv.items);
+                        const cmd = try std.mem.join(arena, " ", argv.items);
                         fatal("the following test command crashed:\n{s}", .{cmd});
                     },
                 }
             },
             else => unreachable,
         }
+    } else {
+        const cmd = try std.mem.join(arena, " ", argv.items);
+        fatal("the following command cannot be executed ({s} does not support spawning a child process):\n{s}", .{ @tagName(builtin.os.tag), cmd });
     }
 }
 
 const AfterUpdateHook = union(enum) {
     none,
-    print: []const u8,
+    print_emit_bin_dir_path,
     update: []const u8,
 };
 
@@ -2893,7 +3079,13 @@ fn updateModule(gpa: Allocator, comp: *Compilation, hook: AfterUpdateHook) !void
         return error.SemanticAnalyzeFail;
     } else switch (hook) {
         .none => {},
-        .print => |bin_path| try io.getStdOut().writer().print("{s}\n", .{bin_path}),
+        .print_emit_bin_dir_path => {
+            const emit = comp.bin_file.options.emit.?;
+            const full_path = try emit.directory.join(gpa, &.{emit.sub_path});
+            defer gpa.free(full_path);
+            const dir_path = fs.path.dirname(full_path).?;
+            try io.getStdOut().writer().print("{s}\n", .{dir_path});
+        },
         .update => |full_path| {
             const bin_sub_path = comp.bin_file.options.emit.?.sub_path;
             const cwd = fs.cwd();
@@ -2937,7 +3129,7 @@ fn freePkgTree(gpa: Allocator, pkg: *Package, free_parent: bool) void {
     }
 }
 
-fn cmdTranslateC(comp: *Compilation, arena: Allocator, enable_cache: bool) !void {
+fn cmdTranslateC(comp: *Compilation, arena: Allocator, enable_cache: bool, stage1_mode: bool) !void {
     if (!build_options.have_llvm)
         fatal("cannot translate-c: compiler built without LLVM extensions", .{});
 
@@ -2950,6 +3142,7 @@ fn cmdTranslateC(comp: *Compilation, arena: Allocator, enable_cache: bool) !void
     defer if (enable_cache) man.deinit();
 
     man.hash.add(@as(u16, 0xb945)); // Random number to distinguish translate-c from compiling C objects
+    man.hash.add(stage1_mode);
     man.hashCSource(c_source_file) catch |err| {
         fatal("unable to process '{s}': {s}", .{ c_source_file.src_path, @errorName(err) });
     };
@@ -3001,6 +3194,7 @@ fn cmdTranslateC(comp: *Compilation, arena: Allocator, enable_cache: bool) !void
             new_argv.ptr + new_argv.len,
             &clang_errors,
             c_headers_dir_path_z,
+            stage1_mode,
         ) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             error.ASTUnitFailure => fatal("clang API returned errors but due to a clang bug, it is not exposing the errors for zig to see. For more details: https://github.com/ziglang/zig/issues/4455", .{}),
@@ -3456,48 +3650,44 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
         };
         try comp.makeBinFileExecutable();
 
-        child_argv.items[argv_index_exe] = try comp.bin_file.options.emit.?.directory.join(
+        const emit = comp.bin_file.options.emit.?;
+        child_argv.items[argv_index_exe] = try emit.directory.join(
             arena,
-            &[_][]const u8{exe_basename},
+            &[_][]const u8{emit.sub_path},
         );
 
         break :argv child_argv.items;
     };
-    const child = try std.ChildProcess.init(child_argv, gpa);
-    defer child.deinit();
 
-    child.stdin_behavior = .Inherit;
-    child.stdout_behavior = .Inherit;
-    child.stderr_behavior = .Inherit;
+    if (std.process.can_spawn) {
+        const child = try std.ChildProcess.init(child_argv, gpa);
+        defer child.deinit();
 
-    const term = try child.spawnAndWait();
-    switch (term) {
-        .Exited => |code| {
-            if (code == 0) return cleanExit();
+        child.stdin_behavior = .Inherit;
+        child.stdout_behavior = .Inherit;
+        child.stderr_behavior = .Inherit;
 
-            if (prominent_compile_errors) {
-                fatal("the build command failed with exit code {d}", .{code});
-            } else {
-                const cmd = try argvCmd(arena, child_argv);
-                fatal("the following build command failed with exit code {d}:\n{s}", .{ code, cmd });
-            }
-        },
-        else => {
-            const cmd = try argvCmd(arena, child_argv);
-            fatal("the following build command crashed:\n{s}", .{cmd});
-        },
+        const term = try child.spawnAndWait();
+        switch (term) {
+            .Exited => |code| {
+                if (code == 0) return cleanExit();
+
+                if (prominent_compile_errors) {
+                    fatal("the build command failed with exit code {d}", .{code});
+                } else {
+                    const cmd = try std.mem.join(arena, " ", child_argv);
+                    fatal("the following build command failed with exit code {d}:\n{s}", .{ code, cmd });
+                }
+            },
+            else => {
+                const cmd = try std.mem.join(arena, " ", child_argv);
+                fatal("the following build command crashed:\n{s}", .{cmd});
+            },
+        }
+    } else {
+        const cmd = try std.mem.join(arena, " ", child_argv);
+        fatal("the following command cannot be executed ({s} does not support spawning a child process):\n{s}", .{ @tagName(builtin.os.tag), cmd });
     }
-}
-
-fn argvCmd(allocator: Allocator, argv: []const []const u8) ![]u8 {
-    var cmd = std.ArrayList(u8).init(allocator);
-    defer cmd.deinit();
-    for (argv[0 .. argv.len - 1]) |arg| {
-        try cmd.appendSlice(arg);
-        try cmd.append(' ');
-    }
-    try cmd.appendSlice(argv[argv.len - 1]);
-    return cmd.toOwnedSlice();
 }
 
 fn readSourceFileToEndAlloc(
@@ -3635,9 +3825,7 @@ pub fn cmdFmt(gpa: Allocator, arena: Allocator, args: []const []const u8) !void 
         };
         defer tree.deinit(gpa);
 
-        for (tree.errors) |parse_error| {
-            try printErrMsgToStdErr(gpa, arena, parse_error, tree, "<stdin>", color);
-        }
+        try printErrsMsgToStdErr(gpa, arena, tree.errors, tree, "<stdin>", color);
         var has_ast_error = false;
         if (check_ast_flag) {
             const Module = @import("Module.zig");
@@ -3649,9 +3837,7 @@ pub fn cmdFmt(gpa: Allocator, arena: Allocator, args: []const []const u8) !void 
                 .zir_loaded = false,
                 .sub_file_path = "<stdin>",
                 .source = source_code,
-                .stat_size = undefined,
-                .stat_inode = undefined,
-                .stat_mtime = undefined,
+                .stat = undefined,
                 .tree = tree,
                 .tree_loaded = true,
                 .zir = undefined,
@@ -3827,9 +4013,7 @@ fn fmtPathFile(
     var tree = try std.zig.parse(fmt.gpa, source_code);
     defer tree.deinit(fmt.gpa);
 
-    for (tree.errors) |parse_error| {
-        try printErrMsgToStdErr(fmt.gpa, fmt.arena, parse_error, tree, file_path, fmt.color);
-    }
+    try printErrsMsgToStdErr(fmt.gpa, fmt.arena, tree.errors, tree, file_path, fmt.color);
     if (tree.errors.len != 0) {
         fmt.any_error = true;
         return;
@@ -3845,9 +4029,11 @@ fn fmtPathFile(
             .zir_loaded = false,
             .sub_file_path = file_path,
             .source = source_code,
-            .stat_size = stat.size,
-            .stat_inode = stat.inode,
-            .stat_mtime = stat.mtime,
+            .stat = .{
+                .size = stat.size,
+                .inode = stat.inode,
+                .mtime = stat.mtime,
+            },
             .tree = tree,
             .tree_loaded = true,
             .zir = undefined,
@@ -3907,65 +4093,95 @@ fn fmtPathFile(
     }
 }
 
-fn printErrMsgToStdErr(
+fn printErrsMsgToStdErr(
     gpa: mem.Allocator,
     arena: mem.Allocator,
-    parse_error: Ast.Error,
+    parse_errors: []const Ast.Error,
     tree: Ast,
     path: []const u8,
     color: Color,
 ) !void {
-    const lok_token = parse_error.token;
-    const token_tags = tree.tokens.items(.tag);
-    const start_loc = tree.tokenLocation(0, lok_token);
-    const source_line = tree.source[start_loc.line_start..start_loc.line_end];
+    var i: usize = 0;
+    while (i < parse_errors.len) : (i += 1) {
+        const parse_error = parse_errors[i];
+        const lok_token = parse_error.token;
+        const token_tags = tree.tokens.items(.tag);
+        const start_loc = tree.tokenLocation(0, lok_token);
+        const source_line = tree.source[start_loc.line_start..start_loc.line_end];
 
-    var text_buf = std.ArrayList(u8).init(gpa);
-    defer text_buf.deinit();
-    const writer = text_buf.writer();
-    try tree.renderError(parse_error, writer);
-    const text = text_buf.items;
+        var text_buf = std.ArrayList(u8).init(gpa);
+        defer text_buf.deinit();
+        const writer = text_buf.writer();
+        try tree.renderError(parse_error, writer);
+        const text = text_buf.items;
 
-    var notes_buffer: [1]Compilation.AllErrors.Message = undefined;
-    var notes_len: usize = 0;
+        var notes_buffer: [2]Compilation.AllErrors.Message = undefined;
+        var notes_len: usize = 0;
 
-    if (token_tags[parse_error.token] == .invalid) {
-        const bad_off = @intCast(u32, tree.tokenSlice(parse_error.token).len);
-        const byte_offset = @intCast(u32, start_loc.line_start) + bad_off;
-        notes_buffer[notes_len] = .{
+        if (token_tags[parse_error.token + @boolToInt(parse_error.token_is_prev)] == .invalid) {
+            const bad_off = @intCast(u32, tree.tokenSlice(parse_error.token + @boolToInt(parse_error.token_is_prev)).len);
+            const byte_offset = @intCast(u32, start_loc.line_start) + @intCast(u32, start_loc.column) + bad_off;
+            notes_buffer[notes_len] = .{
+                .src = .{
+                    .src_path = path,
+                    .msg = try std.fmt.allocPrint(arena, "invalid byte: '{'}'", .{
+                        std.zig.fmtEscapes(tree.source[byte_offset..][0..1]),
+                    }),
+                    .byte_offset = byte_offset,
+                    .line = @intCast(u32, start_loc.line),
+                    .column = @intCast(u32, start_loc.column) + bad_off,
+                    .source_line = source_line,
+                },
+            };
+            notes_len += 1;
+        } else if (parse_error.tag == .decl_between_fields) {
+            const prev_loc = tree.tokenLocation(0, parse_errors[i + 1].token);
+            notes_buffer[0] = .{
+                .src = .{
+                    .src_path = path,
+                    .msg = "field before declarations here",
+                    .byte_offset = @intCast(u32, prev_loc.line_start),
+                    .line = @intCast(u32, prev_loc.line),
+                    .column = @intCast(u32, prev_loc.column),
+                    .source_line = tree.source[prev_loc.line_start..prev_loc.line_end],
+                },
+            };
+            const next_loc = tree.tokenLocation(0, parse_errors[i + 2].token);
+            notes_buffer[1] = .{
+                .src = .{
+                    .src_path = path,
+                    .msg = "field after declarations here",
+                    .byte_offset = @intCast(u32, next_loc.line_start),
+                    .line = @intCast(u32, next_loc.line),
+                    .column = @intCast(u32, next_loc.column),
+                    .source_line = tree.source[next_loc.line_start..next_loc.line_end],
+                },
+            };
+            notes_len = 2;
+            i += 2;
+        }
+
+        const extra_offset = tree.errorOffset(parse_error);
+        const message: Compilation.AllErrors.Message = .{
             .src = .{
                 .src_path = path,
-                .msg = try std.fmt.allocPrint(arena, "invalid byte: '{'}'", .{
-                    std.zig.fmtEscapes(tree.source[byte_offset..][0..1]),
-                }),
-                .byte_offset = byte_offset,
+                .msg = text,
+                .byte_offset = @intCast(u32, start_loc.line_start) + extra_offset,
                 .line = @intCast(u32, start_loc.line),
-                .column = @intCast(u32, start_loc.column) + bad_off,
+                .column = @intCast(u32, start_loc.column) + extra_offset,
                 .source_line = source_line,
+                .notes = notes_buffer[0..notes_len],
             },
         };
-        notes_len += 1;
+
+        const ttyconf: std.debug.TTY.Config = switch (color) {
+            .auto => std.debug.detectTTYConfig(),
+            .on => .escape_codes,
+            .off => .no_color,
+        };
+
+        message.renderToStdErr(ttyconf);
     }
-
-    const message: Compilation.AllErrors.Message = .{
-        .src = .{
-            .src_path = path,
-            .msg = text,
-            .byte_offset = @intCast(u32, start_loc.line_start),
-            .line = @intCast(u32, start_loc.line),
-            .column = @intCast(u32, start_loc.column),
-            .source_line = source_line,
-            .notes = notes_buffer[0..notes_len],
-        },
-    };
-
-    const ttyconf: std.debug.TTY.Config = switch (color) {
-        .auto => std.debug.detectTTYConfig(),
-        .on => .escape_codes,
-        .off => .no_color,
-    };
-
-    message.renderToStdErr(ttyconf);
 }
 
 pub const info_zen =
@@ -3990,65 +4206,87 @@ pub const info_zen =
 extern "c" fn ZigClang_main(argc: c_int, argv: [*:null]?[*:0]u8) c_int;
 extern "c" fn ZigLlvmAr_main(argc: c_int, argv: [*:null]?[*:0]u8) c_int;
 
-/// TODO https://github.com/ziglang/zig/issues/3257
-fn punt_to_clang(arena: Allocator, args: []const []const u8) error{OutOfMemory} {
-    if (!build_options.have_llvm)
-        fatal("`zig cc` and `zig c++` unavailable: compiler built without LLVM extensions", .{});
-    // Convert the args to the format Clang expects.
-    const argv = try arena.alloc(?[*:0]u8, args.len + 1);
+fn argsCopyZ(alloc: Allocator, args: []const []const u8) ![:null]?[*:0]u8 {
+    var argv = try alloc.allocSentinel(?[*:0]u8, args.len, null);
     for (args) |arg, i| {
-        argv[i] = try arena.dupeZ(u8, arg); // TODO If there was an argsAllocZ we could avoid this allocation.
+        argv[i] = try alloc.dupeZ(u8, arg); // TODO If there was an argsAllocZ we could avoid this allocation.
     }
-    argv[args.len] = null;
-    const exit_code = ZigClang_main(@intCast(c_int, args.len), argv[0..args.len :null].ptr);
-    process.exit(@bitCast(u8, @truncate(i8, exit_code)));
+    return argv;
 }
 
-/// TODO https://github.com/ziglang/zig/issues/3257
-fn punt_to_llvm_ar(arena: Allocator, args: []const []const u8) error{OutOfMemory} {
+pub fn clangMain(alloc: Allocator, args: []const []const u8) error{OutOfMemory}!u8 {
+    if (!build_options.have_llvm)
+        fatal("`zig cc` and `zig c++` unavailable: compiler built without LLVM extensions", .{});
+
+    var arena_instance = std.heap.ArenaAllocator.init(alloc);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+
+    // Convert the args to the null-terminated format Clang expects.
+    const argv = try argsCopyZ(arena, args);
+    const exit_code = ZigClang_main(@intCast(c_int, argv.len), argv.ptr);
+    return @bitCast(u8, @truncate(i8, exit_code));
+}
+
+pub fn llvmArMain(alloc: Allocator, args: []const []const u8) error{OutOfMemory}!u8 {
     if (!build_options.have_llvm)
         fatal("`zig ar`, `zig dlltool`, `zig ranlib', and `zig lib` unavailable: compiler built without LLVM extensions", .{});
 
+    var arena_instance = std.heap.ArenaAllocator.init(alloc);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+
     // Convert the args to the format llvm-ar expects.
-    // We subtract 1 to shave off the zig binary from args[0].
-    const argv = try arena.allocSentinel(?[*:0]u8, args.len - 1, null);
-    for (args[1..]) |arg, i| {
-        // TODO If there was an argsAllocZ we could avoid this allocation.
-        argv[i] = try arena.dupeZ(u8, arg);
-    }
-    const argc = @intCast(c_int, argv.len);
-    const exit_code = ZigLlvmAr_main(argc, argv.ptr);
-    process.exit(@bitCast(u8, @truncate(i8, exit_code)));
+    // We intentionally shave off the zig binary at args[0].
+    const argv = try argsCopyZ(arena, args[1..]);
+    const exit_code = ZigLlvmAr_main(@intCast(c_int, argv.len), argv.ptr);
+    return @bitCast(u8, @truncate(i8, exit_code));
 }
 
 /// The first argument determines which backend is invoked. The options are:
 /// * `ld.lld` - ELF
 /// * `lld-link` - COFF
 /// * `wasm-ld` - WebAssembly
-/// TODO https://github.com/ziglang/zig/issues/3257
-pub fn punt_to_lld(arena: Allocator, args: []const []const u8) error{OutOfMemory} {
+pub fn lldMain(
+    alloc: Allocator,
+    args: []const []const u8,
+    can_exit_early: bool,
+) error{OutOfMemory}!u8 {
     if (!build_options.have_llvm)
         fatal("`zig {s}` unavailable: compiler built without LLVM extensions", .{args[0]});
-    // Convert the args to the format LLD expects.
-    // We subtract 1 to shave off the zig binary from args[0].
-    const argv = try arena.allocSentinel(?[*:0]const u8, args.len - 1, null);
-    for (args[1..]) |arg, i| {
-        argv[i] = try arena.dupeZ(u8, arg); // TODO If there was an argsAllocZ we could avoid this allocation.
+
+    // Print a warning if lld is called multiple times in the same process,
+    // since it may misbehave
+    // https://github.com/ziglang/zig/issues/3825
+    const CallCounter = struct {
+        var count: usize = 0;
+    };
+    if (CallCounter.count == 1) { // Issue the warning on the first repeat call
+        warn("invoking LLD for the second time within the same process because the host OS ({s}) does not support spawning child processes. This sometimes activates LLD bugs", .{@tagName(builtin.os.tag)});
     }
+    CallCounter.count += 1;
+
+    var arena_instance = std.heap.ArenaAllocator.init(alloc);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
+
+    // Convert the args to the format llvm-ar expects.
+    // We intentionally shave off the zig binary at args[0].
+    const argv = try argsCopyZ(arena, args[1..]);
     const exit_code = rc: {
         const llvm = @import("codegen/llvm/bindings.zig");
         const argc = @intCast(c_int, argv.len);
         if (mem.eql(u8, args[1], "ld.lld")) {
-            break :rc llvm.LinkELF(argc, argv.ptr, true);
+            break :rc llvm.LinkELF(argc, argv.ptr, can_exit_early);
         } else if (mem.eql(u8, args[1], "lld-link")) {
-            break :rc llvm.LinkCOFF(argc, argv.ptr, true);
+            break :rc llvm.LinkCOFF(argc, argv.ptr, can_exit_early);
         } else if (mem.eql(u8, args[1], "wasm-ld")) {
-            break :rc llvm.LinkWasm(argc, argv.ptr, true);
+            break :rc llvm.LinkWasm(argc, argv.ptr, can_exit_early);
         } else {
             unreachable;
         }
     };
-    process.exit(@bitCast(u8, @truncate(i8, exit_code)));
+    return @bitCast(u8, @truncate(i8, exit_code));
 }
 
 const clang_args = @import("clang_options.zig").list;
@@ -4062,7 +4300,8 @@ pub const ClangArgIterator = struct {
     argv: []const []const u8,
     next_index: usize,
     root_args: ?*Args,
-    allocator: Allocator,
+    arg_iterator_response_file: ArgIteratorResponseFile,
+    arena: Allocator,
 
     pub const ZigEquivalent = enum {
         target,
@@ -4115,6 +4354,8 @@ pub const ClangArgIterator = struct {
         strip,
         exec_model,
         emit_llvm,
+        sysroot,
+        entry,
     };
 
     const Args = struct {
@@ -4122,7 +4363,7 @@ pub const ClangArgIterator = struct {
         argv: []const []const u8,
     };
 
-    fn init(allocator: Allocator, argv: []const []const u8) ClangArgIterator {
+    fn init(arena: Allocator, argv: []const []const u8) ClangArgIterator {
         return .{
             .next_index = 2, // `zig cc foo` this points to `foo`
             .has_next = argv.len > 2,
@@ -4132,8 +4373,20 @@ pub const ClangArgIterator = struct {
             .other_args = undefined,
             .argv = argv,
             .root_args = null,
-            .allocator = allocator,
+            .arg_iterator_response_file = undefined,
+            .arena = arena,
         };
+    }
+
+    const ArgIteratorResponseFile = process.ArgIteratorGeneral(.{ .comments = true, .single_quotes = true });
+
+    /// Initialize the arguments from a Response File. "*.rsp"
+    fn initArgIteratorResponseFile(allocator: Allocator, resp_file_path: []const u8) !ArgIteratorResponseFile {
+        const max_bytes = 10 * 1024 * 1024; // 10 MiB of command line arguments is a reasonable limit
+        var cmd_line = try fs.cwd().readFileAlloc(allocator, resp_file_path, max_bytes);
+        errdefer allocator.free(cmd_line);
+
+        return ArgIteratorResponseFile.initTakeOwnership(allocator, cmd_line);
     }
 
     fn next(self: *ClangArgIterator) !void {
@@ -4151,31 +4404,25 @@ pub const ClangArgIterator = struct {
 
             // This is a "compiler response file". We must parse the file and treat its
             // contents as command line parameters.
-            const allocator = self.allocator;
-            const max_bytes = 10 * 1024 * 1024; // 10 MiB of command line arguments is a reasonable limit
+            const arena = self.arena;
             const resp_file_path = arg[1..];
-            const resp_contents = fs.cwd().readFileAlloc(allocator, resp_file_path, max_bytes) catch |err| {
+
+            self.arg_iterator_response_file =
+                initArgIteratorResponseFile(arena, resp_file_path) catch |err| {
                 fatal("unable to read response file '{s}': {s}", .{ resp_file_path, @errorName(err) });
             };
-            defer allocator.free(resp_contents);
-            // TODO is there a specification for this file format? Let's find it and make this parsing more robust
-            // at the very least I'm guessing this needs to handle quotes and `#` comments.
-            var it = mem.tokenize(u8, resp_contents, " \t\r\n");
-            var resp_arg_list = std.ArrayList([]const u8).init(allocator);
+            // NOTE: The ArgIteratorResponseFile returns tokens from next() that are slices of an
+            // internal buffer. This internal buffer is arena allocated, so it is not cleaned up here.
+
+            var resp_arg_list = std.ArrayList([]const u8).init(arena);
             defer resp_arg_list.deinit();
             {
-                errdefer {
-                    for (resp_arg_list.items) |item| {
-                        allocator.free(mem.span(item));
-                    }
+                while (self.arg_iterator_response_file.next()) |token| {
+                    try resp_arg_list.append(token);
                 }
-                while (it.next()) |token| {
-                    const dupe_token = try allocator.dupeZ(u8, token);
-                    errdefer allocator.free(dupe_token);
-                    try resp_arg_list.append(dupe_token);
-                }
-                const args = try allocator.create(Args);
-                errdefer allocator.destroy(args);
+
+                const args = try arena.create(Args);
+                errdefer arena.destroy(args);
                 args.* = .{
                     .next_index = self.next_index,
                     .argv = self.argv,
@@ -4196,6 +4443,7 @@ pub const ClangArgIterator = struct {
             arg = mem.span(self.argv[self.next_index]);
             self.incrementArgIndex();
         }
+
         if (mem.eql(u8, arg, "-") or !mem.startsWith(u8, arg, "-")) {
             self.zig_equivalent = .positional;
             self.only_arg = arg;
@@ -4295,13 +4543,13 @@ pub const ClangArgIterator = struct {
     }
 
     fn resolveRespFileArgs(self: *ClangArgIterator) void {
-        const allocator = self.allocator;
+        const arena = self.arena;
         if (self.next_index >= self.argv.len) {
             if (self.root_args) |root_args| {
                 self.next_index = root_args.next_index;
                 self.argv = root_args.argv;
 
-                allocator.destroy(root_args);
+                arena.destroy(root_args);
                 self.root_args = null;
             }
             if (self.next_index >= self.argv.len) {
@@ -4443,9 +4691,7 @@ pub fn cmdAstCheck(
         .zir_loaded = false,
         .sub_file_path = undefined,
         .source = undefined,
-        .stat_size = undefined,
-        .stat_inode = undefined,
-        .stat_mtime = undefined,
+        .stat = undefined,
         .tree = undefined,
         .zir = undefined,
         .pkg = undefined,
@@ -4470,9 +4716,11 @@ pub fn cmdAstCheck(
         file.sub_file_path = file_name;
         file.source = source;
         file.source_loaded = true;
-        file.stat_size = stat.size;
-        file.stat_inode = stat.inode;
-        file.stat_mtime = stat.mtime;
+        file.stat = .{
+            .size = stat.size,
+            .inode = stat.inode,
+            .mtime = stat.mtime,
+        };
     } else {
         const stdin = io.getStdIn();
         const source = readSourceFileToEndAlloc(arena, &stdin, null) catch |err| {
@@ -4481,7 +4729,7 @@ pub fn cmdAstCheck(
         file.sub_file_path = "<stdin>";
         file.source = source;
         file.source_loaded = true;
-        file.stat_size = source.len;
+        file.stat.size = source.len;
     }
 
     file.pkg = try Package.create(gpa, null, file.sub_file_path);
@@ -4491,9 +4739,7 @@ pub fn cmdAstCheck(
     file.tree_loaded = true;
     defer file.tree.deinit(gpa);
 
-    for (file.tree.errors) |parse_error| {
-        try printErrMsgToStdErr(gpa, arena, parse_error, file.tree, file.sub_file_path, color);
-    }
+    try printErrsMsgToStdErr(gpa, arena, file.tree.errors, file.tree, file.sub_file_path, color);
     if (file.tree.errors.len != 0) {
         process.exit(1);
     }
@@ -4594,9 +4840,11 @@ pub fn cmdChangelist(
         .zir_loaded = false,
         .sub_file_path = old_source_file,
         .source = undefined,
-        .stat_size = stat.size,
-        .stat_inode = stat.inode,
-        .stat_mtime = stat.mtime,
+        .stat = .{
+            .size = stat.size,
+            .inode = stat.inode,
+            .mtime = stat.mtime,
+        },
         .tree = undefined,
         .zir = undefined,
         .pkg = undefined,
@@ -4617,9 +4865,7 @@ pub fn cmdChangelist(
     file.tree_loaded = true;
     defer file.tree.deinit(gpa);
 
-    for (file.tree.errors) |parse_error| {
-        try printErrMsgToStdErr(gpa, arena, parse_error, file.tree, old_source_file, .auto);
-    }
+    try printErrsMsgToStdErr(gpa, arena, file.tree.errors, file.tree, old_source_file, .auto);
     if (file.tree.errors.len != 0) {
         process.exit(1);
     }
@@ -4656,9 +4902,7 @@ pub fn cmdChangelist(
     var new_tree = try std.zig.parse(gpa, new_source);
     defer new_tree.deinit(gpa);
 
-    for (new_tree.errors) |parse_error| {
-        try printErrMsgToStdErr(gpa, arena, parse_error, new_tree, new_source_file, .auto);
-    }
+    try printErrsMsgToStdErr(gpa, arena, new_tree.errors, new_tree, new_source_file, .auto);
     if (new_tree.errors.len != 0) {
         process.exit(1);
     }

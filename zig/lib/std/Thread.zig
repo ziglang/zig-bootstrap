@@ -4,6 +4,7 @@
 
 const std = @import("std.zig");
 const builtin = @import("builtin");
+const math = std.math;
 const os = std.os;
 const assert = std.debug.assert;
 const target = builtin.target;
@@ -16,6 +17,7 @@ pub const StaticResetEvent = @import("Thread/StaticResetEvent.zig");
 pub const Mutex = @import("Thread/Mutex.zig");
 pub const Semaphore = @import("Thread/Semaphore.zig");
 pub const Condition = @import("Thread/Condition.zig");
+pub const RwLock = @import("Thread/RwLock.zig");
 
 pub const use_pthreads = target.os.tag != .windows and target.os.tag != .wasi and builtin.link_libc;
 const is_gnu = target.abi.isGnu();
@@ -79,26 +81,34 @@ pub fn setName(self: Thread, name: []const u8) SetNameError!void {
             var buf: [32]u8 = undefined;
             const path = try std.fmt.bufPrint(&buf, "/proc/self/task/{d}/comm", .{self.getHandle()});
 
-            const file = try std.fs.cwd().openFile(path, .{ .write = true });
+            const file = try std.fs.cwd().openFile(path, .{ .mode = .write_only });
             defer file.close();
 
             try file.writer().writeAll(name);
             return;
         },
-        .windows => if (target.os.isAtLeast(.windows, .win10_rs1)) |res| {
-            // SetThreadDescription is only available since version 1607, which is 10.0.14393.795
-            // See https://en.wikipedia.org/wiki/Microsoft_Windows_SDK
-            if (!res) return error.Unsupported;
+        .windows => {
+            var buf: [max_name_len]u16 = undefined;
+            const len = try std.unicode.utf8ToUtf16Le(&buf, name);
+            const byte_len = math.cast(c_ushort, len * 2) catch return error.NameTooLong;
 
-            var name_buf_w: [max_name_len:0]u16 = undefined;
-            const length = try std.unicode.utf8ToUtf16Le(&name_buf_w, name);
-            name_buf_w[length] = 0;
+            // Note: NT allocates its own copy, no use-after-free here.
+            const unicode_string = os.windows.UNICODE_STRING{
+                .Length = byte_len,
+                .MaximumLength = byte_len,
+                .Buffer = &buf,
+            };
 
-            try os.windows.SetThreadDescription(
+            switch (os.windows.ntdll.NtSetInformationThread(
                 self.getHandle(),
-                @ptrCast(os.windows.LPWSTR, &name_buf_w),
-            );
-            return;
+                .ThreadNameInformation,
+                &unicode_string,
+                @sizeOf(os.windows.UNICODE_STRING),
+            )) {
+                .SUCCESS => return,
+                .NOT_IMPLEMENTED => return error.Unsupported,
+                else => |err| return os.windows.unexpectedStatus(err),
+            }
         },
         .macos, .ios, .watchos, .tvos => if (use_pthreads) {
             // There doesn't seem to be a way to set the name for an arbitrary thread, only the current one.
@@ -188,18 +198,25 @@ pub fn getName(self: Thread, buffer_ptr: *[max_name_len:0]u8) GetNameError!?[]co
             // musl doesn't provide pthread_getname_np and there's no way to retrieve the thread id of an arbitrary thread.
             return error.Unsupported;
         },
-        .windows => if (target.os.isAtLeast(.windows, .win10_rs1)) |res| {
-            // GetThreadDescription is only available since version 1607, which is 10.0.14393.795
-            // See https://en.wikipedia.org/wiki/Microsoft_Windows_SDK
-            if (!res) return error.Unsupported;
+        .windows => {
+            const buf_capacity = @sizeOf(os.windows.UNICODE_STRING) + (@sizeOf(u16) * max_name_len);
+            var buf: [buf_capacity]u8 align(@alignOf(os.windows.UNICODE_STRING)) = undefined;
 
-            var name_w: os.windows.LPWSTR = undefined;
-            try os.windows.GetThreadDescription(self.getHandle(), &name_w);
-            defer os.windows.LocalFree(name_w);
-
-            const data_len = try std.unicode.utf16leToUtf8(buffer, std.mem.sliceTo(name_w, 0));
-
-            return if (data_len >= 1) buffer[0..data_len] else null;
+            switch (os.windows.ntdll.NtQueryInformationThread(
+                self.getHandle(),
+                .ThreadNameInformation,
+                &buf,
+                buf_capacity,
+                null,
+            )) {
+                .SUCCESS => {
+                    const string = @ptrCast(*const os.windows.UNICODE_STRING, &buf);
+                    const len = try std.unicode.utf16leToUtf8(buffer, string.Buffer[0 .. string.Length / 2]);
+                    return if (len > 0) buffer[0..len] else null;
+                },
+                .NOT_IMPLEMENTED => return error.Unsupported,
+                else => |err| return os.windows.unexpectedStatus(err),
+            }
         },
         .macos, .ios, .watchos, .tvos => if (use_pthreads) {
             const err = std.c.pthread_getname_np(self.getHandle(), buffer.ptr, max_name_len + 1);
@@ -316,7 +333,7 @@ pub fn spawn(config: SpawnConfig, comptime function: anytype, args: anytype) Spa
 /// May be an integer or a pointer depending on the platform.
 pub const Handle = Impl.ThreadHandle;
 
-/// Retrns the handle of this thread
+/// Returns the handle of this thread
 pub fn getHandle(self: Thread) Handle {
     return self.impl.getHandle();
 }
@@ -331,6 +348,26 @@ pub fn detach(self: Thread) void {
 /// Once called, this consumes the Thread object and invoking any other functions on it is considered undefined behavior.
 pub fn join(self: Thread) void {
     return self.impl.join();
+}
+
+pub const YieldError = error{
+    /// The system is not configured to allow yielding
+    SystemCannotYield,
+};
+
+/// Yields the current thread potentially allowing other threads to run.
+pub fn yield() YieldError!void {
+    if (builtin.os.tag == .windows) {
+        // The return value has to do with how many other threads there are; it is not
+        // an error condition on Windows.
+        _ = os.windows.kernel32.SwitchToThread();
+        return;
+    }
+    switch (os.errno(os.system.sched_yield())) {
+        .SUCCESS => return,
+        .NOSYS => return error.SystemCannotYield,
+        else => return error.SystemCannotYield,
+    }
 }
 
 /// State to synchronize detachment of spawner thread to spawned thread
@@ -1150,4 +1187,28 @@ test "Thread.detach" {
 
     event.wait();
     try std.testing.expectEqual(value, 1);
+}
+
+fn testWaitForSignal(mutex: *Mutex, cond: *Condition) void {
+    mutex.lock();
+    defer mutex.unlock();
+    cond.signal();
+    cond.wait(mutex);
+}
+
+test "Condition.signal" {
+    if (builtin.single_threaded) return error.SkipZigTest;
+
+    var mutex = Mutex{};
+    var cond = Condition{};
+
+    var thread: Thread = undefined;
+    {
+        mutex.lock();
+        defer mutex.unlock();
+        thread = try Thread.spawn(.{}, testWaitForSignal, .{ &mutex, &cond });
+        cond.wait(&mutex);
+        cond.signal();
+    }
+    thread.join();
 }

@@ -36,7 +36,6 @@ pub const sqrt2 = 1.414213562373095048801688724209698079;
 /// 1/sqrt(2)
 pub const sqrt1_2 = 0.707106781186547524400844362104849039;
 
-// From a small c++ [program using boost float128](https://github.com/winksaville/cpp_boost_float128)
 pub const f128_true_min = @bitCast(f128, @as(u128, 0x00000000000000000000000000000001));
 pub const f128_min = @bitCast(f128, @as(u128, 0x00010000000000000000000000000000));
 pub const f128_max = @bitCast(f128, @as(u128, 0x7FFEFFFFFFFFFFFFFFFFFFFFFFFFFFFF));
@@ -44,6 +43,12 @@ pub const f128_epsilon = @bitCast(f128, @as(u128, 0x3F8F000000000000000000000000
 pub const f128_toint = 1.0 / f128_epsilon;
 
 // float.h details
+pub const f80_true_min = make_f80(.{ .fraction = 1, .exp = 0 });
+pub const f80_min = make_f80(.{ .fraction = 0x8000000000000000, .exp = 1 });
+pub const f80_max = make_f80(.{ .fraction = 0xFFFFFFFFFFFFFFFF, .exp = 0x7FFE });
+pub const f80_epsilon = make_f80(.{ .fraction = 0x8000000000000000, .exp = 0x3FC0 });
+pub const f80_toint = 1.0 / f80_epsilon;
+
 pub const f64_true_min = 4.94065645841246544177e-324;
 pub const f64_min = 2.2250738585072014e-308;
 pub const f64_max = 1.79769313486231570815e+308;
@@ -90,6 +95,10 @@ pub const qnan_f64 = @bitCast(f64, qnan_u64);
 
 pub const inf_u64 = @as(u64, 0x7FF << 52);
 pub const inf_f64 = @bitCast(f64, inf_u64);
+
+pub const inf_f80 = make_f80(F80{ .fraction = 0x8000000000000000, .exp = 0x7fff });
+pub const nan_f80 = make_f80(F80{ .fraction = 0xA000000000000000, .exp = 0x7fff });
+pub const qnan_f80 = make_f80(F80{ .fraction = 0xC000000000000000, .exp = 0x7fff });
 
 pub const nan_u128 = @as(u128, 0x7fff0000000000000000000000000001);
 pub const nan_f128 = @bitCast(f128, nan_u128);
@@ -938,7 +947,7 @@ fn testRem() !void {
 /// Result is an unsigned integer.
 pub fn absCast(x: anytype) switch (@typeInfo(@TypeOf(x))) {
     .ComptimeInt => comptime_int,
-    .Int => |intInfo| std.meta.Int(.unsigned, intInfo.bits),
+    .Int => |int_info| std.meta.Int(.unsigned, int_info.bits),
     else => @compileError("absCast only accepts integers"),
 } {
     switch (@typeInfo(@TypeOf(x))) {
@@ -949,8 +958,9 @@ pub fn absCast(x: anytype) switch (@typeInfo(@TypeOf(x))) {
                 return x;
             }
         },
-        .Int => |intInfo| {
-            const Uint = std.meta.Int(.unsigned, intInfo.bits);
+        .Int => |int_info| {
+            if (int_info.signedness == .unsigned) return x;
+            const Uint = std.meta.Int(.unsigned, int_info.bits);
             if (x < 0) {
                 return ~@bitCast(Uint, x +% -1);
             } else {
@@ -1036,14 +1046,9 @@ pub fn isPowerOfTwo(v: anytype) bool {
 /// Returns the nearest power of two less than or equal to value, or
 /// zero if value is less than or equal to zero.
 pub fn floorPowerOfTwo(comptime T: type, value: T) T {
-    var x = value;
-
-    comptime var i = 1;
-    inline while (@typeInfo(T).Int.bits > i) : (i *= 2) {
-        x |= (x >> i);
-    }
-
-    return x - (x >> 1);
+    const uT = std.meta.Int(.unsigned, @typeInfo(T).Int.bits);
+    if (value <= 0) return 0;
+    return @as(T, 1) << log2_int(uT, @intCast(uT, value));
 }
 
 test "math.floorPowerOfTwo" {
@@ -1055,9 +1060,15 @@ fn testFloorPowerOfTwo() !void {
     try testing.expect(floorPowerOfTwo(u32, 63) == 32);
     try testing.expect(floorPowerOfTwo(u32, 64) == 64);
     try testing.expect(floorPowerOfTwo(u32, 65) == 64);
+    try testing.expect(floorPowerOfTwo(u32, 0) == 0);
     try testing.expect(floorPowerOfTwo(u4, 7) == 4);
     try testing.expect(floorPowerOfTwo(u4, 8) == 8);
     try testing.expect(floorPowerOfTwo(u4, 9) == 8);
+    try testing.expect(floorPowerOfTwo(u4, 0) == 0);
+    try testing.expect(floorPowerOfTwo(i4, 7) == 4);
+    try testing.expect(floorPowerOfTwo(i4, -8) == 0);
+    try testing.expect(floorPowerOfTwo(i4, -1) == 0);
+    try testing.expect(floorPowerOfTwo(i4, 0) == 0);
 }
 
 /// Returns the next power of two (if the value is not already a power of two).
@@ -1483,4 +1494,22 @@ test "boolMask" {
 /// Return the mod of `num` with the smallest integer type
 pub fn comptimeMod(num: anytype, denom: comptime_int) IntFittingRange(0, denom - 1) {
     return @intCast(IntFittingRange(0, denom - 1), @mod(num, denom));
+}
+
+pub const F80 = struct {
+    fraction: u64,
+    exp: u16,
+};
+
+pub fn make_f80(repr: F80) f80 {
+    const int = (@as(u80, repr.exp) << 64) | repr.fraction;
+    return @bitCast(f80, int);
+}
+
+pub fn break_f80(x: f80) F80 {
+    const int = @bitCast(u80, x);
+    return .{
+        .fraction = @truncate(u64, int),
+        .exp = @truncate(u16, int >> 64),
+    };
 }

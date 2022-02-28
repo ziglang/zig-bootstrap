@@ -12,6 +12,7 @@ const File = link.File;
 const build_options = @import("build_options");
 const Air = @import("../Air.zig");
 const Liveness = @import("../Liveness.zig");
+const TypedValue = @import("../TypedValue.zig");
 
 const std = @import("std");
 const builtin = @import("builtin");
@@ -173,6 +174,7 @@ fn putFn(self: *Plan9, decl: *Module.Decl, out: FnDeclOutput) !void {
         fn_map_res.value_ptr.* = .{
             .sym_index = blk: {
                 try self.syms.append(gpa, undefined);
+                try self.syms.append(gpa, undefined);
                 break :blk @intCast(u32, self.syms.items.len - 1);
             },
         };
@@ -194,10 +196,16 @@ fn putFn(self: *Plan9, decl: *Module.Decl, out: FnDeclOutput) !void {
         // null terminate
         try a.append(0);
         const final = a.toOwnedSlice();
-        self.syms.items[fn_map_res.value_ptr.sym_index] = .{
+        self.syms.items[fn_map_res.value_ptr.sym_index - 1] = .{
             .type = .z,
             .value = 1,
             .name = final,
+        };
+        self.syms.items[fn_map_res.value_ptr.sym_index] = .{
+            .type = .z,
+            // just put a giant number, no source file will have this many newlines
+            .value = std.math.maxInt(u31),
+            .name = &.{ 0, 0 },
         };
     }
 }
@@ -268,6 +276,14 @@ pub fn updateFunc(self: *Plan9, module: *Module, func: *Module.Fn, air: Air, liv
     return self.updateFinish(decl);
 }
 
+pub fn lowerUnnamedConst(self: *Plan9, tv: TypedValue, decl: *Module.Decl) !u32 {
+    _ = self;
+    _ = tv;
+    _ = decl;
+    log.debug("TODO lowerUnnamedConst for Plan9", .{});
+    return error.AnalysisFail;
+}
+
 pub fn updateDecl(self: *Plan9, module: *Module, decl: *Module.Decl) !void {
     if (decl.val.tag() == .extern_fn) {
         return; // TODO Should we do more when front-end analyzed extern decl?
@@ -286,7 +302,9 @@ pub fn updateDecl(self: *Plan9, module: *Module, decl: *Module.Decl) !void {
     var code_buffer = std.ArrayList(u8).init(self.base.allocator);
     defer code_buffer.deinit();
     const decl_val = if (decl.val.castTag(.variable)) |payload| payload.data.init else decl.val;
-    const res = try codegen.generateSymbol(&self.base, decl.srcLoc(), .{
+    // TODO we need the symbol index for symbol in the table of locals for the containing atom
+    const sym_index = decl.link.plan9.sym_index orelse 0;
+    const res = try codegen.generateSymbol(&self.base, @intCast(u32, sym_index), decl.srcLoc(), .{
         .ty = decl.ty,
         .val = decl_val,
     }, &code_buffer, .{ .none = .{} });
@@ -625,14 +643,16 @@ pub fn openPath(allocator: Allocator, sub_path: []const u8, options: link.Option
     if (options.use_llvm)
         return error.LLVMBackendDoesNotSupportPlan9;
     assert(options.object_format == .plan9);
+
+    const self = try createEmpty(allocator, options);
+    errdefer self.base.destroy();
+
     const file = try options.emit.?.directory.handle.createFile(sub_path, .{
         .read = true,
         .mode = link.determineMode(options),
     });
     errdefer file.close();
-
-    const self = try createEmpty(allocator, options);
-    errdefer self.base.destroy();
+    self.base.file = file;
 
     self.bases = defaultBaseAddrs(options.target.cpu.arch);
 
@@ -655,7 +675,6 @@ pub fn openPath(allocator: Allocator, sub_path: []const u8, options: link.Option
         },
     });
 
-    self.base.file = file;
     return self;
 }
 
@@ -705,7 +724,8 @@ pub fn writeSyms(self: *Plan9, buf: *std.ArrayList(u8)) !void {
         var it_file = self.fn_decl_table.iterator();
         while (it_file.next()) |fentry| {
             var symidx_and_submap = fentry.value_ptr;
-            // write the z symbol
+            // write the z symbols
+            try self.writeSym(writer, self.syms.items[symidx_and_submap.sym_index - 1]);
             try self.writeSym(writer, self.syms.items[symidx_and_submap.sym_index]);
 
             // write all the decls come from the file of the z symbol
@@ -731,4 +751,29 @@ pub fn writeSyms(self: *Plan9, buf: *std.ArrayList(u8)) !void {
 pub fn allocateDeclIndexes(self: *Plan9, decl: *Module.Decl) !void {
     _ = self;
     _ = decl;
+}
+pub fn getDeclVAddr(self: *Plan9, decl: *const Module.Decl, parent_atom_index: u32, offset: u64) !u64 {
+    _ = parent_atom_index;
+    _ = offset;
+    if (decl.ty.zigTypeTag() == .Fn) {
+        var start = self.bases.text;
+        var it_file = self.fn_decl_table.iterator();
+        while (it_file.next()) |fentry| {
+            var symidx_and_submap = fentry.value_ptr;
+            var submap_it = symidx_and_submap.functions.iterator();
+            while (submap_it.next()) |entry| {
+                if (entry.key_ptr.* == decl) return start;
+                start += entry.value_ptr.code.len;
+            }
+        }
+        unreachable;
+    } else {
+        var start = self.bases.data + self.got_len * if (!self.sixtyfour_bit) @as(u32, 4) else 8;
+        var it = self.data_decl_table.iterator();
+        while (it.next()) |kv| {
+            if (decl == kv.key_ptr.*) return start;
+            start += kv.value_ptr.len;
+        }
+        unreachable;
+    }
 }

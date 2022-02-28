@@ -1766,7 +1766,7 @@ fn parseInternal(
                                     }
                                 }
                                 if (field.is_comptime) {
-                                    if (!try parsesTo(field.field_type, field.default_value.?, tokens, child_options)) {
+                                    if (!try parsesTo(field.field_type, @ptrCast(*const field.field_type, field.default_value.?).*, tokens, child_options)) {
                                         return error.UnexpectedValue;
                                     }
                                 } else {
@@ -1791,8 +1791,9 @@ fn parseInternal(
             }
             inline for (structInfo.fields) |field, i| {
                 if (!fields_seen[i]) {
-                    if (field.default_value) |default| {
+                    if (field.default_value) |default_ptr| {
                         if (!field.is_comptime) {
+                            const default = @ptrCast(*const field.field_type, default_ptr).*;
                             @field(r, field.name) = default;
                         }
                     } else {
@@ -3332,4 +3333,24 @@ test "stringify null optional fields" {
         ),
         .{ .allocator = std.testing.allocator },
     ));
+}
+
+// Same as `stringify` but accepts an Allocator and stores result in dynamically allocated memory instead of using a Writer.
+// Caller owns returned memory.
+pub fn stringifyAlloc(allocator: std.mem.Allocator, value: anytype, options: StringifyOptions) ![]const u8 {
+    var list = std.ArrayList(u8).init(allocator);
+    errdefer list.deinit();
+    try stringify(value, options, list.writer());
+    return list.toOwnedSlice();
+}
+
+test "stringify alloc" {
+    const allocator = std.testing.allocator;
+    const expected =
+        \\{"foo":"bar","answer":42,"my_friend":"sammy"}
+    ;
+    const actual = try stringifyAlloc(allocator, .{ .foo = "bar", .answer = 42, .my_friend = "sammy" }, .{});
+    defer allocator.free(actual);
+
+    try std.testing.expectEqualStrings(expected, actual);
 }

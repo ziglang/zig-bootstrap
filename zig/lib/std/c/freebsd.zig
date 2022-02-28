@@ -193,12 +193,12 @@ pub const dl_phdr_info = extern struct {
 };
 
 pub const Flock = extern struct {
-    l_start: off_t,
-    l_len: off_t,
-    l_pid: pid_t,
-    l_type: i16,
-    l_whence: i16,
-    l_sysid: i32,
+    start: off_t,
+    len: off_t,
+    pid: pid_t,
+    type: i16,
+    whence: i16,
+    sysid: i32,
     __unused: [4]u8,
 };
 
@@ -282,6 +282,10 @@ pub const Stat = extern struct {
 
     pub fn ctime(self: @This()) timespec {
         return self.ctim;
+    }
+
+    pub fn birthtime(self: @This()) timespec {
+        return self.birthtim;
     }
 };
 
@@ -408,6 +412,12 @@ pub const MAP = struct {
     pub const NOCORE = 0x00020000;
     pub const PREFAULT_READ = 0x00040000;
     pub const @"32BIT" = 0x00080000;
+};
+
+pub const MSF = struct {
+    pub const ASYNC = 1;
+    pub const INVALIDATE = 2;
+    pub const SYNC = 4;
 };
 
 pub const W = struct {

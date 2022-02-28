@@ -123,6 +123,7 @@ pub extern "c" fn write(fd: c.fd_t, buf: [*]const u8, nbyte: usize) isize;
 pub extern "c" fn pwrite(fd: c.fd_t, buf: [*]const u8, nbyte: usize, offset: c.off_t) isize;
 pub extern "c" fn mmap(addr: ?*align(page_size) anyopaque, len: usize, prot: c_uint, flags: c_uint, fd: c.fd_t, offset: c.off_t) *anyopaque;
 pub extern "c" fn munmap(addr: *align(page_size) const anyopaque, len: usize) c_int;
+pub extern "c" fn msync(addr: *align(page_size) const anyopaque, len: usize, flags: c_int) c_int;
 pub extern "c" fn mprotect(addr: *align(page_size) anyopaque, len: usize, prot: c_uint) c_int;
 pub extern "c" fn link(oldpath: [*:0]const u8, newpath: [*:0]const u8, flags: c_int) c_int;
 pub extern "c" fn linkat(oldfd: c.fd_t, oldpath: [*:0]const u8, newfd: c.fd_t, newpath: [*:0]const u8, flags: c_int) c_int;
@@ -244,6 +245,9 @@ pub extern "c" fn sem_trywait(sem: *c.sem_t) c_int;
 pub extern "c" fn sem_timedwait(sem: *c.sem_t, abs_timeout: *const c.timespec) c_int;
 pub extern "c" fn sem_getvalue(sem: *c.sem_t, sval: *c_int) c_int;
 
+pub extern "c" fn shm_open(name: [*:0]const u8, flag: c_int, mode: c.mode_t) c_int;
+pub extern "c" fn shm_unlink(name: [*:0]const u8) c_int;
+
 pub extern "c" fn kqueue() c_int;
 pub extern "c" fn kevent(
     kq: c_int,
@@ -356,6 +360,8 @@ pub extern "c" fn syslog(priority: c_int, message: [*:0]const u8, ...) void;
 pub extern "c" fn openlog(ident: [*:0]const u8, logopt: c_int, facility: c_int) void;
 pub extern "c" fn closelog() void;
 pub extern "c" fn setlogmask(maskpri: c_int) c_int;
+
+pub extern "c" fn if_nametoindex([*:0]const u8) c_int;
 
 pub const max_align_t = if (builtin.abi == .msvc)
     f64

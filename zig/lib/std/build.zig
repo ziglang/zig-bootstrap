@@ -34,8 +34,6 @@ pub const Builder = struct {
     available_options_map: AvailableOptionsMap,
     available_options_list: ArrayList(AvailableOption),
     verbose: bool,
-    verbose_tokenize: bool,
-    verbose_ast: bool,
     verbose_link: bool,
     verbose_cc: bool,
     verbose_air: bool,
@@ -90,7 +88,14 @@ pub const Builder = struct {
     /// Information about the native target. Computed before build() is invoked.
     host: NativeTargetInfo,
 
-    const PkgConfigError = error{
+    pub const ExecError = error{
+        ReadFailure,
+        ExitCodeFailure,
+        ProcessTerminated,
+        ExecNotSupported,
+    } || std.ChildProcess.SpawnError;
+
+    pub const PkgConfigError = error{
         PkgConfigCrashed,
         PkgConfigFailed,
         PkgConfigNotInstalled,
@@ -172,8 +177,6 @@ pub const Builder = struct {
             .cache_root = try fs.path.relative(allocator, build_root, cache_root),
             .global_cache_root = global_cache_root,
             .verbose = false,
-            .verbose_tokenize = false,
-            .verbose_ast = false,
             .verbose_link = false,
             .verbose_cc = false,
             .verbose_air = false,
@@ -963,6 +966,9 @@ pub const Builder = struct {
             printCmd(cwd, argv);
         }
 
+        if (!std.process.can_spawn)
+            return error.ExecNotSupported;
+
         const child = std.ChildProcess.init(argv, self.allocator) catch unreachable;
         defer child.deinit();
 
@@ -1172,8 +1178,11 @@ pub const Builder = struct {
         argv: []const []const u8,
         out_code: *u8,
         stderr_behavior: std.ChildProcess.StdIo,
-    ) ![]u8 {
+    ) ExecError![]u8 {
         assert(argv.len != 0);
+
+        if (!std.process.can_spawn)
+            return error.ExecNotSupported;
 
         const max_output_size = 400 * 1024;
         const child = try std.ChildProcess.init(argv, self.allocator);
@@ -1186,7 +1195,9 @@ pub const Builder = struct {
 
         try child.spawn();
 
-        const stdout = try child.stdout.?.reader().readAllAlloc(self.allocator, max_output_size);
+        const stdout = child.stdout.?.reader().readAllAlloc(self.allocator, max_output_size) catch {
+            return error.ReadFailure;
+        };
         errdefer self.allocator.free(stdout);
 
         const term = try child.wait();
@@ -1212,8 +1223,21 @@ pub const Builder = struct {
             printCmd(null, argv);
         }
 
+        if (!std.process.can_spawn) {
+            if (src_step) |s| warn("{s}...", .{s.name});
+            warn("Unable to spawn the following command: cannot spawn child process\n", .{});
+            printCmd(null, argv);
+            std.os.abort();
+        }
+
         var code: u8 = undefined;
         return self.execAllowFail(argv, &code, .Inherit) catch |err| switch (err) {
+            error.ExecNotSupported => {
+                if (src_step) |s| warn("{s}...", .{s.name});
+                warn("Unable to spawn the following command: cannot spawn child process\n", .{});
+                printCmd(null, argv);
+                std.os.abort();
+            },
             error.FileNotFound => {
                 if (src_step) |s| warn("{s}...", .{s.name});
                 warn("Unable to spawn the following command: file not found\n", .{});
@@ -1264,7 +1288,7 @@ pub const Builder = struct {
         ) catch unreachable;
     }
 
-    fn execPkgConfigList(self: *Builder, out_code: *u8) ![]const PkgConfigPkg {
+    fn execPkgConfigList(self: *Builder, out_code: *u8) (PkgConfigError || ExecError)![]const PkgConfigPkg {
         const stdout = try self.execAllowFail(&[_][]const u8{ "pkg-config", "--list-all" }, out_code, .Ignore);
         var list = ArrayList(PkgConfigPkg).init(self.allocator);
         errdefer list.deinit();
@@ -1291,6 +1315,7 @@ pub const Builder = struct {
         } else |err| {
             const result = switch (err) {
                 error.ProcessTerminated => error.PkgConfigCrashed,
+                error.ExecNotSupported => error.PkgConfigFailed,
                 error.ExitCodeFailure => error.PkgConfigFailed,
                 error.FileNotFound => error.PkgConfigNotInstalled,
                 error.InvalidName => error.PkgConfigNotInstalled,
@@ -1479,8 +1504,11 @@ pub const LibExeObjStep = struct {
     sanitize_thread: bool,
     rdynamic: bool,
     import_memory: bool = false,
+    import_table: bool = false,
+    export_table: bool = false,
     initial_memory: ?u64 = null,
     max_memory: ?u64 = null,
+    shared_memory: bool = false,
     global_base: ?u64 = null,
     c_std: Builder.CStd,
     override_lib_dir: ?[]const u8,
@@ -1551,6 +1579,8 @@ pub const LibExeObjStep = struct {
     omit_frame_pointer: ?bool = null,
 
     subsystem: ?std.Target.SubSystem = null,
+
+    entry_symbol_name: ?[]const u8 = null,
 
     /// Overrides the default stack size
     stack_size: ?u64 = null,
@@ -1858,15 +1888,7 @@ pub const LibExeObjStep = struct {
     /// If the value is omitted, it is set to 1.
     /// `name` and `value` need not live longer than the function call.
     pub fn defineCMacro(self: *LibExeObjStep, name: []const u8, value: ?[]const u8) void {
-        var macro = self.builder.allocator.alloc(
-            u8,
-            name.len + if (value) |value_slice| value_slice.len + 1 else 0,
-        ) catch |err| if (err == error.OutOfMemory) @panic("Out of memory") else unreachable;
-        mem.copy(u8, macro, name);
-        if (value) |value_slice| {
-            macro[name.len] = '=';
-            mem.copy(u8, macro[name.len + 1 ..], value_slice);
-        }
+        const macro = constructCMacro(self.builder.allocator, name, value);
         self.c_macros.append(macro) catch unreachable;
     }
 
@@ -1937,6 +1959,7 @@ pub const LibExeObjStep = struct {
             "--libs",
         }, &code, .Ignore)) |stdout| stdout else |err| switch (err) {
             error.ProcessTerminated => return error.PkgConfigCrashed,
+            error.ExecNotSupported => return error.PkgConfigFailed,
             error.ExitCodeFailure => return error.PkgConfigFailed,
             error.FileNotFound => return error.PkgConfigNotInstalled,
             else => return err,
@@ -1945,14 +1968,14 @@ pub const LibExeObjStep = struct {
         while (it.next()) |tok| {
             if (mem.eql(u8, tok, "-I")) {
                 const dir = it.next() orelse return error.PkgConfigInvalidOutput;
-                self.addIncludeDir(dir);
+                self.addIncludePath(dir);
             } else if (mem.startsWith(u8, tok, "-I")) {
-                self.addIncludeDir(tok["-I".len..]);
+                self.addIncludePath(tok["-I".len..]);
             } else if (mem.eql(u8, tok, "-L")) {
                 const dir = it.next() orelse return error.PkgConfigInvalidOutput;
-                self.addLibPath(dir);
+                self.addLibraryPath(dir);
             } else if (mem.startsWith(u8, tok, "-L")) {
-                self.addLibPath(tok["-L".len..]);
+                self.addLibraryPath(tok["-L".len..]);
             } else if (mem.eql(u8, tok, "-l")) {
                 const lib = it.next() orelse return error.PkgConfigInvalidOutput;
                 self.linkSystemLibraryName(lib);
@@ -2112,15 +2135,30 @@ pub const LibExeObjStep = struct {
         self.linkLibraryOrObject(obj);
     }
 
+    /// TODO deprecated, use `addSystemIncludePath`.
     pub fn addSystemIncludeDir(self: *LibExeObjStep, path: []const u8) void {
+        self.addSystemIncludePath(path);
+    }
+
+    pub fn addSystemIncludePath(self: *LibExeObjStep, path: []const u8) void {
         self.include_dirs.append(IncludeDir{ .raw_path_system = self.builder.dupe(path) }) catch unreachable;
     }
 
+    /// TODO deprecated, use `addIncludePath`.
     pub fn addIncludeDir(self: *LibExeObjStep, path: []const u8) void {
+        self.addIncludePath(path);
+    }
+
+    pub fn addIncludePath(self: *LibExeObjStep, path: []const u8) void {
         self.include_dirs.append(IncludeDir{ .raw_path = self.builder.dupe(path) }) catch unreachable;
     }
 
+    /// TODO deprecated, use `addLibraryPath`.
     pub fn addLibPath(self: *LibExeObjStep, path: []const u8) void {
+        self.addLibraryPath(path);
+    }
+
+    pub fn addLibraryPath(self: *LibExeObjStep, path: []const u8) void {
         self.lib_paths.append(self.builder.dupe(path)) catch unreachable;
     }
 
@@ -2128,7 +2166,12 @@ pub const LibExeObjStep = struct {
         self.rpaths.append(self.builder.dupe(path)) catch unreachable;
     }
 
+    /// TODO deprecated, use `addFrameworkPath`.
     pub fn addFrameworkDir(self: *LibExeObjStep, dir_path: []const u8) void {
+        self.addFrameworkPath(dir_path);
+    }
+
+    pub fn addFrameworkPath(self: *LibExeObjStep, dir_path: []const u8) void {
         self.framework_dirs.append(self.builder.dupe(dir_path)) catch unreachable;
     }
 
@@ -2251,6 +2294,11 @@ pub const LibExeObjStep = struct {
         if (builder.color != .auto) {
             try zig_args.append("--color");
             try zig_args.append(@tagName(builder.color));
+        }
+
+        if (self.entry_symbol_name) |entry| {
+            try zig_args.append("--entry");
+            try zig_args.append(entry);
         }
 
         if (self.stack_size) |stack_size| {
@@ -2384,8 +2432,6 @@ pub const LibExeObjStep = struct {
             try zig_args.append(log_scope);
         }
 
-        if (builder.verbose_tokenize) zig_args.append("--verbose-tokenize") catch unreachable;
-        if (builder.verbose_ast) zig_args.append("--verbose-ast") catch unreachable;
         if (builder.verbose_cimport) zig_args.append("--verbose-cimport") catch unreachable;
         if (builder.verbose_air) zig_args.append("--verbose-air") catch unreachable;
         if (builder.verbose_llvm_ir) zig_args.append("--verbose-llvm-ir") catch unreachable;
@@ -2509,11 +2555,20 @@ pub const LibExeObjStep = struct {
         if (self.import_memory) {
             try zig_args.append("--import-memory");
         }
+        if (self.import_table) {
+            try zig_args.append("--import-table");
+        }
+        if (self.export_table) {
+            try zig_args.append("--export-table");
+        }
         if (self.initial_memory) |initial_memory| {
             try zig_args.append(builder.fmt("--initial-memory={d}", .{initial_memory}));
         }
         if (self.max_memory) |max_memory| {
             try zig_args.append(builder.fmt("--max-memory={d}", .{max_memory}));
+        }
+        if (self.shared_memory) {
+            try zig_args.append("--shared-memory");
         }
         if (self.global_base) |global_base| {
             try zig_args.append(builder.fmt("--global-base={d}", .{global_base}));
@@ -2651,6 +2706,8 @@ pub const LibExeObjStep = struct {
                         try zig_args.append(bin_name);
                         try zig_args.append("--test-cmd");
                         try zig_args.append("--dir=.");
+                        try zig_args.append("--test-cmd");
+                        try zig_args.append("--allow-unknown-exports"); // TODO: Remove when stage2 is default compiler
                         try zig_args.append("--test-cmd-bin");
                     } else {
                         try zig_args.append("--test-no-exec");
@@ -2833,40 +2890,36 @@ pub const LibExeObjStep = struct {
             });
         }
 
-        if (self.kind == .@"test") {
-            try builder.spawnChild(zig_args.items);
-        } else {
-            try zig_args.append("--enable-cache");
+        try zig_args.append("--enable-cache");
 
-            const output_dir_nl = try builder.execFromStep(zig_args.items, &self.step);
-            const build_output_dir = mem.trimRight(u8, output_dir_nl, "\r\n");
+        const output_dir_nl = try builder.execFromStep(zig_args.items, &self.step);
+        const build_output_dir = mem.trimRight(u8, output_dir_nl, "\r\n");
 
-            if (self.output_dir) |output_dir| {
-                var src_dir = try std.fs.cwd().openDir(build_output_dir, .{ .iterate = true });
-                defer src_dir.close();
+        if (self.output_dir) |output_dir| {
+            var src_dir = try std.fs.cwd().openDir(build_output_dir, .{ .iterate = true });
+            defer src_dir.close();
 
-                // Create the output directory if it doesn't exist.
-                try std.fs.cwd().makePath(output_dir);
+            // Create the output directory if it doesn't exist.
+            try std.fs.cwd().makePath(output_dir);
 
-                var dest_dir = try std.fs.cwd().openDir(output_dir, .{});
-                defer dest_dir.close();
+            var dest_dir = try std.fs.cwd().openDir(output_dir, .{});
+            defer dest_dir.close();
 
-                var it = src_dir.iterate();
-                while (try it.next()) |entry| {
-                    // The compiler can put these files into the same directory, but we don't
-                    // want to copy them over.
-                    if (mem.eql(u8, entry.name, "stage1.id") or
-                        mem.eql(u8, entry.name, "llvm-ar.id") or
-                        mem.eql(u8, entry.name, "libs.txt") or
-                        mem.eql(u8, entry.name, "builtin.zig") or
-                        mem.eql(u8, entry.name, "zld.id") or
-                        mem.eql(u8, entry.name, "lld.id")) continue;
+            var it = src_dir.iterate();
+            while (try it.next()) |entry| {
+                // The compiler can put these files into the same directory, but we don't
+                // want to copy them over.
+                if (mem.eql(u8, entry.name, "stage1.id") or
+                    mem.eql(u8, entry.name, "llvm-ar.id") or
+                    mem.eql(u8, entry.name, "libs.txt") or
+                    mem.eql(u8, entry.name, "builtin.zig") or
+                    mem.eql(u8, entry.name, "zld.id") or
+                    mem.eql(u8, entry.name, "lld.id")) continue;
 
-                    _ = try src_dir.updateFile(entry.name, dest_dir, entry.name, .{});
-                }
-            } else {
-                self.output_dir = build_output_dir;
+                _ = try src_dir.updateFile(entry.name, dest_dir, entry.name, .{});
             }
+        } else {
+            self.output_dir = build_output_dir;
         }
 
         // This will ensure all output filenames will now have the output_dir available!
@@ -2896,6 +2949,22 @@ pub const LibExeObjStep = struct {
         }
     }
 };
+
+/// Allocates a new string for assigning a value to a named macro.
+/// If the value is omitted, it is set to 1.
+/// `name` and `value` need not live longer than the function call.
+pub fn constructCMacro(allocator: Allocator, name: []const u8, value: ?[]const u8) []const u8 {
+    var macro = allocator.alloc(
+        u8,
+        name.len + if (value) |value_slice| value_slice.len + 1 else 0,
+    ) catch |err| if (err == error.OutOfMemory) @panic("Out of memory") else unreachable;
+    mem.copy(u8, macro, name);
+    if (value) |value_slice| {
+        macro[name.len] = '=';
+        mem.copy(u8, macro[name.len + 1 ..], value_slice);
+    }
+    return macro;
+}
 
 pub const InstallArtifactStep = struct {
     pub const base_id = .install_artifact;

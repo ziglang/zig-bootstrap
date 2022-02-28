@@ -161,6 +161,24 @@ pub fn emitMir(emit: *Emit) InnerError!void {
             .i64_extend8_s => try emit.emitTag(tag),
             .i64_extend16_s => try emit.emitTag(tag),
             .i64_extend32_s => try emit.emitTag(tag),
+            .i32_reinterpret_f32 => try emit.emitTag(tag),
+            .i64_reinterpret_f64 => try emit.emitTag(tag),
+            .f32_reinterpret_i32 => try emit.emitTag(tag),
+            .f64_reinterpret_i64 => try emit.emitTag(tag),
+            .i32_trunc_f32_s => try emit.emitTag(tag),
+            .i32_trunc_f32_u => try emit.emitTag(tag),
+            .i32_trunc_f64_s => try emit.emitTag(tag),
+            .i32_trunc_f64_u => try emit.emitTag(tag),
+            .i64_trunc_f32_s => try emit.emitTag(tag),
+            .i64_trunc_f32_u => try emit.emitTag(tag),
+            .i64_trunc_f64_s => try emit.emitTag(tag),
+            .i64_trunc_f64_u => try emit.emitTag(tag),
+            .i32_rem_s => try emit.emitTag(tag),
+            .i32_rem_u => try emit.emitTag(tag),
+            .i64_rem_s => try emit.emitTag(tag),
+            .i64_rem_u => try emit.emitTag(tag),
+
+            .extended => try emit.emitExtended(inst),
         }
     }
 }
@@ -224,6 +242,7 @@ fn emitGlobal(emit: *Emit, tag: Mir.Inst.Tag, inst: Mir.Inst.Index) !void {
     const global_offset = emit.offset();
     try emit.code.appendSlice(&buf);
 
+    // globals can have index 0 as it represents the stack pointer
     try emit.decl.link.wasm.relocs.append(emit.bin_file.allocator, .{
         .index = label,
         .offset = global_offset,
@@ -276,18 +295,22 @@ fn emitCall(emit: *Emit, inst: Mir.Inst.Index) !void {
     leb128.writeUnsignedFixed(5, &buf, label);
     try emit.code.appendSlice(&buf);
 
-    try emit.decl.link.wasm.relocs.append(emit.bin_file.allocator, .{
-        .offset = call_offset,
-        .index = label,
-        .relocation_type = .R_WASM_FUNCTION_INDEX_LEB,
-    });
+    if (label != 0) {
+        try emit.decl.link.wasm.relocs.append(emit.bin_file.allocator, .{
+            .offset = call_offset,
+            .index = label,
+            .relocation_type = .R_WASM_FUNCTION_INDEX_LEB,
+        });
+    }
 }
 
 fn emitCallIndirect(emit: *Emit, inst: Mir.Inst.Index) !void {
-    const label = emit.mir.instructions.items(.data)[inst].label;
+    const type_index = emit.mir.instructions.items(.data)[inst].label;
     try emit.code.append(std.wasm.opcode(.call_indirect));
+    // NOTE: If we remove unused function types in the future for incremental
+    // linking, we must also emit a relocation for this `type_index`
+    try leb128.writeULEB128(emit.code.writer(), type_index);
     try leb128.writeULEB128(emit.code.writer(), @as(u32, 0)); // TODO: Emit relocation for table index
-    try leb128.writeULEB128(emit.code.writer(), label);
 }
 
 fn emitFunctionIndex(emit: *Emit, inst: Mir.Inst.Index) !void {
@@ -298,24 +321,55 @@ fn emitFunctionIndex(emit: *Emit, inst: Mir.Inst.Index) !void {
     leb128.writeUnsignedFixed(5, &buf, symbol_index);
     try emit.code.appendSlice(&buf);
 
-    try emit.decl.link.wasm.relocs.append(emit.bin_file.allocator, .{
-        .offset = index_offset,
-        .index = symbol_index,
-        .relocation_type = .R_WASM_TABLE_INDEX_SLEB,
-    });
+    if (symbol_index != 0) {
+        try emit.decl.link.wasm.relocs.append(emit.bin_file.allocator, .{
+            .offset = index_offset,
+            .index = symbol_index,
+            .relocation_type = .R_WASM_TABLE_INDEX_SLEB,
+        });
+    }
 }
 
 fn emitMemAddress(emit: *Emit, inst: Mir.Inst.Index) !void {
-    const symbol_index = emit.mir.instructions.items(.data)[inst].label;
-    try emit.code.append(std.wasm.opcode(.i32_const));
-    const mem_offset = emit.offset();
-    var buf: [5]u8 = undefined;
-    leb128.writeUnsignedFixed(5, &buf, symbol_index);
-    try emit.code.appendSlice(&buf);
+    const extra_index = emit.mir.instructions.items(.data)[inst].payload;
+    const mem = emit.mir.extraData(Mir.Memory, extra_index).data;
+    const mem_offset = emit.offset() + 1;
+    const is_wasm32 = emit.bin_file.options.target.cpu.arch == .wasm32;
+    if (is_wasm32) {
+        try emit.code.append(std.wasm.opcode(.i32_const));
+        var buf: [5]u8 = undefined;
+        leb128.writeUnsignedFixed(5, &buf, mem.pointer);
+        try emit.code.appendSlice(&buf);
+    } else {
+        try emit.code.append(std.wasm.opcode(.i64_const));
+        var buf: [10]u8 = undefined;
+        leb128.writeUnsignedFixed(10, &buf, mem.pointer);
+        try emit.code.appendSlice(&buf);
+    }
 
-    try emit.decl.link.wasm.relocs.append(emit.bin_file.allocator, .{
-        .offset = mem_offset,
-        .index = symbol_index,
-        .relocation_type = .R_WASM_MEMORY_ADDR_LEB,
-    });
+    if (mem.pointer != 0) {
+        try emit.decl.link.wasm.relocs.append(emit.bin_file.allocator, .{
+            .offset = mem_offset,
+            .index = mem.pointer,
+            .relocation_type = if (is_wasm32) .R_WASM_MEMORY_ADDR_LEB else .R_WASM_MEMORY_ADDR_LEB64,
+            .addend = mem.offset,
+        });
+    }
+}
+
+fn emitExtended(emit: *Emit, inst: Mir.Inst.Index) !void {
+    const opcode = emit.mir.instructions.items(.secondary)[inst];
+    switch (@intToEnum(std.wasm.PrefixedOpcode, opcode)) {
+        .memory_fill => try emit.emitMemFill(),
+        else => |tag| return emit.fail("TODO: Implement extension instruction: {s}\n", .{@tagName(tag)}),
+    }
+}
+
+fn emitMemFill(emit: *Emit) !void {
+    try emit.code.append(0xFC);
+    try emit.code.append(0x0B);
+    // When multi-memory proposal reaches phase 4, we
+    // can emit a different memory index here.
+    // For now we will always emit index 0.
+    try leb128.writeULEB128(emit.code.writer(), @as(u32, 0));
 }

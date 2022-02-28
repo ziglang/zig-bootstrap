@@ -6,6 +6,7 @@ const io = std.io;
 const os = std.os;
 const fs = std.fs;
 const process = std.process;
+const testing = std.testing;
 const elf = std.elf;
 const DW = std.dwarf;
 const macho = std.macho;
@@ -64,6 +65,15 @@ pub fn print(comptime fmt: []const u8, args: anytype) void {
     defer stderr_mutex.unlock();
     const stderr = io.getStdErr().writer();
     nosuspend stderr.print(fmt, args) catch return;
+}
+
+/// Indicates code that is unfinshed. It will throw a compiler error by default in Release mode.
+/// This behaviour can be controlled with `root.allow_todo_in_release`.
+pub fn todo(comptime desc: []const u8) noreturn {
+    if (builtin.mode != .Debug and !(@hasDecl(root, "allow_todo_in_release") and root.allow_todo_in_release)) {
+        @compileError("TODO: " ++ desc);
+    }
+    @panic("TODO: " ++ desc);
 }
 
 pub fn getStderrMutex() *std.Thread.Mutex {
@@ -414,6 +424,55 @@ pub const StackIterator = struct {
         return address;
     }
 
+    fn isValidMemory(address: usize) bool {
+        // We are unable to determine validity of memory for freestanding targets
+        if (native_os == .freestanding) return true;
+
+        const aligned_address = address & ~@intCast(usize, (mem.page_size - 1));
+
+        // If the address does not span 2 pages, query only the first one
+        const length: usize = if (aligned_address == address) mem.page_size else 2 * mem.page_size;
+
+        const aligned_memory = @intToPtr([*]align(mem.page_size) u8, aligned_address)[0..length];
+
+        if (native_os != .windows) {
+            if (native_os != .wasi) {
+                os.msync(aligned_memory, os.MSF.ASYNC) catch |err| {
+                    switch (err) {
+                        os.MSyncError.UnmappedMemory => {
+                            return false;
+                        },
+                        else => unreachable,
+                    }
+                };
+            }
+
+            return true;
+        } else {
+            const w = os.windows;
+            var memory_info: w.MEMORY_BASIC_INFORMATION = undefined;
+            //const memory_info_ptr = @ptrCast(w.PMEMORY_BASIC_INFORMATION, buffer);
+
+            // The only error this function can throw is ERROR_INVALID_PARAMETER.
+            // supply an address that invalid i'll be thrown.
+            const rc = w.VirtualQuery(aligned_memory.ptr, &memory_info, aligned_memory.len) catch {
+                return false;
+            };
+
+            // Result code has to be bigger than zero (number of bytes written)
+            if (rc == 0) {
+                return false;
+            }
+
+            // Free pages cannot be read, they are unmapped
+            if (memory_info.State == w.MEM_FREE) {
+                return false;
+            }
+
+            return true;
+        }
+    }
+
     fn next_internal(self: *StackIterator) ?usize {
         const fp = if (comptime native_arch.isSPARC())
             // On SPARC the offset is positive. (!)
@@ -422,7 +481,7 @@ pub const StackIterator = struct {
             math.sub(usize, self.fp, fp_offset) catch return null;
 
         // Sanity check.
-        if (fp == 0 or !mem.isAligned(fp, @alignOf(usize)))
+        if (fp == 0 or !mem.isAligned(fp, @alignOf(usize)) or !isValidMemory(fp))
             return null;
 
         const new_fp = math.add(usize, @intToPtr(*const usize, fp).*, fp_bias) catch return null;
@@ -559,7 +618,7 @@ pub const TTY = struct {
 
 fn machoSearchSymbols(symbols: []const MachoSymbol, address: usize) ?*const MachoSymbol {
     var min: usize = 0;
-    var max: usize = symbols.len;
+    var max: usize = symbols.len - 1;
     while (min < max) {
         const mid = min + (max - min) / 2;
         const curr = &symbols[mid];
@@ -572,7 +631,34 @@ fn machoSearchSymbols(symbols: []const MachoSymbol, address: usize) ?*const Mach
             return curr;
         }
     }
+
+    const max_sym = &symbols[symbols.len - 1];
+    if (address >= max_sym.address())
+        return max_sym;
+
     return null;
+}
+
+test "machoSearchSymbols" {
+    const symbols = [_]MachoSymbol{
+        .{ .addr = 100, .strx = undefined, .size = undefined, .ofile = undefined },
+        .{ .addr = 200, .strx = undefined, .size = undefined, .ofile = undefined },
+        .{ .addr = 300, .strx = undefined, .size = undefined, .ofile = undefined },
+    };
+
+    try testing.expectEqual(@as(?*const MachoSymbol, null), machoSearchSymbols(&symbols, 0));
+    try testing.expectEqual(@as(?*const MachoSymbol, null), machoSearchSymbols(&symbols, 99));
+    try testing.expectEqual(&symbols[0], machoSearchSymbols(&symbols, 100).?);
+    try testing.expectEqual(&symbols[0], machoSearchSymbols(&symbols, 150).?);
+    try testing.expectEqual(&symbols[0], machoSearchSymbols(&symbols, 199).?);
+
+    try testing.expectEqual(&symbols[1], machoSearchSymbols(&symbols, 200).?);
+    try testing.expectEqual(&symbols[1], machoSearchSymbols(&symbols, 250).?);
+    try testing.expectEqual(&symbols[1], machoSearchSymbols(&symbols, 299).?);
+
+    try testing.expectEqual(&symbols[2], machoSearchSymbols(&symbols, 300).?);
+    try testing.expectEqual(&symbols[2], machoSearchSymbols(&symbols, 301).?);
+    try testing.expectEqual(&symbols[2], machoSearchSymbols(&symbols, 5000).?);
 }
 
 /// TODO resources https://github.com/ziglang/zig/issues/4353
@@ -1573,8 +1659,13 @@ fn getDebugInfoAllocator() mem.Allocator {
 
 /// Whether or not the current target can print useful debug information when a segfault occurs.
 pub const have_segfault_handling_support = switch (native_os) {
-    .linux, .netbsd, .solaris => true,
-    .windows => true,
+    .linux,
+    .macos,
+    .netbsd,
+    .solaris,
+    .windows,
+    => true,
+
     .freebsd, .openbsd => @hasDecl(os.system, "ucontext_t"),
     else => false,
 };
@@ -1601,7 +1692,7 @@ pub fn attachSegfaultHandler() void {
         return;
     }
     var act = os.Sigaction{
-        .handler = .{ .sigaction = handleSegfaultLinux },
+        .handler = .{ .sigaction = handleSegfaultPosix },
         .mask = os.empty_sigset,
         .flags = (os.SA.SIGINFO | os.SA.RESTART | os.SA.RESETHAND),
     };
@@ -1629,7 +1720,7 @@ fn resetSegfaultHandler() void {
     os.sigaction(os.SIG.BUS, &act, null);
 }
 
-fn handleSegfaultLinux(sig: i32, info: *const os.siginfo_t, ctx_ptr: ?*const anyopaque) callconv(.C) noreturn {
+fn handleSegfaultPosix(sig: i32, info: *const os.siginfo_t, ctx_ptr: ?*const anyopaque) callconv(.C) noreturn {
     // Reset to the default handler so that if a segfault happens in this handler it will crash
     // the process. Also when this handler returns, the original instruction will be repeated
     // and the resulting segfault will crash the process rather than continually dump stack traces.
@@ -1637,7 +1728,7 @@ fn handleSegfaultLinux(sig: i32, info: *const os.siginfo_t, ctx_ptr: ?*const any
 
     const addr = switch (native_os) {
         .linux => @ptrToInt(info.fields.sigfault.addr),
-        .freebsd => @ptrToInt(info.addr),
+        .freebsd, .macos => @ptrToInt(info.addr),
         .netbsd => @ptrToInt(info.info.reason.fault.addr),
         .openbsd => @ptrToInt(info.data.fault.addr),
         .solaris => @ptrToInt(info.reason.fault.addr),
@@ -1668,12 +1759,14 @@ fn handleSegfaultLinux(sig: i32, info: *const os.siginfo_t, ctx_ptr: ?*const any
                 .linux, .netbsd, .solaris => @intCast(usize, ctx.mcontext.gregs[os.REG.RIP]),
                 .freebsd => @intCast(usize, ctx.mcontext.rip),
                 .openbsd => @intCast(usize, ctx.sc_rip),
+                .macos => @intCast(usize, ctx.mcontext.ss.rip),
                 else => unreachable,
             };
             const bp = switch (native_os) {
                 .linux, .netbsd, .solaris => @intCast(usize, ctx.mcontext.gregs[os.REG.RBP]),
                 .openbsd => @intCast(usize, ctx.sc_rbp),
                 .freebsd => @intCast(usize, ctx.mcontext.rbp),
+                .macos => @intCast(usize, ctx.mcontext.ss.rbp),
                 else => unreachable,
             };
             dumpStackTraceFromBase(bp, ip);
@@ -1686,9 +1779,15 @@ fn handleSegfaultLinux(sig: i32, info: *const os.siginfo_t, ctx_ptr: ?*const any
         },
         .aarch64 => {
             const ctx = @ptrCast(*const os.ucontext_t, @alignCast(@alignOf(os.ucontext_t), ctx_ptr));
-            const ip = @intCast(usize, ctx.mcontext.pc);
+            const ip = switch (native_os) {
+                .macos => @intCast(usize, ctx.mcontext.ss.pc),
+                else => @intCast(usize, ctx.mcontext.pc),
+            };
             // x29 is the ABI-designated frame pointer
-            const bp = @intCast(usize, ctx.mcontext.regs[29]);
+            const bp = switch (native_os) {
+                .macos => @intCast(usize, ctx.mcontext.ss.fp),
+                else => @intCast(usize, ctx.mcontext.regs[29]),
+            };
             dumpStackTraceFromBase(bp, ip);
         },
         else => {},

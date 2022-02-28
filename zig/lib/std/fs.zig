@@ -193,7 +193,9 @@ pub const AtomicFile = struct {
         self.* = undefined;
     }
 
-    pub fn finish(self: *AtomicFile) !void {
+    pub const FinishError = std.os.RenameError;
+
+    pub fn finish(self: *AtomicFile) FinishError!void {
         assert(self.file_exists);
         if (self.file_open) {
             self.file.close();
@@ -300,6 +302,7 @@ pub const Dir = struct {
             buf: [8192]u8, // TODO align(@alignOf(os.system.dirent)),
             index: usize,
             end_index: usize,
+            first_iter: bool,
 
             const Self = @This();
 
@@ -319,6 +322,10 @@ pub const Dir = struct {
             fn nextDarwin(self: *Self) !?Entry {
                 start_over: while (true) {
                     if (self.index >= self.end_index) {
+                        if (self.first_iter) {
+                            std.os.lseek_SET(self.dir.fd, 0) catch unreachable; // EBADF here likely means that the Dir was not opened with iteration permissions
+                            self.first_iter = false;
+                        }
                         const rc = os.system.__getdirentries64(
                             self.dir.fd,
                             &self.buf,
@@ -369,6 +376,10 @@ pub const Dir = struct {
             fn nextSolaris(self: *Self) !?Entry {
                 start_over: while (true) {
                     if (self.index >= self.end_index) {
+                        if (self.first_iter) {
+                            std.os.lseek_SET(self.dir.fd, 0) catch unreachable; // EBADF here likely means that the Dir was not opened with iteration permissions
+                            self.first_iter = false;
+                        }
                         const rc = os.system.getdents(self.dir.fd, &self.buf, self.buf.len);
                         switch (os.errno(rc)) {
                             .SUCCESS => {},
@@ -423,6 +434,10 @@ pub const Dir = struct {
             fn nextBsd(self: *Self) !?Entry {
                 start_over: while (true) {
                     if (self.index >= self.end_index) {
+                        if (self.first_iter) {
+                            std.os.lseek_SET(self.dir.fd, 0) catch unreachable; // EBADF here likely means that the Dir was not opened with iteration permissions
+                            self.first_iter = false;
+                        }
                         const rc = if (builtin.os.tag == .netbsd)
                             os.system.__getdents30(self.dir.fd, &self.buf, self.buf.len)
                         else
@@ -479,6 +494,7 @@ pub const Dir = struct {
             buf: [8192]u8, // TODO align(@alignOf(os.dirent64)),
             index: usize,
             end_index: usize,
+            first_iter: bool,
 
             const Self = @This();
 
@@ -491,6 +507,10 @@ pub const Dir = struct {
                     // TODO: find a better max
                     const HAIKU_MAX_COUNT = 10000;
                     if (self.index >= self.end_index) {
+                        if (self.first_iter) {
+                            std.os.lseek_SET(self.dir.fd, 0) catch unreachable; // EBADF here likely means that the Dir was not opened with iteration permissions
+                            self.first_iter = false;
+                        }
                         const rc = os.system._kern_read_dir(
                             self.dir.fd,
                             &self.buf,
@@ -563,6 +583,7 @@ pub const Dir = struct {
             buf: [8192]u8 align(if (builtin.os.tag != .linux) 1 else @alignOf(linux.dirent64)),
             index: usize,
             end_index: usize,
+            first_iter: bool,
 
             const Self = @This();
             const linux = os.linux;
@@ -574,6 +595,10 @@ pub const Dir = struct {
             pub fn next(self: *Self) Error!?Entry {
                 start_over: while (true) {
                     if (self.index >= self.end_index) {
+                        if (self.first_iter) {
+                            std.os.lseek_SET(self.dir.fd, 0) catch unreachable; // EBADF here likely means that the Dir was not opened with iteration permissions
+                            self.first_iter = false;
+                        }
                         const rc = linux.getdents64(self.dir.fd, &self.buf, self.buf.len);
                         switch (linux.getErrno(rc)) {
                             .SUCCESS => {},
@@ -620,7 +645,7 @@ pub const Dir = struct {
             buf: [8192]u8 align(@alignOf(os.windows.FILE_BOTH_DIR_INFORMATION)),
             index: usize,
             end_index: usize,
-            first: bool,
+            first_iter: bool,
             name_data: [256]u8,
 
             const Self = @This();
@@ -645,9 +670,9 @@ pub const Dir = struct {
                             .FileBothDirectoryInformation,
                             w.FALSE,
                             null,
-                            if (self.first) @as(w.BOOLEAN, w.TRUE) else @as(w.BOOLEAN, w.FALSE),
+                            if (self.first_iter) @as(w.BOOLEAN, w.TRUE) else @as(w.BOOLEAN, w.FALSE),
                         );
-                        self.first = false;
+                        self.first_iter = false;
                         if (io.Information == 0) return null;
                         self.index = 0;
                         self.end_index = io.Information;
@@ -769,18 +794,20 @@ pub const Dir = struct {
                 .index = 0,
                 .end_index = 0,
                 .buf = undefined,
+                .first_iter = true,
             },
             .linux, .haiku => return Iterator{
                 .dir = self,
                 .index = 0,
                 .end_index = 0,
                 .buf = undefined,
+                .first_iter = true,
             },
             .windows => return Iterator{
                 .dir = self,
                 .index = 0,
                 .end_index = 0,
-                .first = true,
+                .first_iter = true,
                 .buf = undefined,
                 .name_data = undefined,
             },
@@ -938,10 +965,10 @@ pub const Dir = struct {
         const w = os.wasi;
         var fdflags: w.fdflags_t = 0x0;
         var base: w.rights_t = 0x0;
-        if (flags.read) {
+        if (flags.isRead()) {
             base |= w.RIGHT.FD_READ | w.RIGHT.FD_TELL | w.RIGHT.FD_SEEK | w.RIGHT.FD_FILESTAT_GET;
         }
-        if (flags.write) {
+        if (flags.isWrite()) {
             fdflags |= w.FDFLAG.APPEND;
             base |= w.RIGHT.FD_WRITE |
                 w.RIGHT.FD_TELL |
@@ -988,12 +1015,11 @@ pub const Dir = struct {
         if (!flags.allow_ctty) {
             os_flags |= os.O.NOCTTY;
         }
-        os_flags |= if (flags.write and flags.read)
-            @as(u32, os.O.RDWR)
-        else if (flags.write)
-            @as(u32, os.O.WRONLY)
-        else
-            @as(u32, os.O.RDONLY);
+        os_flags |= switch (flags.mode) {
+            .read_only => @as(u32, os.O.RDONLY),
+            .write_only => @as(u32, os.O.WRONLY),
+            .read_write => @as(u32, os.O.RDWR),
+        };
         const fd = if (flags.intended_io_mode != .blocking)
             try std.event.Loop.instance.?.openatZ(self.fd, sub_path, os_flags, 0)
         else
@@ -1019,6 +1045,8 @@ pub const Dir = struct {
                 error.FileBusy => unreachable,
                 error.Locked => unreachable,
                 error.PermissionDenied => unreachable,
+                error.DeadLock => unreachable,
+                error.LockedRegionLimitExceeded => unreachable,
                 else => |e| return e,
             };
             fl_flags &= ~@as(usize, os.O.NONBLOCK);
@@ -1026,6 +1054,8 @@ pub const Dir = struct {
                 error.FileBusy => unreachable,
                 error.Locked => unreachable,
                 error.PermissionDenied => unreachable,
+                error.DeadLock => unreachable,
+                error.LockedRegionLimitExceeded => unreachable,
                 else => |e| return e,
             };
         }
@@ -1045,8 +1075,8 @@ pub const Dir = struct {
             .handle = try w.OpenFile(sub_path_w, .{
                 .dir = self.fd,
                 .access_mask = w.SYNCHRONIZE |
-                    (if (flags.read) @as(u32, w.GENERIC_READ) else 0) |
-                    (if (flags.write) @as(u32, w.GENERIC_WRITE) else 0),
+                    (if (flags.isRead()) @as(u32, w.GENERIC_READ) else 0) |
+                    (if (flags.isWrite()) @as(u32, w.GENERIC_WRITE) else 0),
                 .creation = w.FILE_OPEN,
                 .io_mode = flags.intended_io_mode,
             }),
@@ -1171,6 +1201,8 @@ pub const Dir = struct {
                 error.FileBusy => unreachable,
                 error.Locked => unreachable,
                 error.PermissionDenied => unreachable,
+                error.DeadLock => unreachable,
+                error.LockedRegionLimitExceeded => unreachable,
                 else => |e| return e,
             };
             fl_flags &= ~@as(usize, os.O.NONBLOCK);
@@ -1178,6 +1210,8 @@ pub const Dir = struct {
                 error.FileBusy => unreachable,
                 error.Locked => unreachable,
                 error.PermissionDenied => unreachable,
+                error.DeadLock => unreachable,
+                error.LockedRegionLimitExceeded => unreachable,
                 else => |e| return e,
             };
         }
@@ -1361,7 +1395,7 @@ pub const Dir = struct {
                     .share_access = share_access,
                     .creation = creation,
                     .io_mode = .blocking,
-                    .open_dir = true,
+                    .filter = .dir_only,
                 }) catch |er| switch (er) {
                     error.WouldBlock => unreachable,
                     else => |e2| return e2,
@@ -2042,12 +2076,11 @@ pub const Dir = struct {
             const sub_path_w = try os.windows.cStrToPrefixedFileW(sub_path);
             return self.accessW(sub_path_w.span().ptr, flags);
         }
-        const os_mode = if (flags.write and flags.read)
-            @as(u32, os.R_OK | os.W_OK)
-        else if (flags.write)
-            @as(u32, os.W_OK)
-        else
-            @as(u32, os.F_OK);
+        const os_mode = switch (flags.mode) {
+            .read_only => @as(u32, os.F_OK),
+            .write_only => @as(u32, os.W_OK),
+            .read_write => @as(u32, os.R_OK | os.W_OK),
+        };
         const result = if (need_async_thread and flags.intended_io_mode != .blocking)
             std.event.Loop.instance.?.faccessatZ(self.fd, sub_path, os_mode, 0)
         else
@@ -2114,17 +2147,13 @@ pub const Dir = struct {
         return PrevStatus.stale;
     }
 
+    pub const CopyFileError = File.OpenError || File.StatError || AtomicFile.InitError || CopyFileRawError || AtomicFile.FinishError;
+
     /// Guaranteed to be atomic.
     /// On Linux, until https://patchwork.kernel.org/patch/9636735/ is merged and readily available,
     /// there is a possibility of power loss or application termination leaving temporary files present
     /// in the same directory as dest_path.
-    pub fn copyFile(
-        source_dir: Dir,
-        source_path: []const u8,
-        dest_dir: Dir,
-        dest_path: []const u8,
-        options: CopyFileOptions,
-    ) !void {
+    pub fn copyFile(source_dir: Dir, source_path: []const u8, dest_dir: Dir, dest_path: []const u8, options: CopyFileOptions) CopyFileError!void {
         var in_file = try source_dir.openFile(source_path, .{});
         defer in_file.close();
 
@@ -2139,7 +2168,7 @@ pub const Dir = struct {
         defer atomic_file.deinit();
 
         try copy_file(in_file.handle, atomic_file.file.handle);
-        return atomic_file.finish();
+        try atomic_file.finish();
     }
 
     pub const AtomicFileOptions = struct {
@@ -2210,6 +2239,31 @@ pub const Dir = struct {
     }
 
     pub const ChownError = File.ChownError;
+
+    const Permissions = File.Permissions;
+    pub const SetPermissionsError = File.SetPermissionsError;
+
+    /// Sets permissions according to the provided `Permissions` struct.
+    /// This method is *NOT* available on WASI
+    pub fn setPermissions(self: Dir, permissions: Permissions) SetPermissionsError!void {
+        const file: File = .{
+            .handle = self.fd,
+            .capable_io_mode = .blocking,
+        };
+        try file.setPermissions(permissions);
+    }
+
+    const Metadata = File.Metadata;
+    pub const MetadataError = File.MetadataError;
+
+    /// Returns a `Metadata` struct, representing the permissions on the directory
+    pub fn metadata(self: Dir) MetadataError!Metadata {
+        const file: File = .{
+            .handle = self.fd,
+            .capable_io_mode = .blocking,
+        };
+        return try file.metadata();
+    }
 };
 
 /// Returns a handle to the current working directory. It is not opened with iteration capability.
@@ -2619,12 +2673,12 @@ pub fn realpathAlloc(allocator: Allocator, pathname: []const u8) ![]u8 {
     return allocator.dupe(u8, try os.realpath(pathname, &buf));
 }
 
-const CopyFileError = error{SystemResources} || os.CopyFileRangeError || os.SendFileError;
+const CopyFileRawError = error{SystemResources} || os.CopyFileRangeError || os.SendFileError;
 
 // Transfer all the data between two file descriptors in the most efficient way.
 // The copy starts at offset 0, the initial offsets are preserved.
 // No metadata is transferred over.
-fn copy_file(fd_in: os.fd_t, fd_out: os.fd_t) CopyFileError!void {
+fn copy_file(fd_in: os.fd_t, fd_out: os.fd_t) CopyFileRawError!void {
     if (comptime builtin.target.isDarwin()) {
         const rc = os.system.fcopyfile(fd_in, fd_out, null, os.system.COPYFILE_DATA);
         switch (os.errno(rc)) {

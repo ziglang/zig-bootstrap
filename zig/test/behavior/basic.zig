@@ -15,6 +15,8 @@ test "empty function with comments" {
 }
 
 test "truncate" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     try expect(testTruncate(0x10fd) == 0xfd);
     comptime try expect(testTruncate(0x10fd) == 0xfd);
 }
@@ -23,6 +25,8 @@ fn testTruncate(x: u32) u8 {
 }
 
 test "truncate to non-power-of-two integers" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     try testTrunc(u32, u1, 0b10101, 0b1);
     try testTrunc(u32, u1, 0b10110, 0b0);
     try testTrunc(u32, u2, 0b10101, 0b01);
@@ -108,14 +112,21 @@ fn first4KeysOfHomeRow() []const u8 {
 }
 
 test "return string from function" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+
     try expect(mem.eql(u8, first4KeysOfHomeRow(), "aoeu"));
 }
 
 test "hex escape" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     try expect(mem.eql(u8, "\x68\x65\x6c\x6c\x6f", "hello"));
 }
 
 test "multiline string" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     const s1 =
         \\one
         \\two)
@@ -126,6 +137,8 @@ test "multiline string" {
 }
 
 test "multiline string comments at start" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     const s1 =
         //\\one
         \\two)
@@ -136,6 +149,8 @@ test "multiline string comments at start" {
 }
 
 test "multiline string comments at end" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     const s1 =
         \\one
         \\two)
@@ -146,6 +161,8 @@ test "multiline string comments at end" {
 }
 
 test "multiline string comments in middle" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     const s1 =
         \\one
         //\\two)
@@ -156,6 +173,8 @@ test "multiline string comments in middle" {
 }
 
 test "multiline string comments at multiple places" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     const s1 =
         \\one
         //\\two
@@ -172,6 +191,8 @@ test "string concatenation" {
 }
 
 test "array mult operator" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     try expect(mem.eql(u8, "ab" ** 5, "ababababab"));
 }
 
@@ -180,7 +201,7 @@ const OpaqueB = opaque {};
 
 test "opaque types" {
     try expect(*OpaqueA != *OpaqueB);
-    if (!builtin.zig_is_stage2) {
+    if (builtin.zig_backend == .stage1) { // TODO make this pass for stage2
         try expect(mem.eql(u8, @typeName(OpaqueA), "OpaqueA"));
         try expect(mem.eql(u8, @typeName(OpaqueB), "OpaqueB"));
     }
@@ -195,6 +216,8 @@ test "compile time global reinterpret" {
 }
 
 test "cast undefined" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
     const array: [100]u8 = undefined;
     const slice = @as([]const u8, &array);
     testCastUndefined(slice);
@@ -204,6 +227,9 @@ fn testCastUndefined(x: []const u8) void {
 }
 
 test "implicit cast after unreachable" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+
     try expect(outer() == 1234);
 }
 fn inner() i32 {
@@ -259,6 +285,11 @@ fn fB() []const u8 {
 }
 
 test "call function pointer in struct" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
+
     try expect(mem.eql(u8, f3(true), "a"));
     try expect(mem.eql(u8, f3(false), "b"));
 }
@@ -276,10 +307,12 @@ fn f3(x: bool) []const u8 {
 }
 
 const FnPtrWrapper = struct {
-    fn_ptr: fn () []const u8,
+    fn_ptr: *const fn () []const u8,
 };
 
 test "const ptr from var variable" {
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+
     var x: u64 = undefined;
     var y: u64 = undefined;
 
@@ -291,4 +324,525 @@ test "const ptr from var variable" {
 
 fn copy(src: *const u64, dst: *u64) void {
     dst.* = src.*;
+}
+
+test "call result of if else expression" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+
+    try expect(mem.eql(u8, f2(true), "a"));
+    try expect(mem.eql(u8, f2(false), "b"));
+}
+fn f2(x: bool) []const u8 {
+    return (if (x) fA else fB)();
+}
+
+test "memcpy and memset intrinsics" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+
+    try testMemcpyMemset();
+    // TODO add comptime test coverage
+    //comptime try testMemcpyMemset();
+}
+
+fn testMemcpyMemset() !void {
+    var foo: [20]u8 = undefined;
+    var bar: [20]u8 = undefined;
+
+    @memset(&foo, 'A', foo.len);
+    @memcpy(&bar, &foo, bar.len);
+
+    try expect(bar[0] == 'A');
+    try expect(bar[11] == 'A');
+    try expect(bar[19] == 'A');
+}
+
+test "variable is allowed to be a pointer to an opaque type" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+
+    var x: i32 = 1234;
+    _ = hereIsAnOpaqueType(@ptrCast(*OpaqueA, &x));
+}
+fn hereIsAnOpaqueType(ptr: *OpaqueA) *OpaqueA {
+    var a = ptr;
+    return a;
+}
+
+test "take address of parameter" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+
+    try testTakeAddressOfParameter(12.34);
+}
+fn testTakeAddressOfParameter(f: f32) !void {
+    const f_ptr = &f;
+    try expect(f_ptr.* == 12.34);
+}
+
+test "pointer to void return type" {
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+
+    try testPointerToVoidReturnType();
+}
+fn testPointerToVoidReturnType() anyerror!void {
+    const a = testPointerToVoidReturnType2();
+    return a.*;
+}
+const test_pointer_to_void_return_type_x = void{};
+fn testPointerToVoidReturnType2() *const void {
+    return &test_pointer_to_void_return_type_x;
+}
+
+test "array 2D const double ptr" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+
+    const rect_2d_vertexes = [_][1]f32{
+        [_]f32{1.0},
+        [_]f32{2.0},
+    };
+    try testArray2DConstDoublePtr(&rect_2d_vertexes[0][0]);
+}
+
+test "array 2D const double ptr with offset" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;
+
+    const rect_2d_vertexes = [_][2]f32{
+        [_]f32{ 3.0, 4.239 },
+        [_]f32{ 1.0, 2.0 },
+    };
+    try testArray2DConstDoublePtr(&rect_2d_vertexes[1][0]);
+}
+
+test "array 3D const double ptr with offset" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+
+    const rect_3d_vertexes = [_][2][2]f32{
+        [_][2]f32{
+            [_]f32{ 3.0, 4.239 },
+            [_]f32{ 3.5, 7.2 },
+        },
+        [_][2]f32{
+            [_]f32{ 3.0, 4.239 },
+            [_]f32{ 1.0, 2.0 },
+        },
+    };
+    try testArray2DConstDoublePtr(&rect_3d_vertexes[1][1][0]);
+}
+
+fn testArray2DConstDoublePtr(ptr: *const f32) !void {
+    const ptr2 = @ptrCast([*]const f32, ptr);
+    try expect(ptr2[0] == 1.0);
+    try expect(ptr2[1] == 2.0);
+}
+
+test "double implicit cast in same expression" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+
+    var x = @as(i32, @as(u16, nine()));
+    try expect(x == 9);
+}
+fn nine() u8 {
+    return 9;
+}
+
+test "struct inside function" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+
+    try testStructInFn();
+    comptime try testStructInFn();
+}
+
+fn testStructInFn() !void {
+    const BlockKind = u32;
+
+    const Block = struct {
+        kind: BlockKind,
+    };
+
+    var block = Block{ .kind = 1234 };
+
+    block.kind += 1;
+
+    try expect(block.kind == 1235);
+}
+
+test "fn call returning scalar optional in equality expression" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    try expect(getNull() == null);
+}
+
+fn getNull() ?*i32 {
+    return null;
+}
+
+test "global variable assignment with optional unwrapping with var initialized to undefined" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+
+    const S = struct {
+        var data: i32 = 1234;
+        fn foo() ?*i32 {
+            return &data;
+        }
+    };
+    global_foo = S.foo() orelse {
+        @panic("bad");
+    };
+    try expect(global_foo.* == 1234);
+}
+
+var global_foo: *i32 = undefined;
+
+test "peer result location with typed parent, runtime condition, comptime prongs" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+
+    const S = struct {
+        fn doTheTest(arg: i32) i32 {
+            const st = Structy{
+                .bleh = if (arg == 1) 1 else 1,
+            };
+
+            if (st.bleh == 1)
+                return 1234;
+            return 0;
+        }
+
+        const Structy = struct {
+            bleh: i32,
+        };
+    };
+    try expect(S.doTheTest(0) == 1234);
+    try expect(S.doTheTest(1) == 1234);
+}
+
+test "non-ambiguous reference of shadowed decls" {
+    try expect(ZA().B().Self != ZA().Self);
+}
+
+fn ZA() type {
+    return struct {
+        b: B(),
+
+        const Self = @This();
+
+        fn B() type {
+            return struct {
+                const Self = @This();
+            };
+        }
+    };
+}
+
+test "use of declaration with same name as primitive" {
+    const S = struct {
+        const @"u8" = u16;
+        const alias = @"u8";
+    };
+    const a: S.u8 = 300;
+    try expect(a == 300);
+
+    const b: S.alias = 300;
+    try expect(b == 300);
+
+    const @"u8" = u16;
+    const c: @"u8" = 300;
+    try expect(c == 300);
+}
+
+test "constant equal function pointers" {
+    const alias = emptyFn;
+    try expect(comptime x: {
+        break :x emptyFn == alias;
+    });
+}
+
+fn emptyFn() void {}
+
+const addr1 = @ptrCast(*const u8, &emptyFn);
+test "comptime cast fn to ptr" {
+    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
+
+    const addr2 = @ptrCast(*const u8, &emptyFn);
+    comptime try expect(addr1 == addr2);
+}
+
+test "equality compare fn ptrs" {
+    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
+
+    var a = &emptyFn;
+    try expect(a == a);
+}
+
+test "self reference through fn ptr field" {
+    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
+
+    const S = struct {
+        const A = struct {
+            f: *const fn (A) u8,
+        };
+
+        fn foo(a: A) u8 {
+            _ = a;
+            return 12;
+        }
+    };
+    var a: S.A = undefined;
+    a.f = S.foo;
+    try expect(a.f(a) == 12);
+}
+
+test "global variable initialized to global variable array element" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;
+
+    try expect(global_ptr == &gdt[0]);
+}
+const GDTEntry = struct {
+    field: i32,
+};
+var gdt = [_]GDTEntry{
+    GDTEntry{ .field = 1 },
+    GDTEntry{ .field = 2 },
+};
+var global_ptr = &gdt[0];
+
+test "global constant is loaded with a runtime-known index" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+
+    const S = struct {
+        fn doTheTest() !void {
+            var index: usize = 1;
+            const ptr = &pieces[index].field;
+            try expect(ptr.* == 2);
+        }
+        const Piece = struct {
+            field: i32,
+        };
+        const pieces = [_]Piece{ Piece{ .field = 1 }, Piece{ .field = 2 }, Piece{ .field = 3 } };
+    };
+    try S.doTheTest();
+}
+
+test "multiline string literal is null terminated" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+
+    const s1 =
+        \\one
+        \\two)
+        \\three
+    ;
+    const s2 = "one\ntwo)\nthree";
+    try expect(std.cstr.cmp(s1, s2) == 0);
+}
+
+test "string escapes" {
+    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+
+    try expectEqualStrings("\"", "\x22");
+    try expectEqualStrings("\'", "\x27");
+    try expectEqualStrings("\n", "\x0a");
+    try expectEqualStrings("\r", "\x0d");
+    try expectEqualStrings("\t", "\x09");
+    try expectEqualStrings("\\", "\x5c");
+    try expectEqualStrings("\u{1234}\u{069}\u{1}", "\xe1\x88\xb4\x69\x01");
+}
+
+test "explicit cast optional pointers" {
+    const a: ?*i32 = undefined;
+    const b: ?*f32 = @ptrCast(?*f32, a);
+    _ = b;
+}
+
+test "pointer comparison" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+
+    const a = @as([]const u8, "a");
+    const b = &a;
+    try expect(ptrEql(b, b));
+}
+fn ptrEql(a: *const []const u8, b: *const []const u8) bool {
+    return a == b;
+}
+
+test "string concatenation" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+
+    const a = "OK" ++ " IT " ++ "WORKED";
+    const b = "OK IT WORKED";
+
+    comptime try expect(@TypeOf(a) == *const [12:0]u8);
+    comptime try expect(@TypeOf(b) == *const [12:0]u8);
+
+    const len = mem.len(b);
+    const len_with_null = len + 1;
+    {
+        var i: u32 = 0;
+        while (i < len_with_null) : (i += 1) {
+            try expect(a[i] == b[i]);
+        }
+    }
+    try expect(a[len] == 0);
+    try expect(b[len] == 0);
+}
+
+test "thread local variable" {
+    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+
+    const S = struct {
+        threadlocal var t: i32 = 1234;
+    };
+    S.t += 1;
+    try expect(S.t == 1235);
+}
+
+test "result location is optional inside error union" {
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+
+    const x = maybe(true) catch unreachable;
+    try expect(x.? == 42);
+}
+
+fn maybe(x: bool) anyerror!?u32 {
+    return switch (x) {
+        true => @as(u32, 42),
+        else => null,
+    };
+}
+
+test "pointer to thread local array" {
+    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+
+    const s = "Hello world";
+    std.mem.copy(u8, buffer[0..], s);
+    try std.testing.expectEqualSlices(u8, buffer[0..], s);
+}
+
+threadlocal var buffer: [11]u8 = undefined;
+
+test "auto created variables have correct alignment" {
+    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+
+    const S = struct {
+        fn foo(str: [*]const u8) u32 {
+            for (@ptrCast([*]align(1) const u32, str)[0..1]) |v| {
+                return v;
+            }
+            return 0;
+        }
+    };
+    try expect(S.foo("\x7a\x7a\x7a\x7a") == 0x7a7a7a7a);
+    comptime try expect(S.foo("\x7a\x7a\x7a\x7a") == 0x7a7a7a7a);
+}
+
+test "extern variable with non-pointer opaque type" {
+    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+
+    @export(var_to_export, .{ .name = "opaque_extern_var" });
+    try expect(@ptrCast(*align(1) u32, &opaque_extern_var).* == 42);
+}
+extern var opaque_extern_var: opaque {};
+var var_to_export: u32 = 42;
+
+test "lazy typeInfo value as generic parameter" {
+    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+
+    const S = struct {
+        fn foo(args: anytype) void {
+            _ = args;
+        }
+    };
+    S.foo(@typeInfo(@TypeOf(.{})));
+}
+
+test "variable name containing underscores does not shadow int primitive" {
+    const _u0 = 0;
+    const i_8 = 0;
+    const u16_ = 0;
+    const i3_2 = 0;
+    const u6__4 = 0;
+    const i2_04_8 = 0;
+
+    _ = _u0;
+    _ = i_8;
+    _ = u16_;
+    _ = i3_2;
+    _ = u6__4;
+    _ = i2_04_8;
+}
+
+test "if expression type coercion" {
+    var cond: bool = true;
+    const x: u16 = if (cond) 1 else 0;
+    try expect(@as(u16, x) == 1);
+}
+
+test "discarding the result of various expressions" {
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+
+    const S = struct {
+        fn foo() !u32 {
+            return 1;
+        }
+        fn bar() ?u32 {
+            return 1;
+        }
+    };
+    _ = S.bar() orelse {
+        // do nothing
+    };
+    _ = S.foo() catch {
+        // do nothing
+    };
+    _ = switch (1) {
+        1 => 1,
+        2 => {},
+        else => return,
+    };
+    _ = try S.foo();
+    _ = if (S.bar()) |some| some else {};
+    _ = blk: {
+        if (S.bar()) |some| break :blk some;
+        break :blk;
+    };
+    _ = while (S.bar()) |some| break some else {};
+    _ = for ("foo") |char| break char else {};
 }

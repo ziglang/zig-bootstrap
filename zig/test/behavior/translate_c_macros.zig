@@ -1,5 +1,7 @@
-const expect = @import("std").testing.expect;
-const expectEqual = @import("std").testing.expectEqual;
+const builtin = @import("builtin");
+const std = @import("std");
+const expect = std.testing.expect;
+const expectEqual = std.testing.expectEqual;
 
 const h = @cImport(@cInclude("behavior/translate_c_macros.h"));
 
@@ -14,4 +16,43 @@ test "casting to void with a macro" {
     h.IGNORE_ME_8(42);
     h.IGNORE_ME_9(42);
     h.IGNORE_ME_10(42);
+}
+
+test "initializer list expression" {
+    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+
+    try expectEqual(h.Color{
+        .r = 200,
+        .g = 200,
+        .b = 200,
+        .a = 255,
+    }, h.LIGHTGRAY);
+}
+
+test "sizeof in macros" {
+    try expect(@as(c_int, @sizeOf(u32)) == h.MY_SIZEOF(u32));
+    try expect(@as(c_int, @sizeOf(u32)) == h.MY_SIZEOF2(u32));
+}
+
+test "reference to a struct type" {
+    try expect(@sizeOf(h.struct_Foo) == h.SIZE_OF_FOO);
+}
+
+test "cast negative integer to pointer" {
+    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+
+    try expectEqual(@intToPtr(?*anyopaque, @bitCast(usize, @as(isize, -1))), h.MAP_FAILED);
+}
+
+test "casting to union with a macro" {
+    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO Sema.zirUnionInitPtr
+
+    const l: c_long = 42;
+    const d: f64 = 2.0;
+
+    var casted = h.UNION_CAST(l);
+    try expectEqual(l, casted.l);
+
+    casted = h.UNION_CAST(d);
+    try expectEqual(d, casted.d);
 }

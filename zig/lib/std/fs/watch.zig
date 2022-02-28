@@ -401,7 +401,7 @@ pub fn Watch(comptime V: type) type {
                     .access_mask = windows.FILE_LIST_DIRECTORY,
                     .creation = windows.FILE_OPEN,
                     .io_mode = .evented,
-                    .open_dir = true,
+                    .filter = .dir_only,
                 });
                 errdefer windows.CloseHandle(dir_handle);
 
@@ -678,7 +678,7 @@ fn testWriteWatchWriteDelete(allocator: Allocator) !void {
     };
 
     // overwrite line 2
-    const file = try std.fs.cwd().openFile(file_path, .{ .read = true, .write = true });
+    const file = try std.fs.cwd().openFile(file_path, .{ .mode = .read_write });
     {
         defer file.close();
         const write_contents = "lorem ipsum";

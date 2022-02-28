@@ -406,6 +406,16 @@ pub fn mprotect(address: [*]const u8, length: usize, protection: usize) usize {
     return syscall3(.mprotect, @ptrToInt(address), length, protection);
 }
 
+pub const MSF = struct {
+    pub const ASYNC = 1;
+    pub const INVALIDATE = 2;
+    pub const SYNC = 4;
+};
+
+pub fn msync(address: [*]const u8, length: usize, flags: i32) usize {
+    return syscall3(.msync, @ptrToInt(address), length, @bitCast(u32, flags));
+}
+
 pub fn munmap(address: [*]const u8, length: usize) usize {
     return syscall2(.munmap, @ptrToInt(address), length);
 }
@@ -440,26 +450,30 @@ pub fn read(fd: i32, buf: [*]u8, count: usize) usize {
 }
 
 pub fn preadv(fd: i32, iov: [*]const iovec, count: usize, offset: i64) usize {
-    const offset_halves = splitValueLE64(offset);
+    const offset_u = @bitCast(u64, offset);
     return syscall5(
         .preadv,
         @bitCast(usize, @as(isize, fd)),
         @ptrToInt(iov),
         count,
-        offset_halves[0],
-        offset_halves[1],
+        // Kernel expects the offset is splitted into largest natural word-size.
+        // See following link for detail:
+        // https://git.kernel.org/pub/scm/linux/kernel/git/torvalds/linux.git/commit/?id=601cc11d054ae4b5e9b5babec3d8e4667a2cb9b5
+        @truncate(usize, offset_u),
+        if (usize_bits < 64) @truncate(usize, offset_u >> 32) else 0,
     );
 }
 
 pub fn preadv2(fd: i32, iov: [*]const iovec, count: usize, offset: i64, flags: kernel_rwf) usize {
-    const offset_halves = splitValue64(offset);
+    const offset_u = @bitCast(u64, offset);
     return syscall6(
         .preadv2,
         @bitCast(usize, @as(isize, fd)),
         @ptrToInt(iov),
         count,
-        offset_halves[0],
-        offset_halves[1],
+        // See comments in preadv
+        @truncate(usize, offset_u),
+        if (usize_bits < 64) @truncate(usize, offset_u >> 32) else 0,
         flags,
     );
 }
@@ -473,26 +487,28 @@ pub fn writev(fd: i32, iov: [*]const iovec_const, count: usize) usize {
 }
 
 pub fn pwritev(fd: i32, iov: [*]const iovec_const, count: usize, offset: i64) usize {
-    const offset_halves = splitValueLE64(offset);
+    const offset_u = @bitCast(u64, offset);
     return syscall5(
         .pwritev,
         @bitCast(usize, @as(isize, fd)),
         @ptrToInt(iov),
         count,
-        offset_halves[0],
-        offset_halves[1],
+        // See comments in preadv
+        @truncate(usize, offset_u),
+        if (usize_bits < 64) @truncate(usize, offset_u >> 32) else 0,
     );
 }
 
 pub fn pwritev2(fd: i32, iov: [*]const iovec_const, count: usize, offset: i64, flags: kernel_rwf) usize {
-    const offset_halves = splitValue64(offset);
+    const offset_u = @bitCast(u64, offset);
     return syscall6(
         .pwritev2,
         @bitCast(usize, @as(isize, fd)),
         @ptrToInt(iov),
         count,
-        offset_halves[0],
-        offset_halves[1],
+        // See comments in preadv
+        @truncate(usize, offset_u),
+        if (usize_bits < 64) @truncate(usize, offset_u >> 32) else 0,
         flags,
     );
 }
@@ -738,7 +754,11 @@ pub fn fchmod(fd: i32, mode: mode_t) usize {
 }
 
 pub fn fchown(fd: i32, owner: uid_t, group: gid_t) usize {
-    return syscall3(.fchown, @bitCast(usize, @as(isize, fd)), owner, group);
+    if (@hasField(SYS, "fchown32")) {
+        return syscall3(.fchown32, @bitCast(usize, @as(isize, fd)), owner, group);
+    } else {
+        return syscall3(.fchown, @bitCast(usize, @as(isize, fd)), owner, group);
+    }
 }
 
 /// Can only be called on 32 bit systems. For 64 bit see `lseek`.
@@ -845,10 +865,16 @@ pub fn flock(fd: fd_t, operation: i32) usize {
     return syscall2(.flock, @bitCast(usize, @as(isize, fd)), @bitCast(usize, @as(isize, operation)));
 }
 
-var vdso_clock_gettime = @ptrCast(?*const anyopaque, init_vdso_clock_gettime);
+var vdso_clock_gettime = if (builtin.zig_backend == .stage1)
+    @ptrCast(?*const anyopaque, init_vdso_clock_gettime)
+else
+    @ptrCast(?*const anyopaque, &init_vdso_clock_gettime);
 
 // We must follow the C calling convention when we call into the VDSO
-const vdso_clock_gettime_ty = fn (i32, *timespec) callconv(.C) usize;
+const vdso_clock_gettime_ty = if (builtin.zig_backend == .stage1)
+    fn (i32, *timespec) callconv(.C) usize
+else
+    *const fn (i32, *timespec) callconv(.C) usize;
 
 pub fn clock_gettime(clk_id: i32, tp: *timespec) usize {
     if (@hasDecl(VDSO, "CGT_SYM")) {
@@ -1249,11 +1275,11 @@ pub fn sendfile(outfd: i32, infd: i32, offset: ?*i64, count: usize) usize {
     }
 }
 
-pub fn socketpair(domain: i32, socket_type: i32, protocol: i32, fd: [2]i32) usize {
+pub fn socketpair(domain: i32, socket_type: i32, protocol: i32, fd: *[2]i32) usize {
     if (native_arch == .i386) {
-        return socketcall(SC.socketpair, &[4]usize{ @intCast(usize, domain), @intCast(usize, socket_type), @intCast(usize, protocol), @ptrToInt(&fd[0]) });
+        return socketcall(SC.socketpair, &[4]usize{ @intCast(usize, domain), @intCast(usize, socket_type), @intCast(usize, protocol), @ptrToInt(fd) });
     }
-    return syscall4(.socketpair, @intCast(usize, domain), @intCast(usize, socket_type), @intCast(usize, protocol), @ptrToInt(&fd[0]));
+    return syscall4(.socketpair, @intCast(usize, domain), @intCast(usize, socket_type), @intCast(usize, protocol), @ptrToInt(fd));
 }
 
 pub fn accept(fd: i32, noalias addr: ?*sockaddr, noalias len: ?*socklen_t) usize {

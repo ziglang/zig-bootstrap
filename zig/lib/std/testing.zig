@@ -103,11 +103,13 @@ pub fn expectEqual(expected: anytype, actual: @TypeOf(expected)) !void {
 
         .Array => |array| try expectEqualSlices(array.child, &expected, &actual),
 
-        .Vector => |vectorType| {
+        .Vector => |info| {
             var i: usize = 0;
-            while (i < vectorType.len) : (i += 1) {
+            while (i < info.len) : (i += 1) {
                 if (!std.meta.eql(expected[i], actual[i])) {
-                    std.debug.print("index {} incorrect. expected {}, found {}\n", .{ i, expected[i], actual[i] });
+                    std.debug.print("index {} incorrect. expected {}, found {}\n", .{
+                        i, expected[i], actual[i],
+                    });
                     return error.TestExpectedEqual;
                 }
             }
@@ -406,7 +408,7 @@ pub fn expectStringEndsWith(actual: []const u8, expected_ends_with: []const u8) 
         return;
 
     const shortened_actual = if (actual.len >= expected_ends_with.len)
-        actual[0..expected_ends_with.len]
+        actual[(actual.len - expected_ends_with.len)..]
     else
         actual;
 
@@ -463,7 +465,7 @@ test {
 /// Given a type, reference all the declarations inside, so that the semantic analyzer sees them.
 pub fn refAllDecls(comptime T: type) void {
     if (!builtin.is_test) return;
-    inline for (std.meta.declarations(T)) |decl| {
-        _ = decl;
+    inline for (comptime std.meta.declarations(T)) |decl| {
+        if (decl.is_pub) _ = @field(T, decl.name);
     }
 }

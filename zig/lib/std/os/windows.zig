@@ -53,17 +53,26 @@ pub const OpenFileOptions = struct {
     io_mode: std.io.ModeOverride,
     /// If true, tries to open path as a directory.
     /// Defaults to false.
-    open_dir: bool = false,
+    filter: Filter = .file_only,
     /// If false, tries to open path as a reparse point without dereferencing it.
     /// Defaults to true.
     follow_symlinks: bool = true,
+
+    pub const Filter = enum {
+        /// Causes `OpenFile` to return `error.IsDir` if the opened handle would be a directory.
+        file_only,
+        /// Causes `OpenFile` to return `error.NotDir` if the opened handle would be a file.
+        dir_only,
+        /// `OpenFile` does not discriminate between opening files and directories.
+        any,
+    };
 };
 
 pub fn OpenFile(sub_path_w: []const u16, options: OpenFileOptions) OpenError!HANDLE {
-    if (mem.eql(u16, sub_path_w, &[_]u16{'.'}) and !options.open_dir) {
+    if (mem.eql(u16, sub_path_w, &[_]u16{'.'}) and options.filter == .file_only) {
         return error.IsDir;
     }
-    if (mem.eql(u16, sub_path_w, &[_]u16{ '.', '.' }) and !options.open_dir) {
+    if (mem.eql(u16, sub_path_w, &[_]u16{ '.', '.' }) and options.filter == .file_only) {
         return error.IsDir;
     }
 
@@ -87,7 +96,11 @@ pub fn OpenFile(sub_path_w: []const u16, options: OpenFileOptions) OpenError!HAN
     };
     var io: IO_STATUS_BLOCK = undefined;
     const blocking_flag: ULONG = if (options.io_mode == .blocking) FILE_SYNCHRONOUS_IO_NONALERT else 0;
-    const file_or_dir_flag: ULONG = if (options.open_dir) FILE_DIRECTORY_FILE else FILE_NON_DIRECTORY_FILE;
+    const file_or_dir_flag: ULONG = switch (options.filter) {
+        .file_only => FILE_NON_DIRECTORY_FILE,
+        .dir_only => FILE_DIRECTORY_FILE,
+        .any => 0,
+    };
     // If we're not following symlinks, we need to ensure we don't pass in any synchronization flags such as FILE_SYNCHRONOUS_IO_NONALERT.
     const flags: ULONG = if (options.follow_symlinks) file_or_dir_flag | blocking_flag else file_or_dir_flag | FILE_OPEN_REPARSE_POINT;
 
@@ -695,7 +708,7 @@ pub fn CreateSymbolicLink(
         .dir = dir,
         .creation = FILE_CREATE,
         .io_mode = .blocking,
-        .open_dir = is_directory,
+        .filter = if (is_directory) .dir_only else .file_only,
     }) catch |err| switch (err) {
         error.IsDir => return error.PathAlreadyExists,
         error.NotDir => unreachable,
@@ -900,6 +913,7 @@ pub fn DeleteFile(sub_path_w: []const u16, options: DeleteFileOptions) DeleteFil
         .FILE_IS_A_DIRECTORY => return error.IsDir,
         .NOT_A_DIRECTORY => return error.NotDir,
         .SHARING_VIOLATION => return error.FileBusy,
+        .CANNOT_DELETE => return error.AccessDenied,
         else => return unexpectedStatus(rc),
     }
 }
@@ -1481,6 +1495,19 @@ pub fn VirtualFree(lpAddress: ?LPVOID, dwSize: usize, dwFreeType: DWORD) void {
     assert(kernel32.VirtualFree(lpAddress, dwSize, dwFreeType) != 0);
 }
 
+pub const VirtualQuerryError = error{Unexpected};
+
+pub fn VirtualQuery(lpAddress: ?LPVOID, lpBuffer: PMEMORY_BASIC_INFORMATION, dwLength: SIZE_T) VirtualQuerryError!SIZE_T {
+    const rc = kernel32.VirtualQuery(lpAddress, lpBuffer, dwLength);
+    if (rc == 0) {
+        switch (kernel32.GetLastError()) {
+            else => |err| return unexpectedError(err),
+        }
+    }
+
+    return rc;
+}
+
 pub const SetConsoleTextAttributeError = error{Unexpected};
 
 pub fn SetConsoleTextAttribute(hConsoleOutput: HANDLE, wAttributes: WORD) SetConsoleTextAttributeError!void {
@@ -2013,21 +2040,6 @@ pub fn unexpectedStatus(status: NTSTATUS) std.os.UnexpectedError {
         std.debug.dumpCurrentStackTrace(null);
     }
     return error.Unexpected;
-}
-
-pub fn SetThreadDescription(hThread: HANDLE, lpThreadDescription: LPCWSTR) !void {
-    if (kernel32.SetThreadDescription(hThread, lpThreadDescription) == 0) {
-        switch (kernel32.GetLastError()) {
-            else => |err| return unexpectedError(err),
-        }
-    }
-}
-pub fn GetThreadDescription(hThread: HANDLE, ppszThreadDescription: *LPWSTR) !void {
-    if (kernel32.GetThreadDescription(hThread, ppszThreadDescription) == 0) {
-        switch (kernel32.GetLastError()) {
-            else => |err| return unexpectedError(err),
-        }
-    }
 }
 
 pub const Win32Error = @import("windows/win32error.zig").Win32Error;
@@ -2572,6 +2584,11 @@ pub const CREATE_EVENT_MANUAL_RESET = 0x00000001;
 pub const EVENT_ALL_ACCESS = 0x1F0003;
 pub const EVENT_MODIFY_STATE = 0x0002;
 
+// MEMORY_BASIC_INFORMATION.Type flags for VirtualQuery
+pub const MEM_IMAGE = 0x1000000;
+pub const MEM_MAPPED = 0x40000;
+pub const MEM_PRIVATE = 0x20000;
+
 pub const PROCESS_INFORMATION = extern struct {
     hProcess: HANDLE,
     hThread: HANDLE,
@@ -2647,6 +2664,7 @@ pub const HEAP_NO_SERIALIZE = 0x00000001;
 // AllocationType values
 pub const MEM_COMMIT = 0x1000;
 pub const MEM_RESERVE = 0x2000;
+pub const MEM_FREE = 0x10000;
 pub const MEM_RESET = 0x80000;
 pub const MEM_RESET_UNDO = 0x1000000;
 pub const MEM_LARGE_PAGES = 0x20000000;
@@ -2719,54 +2737,58 @@ pub const HRESULT = c_long;
 
 pub const KNOWNFOLDERID = GUID;
 pub const GUID = extern struct {
-    Data1: c_ulong,
-    Data2: c_ushort,
-    Data3: c_ushort,
+    Data1: u32,
+    Data2: u16,
+    Data3: u16,
     Data4: [8]u8,
 
-    pub fn parse(str: []const u8) GUID {
-        var guid: GUID = undefined;
-        var index: usize = 0;
-        assert(str[index] == '{');
-        index += 1;
+    const hex_offsets = switch (builtin.target.cpu.arch.endian()) {
+        .Big => [16]u6{
+            0,  2,  4,  6,
+            9,  11, 14, 16,
+            19, 21, 24, 26,
+            28, 30, 32, 34,
+        },
+        .Little => [16]u6{
+            6,  4,  2,  0,
+            11, 9,  16, 14,
+            19, 21, 24, 26,
+            28, 30, 32, 34,
+        },
+    };
 
-        guid.Data1 = std.fmt.parseUnsigned(c_ulong, str[index .. index + 8], 16) catch unreachable;
-        index += 8;
+    pub fn parse(s: []const u8) GUID {
+        assert(s[0] == '{');
+        assert(s[37] == '}');
+        return parseNoBraces(s[1 .. s.len - 1]) catch @panic("invalid GUID string");
+    }
 
-        assert(str[index] == '-');
-        index += 1;
-
-        guid.Data2 = std.fmt.parseUnsigned(c_ushort, str[index .. index + 4], 16) catch unreachable;
-        index += 4;
-
-        assert(str[index] == '-');
-        index += 1;
-
-        guid.Data3 = std.fmt.parseUnsigned(c_ushort, str[index .. index + 4], 16) catch unreachable;
-        index += 4;
-
-        assert(str[index] == '-');
-        index += 1;
-
-        guid.Data4[0] = std.fmt.parseUnsigned(u8, str[index .. index + 2], 16) catch unreachable;
-        index += 2;
-        guid.Data4[1] = std.fmt.parseUnsigned(u8, str[index .. index + 2], 16) catch unreachable;
-        index += 2;
-
-        assert(str[index] == '-');
-        index += 1;
-
-        var i: usize = 2;
-        while (i < guid.Data4.len) : (i += 1) {
-            guid.Data4[i] = std.fmt.parseUnsigned(u8, str[index .. index + 2], 16) catch unreachable;
-            index += 2;
+    pub fn parseNoBraces(s: []const u8) !GUID {
+        assert(s.len == 36);
+        assert(s[8] == '-');
+        assert(s[13] == '-');
+        assert(s[18] == '-');
+        assert(s[23] == '-');
+        var bytes: [16]u8 = undefined;
+        for (hex_offsets) |hex_offset, i| {
+            bytes[i] = (try std.fmt.charToDigit(s[hex_offset], 16)) << 4 |
+                try std.fmt.charToDigit(s[hex_offset + 1], 16);
         }
-
-        assert(str[index] == '}');
-        index += 1;
-        return guid;
+        return @bitCast(GUID, bytes);
     }
 };
+
+test "GUID" {
+    try std.testing.expectEqual(
+        GUID{
+            .Data1 = 0x01234567,
+            .Data2 = 0x89ab,
+            .Data3 = 0xef10,
+            .Data4 = "\x32\x54\x76\x98\xba\xdc\xfe\x91".*,
+        },
+        GUID.parse("{01234567-89AB-EF10-3254-7698badcfe91}"),
+    );
+}
 
 pub const FOLDERID_LocalAppData = GUID.parse("{F1B32785-6FBA-4FCF-9D55-7B8E7F157091}");
 
@@ -2941,6 +2963,19 @@ pub const COINIT = enum(c_int) {
     COINIT_DISABLE_OLE1DDE = 4,
     COINIT_SPEED_OVER_MEMORY = 8,
 };
+
+pub const MEMORY_BASIC_INFORMATION = extern struct {
+    BaseAddress: PVOID,
+    AllocationBase: PVOID,
+    AllocationProtect: DWORD,
+    PartitionId: WORD,
+    RegionSize: SIZE_T,
+    State: DWORD,
+    Protect: DWORD,
+    Type: DWORD,
+};
+
+pub const PMEMORY_BASIC_INFORMATION = *MEMORY_BASIC_INFORMATION;
 
 /// > The maximum path of 32,767 characters is approximate, because the "\\?\"
 /// > prefix may be expanded to a longer string by the system at run time, and

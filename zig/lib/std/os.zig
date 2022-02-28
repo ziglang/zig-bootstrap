@@ -88,6 +88,7 @@ pub const Kevent = system.Kevent;
 pub const LOCK = system.LOCK;
 pub const MADV = system.MADV;
 pub const MAP = system.MAP;
+pub const MSF = system.MSF;
 pub const MAX_ADDR_LEN = system.MAX_ADDR_LEN;
 pub const MMAP2_UNIT = system.MMAP2_UNIT;
 pub const MSG = system.MSG;
@@ -163,6 +164,7 @@ pub const sigset_t = system.sigset_t;
 pub const sockaddr = system.sockaddr;
 pub const socklen_t = system.socklen_t;
 pub const stack_t = system.stack_t;
+pub const tcflag_t = system.tcflag_t;
 pub const termios = system.termios;
 pub const time_t = system.time_t;
 pub const timespec = system.timespec;
@@ -216,9 +218,13 @@ pub const socket_t = if (builtin.os.tag == .windows) windows.ws2_32.SOCKET else 
 pub var environ: [][*:0]u8 = undefined;
 
 /// Populated by startup code before main().
-/// Not available on Windows. See `std.process.args`
-/// for obtaining the process arguments.
-pub var argv: [][*:0]u8 = undefined;
+/// Not available on WASI or Windows without libc. See `std.process.argsAlloc`
+/// or `std.process.argsWithAllocator` for a cross-platform alternative.
+pub var argv: [][*:0]u8 = if (builtin.link_libc) undefined else switch (builtin.os.tag) {
+    .windows => @compileError("argv isn't supported on Windows: use std.process.argsAlloc instead"),
+    .wasi => @compileError("argv isn't supported on WASI: use std.process.argsAlloc instead"),
+    else => undefined,
+};
 
 /// To obtain errno, call this function with the return value of the
 /// system function call. For some systems this will obtain the value directly
@@ -237,7 +243,7 @@ pub fn close(fd: fd_t) void {
     if (builtin.os.tag == .windows) {
         return windows.CloseHandle(fd);
     }
-    if (builtin.os.tag == .wasi) {
+    if (builtin.os.tag == .wasi and !builtin.link_libc) {
         _ = wasi.fd_close(fd);
         return;
     }
@@ -992,7 +998,7 @@ pub fn write(fd: fd_t, bytes: []const u8) WriteError!usize {
 /// transfer further bytes or may result in an error (e.g., if the disk is now full).
 ///
 /// For POSIX systems, if `fd` is opened in non blocking mode, the function will
-/// return error.WouldBlock when EAGAIN is received.k`.
+/// return error.WouldBlock when EAGAIN is received.
 /// On Windows, if the application has a global event loop enabled, I/O Completion Ports are
 /// used to perform the I/O. `error.WouldBlock` is not possible on Windows.
 ///
@@ -1353,7 +1359,7 @@ fn openOptionsFromFlags(flags: u32) windows.OpenFileOptions {
         access_mask |= w.GENERIC_READ | w.GENERIC_WRITE;
     }
 
-    const open_dir: bool = flags & O.DIRECTORY != 0;
+    const filter: windows.OpenFileOptions.Filter = if (flags & O.DIRECTORY != 0) .dir_only else .file_only;
     const follow_symlinks: bool = flags & O.NOFOLLOW == 0;
 
     const creation: w.ULONG = blk: {
@@ -1369,7 +1375,7 @@ fn openOptionsFromFlags(flags: u32) windows.OpenFileOptions {
         .access_mask = access_mask,
         .io_mode = .blocking,
         .creation = creation,
-        .open_dir = open_dir,
+        .filter = filter,
         .follow_symlinks = follow_symlinks,
     };
 }
@@ -1394,7 +1400,7 @@ pub fn openW(file_path_w: []const u16, flags: u32, perm: mode_t) OpenError!fd_t 
 /// `file_path` is relative to the open directory handle `dir_fd`.
 /// See also `openatZ`.
 pub fn openat(dir_fd: fd_t, file_path: []const u8, flags: u32, mode: mode_t) OpenError!fd_t {
-    if (builtin.os.tag == .wasi) {
+    if (builtin.os.tag == .wasi and !builtin.link_libc) {
         @compileError("use openatWasi instead");
     }
     if (builtin.os.tag == .windows) {
@@ -1759,7 +1765,7 @@ pub fn getcwd(out_buffer: []u8) GetCwdError![]u8 {
     if (builtin.os.tag == .windows) {
         return windows.GetCurrentDirectory(out_buffer);
     }
-    if (builtin.os.tag == .wasi) {
+    if (builtin.os.tag == .wasi and !builtin.link_libc) {
         @compileError("WASI doesn't have a concept of cwd(); use std.fs.wasi.PreopenList to get available Dir handles instead");
     }
 
@@ -1803,7 +1809,7 @@ pub const SymLinkError = error{
 /// If `sym_link_path` exists, it will not be overwritten.
 /// See also `symlinkZ.
 pub fn symlink(target_path: []const u8, sym_link_path: []const u8) SymLinkError!void {
-    if (builtin.os.tag == .wasi) {
+    if (builtin.os.tag == .wasi and !builtin.link_libc) {
         @compileError("symlink is not supported in WASI; use symlinkat instead");
     }
     if (builtin.os.tag == .windows) {
@@ -2020,7 +2026,7 @@ pub const UnlinkError = error{
 /// Delete a name and possibly the file it refers to.
 /// See also `unlinkZ`.
 pub fn unlink(file_path: []const u8) UnlinkError!void {
-    if (builtin.os.tag == .wasi) {
+    if (builtin.os.tag == .wasi and !builtin.link_libc) {
         @compileError("unlink is not supported in WASI; use unlinkat instead");
     } else if (builtin.os.tag == .windows) {
         const file_path_w = try windows.sliceToPrefixedFileW(file_path);
@@ -2174,7 +2180,7 @@ pub const RenameError = error{
 
 /// Change the name or location of a file.
 pub fn rename(old_path: []const u8, new_path: []const u8) RenameError!void {
-    if (builtin.os.tag == .wasi) {
+    if (builtin.os.tag == .wasi and !builtin.link_libc) {
         @compileError("rename is not supported in WASI; use renameat instead");
     } else if (builtin.os.tag == .windows) {
         const old_path_w = try windows.sliceToPrefixedFileW(old_path);
@@ -2324,6 +2330,7 @@ pub fn renameatW(
         .access_mask = windows.SYNCHRONIZE | windows.GENERIC_WRITE | windows.DELETE,
         .creation = windows.FILE_OPEN,
         .io_mode = .blocking,
+        .filter = .any, // This function is supposed to rename both files and directories.
     }) catch |err| switch (err) {
         error.WouldBlock => unreachable, // Not possible without `.share_access_nonblocking = true`.
         else => |e| return e,
@@ -2435,7 +2442,7 @@ pub fn mkdiratW(dir_fd: fd_t, sub_path_w: []const u16, mode: u32) MakeDirError!v
         .access_mask = windows.GENERIC_READ | windows.SYNCHRONIZE,
         .creation = windows.FILE_CREATE,
         .io_mode = .blocking,
-        .open_dir = true,
+        .filter = .dir_only,
     }) catch |err| switch (err) {
         error.IsDir => unreachable,
         error.PipeBusy => unreachable,
@@ -2467,7 +2474,7 @@ pub const MakeDirError = error{
 /// Create a directory.
 /// `mode` is ignored on Windows.
 pub fn mkdir(dir_path: []const u8, mode: u32) MakeDirError!void {
-    if (builtin.os.tag == .wasi) {
+    if (builtin.os.tag == .wasi and !builtin.link_libc) {
         @compileError("mkdir is not supported in WASI; use mkdirat instead");
     } else if (builtin.os.tag == .windows) {
         const dir_path_w = try windows.sliceToPrefixedFileW(dir_path);
@@ -2511,7 +2518,7 @@ pub fn mkdirW(dir_path_w: []const u16, mode: u32) MakeDirError!void {
         .access_mask = windows.GENERIC_READ | windows.SYNCHRONIZE,
         .creation = windows.FILE_CREATE,
         .io_mode = .blocking,
-        .open_dir = true,
+        .filter = .dir_only,
     }) catch |err| switch (err) {
         error.IsDir => unreachable,
         error.PipeBusy => unreachable,
@@ -2537,7 +2544,7 @@ pub const DeleteDirError = error{
 
 /// Deletes an empty directory.
 pub fn rmdir(dir_path: []const u8) DeleteDirError!void {
-    if (builtin.os.tag == .wasi) {
+    if (builtin.os.tag == .wasi and !builtin.link_libc) {
         @compileError("rmdir is not supported in WASI; use unlinkat instead");
     } else if (builtin.os.tag == .windows) {
         const dir_path_w = try windows.sliceToPrefixedFileW(dir_path);
@@ -2598,7 +2605,7 @@ pub const ChangeCurDirError = error{
 /// Changes the current working directory of the calling process.
 /// `dir_path` is recommended to be a UTF-8 encoded string.
 pub fn chdir(dir_path: []const u8) ChangeCurDirError!void {
-    if (builtin.os.tag == .wasi) {
+    if (builtin.os.tag == .wasi and !builtin.link_libc) {
         @compileError("chdir is not supported in WASI");
     } else if (builtin.os.tag == .windows) {
         var utf16_dir_path: [windows.PATH_MAX_WIDE]u16 = undefined;
@@ -2682,7 +2689,7 @@ pub const ReadLinkError = error{
 /// Read value of a symbolic link.
 /// The return value is a slice of `out_buffer` from index 0.
 pub fn readlink(file_path: []const u8, out_buffer: []u8) ReadLinkError![]u8 {
-    if (builtin.os.tag == .wasi) {
+    if (builtin.os.tag == .wasi and !builtin.link_libc) {
         @compileError("readlink is not supported in WASI; use readlinkat instead");
     } else if (builtin.os.tag == .windows) {
         const file_path_w = try windows.sliceToPrefixedFileW(file_path);
@@ -4014,6 +4021,19 @@ pub fn munmap(memory: []align(mem.page_size) const u8) void {
     }
 }
 
+pub const MSyncError = error{
+    UnmappedMemory,
+} || UnexpectedError;
+
+pub fn msync(memory: []align(mem.page_size) u8, flags: i32) MSyncError!void {
+    switch (errno(system.msync(memory.ptr, memory.len, flags))) {
+        .SUCCESS => return,
+        .NOMEM => return error.UnmappedMemory, // Unsuccessful, provided pointer does not point mapped memory
+        .INVAL => unreachable, // Invalid parameters.
+        else => unreachable,
+    }
+}
+
 pub const AccessError = error{
     PermissionDenied,
     FileNotFound,
@@ -4493,6 +4513,8 @@ pub const FcntlError = error{
     FileBusy,
     ProcessFdQuotaExceeded,
     Locked,
+    DeadLock,
+    LockedRegionLimitExceeded,
 } || UnexpectedError;
 
 pub fn fcntl(fd: fd_t, cmd: i32, arg: usize) FcntlError!usize {
@@ -4501,13 +4523,15 @@ pub fn fcntl(fd: fd_t, cmd: i32, arg: usize) FcntlError!usize {
         switch (errno(rc)) {
             .SUCCESS => return @intCast(usize, rc),
             .INTR => continue,
-            .ACCES => return error.Locked,
+            .AGAIN, .ACCES => return error.Locked,
             .BADF => unreachable,
             .BUSY => return error.FileBusy,
             .INVAL => unreachable, // invalid parameters
             .PERM => return error.PermissionDenied,
             .MFILE => return error.ProcessFdQuotaExceeded,
             .NOTDIR => unreachable, // invalid parameter
+            .DEADLK => return error.DeadLock,
+            .NOLCK => return error.LockedRegionLimitExceeded,
             else => |err| return unexpectedErrno(err),
         }
     }
@@ -4522,6 +4546,8 @@ fn setSockFlags(sock: socket_t, flags: u32) !void {
                 error.FileBusy => unreachable,
                 error.Locked => unreachable,
                 error.PermissionDenied => unreachable,
+                error.DeadLock => unreachable,
+                error.LockedRegionLimitExceeded => unreachable,
                 else => |e| return e,
             };
             fd_flags |= FD_CLOEXEC;
@@ -4529,6 +4555,8 @@ fn setSockFlags(sock: socket_t, flags: u32) !void {
                 error.FileBusy => unreachable,
                 error.Locked => unreachable,
                 error.PermissionDenied => unreachable,
+                error.DeadLock => unreachable,
+                error.LockedRegionLimitExceeded => unreachable,
                 else => |e| return e,
             };
         }
@@ -4550,6 +4578,8 @@ fn setSockFlags(sock: socket_t, flags: u32) !void {
                 error.FileBusy => unreachable,
                 error.Locked => unreachable,
                 error.PermissionDenied => unreachable,
+                error.DeadLock => unreachable,
+                error.LockedRegionLimitExceeded => unreachable,
                 else => |e| return e,
             };
             fl_flags |= O.NONBLOCK;
@@ -4557,6 +4587,8 @@ fn setSockFlags(sock: socket_t, flags: u32) !void {
                 error.FileBusy => unreachable,
                 error.Locked => unreachable,
                 error.PermissionDenied => unreachable,
+                error.DeadLock => unreachable,
+                error.LockedRegionLimitExceeded => unreachable,
                 else => |e| return e,
             };
         }
@@ -4629,7 +4661,7 @@ pub fn realpath(pathname: []const u8, out_buffer: *[MAX_PATH_BYTES]u8) RealPathE
         const pathname_w = try windows.sliceToPrefixedFileW(pathname);
         return realpathW(pathname_w.span(), out_buffer);
     }
-    if (builtin.os.tag == .wasi) {
+    if (builtin.os.tag == .wasi and !builtin.link_libc) {
         @compileError("Use std.fs.wasi.PreopenList to obtain valid Dir handles instead of using absolute paths");
     }
     const pathname_c = try toPosixPath(pathname);
@@ -4693,7 +4725,7 @@ pub fn realpathW(pathname: []const u16, out_buffer: *[MAX_PATH_BYTES]u8) RealPat
                 .share_access = share_access,
                 .creation = creation,
                 .io_mode = .blocking,
-                .open_dir = true,
+                .filter = .dir_only,
             }) catch |er| switch (er) {
                 error.WouldBlock => unreachable,
                 else => |e2| return e2,
@@ -4968,7 +5000,11 @@ pub fn toPosixPath(file_path: []const u8) ![MAX_PATH_BYTES - 1:0]u8 {
 /// if this happens the fix is to add the error code to the corresponding
 /// switch expression, possibly introduce a new error in the error set, and
 /// send a patch to Zig.
-pub const unexpected_error_tracing = builtin.mode == .Debug;
+/// The self-hosted compiler is not fully capable of handle the related code.
+/// Until then, unexpected error tracing is disabled for the self-hosted compiler.
+/// TODO remove this once self-hosted is capable enough to handle printing and
+/// stack trace dumping.
+pub const unexpected_error_tracing = builtin.zig_backend == .stage1 and builtin.mode == .Debug;
 
 pub const UnexpectedError = error{
     /// The Operating System returned an undocumented error code.
@@ -6029,25 +6065,6 @@ pub fn dn_expand(
         }
     }
     return error.InvalidDnsPacket;
-}
-
-pub const SchedYieldError = error{
-    /// The system is not configured to allow yielding
-    SystemCannotYield,
-};
-
-pub fn sched_yield() SchedYieldError!void {
-    if (builtin.os.tag == .windows) {
-        // The return value has to do with how many other threads there are; it is not
-        // an error condition on Windows.
-        _ = windows.kernel32.SwitchToThread();
-        return;
-    }
-    switch (errno(system.sched_yield())) {
-        .SUCCESS => return,
-        .NOSYS => return error.SystemCannotYield,
-        else => return error.SystemCannotYield,
-    }
 }
 
 pub const SetSockOptError = error{

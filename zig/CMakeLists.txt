@@ -25,7 +25,7 @@ project(zig C CXX)
 set(CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake ${CMAKE_MODULE_PATH})
 
 set(ZIG_VERSION_MAJOR 0)
-set(ZIG_VERSION_MINOR 9)
+set(ZIG_VERSION_MINOR 10)
 set(ZIG_VERSION_PATCH 0)
 set(ZIG_VERSION "" CACHE STRING "Override Zig version string. Default is to find out with git.")
 
@@ -63,7 +63,7 @@ if("${ZIG_VERSION}" STREQUAL "")
         endif()
     endif()
 endif()
-message("Configuring zig version ${ZIG_VERSION}")
+message(STATUS "Configuring zig version ${ZIG_VERSION}")
 
 set(ZIG_STATIC off CACHE BOOL "Attempt to build a static zig executable (not compatible with glibc)")
 set(ZIG_STATIC_LLVM off CACHE BOOL "Prefer linking against static LLVM libraries")
@@ -142,15 +142,19 @@ include_directories(${CLANG_INCLUDE_DIRS})
 # No patches have been applied to SoftFloat-3e
 set(EMBEDDED_SOFTFLOAT_SOURCES
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/8086/f128M_isSignalingNaN.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/8086/extF80M_isSignalingNaN.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/8086/s_commonNaNToF128M.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/8086/s_commonNaNToExtF80M.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/8086/s_commonNaNToF16UI.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/8086/s_commonNaNToF32UI.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/8086/s_commonNaNToF64UI.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/8086/s_f128MToCommonNaN.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/8086/s_extF80MToCommonNaN.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/8086/s_f16UIToCommonNaN.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/8086/s_f32UIToCommonNaN.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/8086/s_f64UIToCommonNaN.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/8086/s_propagateNaNF128M.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/8086/s_propagateNaNExtF80M.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/8086/s_propagateNaNF16UI.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/8086/softfloat_raiseFlags.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f128M_add.c"
@@ -170,6 +174,7 @@ set(EMBEDDED_SOFTFLOAT_SOURCES
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f128M_to_f16.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f128M_to_f32.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f128M_to_f64.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f128M_to_extF80M.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f128M_to_i32.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f128M_to_i32_r_minMag.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f128M_to_i64.c"
@@ -178,6 +183,20 @@ set(EMBEDDED_SOFTFLOAT_SOURCES
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f128M_to_ui32_r_minMag.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f128M_to_ui64.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f128M_to_ui64_r_minMag.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/extF80M_add.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/extF80M_div.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/extF80M_eq.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/extF80M_le.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/extF80M_lt.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/extF80M_mul.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/extF80M_rem.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/extF80M_roundToInt.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/extF80M_sqrt.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/extF80M_sub.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/extF80M_to_f16.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/extF80M_to_f32.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/extF80M_to_f64.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/extF80M_to_f128M.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f16_add.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f16_div.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f16_eq.c"
@@ -188,9 +207,12 @@ set(EMBEDDED_SOFTFLOAT_SOURCES
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f16_roundToInt.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f16_sqrt.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f16_sub.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f16_to_extF80M.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f16_to_f128M.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f16_to_f64.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f32_to_extF80M.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f32_to_f128M.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f64_to_extF80M.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f64_to_f128M.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f64_to_f16.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/i32_to_f128M.c"
@@ -198,6 +220,7 @@ set(EMBEDDED_SOFTFLOAT_SOURCES
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_addCarryM.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_addComplCarryM.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_addF128M.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_addExtF80M.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_addM.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_addMagsF16.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_addMagsF32.c"
@@ -208,12 +231,14 @@ set(EMBEDDED_SOFTFLOAT_SOURCES
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_approxRecip_1Ks.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_compare128M.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_compare96M.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_compareNonnormExtF80M.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_countLeadingZeros16.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_countLeadingZeros32.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_countLeadingZeros64.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_countLeadingZeros8.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_eq128.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_invalidF128M.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_invalidExtF80M.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_isNaNF128M.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_le128.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_lt128.c"
@@ -224,7 +249,9 @@ set(EMBEDDED_SOFTFLOAT_SOURCES
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_mulAddF32.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_mulAddF64.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_negXM.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_normExtF80SigM.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_normRoundPackMToF128M.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_normRoundPackMToExtF80M.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_normRoundPackToF16.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_normRoundPackToF32.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_normRoundPackToF64.c"
@@ -235,6 +262,7 @@ set(EMBEDDED_SOFTFLOAT_SOURCES
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_remStepMBy32.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_roundMToI64.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_roundMToUI64.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_roundPackMToExtF80M.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_roundPackMToF128M.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_roundPackToF16.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_roundPackToF32.c"
@@ -263,11 +291,14 @@ set(EMBEDDED_SOFTFLOAT_SOURCES
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_subMagsF32.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_subMagsF64.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_tryPropagateNaNF128M.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/s_tryPropagateNaNExtF80M.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f16_mulAdd.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/f128M_mulAdd.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/softfloat_state.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/ui32_to_f128M.c"
     "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/ui64_to_f128M.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/ui32_to_extF80M.c"
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e/source/ui64_to_extF80M.c"
 )
 add_library(embedded_softfloat STATIC ${EMBEDDED_SOFTFLOAT_SOURCES})
 if(MSVC)
@@ -444,6 +475,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/rand.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/sort.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/special/compiler_rt.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/special/compiler_rt/absv.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/special/compiler_rt/addXf3.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/special/compiler_rt/atomics.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/special/compiler_rt/bswap.zig"
@@ -499,6 +531,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/special/compiler_rt/multi3.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/special/compiler_rt/negXf2.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/special/compiler_rt/negXi2.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/special/compiler_rt/negv.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/special/compiler_rt/os_version_check.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/special/compiler_rt/parity.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/special/compiler_rt/popcount.zig"
@@ -560,11 +593,25 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/TypedValue.zig"
     "${CMAKE_SOURCE_DIR}/src/WaitGroup.zig"
     "${CMAKE_SOURCE_DIR}/src/Zir.zig"
+    "${CMAKE_SOURCE_DIR}/src/arch/aarch64/CodeGen.zig"
+    "${CMAKE_SOURCE_DIR}/src/arch/aarch64/Emit.zig"
+    "${CMAKE_SOURCE_DIR}/src/arch/aarch64/Mir.zig"
     "${CMAKE_SOURCE_DIR}/src/arch/aarch64/bits.zig"
+    "${CMAKE_SOURCE_DIR}/src/arch/arm/CodeGen.zig"
+    "${CMAKE_SOURCE_DIR}/src/arch/arm/Emit.zig"
+    "${CMAKE_SOURCE_DIR}/src/arch/arm/Mir.zig"
     "${CMAKE_SOURCE_DIR}/src/arch/arm/bits.zig"
+    "${CMAKE_SOURCE_DIR}/src/arch/riscv64/CodeGen.zig"
+    "${CMAKE_SOURCE_DIR}/src/arch/riscv64/Emit.zig"
+    "${CMAKE_SOURCE_DIR}/src/arch/riscv64/Mir.zig"
     "${CMAKE_SOURCE_DIR}/src/arch/riscv64/bits.zig"
-    "${CMAKE_SOURCE_DIR}/src/arch/x86_64/bits.zig"
     "${CMAKE_SOURCE_DIR}/src/arch/wasm/CodeGen.zig"
+    "${CMAKE_SOURCE_DIR}/src/arch/wasm/Emit.zig"
+    "${CMAKE_SOURCE_DIR}/src/arch/wasm/Mir.zig"
+    "${CMAKE_SOURCE_DIR}/src/arch/x86_64/CodeGen.zig"
+    "${CMAKE_SOURCE_DIR}/src/arch/x86_64/Emit.zig"
+    "${CMAKE_SOURCE_DIR}/src/arch/x86_64/Mir.zig"
+    "${CMAKE_SOURCE_DIR}/src/arch/x86_64/bits.zig"
     "${CMAKE_SOURCE_DIR}/src/clang.zig"
     "${CMAKE_SOURCE_DIR}/src/clang_options.zig"
     "${CMAKE_SOURCE_DIR}/src/clang_options_data.zig"
@@ -608,6 +655,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/print_env.zig"
     "${CMAKE_SOURCE_DIR}/src/print_targets.zig"
     "${CMAKE_SOURCE_DIR}/src/print_zir.zig"
+    "${CMAKE_SOURCE_DIR}/src/register_manager.zig"
     "${CMAKE_SOURCE_DIR}/src/stage1.zig"
     "${CMAKE_SOURCE_DIR}/src/target.zig"
     "${CMAKE_SOURCE_DIR}/src/tracy.zig"
@@ -744,6 +792,9 @@ add_library(opt_c_util STATIC ${OPTIMIZED_C_SOURCES})
 set_target_properties(opt_c_util PROPERTIES
     COMPILE_FLAGS "${OPTIMIZED_C_FLAGS}"
 )
+target_include_directories(opt_c_util PRIVATE
+    "${CMAKE_SOURCE_DIR}/deps/SoftFloat-3e-prebuilt"
+)
 
 add_library(zigstage1 STATIC ${STAGE1_SOURCES})
 set_target_properties(zigstage1 PROPERTIES
@@ -787,7 +838,7 @@ else()
     set(ZIG1_RELEASE_ARG -OReleaseFast --strip)
 endif()
 if(ZIG_SINGLE_THREADED)
-  set(ZIG1_SINGLE_THREADED_ARG "--single-threaded")
+  set(ZIG1_SINGLE_THREADED_ARG "-fsingle-threaded")
 else()
   set(ZIG1_SINGLE_THREADED_ARG "")
 endif()

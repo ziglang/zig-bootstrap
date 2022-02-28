@@ -10,6 +10,8 @@ const mem = std.mem;
 const process = std.process;
 const ArrayList = std.ArrayList;
 const BufMap = std.BufMap;
+const Allocator = mem.Allocator;
+const ExecError = build.Builder.ExecError;
 
 const max_stdout_size = 1 * 1024 * 1024; // 1 MiB
 
@@ -34,7 +36,8 @@ stderr_action: StdIoAction = .inherit,
 
 stdin_behavior: std.ChildProcess.StdIo = .Inherit,
 
-expected_exit_code: u8 = 0,
+/// Set this to `null` to ignore the exit code for the purpose of determining a successful execution
+expected_exit_code: ?u8 = 0,
 
 /// Print the command before running it
 print: bool,
@@ -174,6 +177,13 @@ fn make(step: *Step) !void {
 
     const argv = argv_list.items;
 
+    if (!std.process.can_spawn) {
+        const cmd = try std.mem.join(self.builder.allocator, " ", argv);
+        std.debug.print("the following command cannot be executed ({s} does not support spawning a child process):\n{s}", .{ @tagName(builtin.os.tag), cmd });
+        self.builder.allocator.free(cmd);
+        return ExecError.ExecNotSupported;
+    }
+
     const child = std.ChildProcess.init(argv, self.builder.allocator) catch unreachable;
     defer child.deinit();
 
@@ -220,17 +230,19 @@ fn make(step: *Step) !void {
     };
 
     switch (term) {
-        .Exited => |code| {
-            if (code != self.expected_exit_code) {
+        .Exited => |code| blk: {
+            const expected_exit_code = self.expected_exit_code orelse break :blk;
+
+            if (code != expected_exit_code) {
                 if (self.builder.prominent_compile_errors) {
                     std.debug.print("Run step exited with error code {} (expected {})\n", .{
                         code,
-                        self.expected_exit_code,
+                        expected_exit_code,
                     });
                 } else {
                     std.debug.print("The following command exited with error code {} (expected {}):\n", .{
                         code,
-                        self.expected_exit_code,
+                        expected_exit_code,
                     });
                     printCmd(cwd, argv);
                 }

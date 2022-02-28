@@ -26,6 +26,8 @@ pub const Inst = struct {
     pub const Tag = enum(u16) {
         /// Add (immediate)
         add_immediate,
+        /// Add (shifted register)
+        add_shifted_register,
         /// Branch conditionally
         b_cond,
         /// Branch
@@ -38,6 +40,8 @@ pub const Inst = struct {
         brk,
         /// Pseudo-instruction: Call extern
         call_extern,
+        /// Compare and Branch on Zero
+        cbz,
         /// Compare (immediate)
         cmp_immediate,
         /// Compare (shifted register)
@@ -50,27 +54,44 @@ pub const Inst = struct {
         dbg_epilogue_begin,
         /// Pseudo-instruction: Update debug line
         dbg_line,
-        /// Pseudo-instruction: Load memory
+        /// Bitwise Exclusive OR (shifted register)
+        eor_shifted_register,
+        /// Loads the contents into a register
         ///
-        /// Payload is `LoadMemory`
-        load_memory,
+        /// Payload is `LoadMemoryPie`
+        load_memory_got,
+        /// Loads the contents into a register
+        ///
+        /// Payload is `LoadMemoryPie`
+        load_memory_direct,
+        /// Loads the address into a register
+        ///
+        /// Payload is `LoadMemoryPie`
+        load_memory_ptr_got,
+        /// Loads the address into a register
+        ///
+        /// Payload is `LoadMemoryPie`
+        load_memory_ptr_direct,
         /// Load Pair of Registers
         ldp,
         /// Pseudo-instruction: Load from stack
         ldr_stack,
-        /// Load Register
-        // TODO: split into ldr_immediate and ldr_register
-        ldr,
+        /// Load Register (immediate)
+        ldr_immediate,
+        /// Load Register (register)
+        ldr_register,
         /// Pseudo-instruction: Load byte from stack
         ldrb_stack,
-        /// Load Register Byte
-        // TODO: split into ldrb_immediate and ldrb_register
-        ldrb,
+        /// Load Register Byte (immediate)
+        ldrb_immediate,
+        /// Load Register Byte (register)
+        ldrb_register,
         /// Pseudo-instruction: Load halfword from stack
         ldrh_stack,
-        /// Load Register Halfword
-        // TODO: split into ldrh_immediate and ldrh_register
-        ldrh,
+        /// Load Register Halfword (immediate)
+        ldrh_immediate,
+        /// Load Register Halfword (register)
+        ldrh_register,
         /// Move (to/from SP)
         mov_to_from_sp,
         /// Move (register)
@@ -79,6 +100,10 @@ pub const Inst = struct {
         movk,
         /// Move wide with zero
         movz,
+        /// Multiply
+        mul,
+        /// Bitwise NOT
+        mvn,
         /// No Operation
         nop,
         /// Pseudo-instruction: Pop multiple registers
@@ -91,21 +116,26 @@ pub const Inst = struct {
         stp,
         /// Pseudo-instruction: Store to stack
         str_stack,
-        /// Store Register
-        // TODO: split into str_immediate and str_register
-        str,
+        /// Store Register (immediate)
+        str_immediate,
+        /// Store Register (register)
+        str_register,
         /// Pseudo-instruction: Store byte to stack
         strb_stack,
-        /// Store Register Byte
-        // TODO: split into strb_immediate and strb_register
-        strb,
+        /// Store Register Byte (immediate)
+        strb_immediate,
+        /// Store Register Byte (register)
+        strb_register,
         /// Pseudo-instruction: Store halfword to stack
         strh_stack,
-        /// Store Register Halfword
-        // TODO: split into strh_immediate and strh_register
-        strh,
+        /// Store Register Halfword (immediate)
+        strh_immediate,
+        /// Store Register Halfword (register)
+        strh_register,
         /// Subtract (immediate)
         sub_immediate,
+        /// Subtract (shifted register)
+        sub_shifted_register,
         /// Supervisor Call
         svc,
     };
@@ -128,14 +158,17 @@ pub const Inst = struct {
         /// An extern function
         ///
         /// Used by e.g. call_extern
-        extern_fn: u32,
+        extern_fn: struct {
+            /// Index of the containing atom.
+            atom_index: u32,
+            /// Index into the linker's string table.
+            sym_name: u32,
+        },
         /// A 16-bit immediate value.
         ///
         /// Used by e.g. svc
         imm16: u16,
         /// Index into `extra`. Meaning of what can be found there is context-dependent.
-        ///
-        /// Used by e.g. load_memory
         payload: u32,
         /// A register
         ///
@@ -160,12 +193,34 @@ pub const Inst = struct {
             imm16: u16,
             hw: u2 = 0,
         },
+        /// A register and a condition
+        ///
+        /// Used by e.g. cset
+        r_cond: struct {
+            rd: Register,
+            cond: bits.Instruction.Condition,
+        },
+        /// A register and another instruction
+        ///
+        /// Used by e.g. cbz
+        r_inst: struct {
+            rt: Register,
+            inst: Index,
+        },
         /// Two registers
         ///
         /// Used by e.g. mov_register
         rr: struct {
             rd: Register,
             rn: Register,
+        },
+        /// A register, an unsigned 12-bit immediate, and an optional shift
+        ///
+        /// Used by e.g. cmp_immediate
+        r_imm12_sh: struct {
+            rn: Register,
+            imm12: u12,
+            sh: u1 = 0,
         },
         /// Two registers, an unsigned 12-bit immediate, and an optional shift
         ///
@@ -175,6 +230,23 @@ pub const Inst = struct {
             rn: Register,
             imm12: u12,
             sh: u1 = 0,
+        },
+        /// Two registers and a shift (shift type and 6-bit amount)
+        ///
+        /// Used by e.g. mvn
+        rr_imm6_shift: struct {
+            rd: Register,
+            rm: Register,
+            imm6: u6,
+            shift: bits.Instruction.AddSubtractShiftedRegisterShift,
+        },
+        /// Two registers
+        ///
+        /// Used by e.g. mul
+        rrr: struct {
+            rd: Register,
+            rn: Register,
+            rm: Register,
         },
         /// Three registers and a shift (shift type and 6-bit amount)
         ///
@@ -186,26 +258,36 @@ pub const Inst = struct {
             imm6: u6,
             shift: bits.Instruction.AddSubtractShiftedRegisterShift,
         },
-        /// Three registers and a condition
+        /// Three registers and a shift (logical instruction version)
+        /// (shift type and 6-bit amount)
         ///
-        /// Used by e.g. cset
-        rrr_cond: struct {
+        /// Used by e.g. eor_shifted_register
+        rrr_imm6_logical_shift: struct {
             rd: Register,
             rn: Register,
             rm: Register,
-            cond: bits.Instruction.Condition,
+            imm6: u6,
+            shift: bits.Instruction.LogicalShiftedRegisterShift,
         },
-        /// Two registers and a LoadStoreOffset
+        /// Two registers and a LoadStoreOffsetImmediate
         ///
-        /// Used by e.g. str_register
-        load_store_register: struct {
+        /// Used by e.g. str_immediate
+        load_store_register_immediate: struct {
             rt: Register,
             rn: Register,
-            offset: bits.Instruction.LoadStoreOffset,
+            offset: bits.Instruction.LoadStoreOffsetImmediate,
+        },
+        /// Two registers and a LoadStoreOffsetRegister
+        ///
+        /// Used by e.g. str_register
+        load_store_register_register: struct {
+            rt: Register,
+            rn: Register,
+            offset: bits.Instruction.LoadStoreOffsetRegister,
         },
         /// A registers and a stack offset
         ///
-        /// Used by e.g. str_register
+        /// Used by e.g. str_stack
         load_store_stack: struct {
             rt: Register,
             offset: u32,
@@ -226,15 +308,19 @@ pub const Inst = struct {
             line: u32,
             column: u32,
         },
+        load_memory: struct {
+            register: u32,
+            addr: u32,
+        },
     };
 
     // Make sure we don't accidentally make instructions bigger than expected.
     // Note that in Debug builds, Zig is allowed to insert a secret field for safety checks.
-    // comptime {
-    //     if (builtin.mode != .Debug) {
-    //         assert(@sizeOf(Inst) == 8);
-    //     }
-    // }
+    comptime {
+        if (builtin.mode != .Debug) {
+            assert(@sizeOf(Data) == 8);
+        }
+    }
 };
 
 pub fn deinit(mir: *Mir, gpa: std.mem.Allocator) void {
@@ -263,7 +349,10 @@ pub fn extraData(mir: Mir, comptime T: type, index: usize) struct { data: T, end
     };
 }
 
-pub const LoadMemory = struct {
+pub const LoadMemoryPie = struct {
     register: u32,
-    addr: u32,
+    /// Index of the containing atom.
+    atom_index: u32,
+    /// Index into the linker's symbol table.
+    sym_index: u32,
 };

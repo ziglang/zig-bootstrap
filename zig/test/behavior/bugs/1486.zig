@@ -1,9 +1,12 @@
-const expect = @import("std").testing.expect;
+const std = @import("std");
+const expect = std.testing.expect;
+const builtin = @import("builtin");
 
 const ptr = &global;
-var global: u64 = 123;
+var global: usize = 123;
 
 test "constant pointer to global variable causes runtime load" {
+    if (builtin.zig_backend == .stage2_aarch64 and builtin.os.tag == .macos) return error.SkipZigTest;
     global = 1234;
     try expect(&global == ptr);
     try expect(ptr.* == 1234);

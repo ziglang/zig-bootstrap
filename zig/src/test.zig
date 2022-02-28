@@ -614,7 +614,7 @@ pub const TestContext = struct {
         const host = try std.zig.system.NativeTargetInfo.detect(std.testing.allocator, .{});
 
         var progress = std.Progress{};
-        const root_node = try progress.start("compiler", self.cases.items.len);
+        const root_node = progress.start("compiler", self.cases.items.len);
         defer root_node.end();
 
         var zig_lib_directory = try introspect.findZigLibDir(std.testing.allocator);
@@ -730,6 +730,12 @@ pub const TestContext = struct {
             // * cannot handle updates
             // because of this we must spawn a child process rather than
             // using Compilation directly.
+
+            if (!std.process.can_spawn) {
+                print("Unable to spawn child processes on {s}, skipping test.\n", .{@tagName(builtin.os.tag)});
+                return; // Pass test.
+            }
+
             assert(case.updates.items.len == 1);
             const update = case.updates.items[0];
             try tmp.dir.writeFile(tmp_src_path, update.src);
@@ -958,14 +964,14 @@ pub const TestContext = struct {
 
             switch (update.case) {
                 .Header => |expected_output| {
-                    var file = try tmp.dir.openFile("test_case.h", .{ .read = true });
+                    var file = try tmp.dir.openFile("test_case.h", .{ .mode = .read_only });
                     defer file.close();
                     const out = try file.reader().readAllAlloc(arena, 5 * 1024 * 1024);
 
                     try std.testing.expectEqualStrings(expected_output, out);
                 },
                 .CompareObjectFile => |expected_output| {
-                    var file = try tmp.dir.openFile(bin_name, .{ .read = true });
+                    var file = try tmp.dir.openFile(bin_name, .{ .mode = .read_only });
                     defer file.close();
                     const out = try file.reader().readAllAlloc(arena, 5 * 1024 * 1024);
 
@@ -1104,6 +1110,11 @@ pub const TestContext = struct {
                     }
                 },
                 .Execution => |expected_stdout| {
+                    if (!std.process.can_spawn) {
+                        print("Unable to spawn child processes on {s}, skipping test.\n", .{@tagName(builtin.os.tag)});
+                        return; // Pass test.
+                    }
+
                     update_node.setEstimatedTotalItems(4);
 
                     var argv = std.ArrayList([]const u8).init(allocator);

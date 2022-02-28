@@ -23,10 +23,12 @@ fn processArgs() void {
 }
 
 pub fn main() void {
-    if (builtin.zig_is_stage2) {
+    if (builtin.zig_backend != .stage1 and
+        builtin.zig_backend != .stage2_llvm)
+    {
         return main2() catch @panic("test failure");
     }
-    processArgs();
+    if (builtin.zig_backend == .stage1) processArgs();
     const test_fn_list = builtin.test_functions;
     var ok_count: usize = 0;
     var skip_count: usize = 0;
@@ -34,10 +36,7 @@ pub fn main() void {
     var progress = std.Progress{
         .dont_print_on_dumb = true,
     };
-    const root_node = progress.start("Test", test_fn_list.len) catch |err| switch (err) {
-        // TODO still run tests in this case
-        error.TimerUnsupported => @panic("timer unsupported"),
-    };
+    const root_node = progress.start("Test", test_fn_list.len);
     const have_tty = progress.terminal != null and progress.supports_ansi_escape_codes;
 
     var async_frame_buffer: []align(std.Target.stack_align) u8 = undefined;
@@ -47,9 +46,9 @@ pub fn main() void {
 
     var leaks: usize = 0;
     for (test_fn_list) |test_fn, i| {
-        std.testing.allocator_instance = .{};
+        if (builtin.zig_backend != .stage2_llvm) std.testing.allocator_instance = .{};
         defer {
-            if (std.testing.allocator_instance.deinit()) {
+            if (builtin.zig_backend != .stage2_llvm and std.testing.allocator_instance.deinit()) {
                 leaks += 1;
             }
         }
@@ -73,7 +72,7 @@ pub fn main() void {
             .blocking => {
                 skip_count += 1;
                 test_node.end();
-                progress.log("{s}... SKIP (async test)\n", .{test_fn.name});
+                progress.log("SKIP (async test)\n", .{});
                 if (!have_tty) std.debug.print("SKIP (async test)\n", .{});
                 continue;
             },
@@ -85,18 +84,18 @@ pub fn main() void {
         } else |err| switch (err) {
             error.SkipZigTest => {
                 skip_count += 1;
-                test_node.end();
-                progress.log("{s}... SKIP\n", .{test_fn.name});
+                progress.log("SKIP\n", .{});
                 if (!have_tty) std.debug.print("SKIP\n", .{});
+                test_node.end();
             },
             else => {
                 fail_count += 1;
-                test_node.end();
-                progress.log("{s}... FAIL ({s})\n", .{ test_fn.name, @errorName(err) });
+                progress.log("FAIL ({s})\n", .{@errorName(err)});
                 if (!have_tty) std.debug.print("FAIL ({s})\n", .{@errorName(err)});
-                if (@errorReturnTrace()) |trace| {
+                if (builtin.zig_backend != .stage2_llvm) if (@errorReturnTrace()) |trace| {
                     std.debug.dumpStackTrace(trace.*);
-                }
+                };
+                test_node.end();
             },
         }
     }
@@ -132,16 +131,47 @@ pub fn log(
 }
 
 pub fn main2() anyerror!void {
-    var bad = false;
+    var skipped: usize = 0;
+    var failed: usize = 0;
     // Simpler main(), exercising fewer language features, so that stage2 can handle it.
     for (builtin.test_functions) |test_fn| {
         test_fn.func() catch |err| {
             if (err != error.SkipZigTest) {
-                bad = true;
+                failed += 1;
+            } else {
+                skipped += 1;
             }
         };
     }
-    if (bad) {
+    if (builtin.zig_backend == .stage2_wasm or
+        builtin.zig_backend == .stage2_x86_64)
+    {
+        const passed = builtin.test_functions.len - skipped - failed;
+        const stderr = std.io.getStdErr();
+        writeInt(stderr, passed) catch {};
+        stderr.writeAll(" passed; ") catch {};
+        writeInt(stderr, skipped) catch {};
+        stderr.writeAll(" skipped; ") catch {};
+        writeInt(stderr, failed) catch {};
+        stderr.writeAll(" failed.\n") catch {};
+    }
+    if (failed != 0) {
         return error.TestsFailed;
     }
+}
+
+fn writeInt(stderr: std.fs.File, int: usize) anyerror!void {
+    const base = 10;
+    var buf: [100]u8 = undefined;
+    var a: usize = int;
+    var index: usize = buf.len;
+    while (true) {
+        const digit = a % base;
+        index -= 1;
+        buf[index] = std.fmt.digitToChar(@intCast(u8, digit), .lower);
+        a /= base;
+        if (a == 0) break;
+    }
+    const slice = buf[index..];
+    try stderr.writeAll(slice);
 }

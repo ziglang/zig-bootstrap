@@ -12,7 +12,6 @@ const log = std.log.scoped(.liveness);
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
 const Air = @import("Air.zig");
-const Zir = @import("Zir.zig");
 const Log2Int = std.math.Log2Int;
 
 /// This array is split into sets of 4 bits per AIR instruction.
@@ -26,7 +25,8 @@ tomb_bits: []usize,
 /// array. The meaning of the data depends on the AIR tag.
 ///  * `cond_br` - points to a `CondBr` in `extra` at this index.
 ///  * `switch_br` - points to a `SwitchBr` in `extra` at this index.
-///  * `asm`, `call` - the value is a set of bits which are the extra tomb bits of operands.
+///  * `asm`, `call`, `aggregate_init` - the value is a set of bits which are the extra tomb
+///    bits of operands.
 ///    The main tomb bits are still used and the extra ones are starting with the lsb of the
 ///    value here.
 special: std.AutoHashMapUnmanaged(Air.Inst.Index, u32),
@@ -51,7 +51,7 @@ pub const SwitchBr = struct {
     else_death_count: u32,
 };
 
-pub fn analyze(gpa: Allocator, air: Air, zir: Zir) Allocator.Error!Liveness {
+pub fn analyze(gpa: Allocator, air: Air) Allocator.Error!Liveness {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -65,7 +65,6 @@ pub fn analyze(gpa: Allocator, air: Air, zir: Zir) Allocator.Error!Liveness {
         ),
         .extra = .{},
         .special = .{},
-        .zir = &zir,
     };
     errdefer gpa.free(a.tomb_bits);
     errdefer a.special.deinit(gpa);
@@ -136,6 +135,42 @@ pub fn getCondBr(l: Liveness, inst: Air.Inst.Index) CondBrSlices {
     };
 }
 
+/// Indexed by case number as they appear in AIR.
+/// Else is the last element.
+pub const SwitchBrTable = struct {
+    deaths: []const []const Air.Inst.Index,
+};
+
+/// Caller owns the memory.
+pub fn getSwitchBr(l: Liveness, gpa: Allocator, inst: Air.Inst.Index, cases_len: u32) Allocator.Error!SwitchBrTable {
+    var index: usize = l.special.get(inst) orelse return SwitchBrTable{
+        .deaths = &.{},
+    };
+    const else_death_count = l.extra[index];
+    index += 1;
+
+    var deaths = std.ArrayList([]const Air.Inst.Index).init(gpa);
+    defer deaths.deinit();
+    try deaths.ensureTotalCapacity(cases_len + 1);
+
+    var case_i: u32 = 0;
+    while (case_i < cases_len - 1) : (case_i += 1) {
+        const case_death_count: u32 = l.extra[index];
+        index += 1;
+        const case_deaths = l.extra[index..][0..case_death_count];
+        index += case_death_count;
+        deaths.appendAssumeCapacity(case_deaths);
+    }
+    {
+        // Else
+        const else_deaths = l.extra[index..][0..else_death_count];
+        deaths.appendAssumeCapacity(else_deaths);
+    }
+    return SwitchBrTable{
+        .deaths = deaths.toOwnedSlice(),
+    };
+}
+
 pub fn deinit(l: *Liveness, gpa: Allocator) void {
     gpa.free(l.tomb_bits);
     gpa.free(l.extra);
@@ -156,7 +191,6 @@ const Analysis = struct {
     tomb_bits: []usize,
     special: std.AutoHashMapUnmanaged(Air.Inst.Index, u32),
     extra: std.ArrayListUnmanaged(u32),
-    zir: *const Zir,
 
     fn storeTombBits(a: *Analysis, inst: Air.Inst.Index, tomb_bits: Bpi) void {
         const usize_index = (inst * bpi) / @bitSizeOf(usize);
@@ -260,6 +294,7 @@ fn analyzeInst(
         .shl_exact,
         .shl_sat,
         .shr,
+        .shr_exact,
         .atomic_store_unordered,
         .atomic_store_monotonic,
         .atomic_store_release,
@@ -281,6 +316,7 @@ fn analyzeInst(
         .dbg_stmt,
         .unreach,
         .fence,
+        .ret_addr,
         => return trackOperands(a, new_set, inst, main_tomb, .{ .none, .none, .none }),
 
         .not,
@@ -293,6 +329,7 @@ fn analyzeInst(
         .optional_payload,
         .optional_payload_ptr,
         .optional_payload_ptr_set,
+        .errunion_payload_ptr_set,
         .wrap_optional,
         .unwrap_errunion_payload,
         .unwrap_errunion_err,
@@ -315,6 +352,9 @@ fn analyzeInst(
         .clz,
         .ctz,
         .popcount,
+        .byte_swap,
+        .bit_reverse,
+        .splat,
         => {
             const o = inst_datas[inst].ty_op;
             return trackOperands(a, new_set, inst, main_tomb, .{ o.operand, .none, .none });
@@ -332,9 +372,29 @@ fn analyzeInst(
         .bool_to_int,
         .ret,
         .ret_load,
+        .tag_name,
+        .error_name,
+        .sqrt,
+        .sin,
+        .cos,
+        .exp,
+        .exp2,
+        .log,
+        .log2,
+        .log10,
+        .fabs,
+        .floor,
+        .ceil,
+        .round,
+        .trunc_float,
         => {
             const operand = inst_datas[inst].un_op;
             return trackOperands(a, new_set, inst, main_tomb, .{ operand, .none, .none });
+        },
+
+        .prefetch => {
+            const prefetch = inst_datas[inst].prefetch;
+            return trackOperands(a, new_set, inst, main_tomb, .{ prefetch.ptr, .none, .none });
         },
 
         .call => {
@@ -342,7 +402,7 @@ fn analyzeInst(
             const callee = inst_data.operand;
             const extra = a.air.extraData(Air.Call, inst_data.payload);
             const args = @bitCast([]const Air.Inst.Ref, a.air.extra[extra.end..][0..extra.data.args_len]);
-            if (args.len <= bpi - 2) {
+            if (args.len + 1 <= bpi - 1) {
                 var buf = [1]Air.Inst.Ref{.none} ** (bpi - 1);
                 buf[0] = callee;
                 std.mem.copy(Air.Inst.Ref, buf[1..], args);
@@ -360,9 +420,39 @@ fn analyzeInst(
             }
             return extra_tombs.finish();
         },
+        .aggregate_init => {
+            const ty_pl = inst_datas[inst].ty_pl;
+            const aggregate_ty = a.air.getRefType(ty_pl.ty);
+            const len = @intCast(usize, aggregate_ty.arrayLen());
+            const elements = @bitCast([]const Air.Inst.Ref, a.air.extra[ty_pl.payload..][0..len]);
+
+            if (elements.len <= bpi - 1) {
+                var buf = [1]Air.Inst.Ref{.none} ** (bpi - 1);
+                std.mem.copy(Air.Inst.Ref, &buf, elements);
+                return trackOperands(a, new_set, inst, main_tomb, buf);
+            }
+            var extra_tombs: ExtraTombs = .{
+                .analysis = a,
+                .new_set = new_set,
+                .inst = inst,
+                .main_tomb = main_tomb,
+            };
+            for (elements) |elem| {
+                try extra_tombs.feed(elem);
+            }
+            return extra_tombs.finish();
+        },
+        .union_init => {
+            const extra = a.air.extraData(Air.UnionInit, inst_datas[inst].ty_pl.payload).data;
+            return trackOperands(a, new_set, inst, main_tomb, .{ extra.init, .none, .none });
+        },
         .struct_field_ptr, .struct_field_val => {
             const extra = a.air.extraData(Air.StructField, inst_datas[inst].ty_pl.payload).data;
             return trackOperands(a, new_set, inst, main_tomb, .{ extra.struct_operand, .none, .none });
+        },
+        .field_parent_ptr => {
+            const extra = a.air.extraData(Air.FieldParentPtr, inst_datas[inst].ty_pl.payload).data;
+            return trackOperands(a, new_set, inst, main_tomb, .{ extra.field_ptr, .none, .none });
         },
         .ptr_elem_ptr, .slice_elem_ptr, .slice => {
             const extra = a.air.extraData(Air.Bin, inst_datas[inst].ty_pl.payload).data;
@@ -381,7 +471,13 @@ fn analyzeInst(
             const extra = a.air.extraData(Air.AtomicRmw, pl_op.payload).data;
             return trackOperands(a, new_set, inst, main_tomb, .{ pl_op.operand, extra.operand, .none });
         },
-        .memset, .memcpy => {
+        .memset,
+        .memcpy,
+        .add_with_overflow,
+        .sub_with_overflow,
+        .mul_with_overflow,
+        .shl_with_overflow,
+        => {
             const pl_op = inst_datas[inst].pl_op;
             const extra = a.air.extraData(Air.Bin, pl_op.payload).data;
             return trackOperands(a, new_set, inst, main_tomb, .{ pl_op.operand, extra.lhs, extra.rhs });
@@ -392,15 +488,24 @@ fn analyzeInst(
         },
         .assembly => {
             const extra = a.air.extraData(Air.Asm, inst_datas[inst].ty_pl.payload);
-            const extended = a.zir.instructions.items(.data)[extra.data.zir_index].extended;
-            const outputs_len = @truncate(u5, extended.small);
-            const inputs_len = @truncate(u5, extended.small >> 5);
-            const outputs = @bitCast([]const Air.Inst.Ref, a.air.extra[extra.end..][0..outputs_len]);
-            const args = @bitCast([]const Air.Inst.Ref, a.air.extra[extra.end + outputs.len ..][0..inputs_len]);
-            if (outputs.len + args.len <= bpi - 1) {
+            var extra_i: usize = extra.end;
+            const outputs = @bitCast([]const Air.Inst.Ref, a.air.extra[extra_i..][0..extra.data.outputs_len]);
+            extra_i += outputs.len;
+            const inputs = @bitCast([]const Air.Inst.Ref, a.air.extra[extra_i..][0..extra.data.inputs_len]);
+            extra_i += inputs.len;
+
+            simple: {
                 var buf = [1]Air.Inst.Ref{.none} ** (bpi - 1);
-                std.mem.copy(Air.Inst.Ref, &buf, outputs);
-                std.mem.copy(Air.Inst.Ref, buf[outputs.len..], args);
+                var buf_index: usize = 0;
+                for (outputs) |output| {
+                    if (output != .none) {
+                        if (buf_index >= buf.len) break :simple;
+                        buf[buf_index] = output;
+                        buf_index += 1;
+                    }
+                }
+                if (buf_index + inputs.len > buf.len) break :simple;
+                std.mem.copy(Air.Inst.Ref, buf[buf_index..], inputs);
                 return trackOperands(a, new_set, inst, main_tomb, buf);
             }
             var extra_tombs: ExtraTombs = .{
@@ -410,10 +515,12 @@ fn analyzeInst(
                 .main_tomb = main_tomb,
             };
             for (outputs) |output| {
-                try extra_tombs.feed(output);
+                if (output != .none) {
+                    try extra_tombs.feed(output);
+                }
             }
-            for (args) |arg| {
-                try extra_tombs.feed(arg);
+            for (inputs) |input| {
+                try extra_tombs.feed(input);
             }
             return extra_tombs.finish();
         },

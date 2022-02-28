@@ -424,7 +424,7 @@ pub fn ProgramHeaderIterator(ParseSource: anytype) type {
                 if (self.elf_header.endian == native_endian) return phdr;
 
                 // Convert fields to native endianness.
-                mem.bswapAllFields(Elf64_Phdr, &phdr);
+                mem.byteSwapAllFields(Elf64_Phdr, &phdr);
                 return phdr;
             }
 
@@ -436,7 +436,7 @@ pub fn ProgramHeaderIterator(ParseSource: anytype) type {
             // ELF endianness does NOT match native endianness.
             if (self.elf_header.endian != native_endian) {
                 // Convert fields to native endianness.
-                mem.bswapAllFields(Elf32_Phdr, &phdr);
+                mem.byteSwapAllFields(Elf32_Phdr, &phdr);
             }
 
             // Convert 32-bit header to 64-bit.
@@ -474,7 +474,7 @@ pub fn SectionHeaderIterator(ParseSource: anytype) type {
                 if (self.elf_header.endian == native_endian) return shdr;
 
                 // Convert fields to native endianness.
-                mem.bswapAllFields(Elf64_Shdr, &shdr);
+                mem.byteSwapAllFields(Elf64_Shdr, &shdr);
                 return shdr;
             }
 
@@ -486,7 +486,7 @@ pub fn SectionHeaderIterator(ParseSource: anytype) type {
             // ELF endianness does NOT match native endianness.
             if (self.elf_header.endian != native_endian) {
                 // Convert fields to native endianness.
-                mem.bswapAllFields(Elf32_Shdr, &shdr);
+                mem.byteSwapAllFields(Elf32_Shdr, &shdr);
             }
 
             // Convert 32-bit header to 64-bit.
@@ -943,7 +943,7 @@ pub const Half = switch (@sizeOf(usize)) {
 
 /// Machine architectures
 /// See current registered ELF machine architectures at:
-///    http://www.uxsglobal.com/developers/gabi/latest/ch4.eheader.html
+///    http://www.sco.com/developers/gabi/latest/ch4.eheader.html
 /// The underscore prefix is because many of these start with numbers.
 pub const EM = enum(u16) {
     /// No machine

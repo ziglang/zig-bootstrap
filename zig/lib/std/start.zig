@@ -22,7 +22,7 @@ comptime {
     // The self-hosted compiler is not fully capable of handling all of this start.zig file.
     // Until then, we have simplified logic here for self-hosted. TODO remove this once
     // self-hosted is capable enough to handle all of the real start.zig logic.
-    if (builtin.zig_is_stage2) {
+    if (builtin.zig_backend != .stage1) {
         if (builtin.output_mode == .Exe) {
             if ((builtin.link_libc or builtin.object_format == .c) and @hasDecl(root, "main")) {
                 if (@typeInfo(@TypeOf(root.main)).Fn.calling_convention != .C) {
@@ -31,7 +31,7 @@ comptime {
             } else if (builtin.os.tag == .windows) {
                 @export(wWinMainCRTStartup2, .{ .name = "wWinMainCRTStartup" });
             } else if (builtin.os.tag == .wasi and @hasDecl(root, "main")) {
-                @export(wasmMain2, .{ .name = "_start" });
+                @export(wasiMain2, .{ .name = "_start" });
             } else {
                 if (!@hasDecl(root, "_start")) {
                     @export(_start2, .{ .name = "_start" });
@@ -100,17 +100,17 @@ fn callMain2() noreturn {
     exit2(0);
 }
 
-fn wasmMain2() u8 {
+fn wasiMain2() noreturn {
     switch (@typeInfo(@typeInfo(@TypeOf(root.main)).Fn.return_type.?)) {
         .Void => {
             root.main();
-            return 0;
+            std.os.wasi.proc_exit(0);
         },
         .Int => |info| {
             if (info.bits != 8 or info.signedness == .signed) {
                 @compileError(bad_main_ret);
             }
-            return root.main();
+            std.os.wasi.proc_exit(root.main());
         },
         else => @compileError("Bad return type main"),
     }
@@ -324,7 +324,7 @@ fn _start() callconv(.Naked) noreturn {
 
 fn WinStartup() callconv(std.os.windows.WINAPI) noreturn {
     @setAlignStack(16);
-    if (!builtin.single_threaded) {
+    if (!builtin.single_threaded and !builtin.link_libc) {
         _ = @import("start_windows_tls.zig");
     }
 
@@ -335,7 +335,7 @@ fn WinStartup() callconv(std.os.windows.WINAPI) noreturn {
 
 fn wWinMainCRTStartup() callconv(std.os.windows.WINAPI) noreturn {
     @setAlignStack(16);
-    if (!builtin.single_threaded) {
+    if (!builtin.single_threaded and !builtin.link_libc) {
         _ = @import("start_windows_tls.zig");
     }
 
@@ -511,9 +511,9 @@ inline fn initEventLoopAndCallWinMain() std.os.windows.INT {
             };
             defer loop.deinit();
 
-            var result: u8 = undefined;
-            var frame: @Frame(callMainAsync) = undefined;
-            _ = @asyncCall(&frame, &result, callMainAsync, .{loop});
+            var result: std.os.windows.INT = undefined;
+            var frame: @Frame(callWinMainAsync) = undefined;
+            _ = @asyncCall(&frame, &result, callWinMainAsync, .{loop});
             loop.run();
             return result;
         }
@@ -530,6 +530,14 @@ fn callMainAsync(loop: *std.event.Loop) callconv(.Async) u8 {
     loop.beginOneEvent();
     defer loop.finishOneEvent();
     return callMain();
+}
+
+fn callWinMainAsync(loop: *std.event.Loop) callconv(.Async) std.os.windows.INT {
+    // This prevents the event loop from terminating at least until main() has returned.
+    // TODO This shouldn't be needed here; it should be in the event loop code.
+    loop.beginOneEvent();
+    defer loop.finishOneEvent();
+    return call_wWinMain();
 }
 
 // This is not marked inline because it is called with @asyncCall when

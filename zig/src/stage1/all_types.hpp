@@ -83,7 +83,8 @@ enum CallingConvention {
     CallingConventionAPCS,
     CallingConventionAAPCS,
     CallingConventionAAPCSVFP,
-    CallingConventionSysV
+    CallingConventionSysV,
+    CallingConventionPtxKernel
 };
 
 // Stage 1 supports only the generic address space
@@ -516,6 +517,7 @@ struct ZigValue {
         float16_t x_f16;
         float x_f32;
         double x_f64;
+        extFloat80_t x_f80;
         float128_t x_f128;
         bool x_bool;
         ConstBoundFnValue x_bound_fn;
@@ -1192,7 +1194,6 @@ struct AstNodeAnyFrameType {
 struct AstNode {
     enum NodeType type;
     TokenIndex main_token;
-    bool already_traced_this_node;
     ZigType *owner;
     union {
         AstNodeFnDef fn_def;
@@ -1713,9 +1714,12 @@ struct ZigFn {
 
     bool calls_or_awaits_errorable_fn;
     bool is_cold;
-    bool is_test;
     bool is_noinline;
 };
+
+static inline bool fn_is_test(const ZigFn *fn) {
+    return fn->proto_node->type == NodeTypeTestDecl;
+}
 
 uint32_t fn_table_entry_hash(ZigFn*);
 bool fn_table_entry_eql(ZigFn *a, ZigFn *b);
@@ -2090,6 +2094,7 @@ struct CodeGen {
         ZigType *entry_f16;
         ZigType *entry_f32;
         ZigType *entry_f64;
+        ZigType *entry_f80;
         ZigType *entry_f128;
         ZigType *entry_void;
         ZigType *entry_unreachable;
@@ -2104,6 +2109,7 @@ struct CodeGen {
         ZigType *entry_global_error_set;
         ZigType *entry_enum_literal;
         ZigType *entry_any_frame;
+        ZigType *entry_opt_ptr_const_anyopaque;
     } builtin_types;
 
     struct Intern {

@@ -275,7 +275,9 @@ pub fn zeroes(comptime T: type) T {
             } else {
                 var structure: T = undefined;
                 inline for (struct_info.fields) |field| {
-                    @field(structure, field.name) = zeroes(@TypeOf(@field(structure, field.name)));
+                    if (!field.is_comptime) {
+                        @field(structure, field.name) = zeroes(@TypeOf(@field(structure, field.name)));
+                    }
                 }
                 return structure;
             }
@@ -294,7 +296,8 @@ pub fn zeroes(comptime T: type) T {
             }
         },
         .Array => |info| {
-            if (info.sentinel) |sentinel| {
+            if (info.sentinel) |sentinel_ptr| {
+                const sentinel = @ptrCast(*const info.child, sentinel_ptr).*;
                 return [_:sentinel]info.child{zeroes(info.child)} ** info.len;
             }
             return [_]info.child{zeroes(info.child)} ** info.len;
@@ -306,9 +309,7 @@ pub fn zeroes(comptime T: type) T {
             if (comptime meta.containerLayout(T) == .Extern) {
                 // The C language specification states that (global) unions
                 // should be zero initialized to the first named member.
-                var item: T = undefined;
-                @field(item, info.fields[0].name) = zeroes(@TypeOf(@field(item, info.fields[0].name)));
-                return item;
+                return @unionInit(T, info.fields[0].name, zeroes(info.fields[0].field_type));
             }
 
             @compileError("Can't set a " ++ @typeName(T) ++ " to zero.");
@@ -342,6 +343,8 @@ test "mem.zeroes" {
     try testing.expect(a.y == 10);
 
     const ZigStruct = struct {
+        comptime comptime_field: u8 = 5,
+
         integral_types: struct {
             integer_0: i0,
             integer_8: i8,
@@ -376,6 +379,7 @@ test "mem.zeroes" {
     };
 
     const b = zeroes(ZigStruct);
+    try testing.expectEqual(@as(u8, 5), b.comptime_field);
     try testing.expectEqual(@as(i8, 0), b.integral_types.integer_0);
     try testing.expectEqual(@as(i8, 0), b.integral_types.integer_8);
     try testing.expectEqual(@as(i16, 0), b.integral_types.integer_16);
@@ -411,6 +415,9 @@ test "mem.zeroes" {
 
     var c = zeroes(C_union);
     try testing.expectEqual(@as(u8, 0), c.a);
+
+    comptime var comptime_union = zeroes(C_union);
+    try testing.expectEqual(@as(u8, 0), comptime_union.a);
 }
 
 /// Initializes all fields of the struct with their default value, or zero values if no default value is present.
@@ -448,7 +455,8 @@ pub fn zeroInit(comptime T: type, init: anytype) T {
                                     @field(value, field.name) = @field(init, field.name);
                                 },
                             }
-                        } else if (field.default_value) |default_value| {
+                        } else if (field.default_value) |default_value_ptr| {
+                            const default_value = @ptrCast(*const field.field_type, default_value_ptr).*;
                             @field(value, field.name) = default_value;
                         }
                     }
@@ -594,7 +602,7 @@ pub fn Span(comptime T: type) type {
                     else => @compileError("invalid type given to std.mem.Span"),
                 },
                 .C => {
-                    new_ptr_info.sentinel = 0;
+                    new_ptr_info.sentinel = &@as(ptr_info.child, 0);
                     new_ptr_info.is_allowzero = false;
                 },
                 .Many, .Slice => {},
@@ -646,7 +654,9 @@ pub fn span(ptr: anytype) Span(@TypeOf(ptr)) {
     }
     const Result = Span(@TypeOf(ptr));
     const l = len(ptr);
-    if (@typeInfo(Result).Pointer.sentinel) |s| {
+    const ptr_info = @typeInfo(Result).Pointer;
+    if (ptr_info.sentinel) |s_ptr| {
+        const s = @ptrCast(*const ptr_info.child, s_ptr).*;
         return ptr[0..l :s];
     } else {
         return ptr[0..l];
@@ -679,9 +689,10 @@ fn SliceTo(comptime T: type, comptime end: meta.Elem(T)) type {
                         // The return type must only be sentinel terminated if we are guaranteed
                         // to find the value searched for, which is only the case if it matches
                         // the sentinel of the type passed.
-                        if (array_info.sentinel) |sentinel| {
+                        if (array_info.sentinel) |sentinel_ptr| {
+                            const sentinel = @ptrCast(*const array_info.child, sentinel_ptr).*;
                             if (end == sentinel) {
-                                new_ptr_info.sentinel = end;
+                                new_ptr_info.sentinel = &end;
                             } else {
                                 new_ptr_info.sentinel = null;
                             }
@@ -693,16 +704,17 @@ fn SliceTo(comptime T: type, comptime end: meta.Elem(T)) type {
                     // The return type must only be sentinel terminated if we are guaranteed
                     // to find the value searched for, which is only the case if it matches
                     // the sentinel of the type passed.
-                    if (ptr_info.sentinel) |sentinel| {
+                    if (ptr_info.sentinel) |sentinel_ptr| {
+                        const sentinel = @ptrCast(*const ptr_info.child, sentinel_ptr).*;
                         if (end == sentinel) {
-                            new_ptr_info.sentinel = end;
+                            new_ptr_info.sentinel = &end;
                         } else {
                             new_ptr_info.sentinel = null;
                         }
                     }
                 },
                 .C => {
-                    new_ptr_info.sentinel = end;
+                    new_ptr_info.sentinel = &end;
                     // C pointers are always allowzero, but we don't want the return type to be.
                     assert(new_ptr_info.is_allowzero);
                     new_ptr_info.is_allowzero = false;
@@ -715,7 +727,7 @@ fn SliceTo(comptime T: type, comptime end: meta.Elem(T)) type {
     @compileError("invalid type given to std.mem.sliceTo: " ++ @typeName(T));
 }
 
-/// Takes a pointer to an array, an array, a sentinel-terminated pointer, or a slice and
+/// Takes an array, a pointer to an array, a sentinel-terminated pointer, or a slice and
 /// iterates searching for the first occurrence of `end`, returning the scanned slice.
 /// If `end` is not found, the full length of the array/slice/sentinel terminated pointer is returned.
 /// If the pointer type is sentinel terminated and `end` matches that terminator, the
@@ -729,7 +741,9 @@ pub fn sliceTo(ptr: anytype, comptime end: meta.Elem(@TypeOf(ptr))) SliceTo(@Typ
     }
     const Result = SliceTo(@TypeOf(ptr), end);
     const length = lenSliceTo(ptr, end);
-    if (@typeInfo(Result).Pointer.sentinel) |s| {
+    const ptr_info = @typeInfo(Result).Pointer;
+    if (ptr_info.sentinel) |s_ptr| {
+        const s = @ptrCast(*const ptr_info.child, s_ptr).*;
         return ptr[0..length :s];
     } else {
         return ptr[0..length];
@@ -781,7 +795,8 @@ fn lenSliceTo(ptr: anytype, comptime end: meta.Elem(@TypeOf(ptr))) usize {
         .Pointer => |ptr_info| switch (ptr_info.size) {
             .One => switch (@typeInfo(ptr_info.child)) {
                 .Array => |array_info| {
-                    if (array_info.sentinel) |sentinel| {
+                    if (array_info.sentinel) |sentinel_ptr| {
+                        const sentinel = @ptrCast(*const array_info.child, sentinel_ptr).*;
                         if (sentinel == end) {
                             return indexOfSentinel(array_info.child, end, ptr);
                         }
@@ -790,7 +805,8 @@ fn lenSliceTo(ptr: anytype, comptime end: meta.Elem(@TypeOf(ptr))) usize {
                 },
                 else => {},
             },
-            .Many => if (ptr_info.sentinel) |sentinel| {
+            .Many => if (ptr_info.sentinel) |sentinel_ptr| {
+                const sentinel = @ptrCast(*const ptr_info.child, sentinel_ptr).*;
                 // We may be looking for something other than the sentinel,
                 // but iterating past the sentinel would be a bug so we need
                 // to check for both.
@@ -803,7 +819,8 @@ fn lenSliceTo(ptr: anytype, comptime end: meta.Elem(@TypeOf(ptr))) usize {
                 return indexOfSentinel(ptr_info.child, end, ptr);
             },
             .Slice => {
-                if (ptr_info.sentinel) |sentinel| {
+                if (ptr_info.sentinel) |sentinel_ptr| {
+                    const sentinel = @ptrCast(*const ptr_info.child, sentinel_ptr).*;
                     if (sentinel == end) {
                         return indexOfSentinel(ptr_info.child, sentinel, ptr);
                     }
@@ -862,10 +879,12 @@ pub fn len(value: anytype) usize {
                 .Array => value.len,
                 else => @compileError("invalid type given to std.mem.len"),
             },
-            .Many => if (info.sentinel) |sentinel|
-                indexOfSentinel(info.child, sentinel, value)
-            else
-                @compileError("length of pointer with no sentinel"),
+            .Many => {
+                const sentinel_ptr = info.sentinel orelse
+                    @compileError("length of pointer with no sentinel");
+                const sentinel = @ptrCast(*const info.child, sentinel_ptr).*;
+                return indexOfSentinel(info.child, sentinel, value);
+            },
             .C => {
                 assert(value != null);
                 return indexOfSentinel(info.child, 0, value);
@@ -1517,16 +1536,19 @@ test "writeIntBig and writeIntLittle" {
     try testing.expect(eql(u8, buf2[0..], &[_]u8{ 0xfc, 0xff }));
 }
 
+/// TODO delete this deprecated declaration after 0.10.0 is released
+pub const bswapAllFields = @compileError("bswapAllFields has been renamed to byteSwapAllFields");
+
 /// Swap the byte order of all the members of the fields of a struct
 /// (Changing their endianess)
-pub fn bswapAllFields(comptime S: type, ptr: *S) void {
-    if (@typeInfo(S) != .Struct) @compileError("bswapAllFields expects a struct as the first argument");
+pub fn byteSwapAllFields(comptime S: type, ptr: *S) void {
+    if (@typeInfo(S) != .Struct) @compileError("byteSwapAllFields expects a struct as the first argument");
     inline for (std.meta.fields(S)) |f| {
         @field(ptr, f.name) = @byteSwap(f.field_type, @field(ptr, f.name));
     }
 }
 
-test "bswapAllFields" {
+test "byteSwapAllFields" {
     const T = extern struct {
         f0: u8,
         f1: u16,
@@ -1537,7 +1559,7 @@ test "bswapAllFields" {
         .f1 = 0x1234,
         .f2 = 0x12345678,
     };
-    bswapAllFields(T, &s);
+    byteSwapAllFields(T, &s);
     try std.testing.expectEqual(T{
         .f0 = 0x12,
         .f1 = 0x3412,
@@ -2138,6 +2160,7 @@ fn testWriteIntImpl() !void {
 /// Returns the smallest number in a slice. O(n).
 /// `slice` must not be empty.
 pub fn min(comptime T: type, slice: []const T) T {
+    assert(slice.len > 0);
     var best = slice[0];
     for (slice[1..]) |item| {
         best = math.min(best, item);
@@ -2146,12 +2169,15 @@ pub fn min(comptime T: type, slice: []const T) T {
 }
 
 test "mem.min" {
-    try testing.expect(min(u8, "abcdefg") == 'a');
+    try testing.expectEqual(min(u8, "abcdefg"), 'a');
+    try testing.expectEqual(min(u8, "bcdefga"), 'a');
+    try testing.expectEqual(min(u8, "a"), 'a');
 }
 
 /// Returns the largest number in a slice. O(n).
 /// `slice` must not be empty.
 pub fn max(comptime T: type, slice: []const T) T {
+    assert(slice.len > 0);
     var best = slice[0];
     for (slice[1..]) |item| {
         best = math.max(best, item);
@@ -2160,7 +2186,99 @@ pub fn max(comptime T: type, slice: []const T) T {
 }
 
 test "mem.max" {
-    try testing.expect(max(u8, "abcdefg") == 'g');
+    try testing.expectEqual(max(u8, "abcdefg"), 'g');
+    try testing.expectEqual(max(u8, "gabcdef"), 'g');
+    try testing.expectEqual(max(u8, "g"), 'g');
+}
+
+/// Finds the smallest and largest number in a slice. O(n).
+/// Returns an anonymous struct with the fields `min` and `max`.
+/// `slice` must not be empty.
+pub fn minMax(comptime T: type, slice: []const T) struct { min: T, max: T } {
+    assert(slice.len > 0);
+    var minVal = slice[0];
+    var maxVal = slice[0];
+    for (slice[1..]) |item| {
+        minVal = math.min(minVal, item);
+        maxVal = math.max(maxVal, item);
+    }
+    return .{ .min = minVal, .max = maxVal };
+}
+
+test "mem.minMax" {
+    try testing.expectEqual(minMax(u8, "abcdefg"), .{ .min = 'a', .max = 'g' });
+    try testing.expectEqual(minMax(u8, "bcdefga"), .{ .min = 'a', .max = 'g' });
+    try testing.expectEqual(minMax(u8, "a"), .{ .min = 'a', .max = 'a' });
+}
+
+/// Returns the index of the smallest number in a slice. O(n).
+/// `slice` must not be empty.
+pub fn indexOfMin(comptime T: type, slice: []const T) usize {
+    assert(slice.len > 0);
+    var best = slice[0];
+    var index: usize = 0;
+    for (slice[1..]) |item, i| {
+        if (item < best) {
+            best = item;
+            index = i + 1;
+        }
+    }
+    return index;
+}
+
+test "mem.indexOfMin" {
+    try testing.expectEqual(indexOfMin(u8, "abcdefg"), 0);
+    try testing.expectEqual(indexOfMin(u8, "bcdefga"), 6);
+    try testing.expectEqual(indexOfMin(u8, "a"), 0);
+}
+
+/// Returns the index of the largest number in a slice. O(n).
+/// `slice` must not be empty.
+pub fn indexOfMax(comptime T: type, slice: []const T) usize {
+    assert(slice.len > 0);
+    var best = slice[0];
+    var index: usize = 0;
+    for (slice[1..]) |item, i| {
+        if (item > best) {
+            best = item;
+            index = i + 1;
+        }
+    }
+    return index;
+}
+
+test "mem.indexOfMax" {
+    try testing.expectEqual(indexOfMax(u8, "abcdefg"), 6);
+    try testing.expectEqual(indexOfMax(u8, "gabcdef"), 0);
+    try testing.expectEqual(indexOfMax(u8, "a"), 0);
+}
+
+/// Finds the indices of the smallest and largest number in a slice. O(n).
+/// Returns an anonymous struct with the fields `index_min` and `index_max`.
+/// `slice` must not be empty.
+pub fn indexOfMinMax(comptime T: type, slice: []const T) struct { index_min: usize, index_max: usize } {
+    assert(slice.len > 0);
+    var minVal = slice[0];
+    var maxVal = slice[0];
+    var minIdx: usize = 0;
+    var maxIdx: usize = 0;
+    for (slice[1..]) |item, i| {
+        if (item < minVal) {
+            minVal = item;
+            minIdx = i + 1;
+        }
+        if (item > maxVal) {
+            maxVal = item;
+            maxIdx = i + 1;
+        }
+    }
+    return .{ .index_min = minIdx, .index_max = maxIdx };
+}
+
+test "mem.indexOfMinMax" {
+    try testing.expectEqual(indexOfMinMax(u8, "abcdefg"), .{ .index_min = 0, .index_max = 6 });
+    try testing.expectEqual(indexOfMinMax(u8, "gabcdef"), .{ .index_min = 1, .index_max = 0 });
+    try testing.expectEqual(indexOfMinMax(u8, "a"), .{ .index_min = 0, .index_max = 0 });
 }
 
 pub fn swap(comptime T: type, a: *T, b: *T) void {
@@ -2468,7 +2586,11 @@ test "alignPointer" {
     try S.checkAlign([*]u32, math.maxInt(usize) - 3, 8, 0);
 }
 
-fn CopyPtrAttrs(comptime source: type, comptime size: std.builtin.TypeInfo.Pointer.Size, comptime child: type) type {
+fn CopyPtrAttrs(
+    comptime source: type,
+    comptime size: std.builtin.TypeInfo.Pointer.Size,
+    comptime child: type,
+) type {
     const info = @typeInfo(source).Pointer;
     return @Type(.{
         .Pointer = .{

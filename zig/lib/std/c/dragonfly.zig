@@ -185,6 +185,12 @@ pub const MAP = struct {
     pub const SIZEALIGN = 262144;
 };
 
+pub const MSF = struct {
+    pub const ASYNC = 1;
+    pub const INVALIDATE = 2;
+    pub const SYNC = 4;
+};
+
 pub const W = struct {
     pub const NOHANG = 0x0001;
     pub const UNTRACED = 0x0002;
@@ -923,11 +929,11 @@ pub const LOCK = struct {
 };
 
 pub const Flock = extern struct {
-    l_start: off_t,
-    l_len: off_t,
-    l_pid: pid_t,
-    l_type: c_short,
-    l_whence: c_short,
+    start: off_t,
+    len: off_t,
+    pid: pid_t,
+    type: c_short,
+    whence: c_short,
 };
 
 pub const addrinfo = extern struct {

@@ -23,29 +23,29 @@ pub fn main() !void {
 
     const allocator = arena.allocator();
 
-    var args_it = process.args();
+    var args_it = try process.argsWithAllocator(allocator);
 
     if (!args_it.skip()) @panic("expected self arg");
 
-    const zig_exe = try (args_it.next(allocator) orelse @panic("expected zig exe arg"));
+    const zig_exe = args_it.next() orelse @panic("expected zig exe arg");
     defer allocator.free(zig_exe);
 
-    const in_file_name = try (args_it.next(allocator) orelse @panic("expected input arg"));
+    const in_file_name = args_it.next() orelse @panic("expected input arg");
     defer allocator.free(in_file_name);
 
-    const out_file_name = try (args_it.next(allocator) orelse @panic("expected output arg"));
+    const out_file_name = args_it.next() orelse @panic("expected output arg");
     defer allocator.free(out_file_name);
 
     var do_code_tests = true;
-    if (args_it.next(allocator)) |arg| {
-        if (mem.eql(u8, try arg, "--skip-code-tests")) {
+    if (args_it.next()) |arg| {
+        if (mem.eql(u8, arg, "--skip-code-tests")) {
             do_code_tests = false;
         } else {
             @panic("unrecognized arg");
         }
     }
 
-    var in_file = try fs.cwd().openFile(in_file_name, .{ .read = true });
+    var in_file = try fs.cwd().openFile(in_file_name, .{ .mode = .read_only });
     defer in_file.close();
 
     var out_file = try fs.cwd().createFile(out_file_name, .{});
@@ -1196,7 +1196,7 @@ fn genHtml(
     do_code_tests: bool,
 ) !void {
     var progress = Progress{};
-    const root_node = try progress.start("Generating docgen examples", toc.nodes.len);
+    const root_node = progress.start("Generating docgen examples", toc.nodes.len);
     defer root_node.end();
 
     var env_map = try process.getEnvMap(allocator);
@@ -1866,7 +1866,7 @@ test "shell parsed" {
         // intentional space after "--build-option1 \"
         const shell_out =
             \\$ zig build test.zig \
-            \\ --build-option1 \ 
+            \\ --build-option1 \
             \\ --build-option2
             \\$ ./test
         ;

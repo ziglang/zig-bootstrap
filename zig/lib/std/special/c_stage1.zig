@@ -161,32 +161,6 @@ test "strncmp" {
     try std.testing.expect(strncmp("\xff", "\x02", 1) == 253);
 }
 
-export fn memset(dest: ?[*]u8, c: u8, n: usize) callconv(.C) ?[*]u8 {
-    @setRuntimeSafety(false);
-
-    var index: usize = 0;
-    while (index != n) : (index += 1)
-        dest.?[index] = c;
-
-    return dest;
-}
-
-export fn __memset(dest: ?[*]u8, c: u8, n: usize, dest_n: usize) callconv(.C) ?[*]u8 {
-    if (dest_n < n)
-        @panic("buffer overflow");
-    return memset(dest, c, n);
-}
-
-export fn memcpy(noalias dest: ?[*]u8, noalias src: ?[*]const u8, n: usize) callconv(.C) ?[*]u8 {
-    @setRuntimeSafety(false);
-
-    var index: usize = 0;
-    while (index != n) : (index += 1)
-        dest.?[index] = src.?[index];
-
-    return dest;
-}
-
 export fn memmove(dest: ?[*]u8, src: ?[*]const u8, n: usize) callconv(.C) ?[*]u8 {
     @setRuntimeSafety(false);
 
@@ -639,19 +613,6 @@ export fn fmod(x: f64, y: f64) f64 {
     return generic_fmod(f64, x, y);
 }
 
-export fn ceilf(x: f32) f32 {
-    return math.ceil(x);
-}
-export fn ceil(x: f64) f64 {
-    return math.ceil(x);
-}
-export fn ceill(x: c_longdouble) c_longdouble {
-    if (!long_double_is_f128) {
-        @panic("TODO implement this");
-    }
-    return math.ceil(x);
-}
-
 export fn fmaf(a: f32, b: f32, c: f32) f32 {
     return math.fma(f32, a, b, c);
 }
@@ -666,22 +627,6 @@ export fn fmal(a: c_longdouble, b: c_longdouble, c: c_longdouble) c_longdouble {
     return math.fma(c_longdouble, a, b, c);
 }
 
-export fn sin(a: f64) f64 {
-    return math.sin(a);
-}
-
-export fn sinf(a: f32) f32 {
-    return math.sin(a);
-}
-
-export fn cos(a: f64) f64 {
-    return math.cos(a);
-}
-
-export fn cosf(a: f32) f32 {
-    return math.cos(a);
-}
-
 export fn sincos(a: f64, r_sin: *f64, r_cos: *f64) void {
     r_sin.* = math.sin(a);
     r_cos.* = math.cos(a);
@@ -692,67 +637,12 @@ export fn sincosf(a: f32, r_sin: *f32, r_cos: *f32) void {
     r_cos.* = math.cos(a);
 }
 
-export fn exp(a: f64) f64 {
-    return math.exp(a);
-}
-
-export fn expf(a: f32) f32 {
-    return math.exp(a);
-}
-
-export fn exp2(a: f64) f64 {
-    return math.exp2(a);
-}
-
-export fn exp2f(a: f32) f32 {
-    return math.exp2(a);
-}
-
-export fn log(a: f64) f64 {
-    return math.ln(a);
-}
-
-export fn logf(a: f32) f32 {
-    return math.ln(a);
-}
-
-export fn log2(a: f64) f64 {
-    return math.log2(a);
-}
-
-export fn log2f(a: f32) f32 {
-    return math.log2(a);
-}
-
-export fn log10(a: f64) f64 {
-    return math.log10(a);
-}
-
-export fn log10f(a: f32) f32 {
-    return math.log10(a);
-}
-
 export fn fabs(a: f64) f64 {
     return math.fabs(a);
 }
 
 export fn fabsf(a: f32) f32 {
     return math.fabs(a);
-}
-
-export fn trunc(a: f64) f64 {
-    return math.trunc(a);
-}
-
-export fn truncf(a: f32) f32 {
-    return math.trunc(a);
-}
-
-export fn truncl(a: c_longdouble) c_longdouble {
-    if (!long_double_is_f128) {
-        @panic("TODO implement this");
-    }
-    return math.trunc(a);
 }
 
 export fn round(a: f64) f64 {

@@ -328,7 +328,7 @@ pub fn addCases(ctx: *TestContext) !void {
                 .macos => {
                     // While loops
                     case.addCompareOutput(
-                        \\extern fn write(usize, usize, usize) usize;
+                        \\extern "c" fn write(usize, usize, usize) usize;
                         \\
                         \\pub fn main() void {
                         \\    var i: u32 = 0;
@@ -349,7 +349,7 @@ pub fn addCases(ctx: *TestContext) !void {
 
                     // inline while requires the condition to be comptime known.
                     case.addError(
-                        \\extern fn write(usize, usize, usize) usize;
+                        \\extern "c" fn write(usize, usize, usize) usize;
                         \\
                         \\pub fn main() void {
                         \\    var i: u32 = 0;
@@ -652,7 +652,7 @@ pub fn addCases(ctx: *TestContext) !void {
                 .macos => {
                     // Basic for loop
                     case.addCompareOutput(
-                        \\extern fn write(usize, usize, usize) usize;
+                        \\extern "c" fn write(usize, usize, usize) usize;
                         \\
                         \\pub fn main() void {
                         \\    for ("hello") |_| print();
@@ -736,7 +736,7 @@ pub fn addCases(ctx: *TestContext) !void {
                 }),
                 .macos => try case.files.append(.{
                     .src = 
-                    \\extern fn write(usize, usize, usize) usize;
+                    \\extern "c" fn write(usize, usize, usize) usize;
                     \\
                     \\pub fn print() void {
                     \\    _ = write(1, @ptrToInt("Hello, World!\n"), 14);
@@ -814,7 +814,7 @@ pub fn addCases(ctx: *TestContext) !void {
                 }),
                 .macos => try case.files.append(.{
                     .src = 
-                    \\extern fn write(usize, usize, usize) usize;
+                    \\extern "c" fn write(usize, usize, usize) usize;
                     \\fn print() void {
                     \\    _ = write(1, @ptrToInt("Hello, World!\n"), 14);
                     \\}
@@ -1478,7 +1478,7 @@ pub fn addCases(ctx: *TestContext) !void {
                     \\}
                 , "HelloHello, World!\n"),
                 .macos => case.addCompareOutput(
-                    \\extern fn write(usize, usize, usize) usize;
+                    \\extern "c" fn write(usize, usize, usize) usize;
                     \\
                     \\pub fn main() void {
                     \\    comptime var len: u32 = 5;
@@ -1550,7 +1550,7 @@ pub fn addCases(ctx: *TestContext) !void {
                     \\}
                 , "HeHelHellHello"),
                 .macos => case.addCompareOutput(
-                    \\extern fn write(usize, usize, usize) usize;
+                    \\extern "c" fn write(usize, usize, usize) usize;
                     \\
                     \\pub fn main() void {
                     \\    comptime var i: u64 = 2;
@@ -1603,6 +1603,334 @@ pub fn addCases(ctx: *TestContext) !void {
             , &[_][]const u8{
                 ":2:28: error: cannot set address space of local variable 'foo'",
             });
+        }
+
+        {
+            var case = ctx.exe("saving vars of different ABI size to stack", target);
+
+            case.addCompareOutput(
+                \\pub fn main() void {
+                \\    assert(callMe(2) == 24);
+                \\}
+                \\
+                \\fn callMe(a: u8) u8 {
+                \\    var b: u8 = a + 10;
+                \\    const c = 2 * b;
+                \\    return c;
+                \\}
+                \\
+                \\pub fn assert(ok: bool) void {
+                \\    if (!ok) unreachable; // assertion failure
+                \\}
+            ,
+                "",
+            );
+
+            case.addCompareOutput(
+                \\pub fn main() void {
+                \\    assert(callMe(2) == 24);
+                \\}
+                \\
+                \\fn callMe(a: u16) u16 {
+                \\    var b: u16 = a + 10;
+                \\    const c = 2 * b;
+                \\    return c;
+                \\}
+                \\
+                \\pub fn assert(ok: bool) void {
+                \\    if (!ok) unreachable; // assertion failure
+                \\}
+            ,
+                "",
+            );
+
+            case.addCompareOutput(
+                \\pub fn main() void {
+                \\    assert(callMe(2) == 24);
+                \\}
+                \\
+                \\fn callMe(a: u32) u32 {
+                \\    var b: u32 = a + 10;
+                \\    const c = 2 * b;
+                \\    return c;
+                \\}
+                \\
+                \\pub fn assert(ok: bool) void {
+                \\    if (!ok) unreachable; // assertion failure
+                \\}
+            ,
+                "",
+            );
+        }
+        {
+            var case = ctx.exe("issue 7187: miscompilation with bool return type", target);
+            case.addCompareOutput(
+                \\pub fn main() void {
+                \\    var x: usize = 1;
+                \\    var y: bool = getFalse();
+                \\    _ = y;
+                \\
+                \\    assert(x == 1);
+                \\}
+                \\
+                \\fn getFalse() bool {
+                \\    return false;
+                \\}
+                \\
+                \\fn assert(ok: bool) void {
+                \\    if (!ok) unreachable;
+                \\}
+            , "");
+        }
+
+        {
+            var case = ctx.exe("load-store via pointer deref", target);
+            case.addCompareOutput(
+                \\pub fn main() void {
+                \\    var x: u32 = undefined;
+                \\    set(&x);
+                \\    assert(x == 123);
+                \\}
+                \\
+                \\fn set(x: *u32) void {
+                \\    x.* = 123;
+                \\}
+                \\
+                \\fn assert(ok: bool) void {
+                \\    if (!ok) unreachable;
+                \\}
+            , "");
+            case.addCompareOutput(
+                \\pub fn main() void {
+                \\    var x: u16 = undefined;
+                \\    set(&x);
+                \\    assert(x == 123);
+                \\}
+                \\
+                \\fn set(x: *u16) void {
+                \\    x.* = 123;
+                \\}
+                \\
+                \\fn assert(ok: bool) void {
+                \\    if (!ok) unreachable;
+                \\}
+            , "");
+            case.addCompareOutput(
+                \\pub fn main() void {
+                \\    var x: u8 = undefined;
+                \\    set(&x);
+                \\    assert(x == 123);
+                \\}
+                \\
+                \\fn set(x: *u8) void {
+                \\    x.* = 123;
+                \\}
+                \\
+                \\fn assert(ok: bool) void {
+                \\    if (!ok) unreachable;
+                \\}
+            , "");
+        }
+
+        {
+            var case = ctx.exe("optional payload", target);
+            case.addCompareOutput(
+                \\pub fn main() void {
+                \\    var x: u32 = undefined;
+                \\    const maybe_x = byPtr(&x);
+                \\    assert(maybe_x != null);
+                \\    maybe_x.?.* = 123;
+                \\    assert(x == 123);
+                \\}
+                \\
+                \\fn byPtr(x: *u32) ?*u32 {
+                \\    return x;
+                \\}
+                \\
+                \\fn assert(ok: bool) void {
+                \\    if (!ok) unreachable;
+                \\}
+            , "");
+            case.addCompareOutput(
+                \\pub fn main() void {
+                \\    var x: u32 = undefined;
+                \\    const maybe_x = byPtr(&x);
+                \\    assert(maybe_x == null);
+                \\}
+                \\
+                \\fn byPtr(x: *u32) ?*u32 {
+                \\    _ = x;
+                \\    return null;
+                \\}
+                \\
+                \\fn assert(ok: bool) void {
+                \\    if (!ok) unreachable;
+                \\}
+            , "");
+            case.addCompareOutput(
+                \\pub fn main() void {
+                \\    var x: u8 = undefined;
+                \\    const maybe_x = byPtr(&x);
+                \\    assert(maybe_x != null);
+                \\    maybe_x.?.* = 255;
+                \\    assert(x == 255);
+                \\}
+                \\
+                \\fn byPtr(x: *u8) ?*u8 {
+                \\    return x;
+                \\}
+                \\
+                \\fn assert(ok: bool) void {
+                \\    if (!ok) unreachable;
+                \\}
+            , "");
+            case.addCompareOutput(
+                \\pub fn main() void {
+                \\    var x: i8 = undefined;
+                \\    const maybe_x = byPtr(&x);
+                \\    assert(maybe_x != null);
+                \\    maybe_x.?.* = -1;
+                \\    assert(x == -1);
+                \\}
+                \\
+                \\fn byPtr(x: *i8) ?*i8 {
+                \\    return x;
+                \\}
+                \\
+                \\fn assert(ok: bool) void {
+                \\    if (!ok) unreachable;
+                \\}
+            , "");
+        }
+
+        {
+            var case = ctx.exe("unwrap error union - simple errors", target);
+            case.addCompareOutput(
+                \\pub fn main() void {
+                \\    maybeErr() catch unreachable;
+                \\}
+                \\
+                \\fn maybeErr() !void {
+                \\    return;
+                \\}
+            , "");
+            case.addCompareOutput(
+                \\pub fn main() void {
+                \\    maybeErr() catch return;
+                \\    unreachable;
+                \\}
+                \\
+                \\fn maybeErr() !void {
+                \\    return error.NoWay;
+                \\}
+            , "");
+        }
+
+        {
+            var case = ctx.exe("access slice element by index - slice_elem_val", target);
+            case.addCompareOutput(
+                \\var array = [_]usize{ 0, 42, 123, 34 };
+                \\var slice: []const usize = &array;
+                \\
+                \\pub fn main() void {
+                \\    assert(slice[0] == 0);
+                \\    assert(slice[1] == 42);
+                \\    assert(slice[2] == 123);
+                \\    assert(slice[3] == 34);
+                \\}
+                \\
+                \\fn assert(ok: bool) void {
+                \\    if (!ok) unreachable;
+                \\}
+            , "");
+        }
+
+        {
+            var case = ctx.exe("lower unnamed constants - structs", target);
+            case.addCompareOutput(
+                \\const Foo = struct {
+                \\    a: u8,
+                \\    b: u32,
+                \\
+                \\    fn first(self: *Foo) u8 {
+                \\        return self.a;
+                \\    }
+                \\
+                \\    fn second(self: *Foo) u32 {
+                \\        return self.b;
+                \\    }
+                \\};
+                \\
+                \\pub fn main() void {
+                \\    var foo = Foo{ .a = 1, .b = 5 };
+                \\    assert(foo.first() == 1);
+                \\    assert(foo.second() == 5);
+                \\}
+                \\
+                \\fn assert(ok: bool) void {
+                \\    if (!ok) unreachable;
+                \\}
+            , "");
+
+            case.addCompareOutput(
+                \\const Foo = struct {
+                \\    a: u8,
+                \\    b: u32,
+                \\
+                \\    fn first(self: *Foo) u8 {
+                \\        return self.a;
+                \\    }
+                \\
+                \\    fn second(self: *Foo) u32 {
+                \\        return self.b;
+                \\    }
+                \\};
+                \\
+                \\pub fn main() void {
+                \\    var foo = Foo{ .a = 1, .b = 5 };
+                \\    assert(foo.first() == 1);
+                \\    assert(foo.second() == 5);
+                \\
+                \\    foo.a = 10;
+                \\    foo.b = 255;
+                \\
+                \\    assert(foo.first() == 10);
+                \\    assert(foo.second() == 255);
+                \\
+                \\    var foo2 = Foo{ .a = 15, .b = 255 };
+                \\    assert(foo2.first() == 15);
+                \\    assert(foo2.second() == 255);
+                \\}
+                \\
+                \\fn assert(ok: bool) void {
+                \\    if (!ok) unreachable;
+                \\}
+            , "");
+
+            case.addCompareOutput(
+                \\const Foo = struct {
+                \\    a: u8,
+                \\    b: u32,
+                \\
+                \\    fn first(self: *Foo) u8 {
+                \\        return self.a;
+                \\    }
+                \\
+                \\    fn second(self: *Foo) u32 {
+                \\        return self.b;
+                \\    }
+                \\};
+                \\
+                \\pub fn main() void {
+                \\    var foo2 = Foo{ .a = 15, .b = 255 };
+                \\    assert(foo2.first() == 15);
+                \\    assert(foo2.second() == 255);
+                \\}
+                \\
+                \\fn assert(ok: bool) void {
+                \\    if (!ok) unreachable;
+                \\}
+            , "");
         }
     }
 }
@@ -1877,8 +2205,8 @@ fn addMacOsTestCases(ctx: *TestContext) !void {
 
         // Regular old hello world
         case.addCompareOutput(
-            \\extern fn write(usize, usize, usize) usize;
-            \\extern fn exit(usize) noreturn;
+            \\extern "c" fn write(usize, usize, usize) usize;
+            \\extern "c" fn exit(usize) noreturn;
             \\
             \\pub export fn main() noreturn {
             \\    print();
@@ -1897,7 +2225,7 @@ fn addMacOsTestCases(ctx: *TestContext) !void {
 
         // Now using start.zig without an explicit extern exit fn
         case.addCompareOutput(
-            \\extern fn write(usize, usize, usize) usize;
+            \\extern "c" fn write(usize, usize, usize) usize;
             \\
             \\pub fn main() void {
             \\    print();
@@ -1914,7 +2242,7 @@ fn addMacOsTestCases(ctx: *TestContext) !void {
 
         // Print it 4 times and force growth and realloc.
         case.addCompareOutput(
-            \\extern fn write(usize, usize, usize) usize;
+            \\extern "c" fn write(usize, usize, usize) usize;
             \\
             \\pub fn main() void {
             \\    print();
@@ -1938,7 +2266,7 @@ fn addMacOsTestCases(ctx: *TestContext) !void {
 
         // Print it once, and change the message.
         case.addCompareOutput(
-            \\extern fn write(usize, usize, usize) usize;
+            \\extern "c" fn write(usize, usize, usize) usize;
             \\
             \\pub fn main() void {
             \\    print();
@@ -1955,7 +2283,7 @@ fn addMacOsTestCases(ctx: *TestContext) !void {
 
         // Now we print it twice.
         case.addCompareOutput(
-            \\extern fn write(usize, usize, usize) usize;
+            \\extern "c" fn write(usize, usize, usize) usize;
             \\
             \\pub fn main() void {
             \\    print();

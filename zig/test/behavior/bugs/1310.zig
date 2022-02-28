@@ -1,5 +1,6 @@
 const std = @import("std");
 const expect = std.testing.expect;
+const builtin = @import("builtin");
 
 pub const VM = ?[*]const struct_InvocationTable_;
 pub const struct_InvocationTable_ = extern struct {

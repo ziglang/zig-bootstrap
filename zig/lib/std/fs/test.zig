@@ -180,6 +180,39 @@ test "Dir.Iterator" {
     try testing.expect(contains(&entries, Dir.Entry{ .name = "some_dir", .kind = Dir.Entry.Kind.Directory }));
 }
 
+test "Dir.Iterator twice" {
+    var tmp_dir = tmpDir(.{ .iterate = true });
+    defer tmp_dir.cleanup();
+
+    // First, create a couple of entries to iterate over.
+    const file = try tmp_dir.dir.createFile("some_file", .{});
+    file.close();
+
+    try tmp_dir.dir.makeDir("some_dir");
+
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    var i: u8 = 0;
+    while (i < 2) : (i += 1) {
+        var entries = std.ArrayList(Dir.Entry).init(allocator);
+
+        // Create iterator.
+        var iter = tmp_dir.dir.iterate();
+        while (try iter.next()) |entry| {
+            // We cannot just store `entry` as on Windows, we're re-using the name buffer
+            // which means we'll actually share the `name` pointer between entries!
+            const name = try allocator.dupe(u8, entry.name);
+            try entries.append(Dir.Entry{ .name = name, .kind = entry.kind });
+        }
+
+        try testing.expect(entries.items.len == 2); // note that the Iterator skips '.' and '..'
+        try testing.expect(contains(&entries, Dir.Entry{ .name = "some_file", .kind = Dir.Entry.Kind.File }));
+        try testing.expect(contains(&entries, Dir.Entry{ .name = "some_dir", .kind = Dir.Entry.Kind.Directory }));
+    }
+}
+
 fn entryEql(lhs: Dir.Entry, rhs: Dir.Entry) bool {
     return mem.eql(u8, lhs.name, rhs.name) and lhs.kind == rhs.kind;
 }
@@ -319,9 +352,9 @@ test "file operations on directories" {
             try testing.expectError(error.IsDir, tmp_dir.dir.readFileAlloc(testing.allocator, test_dir_name, std.math.maxInt(usize)));
         },
     }
-    // Note: The `.write = true` is necessary to ensure the error occurs on all platforms.
+    // Note: The `.mode = .read_write` is necessary to ensure the error occurs on all platforms.
     // TODO: Add a read-only test as well, see https://github.com/ziglang/zig/issues/5732
-    try testing.expectError(error.IsDir, tmp_dir.dir.openFile(test_dir_name, .{ .write = true }));
+    try testing.expectError(error.IsDir, tmp_dir.dir.openFile(test_dir_name, .{ .mode = .read_write }));
 
     switch (builtin.os.tag) {
         .wasi, .freebsd, .netbsd, .openbsd, .dragonfly => {},
@@ -1067,4 +1100,80 @@ test "chown" {
     var dir = try tmp.dir.openDir("test_dir", .{ .iterate = true });
     defer dir.close();
     try dir.chown(null, null);
+}
+
+test "File.Metadata" {
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile("test_file", .{ .read = true });
+    defer file.close();
+
+    const metadata = try file.metadata();
+    try testing.expect(metadata.kind() == .File);
+    try testing.expect(metadata.size() == 0);
+    _ = metadata.accessed();
+    _ = metadata.modified();
+    _ = metadata.created();
+}
+
+test "File.Permissions" {
+    if (builtin.os.tag == .wasi)
+        return error.SkipZigTest;
+
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile("test_file", .{ .read = true });
+    defer file.close();
+
+    const metadata = try file.metadata();
+    var permissions = metadata.permissions();
+
+    try testing.expect(!permissions.readOnly());
+    permissions.setReadOnly(true);
+    try testing.expect(permissions.readOnly());
+
+    try file.setPermissions(permissions);
+    const new_permissions = (try file.metadata()).permissions();
+    try testing.expect(new_permissions.readOnly());
+
+    // Must be set to non-read-only to delete
+    permissions.setReadOnly(false);
+    try file.setPermissions(permissions);
+}
+
+test "File.PermissionsUnix" {
+    if (builtin.os.tag == .windows or builtin.os.tag == .wasi)
+        return error.SkipZigTest;
+
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+
+    const file = try tmp.dir.createFile("test_file", .{ .mode = 0o666, .read = true });
+    defer file.close();
+
+    const metadata = try file.metadata();
+    var permissions = metadata.permissions();
+
+    permissions.setReadOnly(true);
+    try testing.expect(permissions.readOnly());
+    try testing.expect(!permissions.inner.unixHas(.user, .write));
+    permissions.inner.unixSet(.user, .{ .write = true });
+    try testing.expect(!permissions.readOnly());
+    try testing.expect(permissions.inner.unixHas(.user, .write));
+    try testing.expect(permissions.inner.mode & 0o400 != 0);
+
+    permissions.setReadOnly(true);
+    try file.setPermissions(permissions);
+    permissions = (try file.metadata()).permissions();
+    try testing.expect(permissions.readOnly());
+
+    // Must be set to non-read-only to delete
+    permissions.setReadOnly(false);
+    try file.setPermissions(permissions);
+
+    const permissions_unix = File.PermissionsUnix.unixNew(0o754);
+    try testing.expect(permissions_unix.unixHas(.user, .execute));
+    try testing.expect(!permissions_unix.unixHas(.other, .execute));
 }
