@@ -12,16 +12,15 @@ const assert = std.debug.assert;
 pub fn parseHexFloat(comptime T: type, s: []const u8) !T {
     assert(@typeInfo(T) == .Float);
 
-    const IntT = std.meta.Int(.unsigned, @typeInfo(T).Float.bits);
+    const TBits = std.meta.Int(.unsigned, @typeInfo(T).Float.bits);
 
     const mantissa_bits = math.floatMantissaBits(T);
     const exponent_bits = math.floatExponentBits(T);
+    const exponent_min = math.floatExponentMin(T);
+    const exponent_max = math.floatExponentMax(T);
 
+    const exponent_bias = exponent_max;
     const sign_shift = mantissa_bits + exponent_bits;
-
-    const exponent_bias = (1 << (exponent_bits - 1)) - 1;
-    const exponent_min = 1 - exponent_bias;
-    const exponent_max = exponent_bias;
 
     if (s.len == 0)
         return error.InvalidCharacter;
@@ -233,10 +232,10 @@ pub fn parseHexFloat(comptime T: type, s: []const u8) !T {
     // Remove the implicit bit.
     mantissa &= @as(u128, (1 << mantissa_bits) - 1);
 
-    const raw: IntT =
-        (if (negative) @as(IntT, 1) << sign_shift else 0) |
-        @as(IntT, @bitCast(u16, exponent + exponent_bias)) << mantissa_bits |
-        @truncate(IntT, mantissa);
+    const raw: TBits =
+        (if (negative) @as(TBits, 1) << sign_shift else 0) |
+        @as(TBits, @bitCast(u16, exponent + exponent_bias)) << mantissa_bits |
+        @truncate(TBits, mantissa);
 
     return @bitCast(T, raw);
 }
@@ -263,14 +262,14 @@ test "f16" {
         .{ .s = "0x10p+10", .v = 16384.0 },
         .{ .s = "0x10p-10", .v = 0.015625 },
         // Max normalized value.
-        .{ .s = "0x1.ffcp+15", .v = math.f16_max },
-        .{ .s = "-0x1.ffcp+15", .v = -math.f16_max },
+        .{ .s = "0x1.ffcp+15", .v = math.floatMax(f16) },
+        .{ .s = "-0x1.ffcp+15", .v = -math.floatMax(f16) },
         // Min normalized value.
-        .{ .s = "0x1p-14", .v = math.f16_min },
-        .{ .s = "-0x1p-14", .v = -math.f16_min },
+        .{ .s = "0x1p-14", .v = math.floatMin(f16) },
+        .{ .s = "-0x1p-14", .v = -math.floatMin(f16) },
         // Min denormal value.
-        .{ .s = "0x1p-24", .v = math.f16_true_min },
-        .{ .s = "-0x1p-24", .v = -math.f16_true_min },
+        .{ .s = "0x1p-24", .v = math.floatTrueMin(f16) },
+        .{ .s = "-0x1p-24", .v = -math.floatTrueMin(f16) },
     };
 
     for (cases) |case| {
@@ -287,14 +286,14 @@ test "f32" {
         .{ .s = "0x0.ffffffp128", .v = 0x0.ffffffp128 },
         .{ .s = "0x0.1234570p-125", .v = 0x0.1234570p-125 },
         // Max normalized value.
-        .{ .s = "0x1.fffffeP+127", .v = math.f32_max },
-        .{ .s = "-0x1.fffffeP+127", .v = -math.f32_max },
+        .{ .s = "0x1.fffffeP+127", .v = math.floatMax(f32) },
+        .{ .s = "-0x1.fffffeP+127", .v = -math.floatMax(f32) },
         // Min normalized value.
-        .{ .s = "0x1p-126", .v = math.f32_min },
-        .{ .s = "-0x1p-126", .v = -math.f32_min },
+        .{ .s = "0x1p-126", .v = math.floatMin(f32) },
+        .{ .s = "-0x1p-126", .v = -math.floatMin(f32) },
         // Min denormal value.
-        .{ .s = "0x1P-149", .v = math.f32_true_min },
-        .{ .s = "-0x1P-149", .v = -math.f32_true_min },
+        .{ .s = "0x1P-149", .v = math.floatTrueMin(f32) },
+        .{ .s = "-0x1P-149", .v = -math.floatTrueMin(f32) },
     };
 
     for (cases) |case| {
@@ -309,14 +308,14 @@ test "f64" {
         .{ .s = "0x10p+10", .v = 16384.0 },
         .{ .s = "0x10p-10", .v = 0.015625 },
         // Max normalized value.
-        .{ .s = "0x1.fffffffffffffp+1023", .v = math.f64_max },
-        .{ .s = "-0x1.fffffffffffffp1023", .v = -math.f64_max },
+        .{ .s = "0x1.fffffffffffffp+1023", .v = math.floatMax(f64) },
+        .{ .s = "-0x1.fffffffffffffp1023", .v = -math.floatMax(f64) },
         // Min normalized value.
-        .{ .s = "0x1p-1022", .v = math.f64_min },
-        .{ .s = "-0x1p-1022", .v = -math.f64_min },
+        .{ .s = "0x1p-1022", .v = math.floatMin(f64) },
+        .{ .s = "-0x1p-1022", .v = -math.floatMin(f64) },
         // Min denormalized value.
-        .{ .s = "0x1p-1074", .v = math.f64_true_min },
-        .{ .s = "-0x1p-1074", .v = -math.f64_true_min },
+        .{ .s = "0x1p-1074", .v = math.floatTrueMin(f64) },
+        .{ .s = "-0x1p-1074", .v = -math.floatTrueMin(f64) },
     };
 
     for (cases) |case| {
@@ -331,14 +330,14 @@ test "f128" {
         .{ .s = "0x10p+10", .v = 16384.0 },
         .{ .s = "0x10p-10", .v = 0.015625 },
         // Max normalized value.
-        .{ .s = "0xf.fffffffffffffffffffffffffff8p+16380", .v = math.f128_max },
-        .{ .s = "-0xf.fffffffffffffffffffffffffff8p+16380", .v = -math.f128_max },
+        .{ .s = "0xf.fffffffffffffffffffffffffff8p+16380", .v = math.floatMax(f128) },
+        .{ .s = "-0xf.fffffffffffffffffffffffffff8p+16380", .v = -math.floatMax(f128) },
         // Min normalized value.
-        .{ .s = "0x1p-16382", .v = math.f128_min },
-        .{ .s = "-0x1p-16382", .v = -math.f128_min },
+        .{ .s = "0x1p-16382", .v = math.floatMin(f128) },
+        .{ .s = "-0x1p-16382", .v = -math.floatMin(f128) },
         // // Min denormalized value.
-        .{ .s = "0x1p-16494", .v = math.f128_true_min },
-        .{ .s = "-0x1p-16494", .v = -math.f128_true_min },
+        .{ .s = "0x1p-16494", .v = math.floatTrueMin(f128) },
+        .{ .s = "-0x1p-16494", .v = -math.floatTrueMin(f128) },
         .{ .s = "0x1.edcb34a235253948765432134674fp-1", .v = 0x1.edcb34a235253948765432134674fp-1 },
     };
 

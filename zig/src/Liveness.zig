@@ -178,10 +178,49 @@ pub fn deinit(l: *Liveness, gpa: Allocator) void {
     l.* = undefined;
 }
 
+pub fn iterateBigTomb(l: Liveness, inst: Air.Inst.Index) BigTomb {
+    return .{
+        .tomb_bits = l.getTombBits(inst),
+        .extra_start = l.special.get(inst) orelse 0,
+        .extra_offset = 0,
+        .extra = l.extra,
+        .bit_index = 0,
+    };
+}
+
 /// How many tomb bits per AIR instruction.
 pub const bpi = 4;
 pub const Bpi = std.meta.Int(.unsigned, bpi);
 pub const OperandInt = std.math.Log2Int(Bpi);
+
+/// Useful for decoders of Liveness information.
+pub const BigTomb = struct {
+    tomb_bits: Liveness.Bpi,
+    bit_index: u32,
+    extra_start: u32,
+    extra_offset: u32,
+    extra: []const u32,
+
+    /// Returns whether the next operand dies.
+    pub fn feed(bt: *BigTomb) bool {
+        const this_bit_index = bt.bit_index;
+        bt.bit_index += 1;
+
+        const small_tombs = Liveness.bpi - 1;
+        if (this_bit_index < small_tombs) {
+            const dies = @truncate(u1, bt.tomb_bits >> @intCast(Liveness.OperandInt, this_bit_index)) != 0;
+            return dies;
+        }
+
+        const big_bit_index = this_bit_index - small_tombs;
+        while (big_bit_index - bt.extra_offset * 31 >= 31) {
+            bt.extra_offset += 1;
+        }
+        const dies = @truncate(u1, bt.extra[bt.extra_start + bt.extra_offset] >>
+            @intCast(u5, big_bit_index - bt.extra_offset * 31)) != 0;
+        return dies;
+    }
+};
 
 /// In-progress data; on successful analysis converted into `Liveness`.
 const Analysis = struct {
@@ -314,9 +353,15 @@ fn analyzeInst(
         .const_ty,
         .breakpoint,
         .dbg_stmt,
+        .dbg_inline_begin,
+        .dbg_inline_end,
+        .dbg_block_begin,
+        .dbg_block_end,
         .unreach,
         .fence,
         .ret_addr,
+        .frame_addr,
+        .wasm_memory_size,
         => return trackOperands(a, new_set, inst, main_tomb, .{ .none, .none, .none }),
 
         .not,
@@ -377,6 +422,7 @@ fn analyzeInst(
         .sqrt,
         .sin,
         .cos,
+        .tan,
         .exp,
         .exp2,
         .log,
@@ -387,8 +433,16 @@ fn analyzeInst(
         .ceil,
         .round,
         .trunc_float,
+        .cmp_lt_errors_len,
         => {
             const operand = inst_datas[inst].un_op;
+            return trackOperands(a, new_set, inst, main_tomb, .{ operand, .none, .none });
+        },
+
+        .dbg_var_ptr,
+        .dbg_var_val,
+        => {
+            const operand = inst_datas[inst].pl_op.operand;
             return trackOperands(a, new_set, inst, main_tomb, .{ operand, .none, .none });
         },
 
@@ -397,11 +451,11 @@ fn analyzeInst(
             return trackOperands(a, new_set, inst, main_tomb, .{ prefetch.ptr, .none, .none });
         },
 
-        .call => {
+        .call, .call_always_tail, .call_never_tail, .call_never_inline => {
             const inst_data = inst_datas[inst].pl_op;
             const callee = inst_data.operand;
             const extra = a.air.extraData(Air.Call, inst_data.payload);
-            const args = @bitCast([]const Air.Inst.Ref, a.air.extra[extra.end..][0..extra.data.args_len]);
+            const args = @ptrCast([]const Air.Inst.Ref, a.air.extra[extra.end..][0..extra.data.args_len]);
             if (args.len + 1 <= bpi - 1) {
                 var buf = [1]Air.Inst.Ref{.none} ** (bpi - 1);
                 buf[0] = callee;
@@ -414,17 +468,35 @@ fn analyzeInst(
                 .inst = inst,
                 .main_tomb = main_tomb,
             };
+            defer extra_tombs.deinit();
             try extra_tombs.feed(callee);
             for (args) |arg| {
                 try extra_tombs.feed(arg);
             }
             return extra_tombs.finish();
         },
+        .select => {
+            const pl_op = inst_datas[inst].pl_op;
+            const extra = a.air.extraData(Air.Bin, pl_op.payload).data;
+            return trackOperands(a, new_set, inst, main_tomb, .{ pl_op.operand, extra.lhs, extra.rhs });
+        },
+        .shuffle => {
+            const extra = a.air.extraData(Air.Shuffle, inst_datas[inst].ty_pl.payload).data;
+            return trackOperands(a, new_set, inst, main_tomb, .{ extra.a, extra.b, .none });
+        },
+        .reduce => {
+            const reduce = inst_datas[inst].reduce;
+            return trackOperands(a, new_set, inst, main_tomb, .{ reduce.operand, .none, .none });
+        },
+        .cmp_vector => {
+            const extra = a.air.extraData(Air.VectorCmp, inst_datas[inst].ty_pl.payload).data;
+            return trackOperands(a, new_set, inst, main_tomb, .{ extra.lhs, extra.rhs, .none });
+        },
         .aggregate_init => {
             const ty_pl = inst_datas[inst].ty_pl;
             const aggregate_ty = a.air.getRefType(ty_pl.ty);
             const len = @intCast(usize, aggregate_ty.arrayLen());
-            const elements = @bitCast([]const Air.Inst.Ref, a.air.extra[ty_pl.payload..][0..len]);
+            const elements = @ptrCast([]const Air.Inst.Ref, a.air.extra[ty_pl.payload..][0..len]);
 
             if (elements.len <= bpi - 1) {
                 var buf = [1]Air.Inst.Ref{.none} ** (bpi - 1);
@@ -437,6 +509,7 @@ fn analyzeInst(
                 .inst = inst,
                 .main_tomb = main_tomb,
             };
+            defer extra_tombs.deinit();
             for (elements) |elem| {
                 try extra_tombs.feed(elem);
             }
@@ -462,6 +535,11 @@ fn analyzeInst(
             const extra = a.air.extraData(Air.Cmpxchg, inst_datas[inst].ty_pl.payload).data;
             return trackOperands(a, new_set, inst, main_tomb, .{ extra.ptr, extra.expected_value, extra.new_value });
         },
+        .mul_add => {
+            const pl_op = inst_datas[inst].pl_op;
+            const extra = a.air.extraData(Air.Bin, pl_op.payload).data;
+            return trackOperands(a, new_set, inst, main_tomb, .{ extra.lhs, extra.rhs, pl_op.operand });
+        },
         .atomic_load => {
             const ptr = inst_datas[inst].atomic_load.ptr;
             return trackOperands(a, new_set, inst, main_tomb, .{ ptr, .none, .none });
@@ -473,14 +551,19 @@ fn analyzeInst(
         },
         .memset,
         .memcpy,
+        => {
+            const pl_op = inst_datas[inst].pl_op;
+            const extra = a.air.extraData(Air.Bin, pl_op.payload).data;
+            return trackOperands(a, new_set, inst, main_tomb, .{ pl_op.operand, extra.lhs, extra.rhs });
+        },
         .add_with_overflow,
         .sub_with_overflow,
         .mul_with_overflow,
         .shl_with_overflow,
         => {
-            const pl_op = inst_datas[inst].pl_op;
-            const extra = a.air.extraData(Air.Bin, pl_op.payload).data;
-            return trackOperands(a, new_set, inst, main_tomb, .{ pl_op.operand, extra.lhs, extra.rhs });
+            const ty_pl = inst_datas[inst].ty_pl;
+            const extra = a.air.extraData(Air.Bin, ty_pl.payload).data;
+            return trackOperands(a, new_set, inst, main_tomb, .{ extra.lhs, extra.rhs, .none });
         },
         .br => {
             const br = inst_datas[inst].br;
@@ -489,9 +572,9 @@ fn analyzeInst(
         .assembly => {
             const extra = a.air.extraData(Air.Asm, inst_datas[inst].ty_pl.payload);
             var extra_i: usize = extra.end;
-            const outputs = @bitCast([]const Air.Inst.Ref, a.air.extra[extra_i..][0..extra.data.outputs_len]);
+            const outputs = @ptrCast([]const Air.Inst.Ref, a.air.extra[extra_i..][0..extra.data.outputs_len]);
             extra_i += outputs.len;
-            const inputs = @bitCast([]const Air.Inst.Ref, a.air.extra[extra_i..][0..extra.data.inputs_len]);
+            const inputs = @ptrCast([]const Air.Inst.Ref, a.air.extra[extra_i..][0..extra.data.inputs_len]);
             extra_i += inputs.len;
 
             simple: {
@@ -514,6 +597,7 @@ fn analyzeInst(
                 .inst = inst,
                 .main_tomb = main_tomb,
             };
+            defer extra_tombs.deinit();
             for (outputs) |output| {
                 if (output != .none) {
                     try extra_tombs.feed(output);
@@ -705,6 +789,10 @@ fn analyzeInst(
 
             return trackOperands(a, new_set, inst, main_tomb, .{ condition, .none, .none });
         },
+        .wasm_memory_grow => {
+            const pl_op = inst_datas[inst].pl_op;
+            return trackOperands(a, new_set, inst, main_tomb, .{ pl_op.operand, .none, .none });
+        },
     }
 }
 
@@ -745,31 +833,48 @@ const ExtraTombs = struct {
     bit_index: usize = 0,
     tomb_bits: Bpi = 0,
     big_tomb_bits: u32 = 0,
+    big_tomb_bits_extra: std.ArrayListUnmanaged(u32) = .{},
 
     fn feed(et: *ExtraTombs, op_ref: Air.Inst.Ref) !void {
         const this_bit_index = et.bit_index;
-        assert(this_bit_index < 32); // TODO mechanism for when there are greater than 32 operands
         et.bit_index += 1;
         const gpa = et.analysis.gpa;
-        const op_int = @enumToInt(op_ref);
-        if (op_int < Air.Inst.Ref.typed_value_map.len) return;
-        const op_index: Air.Inst.Index = op_int - @intCast(u32, Air.Inst.Ref.typed_value_map.len);
+        const op_index = Air.refToIndex(op_ref) orelse return;
         const prev = try et.analysis.table.fetchPut(gpa, op_index, {});
         if (prev == null) {
             // Death.
             if (et.new_set) |ns| try ns.putNoClobber(gpa, op_index, {});
-            if (this_bit_index < bpi - 1) {
+            const available_tomb_bits = bpi - 1;
+            if (this_bit_index < available_tomb_bits) {
                 et.tomb_bits |= @as(Bpi, 1) << @intCast(OperandInt, this_bit_index);
             } else {
-                const big_bit_index = this_bit_index - (bpi - 1);
-                et.big_tomb_bits |= @as(u32, 1) << @intCast(u5, big_bit_index);
+                const big_bit_index = this_bit_index - available_tomb_bits;
+                while (big_bit_index >= (et.big_tomb_bits_extra.items.len + 1) * 31) {
+                    // We need another element in the extra array.
+                    try et.big_tomb_bits_extra.append(gpa, et.big_tomb_bits);
+                    et.big_tomb_bits = 0;
+                } else {
+                    const final_bit_index = big_bit_index - et.big_tomb_bits_extra.items.len * 31;
+                    et.big_tomb_bits |= @as(u32, 1) << @intCast(u5, final_bit_index);
+                }
             }
         }
     }
 
     fn finish(et: *ExtraTombs) !void {
         et.tomb_bits |= @as(Bpi, @boolToInt(et.main_tomb)) << (bpi - 1);
+        // Signal the terminal big_tomb_bits element.
+        et.big_tomb_bits |= @as(u32, 1) << 31;
+
         et.analysis.storeTombBits(et.inst, et.tomb_bits);
-        try et.analysis.special.put(et.analysis.gpa, et.inst, et.big_tomb_bits);
+        const extra_index = @intCast(u32, et.analysis.extra.items.len);
+        try et.analysis.extra.ensureUnusedCapacity(et.analysis.gpa, et.big_tomb_bits_extra.items.len + 1);
+        try et.analysis.special.put(et.analysis.gpa, et.inst, extra_index);
+        et.analysis.extra.appendSliceAssumeCapacity(et.big_tomb_bits_extra.items);
+        et.analysis.extra.appendAssumeCapacity(et.big_tomb_bits);
+    }
+
+    fn deinit(et: *ExtraTombs) void {
+        et.big_tomb_bits_extra.deinit(et.analysis.gpa);
     }
 };

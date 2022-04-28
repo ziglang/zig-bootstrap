@@ -1,4 +1,5 @@
 const std = @import("std.zig");
+const builtin = @import("builtin");
 const assert = debug.assert;
 const autoHash = std.hash.autoHash;
 const debug = std.debug;
@@ -369,11 +370,14 @@ pub fn HashMap(
     comptime Context: type,
     comptime max_load_percentage: u64,
 ) type {
-    comptime verifyContext(Context, K, K, u64, false);
     return struct {
         unmanaged: Unmanaged,
         allocator: Allocator,
         ctx: Context,
+
+        comptime {
+            verifyContext(Context, K, K, u64, false);
+        }
 
         /// The type of the unmanaged hash map underlying this wrapper
         pub const Unmanaged = HashMapUnmanaged(K, V, Context, max_load_percentage);
@@ -693,10 +697,12 @@ pub fn HashMapUnmanaged(
 ) type {
     if (max_load_percentage <= 0 or max_load_percentage >= 100)
         @compileError("max_load_percentage must be between 0 and 100.");
-    comptime verifyContext(Context, K, K, u64, false);
-
     return struct {
         const Self = @This();
+
+        comptime {
+            verifyContext(Context, K, K, u64, false);
+        }
 
         // This is actually a midway pointer to the single buffer containing
         // a `Header` field, the `Metadata`s and `Entry`s.
@@ -738,7 +744,7 @@ pub fn HashMapUnmanaged(
             value: V,
         };
 
-        const Header = packed struct {
+        const Header = struct {
             values: [*]V,
             keys: [*]K,
             capacity: Size,
@@ -907,6 +913,8 @@ pub fn HashMapUnmanaged(
         }
 
         pub fn ensureUnusedCapacity(self: *Self, allocator: Allocator, additional_size: Size) Allocator.Error!void {
+            if (@sizeOf(Context) != 0)
+                @compileError("Cannot infer context " ++ @typeName(Context) ++ ", call ensureUnusedCapacityContext instead.");
             return ensureUnusedCapacityContext(self, allocator, additional_size, undefined);
         }
         pub fn ensureUnusedCapacityContext(self: *Self, allocator: Allocator, additional_size: Size, ctx: Context) Allocator.Error!void {
@@ -932,7 +940,7 @@ pub fn HashMapUnmanaged(
         }
 
         fn header(self: *const Self) *Header {
-            return @ptrCast(*Header, @ptrCast([*]Header, self.metadata.?) - 1);
+            return @ptrCast(*Header, @ptrCast([*]Header, @alignCast(@alignOf(Header), self.metadata.?)) - 1);
         }
 
         fn keys(self: *const Self) [*]K {
@@ -1575,6 +1583,19 @@ pub fn HashMapUnmanaged(
 
             self.metadata = null;
             self.available = 0;
+        }
+
+        /// This function is used in tools/zig-gdb.py to fetch the header type to facilitate
+        /// fancy debug printing for this type.
+        fn gdbHelper(self: *Self, hdr: *Header) void {
+            _ = self;
+            _ = hdr;
+        }
+
+        comptime {
+            if (builtin.mode == .Debug) {
+                _ = gdbHelper;
+            }
         }
     };
 }

@@ -673,8 +673,7 @@ pub const Target = struct {
 
                 /// Adds the specified feature set but not its dependencies.
                 pub fn addFeatureSet(set: *Set, other_set: Set) void {
-                    set.ints = @as(std.meta.Vector(usize_count, usize), set.ints) |
-                        @as(std.meta.Vector(usize_count, usize), other_set.ints);
+                    set.ints = @as(@Vector(usize_count, usize), set.ints) | @as(@Vector(usize_count, usize), other_set.ints);
                 }
 
                 /// Removes the specified feature but not its dependents.
@@ -686,8 +685,7 @@ pub const Target = struct {
 
                 /// Removes the specified feature but not its dependents.
                 pub fn removeFeatureSet(set: *Set, other_set: Set) void {
-                    set.ints = @as(std.meta.Vector(usize_count, usize), set.ints) &
-                        ~@as(std.meta.Vector(usize_count, usize), other_set.ints);
+                    set.ints = @as(@Vector(usize_count, usize), set.ints) & ~@as(@Vector(usize_count, usize), other_set.ints);
                 }
 
                 pub fn populateDependencies(set: *Set, all_features_list: []const Cpu.Feature) void {
@@ -716,7 +714,7 @@ pub const Target = struct {
                 }
 
                 pub fn isSuperSetOf(set: Set, other_set: Set) bool {
-                    const V = std.meta.Vector(usize_count, usize);
+                    const V = @Vector(usize_count, usize);
                     const set_v: V = set.ints;
                     const other_v: V = other_set.ints;
                     return @reduce(.And, (set_v & other_v) == other_v);
@@ -965,7 +963,7 @@ pub const Target = struct {
                     .amdgcn => ._NONE,
                     .bpfel => ._BPF,
                     .bpfeb => ._BPF,
-                    .csky => ._NONE,
+                    .csky => ._CSKY,
                     .sparcv9 => ._SPARCV9,
                     .s390x => ._S390,
                     .ve => ._NONE,
@@ -1714,9 +1712,64 @@ pub const Target = struct {
         };
     }
 
-    pub inline fn longDoubleIsF128(target: Target) bool {
-        return switch (target.cpu.arch) {
-            .riscv64, .aarch64, .aarch64_be, .aarch64_32, .s390x, .mips64, .mips64el => true,
+    pub inline fn longDoubleIs(target: Target, comptime F: type) bool {
+        if (target.abi == .msvc) {
+            return F == f64;
+        }
+        return switch (F) {
+            f128 => switch (target.cpu.arch) {
+                .aarch64 => {
+                    // According to Apple's official guide:
+                    // > The long double type is a double precision IEEE754 binary floating-point type,
+                    // > which makes it identical to the double type. This behavior contrasts to the
+                    // > standard specification, in which a long double is a quad-precision, IEEE754
+                    // > binary, floating-point type.
+                    // https://developer.apple.com/documentation/xcode/writing-arm64-code-for-apple-platforms
+                    return !target.isDarwin();
+                },
+
+                .riscv64,
+                .aarch64_be,
+                .aarch64_32,
+                .s390x,
+                .mips64,
+                .mips64el,
+                .sparc,
+                .sparcv9,
+                .sparcel,
+                .powerpc,
+                .powerpcle,
+                .powerpc64,
+                .powerpc64le,
+                => true,
+
+                else => false,
+            },
+            f80 => switch (target.cpu.arch) {
+                .x86_64, .i386 => true,
+                else => false,
+            },
+            f64 => switch (target.cpu.arch) {
+                .x86_64,
+                .i386,
+                .riscv64,
+                .aarch64,
+                .aarch64_be,
+                .aarch64_32,
+                .s390x,
+                .mips64,
+                .mips64el,
+                .sparc,
+                .sparcv9,
+                .sparcel,
+                .powerpc,
+                .powerpcle,
+                .powerpc64,
+                .powerpc64le,
+                => false,
+
+                else => true,
+            },
             else => false,
         };
     }

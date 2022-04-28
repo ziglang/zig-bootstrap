@@ -12,7 +12,6 @@ const builtin = @import("builtin");
 const assert = std.debug.assert;
 
 const bits = @import("bits.zig");
-const Air = @import("../../Air.zig");
 const Register = bits.Register;
 
 instructions: std.MultiArrayList(Inst).Slice,
@@ -28,6 +27,8 @@ pub const Inst = struct {
     pub const Tag = enum(u16) {
         /// Add
         add,
+        /// Add, update condition flags
+        adds,
         /// Bitwise AND
         @"and",
         /// Arithmetic Shift Right
@@ -42,8 +43,6 @@ pub const Inst = struct {
         bx,
         /// Compare
         cmp,
-        /// Pseudo-instruction: Argument
-        dbg_arg,
         /// Pseudo-instruction: End of prologue
         dbg_prologue_end,
         /// Pseudo-instruction: Beginning of epilogue
@@ -54,6 +53,8 @@ pub const Inst = struct {
         eor,
         /// Load Register
         ldr,
+        /// Pseudo-instruction: Load pointer to stack argument offset
+        ldr_ptr_stack_argument,
         /// Load Register
         ldr_stack_argument,
         /// Load Register Byte
@@ -98,6 +99,10 @@ pub const Inst = struct {
         rsb,
         /// Signed Bit Field Extract
         sbfx,
+        /// Signed Multiply (halfwords), bottom half, bottom half
+        smulbb,
+        /// Signed Multiply Long
+        smull,
         /// Store Register
         str,
         /// Store Register Byte
@@ -106,10 +111,14 @@ pub const Inst = struct {
         strh,
         /// Subtract
         sub,
+        /// Subtract, update condition flags
+        subs,
         /// Supervisor Call
         svc,
         /// Unsigned Bit Field Extract
         ubfx,
+        /// Unsigned Multiply Long
+        umull,
     };
 
     /// The position of an MIR instruction within the `Mir` instructions array.
@@ -207,6 +216,15 @@ pub const Inst = struct {
             rn: Register,
             rm: Register,
         },
+        /// Four registers
+        ///
+        /// Used by e.g. smull
+        rrrr: struct {
+            rdlo: Register,
+            rdhi: Register,
+            rn: Register,
+            rm: Register,
+        },
         /// An unordered list of registers
         ///
         /// Used by e.g. push
@@ -217,13 +235,6 @@ pub const Inst = struct {
         dbg_line_column: struct {
             line: u32,
             column: u32,
-        },
-        /// Debug info: argument
-        ///
-        /// Used by e.g. dbg_arg
-        dbg_arg_info: struct {
-            air_inst: Air.Inst.Index,
-            arg_index: u32,
         },
     };
 

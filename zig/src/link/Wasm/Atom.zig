@@ -103,17 +103,17 @@ pub fn symbolLoc(self: Atom) Wasm.SymbolLoc {
 /// at the calculated offset.
 pub fn resolveRelocs(self: *Atom, wasm_bin: *const Wasm) !void {
     if (self.relocs.items.len == 0) return;
-    const symbol = self.symbolLoc().getSymbol(wasm_bin).*;
+    const symbol_name = self.symbolLoc().getName(wasm_bin);
     log.debug("Resolving relocs in atom '{s}' count({d})", .{
-        symbol.name,
+        symbol_name,
         self.relocs.items.len,
     });
 
     for (self.relocs.items) |reloc| {
         const value = try self.relocationValue(reloc, wasm_bin);
         log.debug("Relocating '{s}' referenced in '{s}' offset=0x{x:0>8} value={d}", .{
-            (Wasm.SymbolLoc{ .file = self.file, .index = reloc.index }).getSymbol(wasm_bin).name,
-            symbol.name,
+            (Wasm.SymbolLoc{ .file = self.file, .index = reloc.index }).getName(wasm_bin),
+            symbol_name,
             reloc.offset,
             value,
         });
@@ -158,7 +158,7 @@ fn relocationValue(self: Atom, relocation: types.Relocation, wasm_bin: *const Wa
         .R_WASM_TABLE_INDEX_I64,
         .R_WASM_TABLE_INDEX_SLEB,
         .R_WASM_TABLE_INDEX_SLEB64,
-        => return wasm_bin.function_table.get(relocation.index) orelse 0,
+        => return wasm_bin.function_table.get(target_loc) orelse 0,
         .R_WASM_TYPE_INDEX_LEB => return wasm_bin.functions.items[symbol.index].type_index,
         .R_WASM_GLOBAL_INDEX_I32,
         .R_WASM_GLOBAL_INDEX_LEB,

@@ -369,6 +369,7 @@ fn detectAbiAndDynamicLinker(
 
         error.IsDir,
         error.NotDir,
+        error.InvalidHandle,
         error.AccessDenied,
         error.NoDevice,
         error.FileNotFound,
@@ -472,7 +473,7 @@ pub fn abiAndDynamicLinkerFromFile(
     _ = try preadMin(file, &hdr_buf, 0, hdr_buf.len);
     const hdr32 = @ptrCast(*elf.Elf32_Ehdr, &hdr_buf);
     const hdr64 = @ptrCast(*elf.Elf64_Ehdr, &hdr_buf);
-    if (!mem.eql(u8, hdr32.e_ident[0..4], "\x7fELF")) return error.InvalidElfMagic;
+    if (!mem.eql(u8, hdr32.e_ident[0..4], elf.MAGIC)) return error.InvalidElfMagic;
     const elf_endian: std.builtin.Endian = switch (hdr32.e_ident[elf.EI_DATA]) {
         elf.ELFDATA2LSB => .Little,
         elf.ELFDATA2MSB => .Big,
@@ -670,6 +671,7 @@ pub fn abiAndDynamicLinkerFromFile(
 
                         error.FileNotFound,
                         error.NotDir,
+                        error.InvalidHandle,
                         error.AccessDenied,
                         error.NoDevice,
                         => continue,

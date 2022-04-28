@@ -91,6 +91,7 @@ pub const tls = @import("linux/tls.zig");
 pub const pie = @import("linux/start_pie.zig");
 pub const BPF = @import("linux/bpf.zig");
 pub const IOCTL = @import("linux/ioctl.zig");
+pub const SECCOMP = @import("linux/seccomp.zig");
 
 pub const MAP = struct {
     pub usingnamespace arch_bits.MAP;
@@ -1080,12 +1081,14 @@ pub fn sigaction(sig: u6, noalias act: ?*const Sigaction, noalias oact: ?*Sigact
     const mask_size = @sizeOf(@TypeOf(ksa.mask));
 
     if (act) |new| {
-        const restorer_fn = if ((new.flags & SA.SIGINFO) != 0) restore_rt else restore;
+        const restore_rt_ptr = if (builtin.zig_backend == .stage1) restore_rt else &restore_rt;
+        const restore_ptr = if (builtin.zig_backend == .stage1) restore else &restore;
+        const restorer_fn = if ((new.flags & SA.SIGINFO) != 0) restore_rt_ptr else restore_ptr;
         ksa = k_sigaction{
             .handler = new.handler.handler,
             .flags = new.flags | SA.RESTORER,
             .mask = undefined,
-            .restorer = @ptrCast(fn () callconv(.C) void, restorer_fn),
+            .restorer = @ptrCast(k_sigaction_funcs.restorer, restorer_fn),
         };
         @memcpy(@ptrCast([*]u8, &ksa.mask), @ptrCast([*]const u8, &new.mask), mask_size);
     }
@@ -1687,6 +1690,10 @@ pub fn perf_event_open(
         @bitCast(usize, @as(isize, group_fd)),
         flags,
     );
+}
+
+pub fn seccomp(operation: u32, flags: u32, args: ?*const anyopaque) usize {
+    return syscall3(.seccomp, operation, flags, @ptrToInt(args));
 }
 
 pub const E = switch (native_arch) {
@@ -3047,39 +3054,55 @@ pub const sigset_t = [1024 / 32]u32;
 pub const all_mask: sigset_t = [_]u32{0xffffffff} ** sigset_t.len;
 pub const app_mask: sigset_t = [2]u32{ 0xfffffffc, 0x7fffffff } ++ [_]u32{0xffffffff} ** 30;
 
+const k_sigaction_funcs = if (builtin.zig_backend == .stage1) struct {
+    const handler = ?fn (c_int) callconv(.C) void;
+    const restorer = fn () callconv(.C) void;
+} else struct {
+    const handler = ?*const fn (c_int) callconv(.C) void;
+    const restorer = *const fn () callconv(.C) void;
+};
+
 pub const k_sigaction = switch (native_arch) {
     .mips, .mipsel => extern struct {
         flags: c_uint,
-        handler: ?fn (c_int) callconv(.C) void,
+        handler: k_sigaction_funcs.handler,
         mask: [4]c_ulong,
-        restorer: fn () callconv(.C) void,
+        restorer: k_sigaction_funcs.restorer,
     },
     .mips64, .mips64el => extern struct {
         flags: c_uint,
-        handler: ?fn (c_int) callconv(.C) void,
+        handler: k_sigaction_funcs.handler,
         mask: [2]c_ulong,
-        restorer: fn () callconv(.C) void,
+        restorer: k_sigaction_funcs.restorer,
     },
     else => extern struct {
-        handler: ?fn (c_int) callconv(.C) void,
+        handler: k_sigaction_funcs.handler,
         flags: c_ulong,
-        restorer: fn () callconv(.C) void,
+        restorer: k_sigaction_funcs.restorer,
         mask: [2]c_uint,
     },
 };
 
 /// Renamed from `sigaction` to `Sigaction` to avoid conflict with the syscall.
 pub const Sigaction = extern struct {
-    pub const handler_fn = fn (c_int) callconv(.C) void;
-    pub const sigaction_fn = fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void;
+    pub usingnamespace if (builtin.zig_backend == .stage1) struct {
+        pub const handler_fn = fn (c_int) callconv(.C) void;
+        pub const sigaction_fn = fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void;
+    } else struct {
+        pub const handler_fn = *const fn (c_int) callconv(.C) void;
+        pub const sigaction_fn = *const fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void;
+    };
 
     handler: extern union {
-        handler: ?handler_fn,
-        sigaction: ?sigaction_fn,
+        handler: ?Sigaction.handler_fn,
+        sigaction: ?Sigaction.sigaction_fn,
     },
     mask: sigset_t,
     flags: c_uint,
-    restorer: ?fn () callconv(.C) void = null,
+    restorer: ?if (builtin.zig_backend == .stage1)
+        fn () callconv(.C) void
+    else
+        *const fn () callconv(.C) void = null,
 };
 
 pub const empty_sigset = [_]u32{0} ** @typeInfo(sigset_t).Array.len;
@@ -5390,4 +5413,56 @@ pub const PERF = struct {
     };
 
     pub const IOC_FLAG_GROUP = 1;
+};
+
+// TODO: Add the rest of the AUDIT defines?
+pub const AUDIT = struct {
+    pub const ARCH = enum(u32) {
+        const _64BIT = 0x80000000;
+        const _LE = 0x40000000;
+
+        pub const current = switch (native_arch) {
+            .i386 => .I386,
+            .x86_64 => .X86_64,
+            .aarch64 => .AARCH64,
+            .arm, .thumb => .ARM,
+            .riscv64 => .RISCV64,
+            .sparcv9 => .SPARC64,
+            .mips => .MIPS,
+            .mipsel => .MIPSEL,
+            .powerpc => .PPC,
+            .powerpc64 => .PPC64,
+            .powerpc64le => .PPC64LE,
+            else => undefined,
+        };
+
+        AARCH64 = toAudit(.aarch64),
+        ARM = toAudit(.arm),
+        ARMEB = toAudit(.armeb),
+        CSKY = toAudit(.csky),
+        HEXAGON = @enumToInt(std.elf.EM._HEXAGON),
+        I386 = toAudit(.i386),
+        M68K = toAudit(.m68k),
+        MIPS = toAudit(.mips),
+        MIPSEL = toAudit(.mips) | _LE,
+        MIPS64 = toAudit(.mips64),
+        MIPSEL64 = toAudit(.mips64) | _LE,
+        PPC = toAudit(.powerpc),
+        PPC64 = toAudit(.powerpc64),
+        PPC64LE = toAudit(.powerpc64le),
+        RISCV32 = toAudit(.riscv32),
+        RISCV64 = toAudit(.riscv64),
+        S390X = toAudit(.s390x),
+        SPARC = toAudit(.sparc),
+        SPARC64 = toAudit(.sparcv9),
+        X86_64 = toAudit(.x86_64),
+
+        fn toAudit(arch: std.Target.Cpu.Arch) u32 {
+            var res: u32 = @enumToInt(arch.toElfMachine());
+            if (arch.endian() == .Little) res |= _LE;
+            if (arch.ptrBitWidth() == 64) res |= _64BIT;
+
+            return res;
+        }
+    };
 };

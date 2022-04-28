@@ -7,7 +7,6 @@ const expectEqual = testing.expectEqual;
 test "passing an optional integer as a parameter" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     const S = struct {
         fn entry() bool {
@@ -27,8 +26,6 @@ pub const EmptyStruct = struct {};
 
 test "optional pointer to size zero struct" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     var e = EmptyStruct{};
     var o: ?*EmptyStruct = &e;
@@ -36,8 +33,7 @@ test "optional pointer to size zero struct" {
 }
 
 test "equality compare optional pointers" {
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
 
     try testNullPtrsEql();
     comptime try testNullPtrsEql();
@@ -62,7 +58,6 @@ fn testNullPtrsEql() !void {
 test "optional with void type" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     const Foo = struct {
         x: ?void,
@@ -72,7 +67,6 @@ test "optional with void type" {
 }
 
 test "address of unwrap optional" {
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
@@ -152,7 +146,6 @@ fn test_cmp_optional_non_optional() !void {
 test "unwrap function call with optional pointer return value" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     const S = struct {
         fn entry() !void {
@@ -174,7 +167,6 @@ test "unwrap function call with optional pointer return value" {
 test "nested orelse" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     const S = struct {
         fn entry() !void {
@@ -202,7 +194,6 @@ test "self-referential struct through a slice of optional" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
     const S = struct {
         const Node = struct {
@@ -254,7 +245,9 @@ test "coerce an anon struct literal to optional struct" {
 }
 
 test "0-bit child type coerced to optional return ptr result location" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
 
     const S = struct {
         fn doTheTest() !void {
@@ -278,7 +271,9 @@ test "0-bit child type coerced to optional return ptr result location" {
 }
 
 test "0-bit child type coerced to optional" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
 
     const S = struct {
         fn doTheTest() !void {
@@ -303,7 +298,9 @@ test "0-bit child type coerced to optional" {
 }
 
 test "array of optional unaligned types" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
 
     const Enum = enum { one, two, three };
 
@@ -323,15 +320,54 @@ test "array of optional unaligned types" {
 
     // The index must be a runtime value
     var i: usize = 0;
-    try expectEqual(Enum.one, values[i].?.Num);
+    try expect(Enum.one == values[i].?.Num);
     i += 1;
-    try expectEqual(Enum.two, values[i].?.Num);
+    try expect(Enum.two == values[i].?.Num);
     i += 1;
-    try expectEqual(Enum.three, values[i].?.Num);
+    try expect(Enum.three == values[i].?.Num);
     i += 1;
-    try expectEqual(Enum.one, values[i].?.Num);
+    try expect(Enum.one == values[i].?.Num);
     i += 1;
-    try expectEqual(Enum.two, values[i].?.Num);
+    try expect(Enum.two == values[i].?.Num);
     i += 1;
-    try expectEqual(Enum.three, values[i].?.Num);
+    try expect(Enum.three == values[i].?.Num);
+}
+
+test "optional pointer to zero bit optional payload" {
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+
+    const B = struct {
+        fn foo(_: *@This()) void {}
+    };
+    const A = struct {
+        b: ?B = .{},
+    };
+    var a: A = .{};
+    var a_ptr = &a;
+    if (a_ptr.b) |*some| {
+        some.foo();
+    }
+}
+
+test "optional pointer to zero bit error union payload" {
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+
+    const B = struct {
+        fn foo(_: *@This()) void {}
+    };
+    const A = struct {
+        b: anyerror!B = .{},
+    };
+    var a: A = .{};
+    var a_ptr = &a;
+    if (a_ptr.b) |*some| {
+        some.foo();
+    } else |_| {}
 }

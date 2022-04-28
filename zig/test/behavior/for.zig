@@ -21,8 +21,6 @@ test "continue in for loop" {
 }
 
 test "break from outer for loop" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
-
     try testBreakOuter();
     comptime try testBreakOuter();
 }
@@ -40,8 +38,6 @@ fn testBreakOuter() !void {
 }
 
 test "continue outer for loop" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
-
     try testContinueOuter();
     comptime try testContinueOuter();
 }
@@ -59,8 +55,6 @@ fn testContinueOuter() !void {
 }
 
 test "ignore lval with underscore (for loop)" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
-
     for ([_]void{}) |_, i| {
         _ = i;
         for ([_]void{}) |_, j| {
@@ -72,7 +66,6 @@ test "ignore lval with underscore (for loop)" {
 }
 
 test "basic for loop" {
-    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
@@ -157,7 +150,9 @@ test "2 break statements and an else" {
 }
 
 test "for loop with pointer elem var" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
 
     const source = "abcdefg";
     var target: [source.len]u8 = undefined;
@@ -182,7 +177,8 @@ fn mangleString(s: []u8) void {
 }
 
 test "for copies its payload" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
 
     const S = struct {
         fn doTheTest() !void {
@@ -190,7 +186,7 @@ test "for copies its payload" {
             for (x) |value, i| {
                 // Modify the original array
                 x[i] += 99;
-                try expectEqual(value, i + 1);
+                try expect(value == i + 1);
             }
         }
     };
@@ -199,7 +195,10 @@ test "for copies its payload" {
 }
 
 test "for on slice with allowzero ptr" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
 
     const S = struct {
         fn doTheTest(slice: []const u8) !void {

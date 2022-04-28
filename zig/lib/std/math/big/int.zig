@@ -1358,7 +1358,7 @@ pub const Mutable = struct {
         var tmp_x = try Managed.init(limbs_buffer.allocator);
         defer tmp_x.deinit();
 
-        while (y.len() > 1) {
+        while (y.len() > 1 and !y.eqZero()) {
             assert(x.isPositive() and y.isPositive());
             assert(x.len() >= y.len());
 
@@ -1626,7 +1626,6 @@ pub const Mutable = struct {
             // Note, we multiply by a single limb here.
             // The shift doesn't need to be performed if we add the result of the first multiplication
             // to x[i - t - 1].
-            // mem.set(Limb, x.limbs, 0);
             const underflow = llmulLimb(.sub, x.limbs[k..x.len], y.limbs[0..y.len], q.limbs[k]);
 
             // 3.4.
@@ -1639,10 +1638,9 @@ pub const Mutable = struct {
                 llaccum(.add, x.limbs[k..x.len], y.limbs[0..y.len]);
                 q.limbs[k] -= 1;
             }
-
-            x.normalize(x.len);
         }
 
+        x.normalize(x.len);
         q.normalize(q.len);
 
         // De-normalize r and y.
@@ -1752,8 +1750,8 @@ pub const Mutable = struct {
     /// Read the value of `x` from `buffer`
     /// Asserts that `buffer`, `abi_size`, and `bit_count` are large enough to store the value.
     ///
-    /// The contents of `buffer` are interpreted as if they were the contents of 
-    /// @ptrCast(*[abi_size]const u8, &x). Byte ordering is determined by `endian` 
+    /// The contents of `buffer` are interpreted as if they were the contents of
+    /// @ptrCast(*[abi_size]const u8, &x). Byte ordering is determined by `endian`
     /// and any required padding bits are expected on the MSB end.
     pub fn readTwosComplement(
         x: *Mutable,
@@ -2065,7 +2063,8 @@ pub const Const = struct {
         // This is the inverse of calcDivLimbsBufferLen
         const available_len = (limbs.len / 3) - 2;
 
-        const biggest: Const = .{
+        // TODO https://github.com/ziglang/zig/issues/11439
+        const biggest = comptime Const{
             .limbs = &([1]Limb{math.maxInt(Limb)} ** available_len),
             .positive = false,
         };
@@ -3676,8 +3675,8 @@ fn llsignedor(r: []Limb, a: []const Limb, a_positive: bool, b: []const Limb, b_p
 fn llsignedand(r: []Limb, a: []const Limb, a_positive: bool, b: []const Limb, b_positive: bool) bool {
     @setRuntimeSafety(debug_safety);
     assert(a.len != 0 and b.len != 0);
-    assert(r.len >= a.len);
     assert(a.len >= b.len);
+    assert(r.len >= if (!a_positive and !b_positive) a.len + 1 else b.len);
 
     if (a_positive and b_positive) {
         // Trivial case, result is positive.

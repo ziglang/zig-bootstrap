@@ -135,10 +135,9 @@ var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{
 pub fn main() anyerror!void {
     crash_report.initialize();
 
-    var gpa_need_deinit = false;
+    const use_gpa = build_options.force_gpa or !builtin.link_libc;
     const gpa = gpa: {
-        if (build_options.force_gpa or !builtin.link_libc) {
-            gpa_need_deinit = true;
+        if (use_gpa) {
             break :gpa general_purpose_allocator.allocator();
         }
         // We would prefer to use raw libc allocator here, but cannot
@@ -148,7 +147,7 @@ pub fn main() anyerror!void {
         }
         break :gpa std.heap.raw_c_allocator;
     };
-    defer if (gpa_need_deinit) {
+    defer if (use_gpa) {
         _ = general_purpose_allocator.deinit();
     };
     var arena_instance = std.heap.ArenaAllocator.init(gpa);
@@ -160,6 +159,16 @@ pub fn main() anyerror!void {
     if (tracy.enable_allocation) {
         var gpa_tracy = tracy.tracyAllocator(gpa);
         return mainArgs(gpa_tracy.allocator(), arena, args);
+    }
+
+    // WASI: `--dir` instructs the WASM runtime to "preopen" a directory, making
+    // it available to the us, the guest program. This is the only way for us to
+    // access files/dirs on the host filesystem
+    if (builtin.os.tag == .wasi) {
+        // This sets our CWD to "/preopens/cwd"
+        // Dot-prefixed preopens like `--dir=.` are "mounted" at "/preopens/cwd"
+        // Other preopens like `--dir=lib` are "mounted" at "/"
+        try std.os.initPreopensWasi(std.heap.page_allocator, "/preopens/cwd");
     }
 
     return mainArgs(gpa, arena, args);
@@ -433,6 +442,7 @@ const usage_build_generic =
     \\  -framework [name]              (Darwin) link against framework
     \\  -F[dir]                        (Darwin) add search path for frameworks
     \\  -install_name=[value]          (Darwin) add dylib's install name
+    \\  --entitlements [path]          (Darwin) add path to entitlements file for embedding in code signature
     \\  --import-memory                (WebAssembly) import memory from the environment
     \\  --import-table                 (WebAssembly) import function table from the host environment
     \\  --export-table                 (WebAssembly) export function table to the host environment
@@ -680,6 +690,7 @@ fn buildOutputType(
     var native_darwin_sdk: ?std.zig.system.darwin.DarwinSDK = null;
     var install_name: ?[]const u8 = null;
     var hash_style: link.HashStyle = .both;
+    var entitlements: ?[]const u8 = null;
 
     // e.g. -m3dnow or -mno-outline-atomics. They correspond to std.Target llvm cpu feature names.
     // This array is populated by zig cc frontend and then has to be converted to zig-style
@@ -767,158 +778,153 @@ fn buildOutputType(
             }
 
             soname = .yes_default_value;
-            const args = all_args[2..];
-            var i: usize = 0;
-            args_loop: while (i < args.len) : (i += 1) {
-                const arg = args[i];
-                if (mem.startsWith(u8, arg, "-")) {
+
+            const Iterator = struct {
+                resp_file: ?ArgIteratorResponseFile = null,
+                args: []const []const u8,
+                i: usize = 0,
+                fn next(it: *@This()) ?[]const u8 {
+                    if (it.i >= it.args.len) {
+                        if (it.resp_file) |*resp| return if (resp.next()) |sentinel| std.mem.span(sentinel) else null;
+                        return null;
+                    }
+                    defer it.i += 1;
+                    return it.args[it.i];
+                }
+            };
+            var args_iter = Iterator{
+                .args = all_args[2..],
+            };
+
+            args_loop: while (args_iter.next()) |arg| {
+                if (mem.startsWith(u8, arg, "@")) {
+                    // This is a "compiler response file". We must parse the file and treat its
+                    // contents as command line parameters.
+                    const resp_file_path = arg[1..];
+                    args_iter.resp_file = initArgIteratorResponseFile(arena, resp_file_path) catch |err| {
+                        fatal("unable to read response file '{s}': {s}", .{ resp_file_path, @errorName(err) });
+                    };
+                } else if (mem.startsWith(u8, arg, "-")) {
                     if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
                         try io.getStdOut().writeAll(usage_build_generic);
                         return cleanExit();
                     } else if (mem.eql(u8, arg, "--")) {
                         if (arg_mode == .run) {
-                            // The index refers to all_args so skip `zig` `run`
-                            // and `--`
-                            runtime_args_start = i + 3;
+                            // args_iter.i is 1, referring the next arg after "--" in ["--", ...]
+                            // Add +2 to the index so it is relative to all_args
+                            runtime_args_start = args_iter.i + 2;
                             break :args_loop;
                         } else {
                             fatal("unexpected end-of-parameter mark: --", .{});
                         }
                     } else if (mem.eql(u8, arg, "--pkg-begin")) {
-                        if (i + 2 >= args.len) fatal("Expected 2 arguments after {s}", .{arg});
-                        i += 1;
-                        const pkg_name = args[i];
-                        i += 1;
-                        const pkg_path = args[i];
+                        const pkg_name = args_iter.next();
+                        const pkg_path = args_iter.next();
+                        if (pkg_name == null or pkg_path == null) fatal("Expected 2 arguments after {s}", .{arg});
 
                         const new_cur_pkg = Package.create(
                             gpa,
-                            fs.path.dirname(pkg_path),
-                            fs.path.basename(pkg_path),
+                            fs.path.dirname(pkg_path.?),
+                            fs.path.basename(pkg_path.?),
                         ) catch |err| {
-                            fatal("Failed to add package at path {s}: {s}", .{ pkg_path, @errorName(err) });
+                            fatal("Failed to add package at path {s}: {s}", .{ pkg_path.?, @errorName(err) });
                         };
-                        try cur_pkg.addAndAdopt(gpa, pkg_name, new_cur_pkg);
+                        try cur_pkg.addAndAdopt(gpa, pkg_name.?, new_cur_pkg);
                         cur_pkg = new_cur_pkg;
                     } else if (mem.eql(u8, arg, "--pkg-end")) {
                         cur_pkg = cur_pkg.parent orelse
                             fatal("encountered --pkg-end with no matching --pkg-begin", .{});
                     } else if (mem.eql(u8, arg, "--main-pkg-path")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        main_pkg_path = args[i];
+                        main_pkg_path = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
                     } else if (mem.eql(u8, arg, "-cflags")) {
                         extra_cflags.shrinkRetainingCapacity(0);
                         while (true) {
-                            i += 1;
-                            if (i >= args.len) fatal("expected -- after -cflags", .{});
-                            if (mem.eql(u8, args[i], "--")) break;
-                            try extra_cflags.append(args[i]);
+                            const next_arg = args_iter.next() orelse {
+                                fatal("expected -- after -cflags", .{});
+                            };
+                            if (mem.eql(u8, next_arg, "--")) break;
+                            try extra_cflags.append(next_arg);
                         }
                     } else if (mem.eql(u8, arg, "--color")) {
-                        if (i + 1 >= args.len) {
+                        const next_arg = args_iter.next() orelse {
                             fatal("expected [auto|on|off] after --color", .{});
-                        }
-                        i += 1;
-                        const next_arg = args[i];
+                        };
                         color = std.meta.stringToEnum(Color, next_arg) orelse {
                             fatal("expected [auto|on|off] after --color, found '{s}'", .{next_arg});
                         };
                     } else if (mem.eql(u8, arg, "--subsystem")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        if (mem.eql(u8, args[i], "console")) {
-                            subsystem = .Console;
-                        } else if (mem.eql(u8, args[i], "windows")) {
-                            subsystem = .Windows;
-                        } else if (mem.eql(u8, args[i], "posix")) {
-                            subsystem = .Posix;
-                        } else if (mem.eql(u8, args[i], "native")) {
-                            subsystem = .Native;
-                        } else if (mem.eql(u8, args[i], "efi_application")) {
-                            subsystem = .EfiApplication;
-                        } else if (mem.eql(u8, args[i], "efi_boot_service_driver")) {
-                            subsystem = .EfiBootServiceDriver;
-                        } else if (mem.eql(u8, args[i], "efi_rom")) {
-                            subsystem = .EfiRom;
-                        } else if (mem.eql(u8, args[i], "efi_runtime_driver")) {
-                            subsystem = .EfiRuntimeDriver;
-                        } else {
-                            fatal("invalid: --subsystem: '{s}'. Options are:\n{s}", .{
-                                args[i],
-                                \\  console
-                                \\  windows
-                                \\  posix
-                                \\  native
-                                \\  efi_application
-                                \\  efi_boot_service_driver
-                                \\  efi_rom
-                                \\  efi_runtime_driver
-                                \\
-                            });
-                        }
+                        const next_arg = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
+                        subsystem = try parseSubSystem(next_arg);
                     } else if (mem.eql(u8, arg, "-O")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        optimize_mode_string = args[i];
+                        optimize_mode_string = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
                     } else if (mem.eql(u8, arg, "--entry")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        entry = args[i];
+                        entry = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
                     } else if (mem.eql(u8, arg, "--stack")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        stack_size_override = std.fmt.parseUnsigned(u64, args[i], 0) catch |err| {
+                        const next_arg = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
+                        stack_size_override = std.fmt.parseUnsigned(u64, next_arg, 0) catch |err| {
                             fatal("unable to parse '{s}': {s}", .{ arg, @errorName(err) });
                         };
                     } else if (mem.eql(u8, arg, "--image-base")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        image_base_override = std.fmt.parseUnsigned(u64, args[i], 0) catch |err| {
+                        const next_arg = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
+                        image_base_override = std.fmt.parseUnsigned(u64, next_arg, 0) catch |err| {
                             fatal("unable to parse '{s}': {s}", .{ arg, @errorName(err) });
                         };
                     } else if (mem.eql(u8, arg, "--name")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        provided_name = args[i];
+                        provided_name = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
                     } else if (mem.eql(u8, arg, "-rpath")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        try rpath_list.append(args[i]);
+                        try rpath_list.append(args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        });
                     } else if (mem.eql(u8, arg, "--library-directory") or mem.eql(u8, arg, "-L")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        try lib_dirs.append(args[i]);
+                        try lib_dirs.append(args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        });
                     } else if (mem.eql(u8, arg, "-F")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        try framework_dirs.append(args[i]);
+                        try framework_dirs.append(args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        });
                     } else if (mem.eql(u8, arg, "-framework")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        try frameworks.append(args[i]);
+                        try frameworks.append(args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        });
                     } else if (mem.eql(u8, arg, "-install_name")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        install_name = args[i];
+                        install_name = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
                     } else if (mem.eql(u8, arg, "-T") or mem.eql(u8, arg, "--script")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        linker_script = args[i];
+                        linker_script = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
                     } else if (mem.eql(u8, arg, "--version-script")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        version_script = args[i];
+                        version_script = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
                     } else if (mem.eql(u8, arg, "--library") or mem.eql(u8, arg, "-l")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
+                        const next_arg = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
                         // We don't know whether this library is part of libc or libc++ until
                         // we resolve the target, so we simply append to the list for now.
-                        i += 1;
-                        try system_libs.put(args[i], .{ .needed = false });
+                        try system_libs.put(next_arg, .{ .needed = false });
                     } else if (mem.eql(u8, arg, "--needed-library") or mem.eql(u8, arg, "-needed-l")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        try system_libs.put(args[i], .{ .needed = true });
+                        const next_arg = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
+                        try system_libs.put(next_arg, .{ .needed = true });
                     } else if (mem.eql(u8, arg, "-D") or
                         mem.eql(u8, arg, "-isystem") or
                         mem.eql(u8, arg, "-I") or
@@ -927,31 +933,30 @@ fn buildOutputType(
                         mem.eql(u8, arg, "-iframework") or
                         mem.eql(u8, arg, "-iframeworkwithsysroot"))
                     {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
                         try clang_argv.append(arg);
-                        try clang_argv.append(args[i]);
+                        try clang_argv.append(args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        });
                     } else if (mem.eql(u8, arg, "--version")) {
-                        if (i + 1 >= args.len) {
-                            fatal("expected parameter after --version", .{});
-                        }
-                        i += 1;
-                        version = std.builtin.Version.parse(args[i]) catch |err| {
-                            fatal("unable to parse --version '{s}': {s}", .{ args[i], @errorName(err) });
+                        const next_arg = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
+                        version = std.builtin.Version.parse(next_arg) catch |err| {
+                            fatal("unable to parse --version '{s}': {s}", .{ next_arg, @errorName(err) });
                         };
                         have_version = true;
                     } else if (mem.eql(u8, arg, "-target")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        target_arch_os_abi = args[i];
+                        target_arch_os_abi = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
                     } else if (mem.eql(u8, arg, "-mcpu")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        target_mcpu = args[i];
+                        target_mcpu = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
                     } else if (mem.eql(u8, arg, "-mcmodel")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        machine_code_model = parseCodeModel(args[i]);
+                        machine_code_model = parseCodeModel(args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        });
                     } else if (mem.startsWith(u8, arg, "-ofmt=")) {
                         target_ofmt = arg["-ofmt=".len..];
                     } else if (mem.startsWith(u8, arg, "-mcpu=")) {
@@ -961,50 +966,51 @@ fn buildOutputType(
                     } else if (mem.startsWith(u8, arg, "-O")) {
                         optimize_mode_string = arg["-O".len..];
                     } else if (mem.eql(u8, arg, "--dynamic-linker")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        target_dynamic_linker = args[i];
+                        target_dynamic_linker = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
                     } else if (mem.eql(u8, arg, "--sysroot")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        sysroot = args[i];
+                        sysroot = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
                         try clang_argv.append("-isysroot");
-                        try clang_argv.append(args[i]);
+                        try clang_argv.append(sysroot.?);
                     } else if (mem.eql(u8, arg, "--libc")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        libc_paths_file = args[i];
+                        libc_paths_file = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
                     } else if (mem.eql(u8, arg, "--test-filter")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        test_filter = args[i];
+                        test_filter = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
                     } else if (mem.eql(u8, arg, "--test-name-prefix")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        test_name_prefix = args[i];
+                        test_name_prefix = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
                     } else if (mem.eql(u8, arg, "--test-cmd")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        try test_exec_args.append(args[i]);
+                        try test_exec_args.append(args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        });
                     } else if (mem.eql(u8, arg, "--cache-dir")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        override_local_cache_dir = args[i];
+                        override_local_cache_dir = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
                     } else if (mem.eql(u8, arg, "--global-cache-dir")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        override_global_cache_dir = args[i];
+                        override_global_cache_dir = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
                     } else if (mem.eql(u8, arg, "--zig-lib-dir")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
-                        override_lib_dir = args[i];
+                        override_lib_dir = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
                     } else if (mem.eql(u8, arg, "--debug-log")) {
-                        if (i + 1 >= args.len) fatal("expected parameter after {s}", .{arg});
-                        i += 1;
+                        const next_arg = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
                         if (!build_options.enable_logging) {
                             std.log.warn("Zig was compiled without logging enabled (-Dlog). --debug-log has no effect.", .{});
                         } else {
-                            try log_scopes.append(gpa, args[i]);
+                            try log_scopes.append(gpa, next_arg);
                         }
                     } else if (mem.eql(u8, arg, "--debug-link-snapshot")) {
                         if (!build_options.enable_link_snapshots) {
@@ -1012,6 +1018,10 @@ fn buildOutputType(
                         } else {
                             enable_link_snapshots = true;
                         }
+                    } else if (mem.eql(u8, arg, "--entitlements")) {
+                        entitlements = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
                     } else if (mem.eql(u8, arg, "-fcompiler-rt")) {
                         want_compiler_rt = true;
                     } else if (mem.eql(u8, arg, "-fno-compiler-rt")) {
@@ -1177,11 +1187,9 @@ fn buildOutputType(
                     } else if (mem.eql(u8, arg, "-fno-allow-shlib-undefined")) {
                         linker_allow_shlib_undefined = false;
                     } else if (mem.eql(u8, arg, "-z")) {
-                        i += 1;
-                        if (i >= args.len) {
-                            fatal("expected linker extension flag after '{s}'", .{arg});
-                        }
-                        const z_arg = args[i];
+                        const z_arg = args_iter.next() orelse {
+                            fatal("expected parameter after {s}", .{arg});
+                        };
                         if (mem.eql(u8, z_arg, "nodelete")) {
                             linker_z_nodelete = true;
                         } else if (mem.eql(u8, z_arg, "notext")) {
@@ -1286,7 +1294,7 @@ fn buildOutputType(
         .cc, .cpp => {
             emit_h = .no;
             soname = .no;
-            strip = true;
+            strip = false;
             ensure_libc_on_non_freestanding = true;
             ensure_libcpp_on_non_freestanding = arg_mode == .cpp;
             want_native_include_dirs = true;
@@ -1317,7 +1325,16 @@ fn buildOutputType(
                 };
                 switch (it.zig_equivalent) {
                     .target => target_arch_os_abi = it.only_arg, // example: -target riscv64-linux-unknown
-                    .o => out_path = it.only_arg, // -o
+                    .o => {
+                        // We handle -o /dev/null equivalent to -fno-emit-bin because
+                        // otherwise our atomic rename into place will fail. This also
+                        // makes Zig do less work, avoiding pointless file system operations.
+                        if (mem.eql(u8, it.only_arg, "/dev/null")) {
+                            emit_bin = .no;
+                        } else {
+                            out_path = it.only_arg;
+                        }
+                    },
                     .c => c_out_mode = .object, // -c
                     .asm_only => c_out_mode = .assembly, // -S
                     .preprocess_only => c_out_mode = .preprocessor, // -E
@@ -1384,6 +1401,8 @@ fn buildOutputType(
                     .no_function_sections => function_sections = false,
                     .color_diagnostics => color = .on,
                     .no_color_diagnostics => color = .off,
+                    .stack_check => want_stack_check = true,
+                    .no_stack_check => want_stack_check = false,
                     .unwind_tables => want_unwind_tables = true,
                     .no_unwind_tables => want_unwind_tables = false,
                     .nostdlib => ensure_libc_on_non_freestanding = false,
@@ -1571,6 +1590,12 @@ fn buildOutputType(
                         fatal("expected linker arg after '{s}'", .{arg});
                     }
                     try rpath_list.append(linker_args.items[i]);
+                } else if (mem.eql(u8, arg, "--subsystem")) {
+                    i += 1;
+                    if (i >= linker_args.items.len) {
+                        fatal("expected linker arg after '{s}'", .{arg});
+                    }
+                    subsystem = try parseSubSystem(linker_args.items[i]);
                 } else if (mem.eql(u8, arg, "-I") or
                     mem.eql(u8, arg, "--dynamic-linker") or
                     mem.eql(u8, arg, "-dynamic-linker"))
@@ -2501,7 +2526,7 @@ fn buildOutputType(
         pkg_tree_root.table = .{};
     }
 
-    const self_exe_path = try fs.selfExePathAlloc(arena);
+    const self_exe_path = try introspect.findZigExePath(arena);
     var zig_lib_directory: Compilation.Directory = if (override_lib_dir) |lib_dir| .{
         .path = lib_dir,
         .handle = fs.cwd().openDir(lib_dir, .{}) catch |err| {
@@ -2696,6 +2721,7 @@ fn buildOutputType(
         .enable_link_snapshots = enable_link_snapshots,
         .native_darwin_sdk = native_darwin_sdk,
         .install_name = install_name,
+        .entitlements = entitlements,
     }) catch |err| switch (err) {
         error.LibCUnavailable => {
             const target = target_info.target;
@@ -3369,7 +3395,7 @@ pub fn cmdInit(
             }
         }
     }
-    const self_exe_path = try fs.selfExePathAlloc(arena);
+    const self_exe_path = try introspect.findZigExePath(arena);
     var zig_lib_directory = introspect.findZigLibDirFromSelfExe(arena, self_exe_path) catch |err| {
         fatal("unable to find zig installation directory: {s}\n", .{@errorName(err)});
     };
@@ -3438,18 +3464,25 @@ pub const usage_build =
     \\   Build a project from build.zig.
     \\
     \\Options:
-    \\   -h, --help             Print this help and exit
-    \\
+    \\   -fstage1                      Force using bootstrap compiler as the codegen backend
+    \\   -fno-stage1                   Prevent using bootstrap compiler as the codegen backend
+    \\   --build-file [file]           Override path to build.zig
+    \\   --cache-dir [path]            Override path to local Zig cache directory
+    \\   --global-cache-dir [path]     Override path to global Zig cache directory
+    \\   --zig-lib-dir [arg]           Override path to Zig lib directory
+    \\   --prominent-compile-errors    Output compile errors formatted for a human to read
+    \\   -h, --help                    Print this help and exit
     \\
 ;
 
 pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
     var prominent_compile_errors: bool = false;
+    var use_stage1: ?bool = null;
 
     // We want to release all the locks before executing the child process, so we make a nice
     // big block here to ensure the cleanup gets run when we extract out our argv.
     const child_argv = argv: {
-        const self_exe_path = try fs.selfExePathAlloc(arena);
+        const self_exe_path = try introspect.findZigExePath(arena);
 
         var build_file: ?[]const u8 = null;
         var override_lib_dir: ?[]const u8 = null;
@@ -3499,6 +3532,12 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
                         continue;
                     } else if (mem.eql(u8, arg, "--prominent-compile-errors")) {
                         prominent_compile_errors = true;
+                    } else if (mem.eql(u8, arg, "-fstage1")) {
+                        use_stage1 = true;
+                        try child_argv.append(arg);
+                    } else if (mem.eql(u8, arg, "-fno-stage1")) {
+                        use_stage1 = false;
+                        try child_argv.append(arg);
                     }
                 }
                 try child_argv.append(arg);
@@ -3639,6 +3678,7 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
             .optimize_mode = .Debug,
             .self_exe_path = self_exe_path,
             .thread_pool = &thread_pool,
+            .use_stage1 = use_stage1,
         }) catch |err| {
             fatal("unable to create compilation: {s}", .{@errorName(err)});
         };
@@ -3752,6 +3792,7 @@ pub const usage_fmt =
     \\   --check                List non-conforming files and exit with an error
     \\                          if the list is non-empty
     \\   --ast-check            Run zig ast-check on every file
+    \\   --exclude [file]       Exclude file or directory from formatting
     \\
     \\
 ;
@@ -3775,6 +3816,8 @@ pub fn cmdFmt(gpa: Allocator, arena: Allocator, args: []const []const u8) !void 
     var check_ast_flag: bool = false;
     var input_files = ArrayList([]const u8).init(gpa);
     defer input_files.deinit();
+    var excluded_files = ArrayList([]const u8).init(gpa);
+    defer excluded_files.deinit();
 
     {
         var i: usize = 0;
@@ -3800,6 +3843,13 @@ pub fn cmdFmt(gpa: Allocator, arena: Allocator, args: []const []const u8) !void 
                     check_flag = true;
                 } else if (mem.eql(u8, arg, "--ast-check")) {
                     check_ast_flag = true;
+                } else if (mem.eql(u8, arg, "--exclude")) {
+                    if (i + 1 >= args.len) {
+                        fatal("expected parameter after --exclude", .{});
+                    }
+                    i += 1;
+                    const next_arg = args[i];
+                    try excluded_files.append(next_arg);
                 } else {
                     fatal("unrecognized parameter: '{s}'", .{arg});
                 }
@@ -3842,7 +3892,7 @@ pub fn cmdFmt(gpa: Allocator, arena: Allocator, args: []const []const u8) !void 
                 .tree_loaded = true,
                 .zir = undefined,
                 .pkg = undefined,
-                .root_decl = null,
+                .root_decl = .none,
             };
 
             file.pkg = try Package.create(gpa, null, file.sub_file_path);
@@ -3899,6 +3949,16 @@ pub fn cmdFmt(gpa: Allocator, arena: Allocator, args: []const []const u8) !void 
     };
     defer fmt.seen.deinit();
     defer fmt.out_buffer.deinit();
+
+    // Mark any excluded files/directories as already seen,
+    // so that they are skipped later during actual processing
+    for (excluded_files.items) |file_path| {
+        var dir = try fs.cwd().openDir(file_path, .{});
+        defer dir.close();
+
+        const stat = try dir.stat();
+        try fmt.seen.put(stat.inode, {});
+    }
 
     for (input_files.items) |file_path| {
         try fmtPath(&fmt, file_path, check_flag, fs.cwd(), file_path);
@@ -4038,7 +4098,7 @@ fn fmtPathFile(
             .tree_loaded = true,
             .zir = undefined,
             .pkg = undefined,
-            .root_decl = null,
+            .root_decl = .none,
         };
 
         file.pkg = try Package.create(fmt.gpa, null, file.sub_file_path);
@@ -4289,6 +4349,17 @@ pub fn lldMain(
     return @bitCast(u8, @truncate(i8, exit_code));
 }
 
+const ArgIteratorResponseFile = process.ArgIteratorGeneral(.{ .comments = true, .single_quotes = true });
+
+/// Initialize the arguments from a Response File. "*.rsp"
+fn initArgIteratorResponseFile(allocator: Allocator, resp_file_path: []const u8) !ArgIteratorResponseFile {
+    const max_bytes = 10 * 1024 * 1024; // 10 MiB of command line arguments is a reasonable limit
+    var cmd_line = try fs.cwd().readFileAlloc(allocator, resp_file_path, max_bytes);
+    errdefer allocator.free(cmd_line);
+
+    return ArgIteratorResponseFile.initTakeOwnership(allocator, cmd_line);
+}
+
 const clang_args = @import("clang_options.zig").list;
 
 pub const ClangArgIterator = struct {
@@ -4351,6 +4422,8 @@ pub const ClangArgIterator = struct {
         no_function_sections,
         color_diagnostics,
         no_color_diagnostics,
+        stack_check,
+        no_stack_check,
         strip,
         exec_model,
         emit_llvm,
@@ -4376,17 +4449,6 @@ pub const ClangArgIterator = struct {
             .arg_iterator_response_file = undefined,
             .arena = arena,
         };
-    }
-
-    const ArgIteratorResponseFile = process.ArgIteratorGeneral(.{ .comments = true, .single_quotes = true });
-
-    /// Initialize the arguments from a Response File. "*.rsp"
-    fn initArgIteratorResponseFile(allocator: Allocator, resp_file_path: []const u8) !ArgIteratorResponseFile {
-        const max_bytes = 10 * 1024 * 1024; // 10 MiB of command line arguments is a reasonable limit
-        var cmd_line = try fs.cwd().readFileAlloc(allocator, resp_file_path, max_bytes);
-        errdefer allocator.free(cmd_line);
-
-        return ArgIteratorResponseFile.initTakeOwnership(allocator, cmd_line);
     }
 
     fn next(self: *ClangArgIterator) !void {
@@ -4695,7 +4757,7 @@ pub fn cmdAstCheck(
         .tree = undefined,
         .zir = undefined,
         .pkg = undefined,
-        .root_decl = null,
+        .root_decl = .none,
     };
     if (zig_source_file) |file_name| {
         var f = fs.cwd().openFile(file_name, .{}) catch |err| {
@@ -4848,7 +4910,7 @@ pub fn cmdChangelist(
         .tree = undefined,
         .zir = undefined,
         .pkg = undefined,
-        .root_decl = null,
+        .root_decl = .none,
     };
 
     file.pkg = try Package.create(gpa, null, file.sub_file_path);
@@ -5068,5 +5130,38 @@ fn warnAboutForeignBinaries(
                 host_name, foreign_name, tip_suffix,
             });
         },
+    }
+}
+
+fn parseSubSystem(next_arg: []const u8) !std.Target.SubSystem {
+    if (mem.eql(u8, next_arg, "console")) {
+        return .Console;
+    } else if (mem.eql(u8, next_arg, "windows")) {
+        return .Windows;
+    } else if (mem.eql(u8, next_arg, "posix")) {
+        return .Posix;
+    } else if (mem.eql(u8, next_arg, "native")) {
+        return .Native;
+    } else if (mem.eql(u8, next_arg, "efi_application")) {
+        return .EfiApplication;
+    } else if (mem.eql(u8, next_arg, "efi_boot_service_driver")) {
+        return .EfiBootServiceDriver;
+    } else if (mem.eql(u8, next_arg, "efi_rom")) {
+        return .EfiRom;
+    } else if (mem.eql(u8, next_arg, "efi_runtime_driver")) {
+        return .EfiRuntimeDriver;
+    } else {
+        fatal("invalid: --subsystem: '{s}'. Options are:\n{s}", .{
+            next_arg,
+            \\  console
+            \\  windows
+            \\  posix
+            \\  native
+            \\  efi_application
+            \\  efi_boot_service_driver
+            \\  efi_rom
+            \\  efi_runtime_driver
+            \\
+        });
     }
 }

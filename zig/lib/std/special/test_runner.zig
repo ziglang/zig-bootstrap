@@ -24,7 +24,7 @@ fn processArgs() void {
 
 pub fn main() void {
     if (builtin.zig_backend != .stage1 and
-        builtin.zig_backend != .stage2_llvm)
+        (builtin.zig_backend != .stage2_llvm or builtin.cpu.arch == .wasm32))
     {
         return main2() catch @panic("test failure");
     }
@@ -46,9 +46,9 @@ pub fn main() void {
 
     var leaks: usize = 0;
     for (test_fn_list) |test_fn, i| {
-        if (builtin.zig_backend != .stage2_llvm) std.testing.allocator_instance = .{};
+        std.testing.allocator_instance = .{};
         defer {
-            if (builtin.zig_backend != .stage2_llvm and std.testing.allocator_instance.deinit()) {
+            if (std.testing.allocator_instance.deinit()) {
                 leaks += 1;
             }
         }
@@ -144,7 +144,8 @@ pub fn main2() anyerror!void {
         };
     }
     if (builtin.zig_backend == .stage2_wasm or
-        builtin.zig_backend == .stage2_x86_64)
+        builtin.zig_backend == .stage2_x86_64 or
+        builtin.zig_backend == .stage2_llvm)
     {
         const passed = builtin.test_functions.len - skipped - failed;
         const stderr = std.io.getStdErr();

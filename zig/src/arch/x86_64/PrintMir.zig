@@ -5,6 +5,7 @@ const Print = @This();
 const std = @import("std");
 const assert = std.debug.assert;
 const bits = @import("bits.zig");
+const abi = @import("abi.zig");
 const leb128 = std.leb;
 const link = @import("../../link.zig");
 const log = std.log.scoped(.codegen);
@@ -146,7 +147,7 @@ pub fn printMir(print: *const Print, w: anytype, mir_to_air_map: std.AutoHashMap
 
             .call_extern => try print.mirCallExtern(inst, w),
 
-            .dbg_line, .dbg_prologue_end, .dbg_epilogue_begin, .arg_dbg_info => try w.print("{s}\n", .{@tagName(tag)}),
+            .dbg_line, .dbg_prologue_end, .dbg_epilogue_begin => try w.print("{s}\n", .{@tagName(tag)}),
 
             .push_regs_from_callee_preserved_regs => try print.mirPushPopRegsFromCalleePreservedRegs(.push, inst, w),
             .pop_regs_from_callee_preserved_regs => try print.mirPushPopRegsFromCalleePreservedRegs(.pop, inst, w),
@@ -188,7 +189,7 @@ fn mirPushPopRegsFromCalleePreservedRegs(print: *const Print, tag: Mir.Inst.Tag,
     var disp: u32 = data.disp + 8;
     if (regs == 0) return w.writeAll("no regs from callee_preserved_regs\n");
     var printed_first_reg = false;
-    for (bits.callee_preserved_regs) |reg, i| {
+    for (abi.callee_preserved_regs) |reg, i| {
         if ((regs >> @intCast(u5, i)) & 1 == 0) continue;
         if (printed_first_reg) try w.writeAll("  ");
         printed_first_reg = true;

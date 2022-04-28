@@ -17,6 +17,7 @@ const fmt_lib = std.fmt;
 const File = std.fs.File;
 const CrossTarget = std.zig.CrossTarget;
 const NativeTargetInfo = std.zig.system.NativeTargetInfo;
+const Sha256 = std.crypto.hash.sha2.Sha256;
 
 pub const FmtStep = @import("build/FmtStep.zig");
 pub const TranslateCStep = @import("build/TranslateCStep.zig");
@@ -43,6 +44,7 @@ pub const Builder = struct {
     /// The purpose of executing the command is for a human to read compile errors from the terminal
     prominent_compile_errors: bool,
     color: enum { auto, on, off } = .auto,
+    use_stage1: ?bool = null,
     invalid_user_input: bool,
     zig_exe: []const u8,
     default_step: *Step,
@@ -1320,6 +1322,7 @@ pub const Builder = struct {
                 error.FileNotFound => error.PkgConfigNotInstalled,
                 error.InvalidName => error.PkgConfigNotInstalled,
                 error.PkgConfigInvalidOutput => error.PkgConfigInvalidOutput,
+                error.ChildExecFailed => error.PkgConfigFailed,
                 else => return err,
             };
             self.pkg_config_pkg_list = result;
@@ -1568,6 +1571,9 @@ pub const LibExeObjStep = struct {
     /// (Darwin) Install name for the dylib
     install_name: ?[]const u8 = null,
 
+    /// (Darwin) Path to entitlements file
+    entitlements: ?[]const u8 = null,
+
     /// Position Independent Code
     force_pic: ?bool = null,
 
@@ -1577,6 +1583,7 @@ pub const LibExeObjStep = struct {
     red_zone: ?bool = null,
 
     omit_frame_pointer: ?bool = null,
+    no_dll_export_fns: bool = false,
 
     subsystem: ?std.Target.SubSystem = null,
 
@@ -1586,6 +1593,7 @@ pub const LibExeObjStep = struct {
     stack_size: ?u64 = null,
 
     want_lto: ?bool = null,
+    use_stage1: ?bool = null,
 
     output_path_source: GeneratedFile,
     output_lib_path_source: GeneratedFile,
@@ -1595,10 +1603,24 @@ pub const LibExeObjStep = struct {
     pub const LinkObject = union(enum) {
         static_path: FileSource,
         other_step: *LibExeObjStep,
-        system_lib: []const u8,
+        system_lib: SystemLib,
         assembly_file: FileSource,
         c_source_file: *CSourceFile,
         c_source_files: *CSourceFiles,
+    };
+
+    pub const SystemLib = struct {
+        name: []const u8,
+        use_pkg_config: enum {
+            /// Don't use pkg-config, just pass -lfoo where foo is name.
+            no,
+            /// Try to get information on how to link the library from pkg-config.
+            /// If that fails, fall back to passing -lfoo where foo is name.
+            yes,
+            /// Try to get information on how to link the library from pkg-config.
+            /// If that fails, error out.
+            force,
+        },
     };
 
     pub const IncludeDir = union(enum) {
@@ -1849,7 +1871,7 @@ pub const LibExeObjStep = struct {
         }
         for (self.link_objects.items) |link_object| {
             switch (link_object) {
-                .system_lib => |n| if (mem.eql(u8, n, name)) return true,
+                .system_lib => |lib| if (mem.eql(u8, lib.name, name)) return true,
                 else => continue,
             }
         }
@@ -1874,14 +1896,24 @@ pub const LibExeObjStep = struct {
     pub fn linkLibC(self: *LibExeObjStep) void {
         if (!self.is_linking_libc) {
             self.is_linking_libc = true;
-            self.link_objects.append(.{ .system_lib = "c" }) catch unreachable;
+            self.link_objects.append(.{
+                .system_lib = .{
+                    .name = "c",
+                    .use_pkg_config = .no,
+                },
+            }) catch unreachable;
         }
     }
 
     pub fn linkLibCpp(self: *LibExeObjStep) void {
         if (!self.is_linking_libcpp) {
             self.is_linking_libcpp = true;
-            self.link_objects.append(.{ .system_lib = "c++" }) catch unreachable;
+            self.link_objects.append(.{
+                .system_lib = .{
+                    .name = "c++",
+                    .use_pkg_config = .no,
+                },
+            }) catch unreachable;
         }
     }
 
@@ -1900,12 +1932,28 @@ pub const LibExeObjStep = struct {
     /// This one has no integration with anything, it just puts -lname on the command line.
     /// Prefer to use `linkSystemLibrary` instead.
     pub fn linkSystemLibraryName(self: *LibExeObjStep, name: []const u8) void {
-        self.link_objects.append(.{ .system_lib = self.builder.dupe(name) }) catch unreachable;
+        self.link_objects.append(.{
+            .system_lib = .{
+                .name = self.builder.dupe(name),
+                .use_pkg_config = .no,
+            },
+        }) catch unreachable;
     }
 
     /// This links against a system library, exclusively using pkg-config to find the library.
     /// Prefer to use `linkSystemLibrary` instead.
-    pub fn linkSystemLibraryPkgConfigOnly(self: *LibExeObjStep, lib_name: []const u8) !void {
+    pub fn linkSystemLibraryPkgConfigOnly(self: *LibExeObjStep, lib_name: []const u8) void {
+        self.link_objects.append(.{
+            .system_lib = .{
+                .name = self.builder.dupe(lib_name),
+                .use_pkg_config = .force,
+            },
+        }) catch unreachable;
+    }
+
+    /// Run pkg-config for the given library name and parse the output, returning the arguments
+    /// that should be passed to zig to link the given library.
+    fn runPkgConfig(self: *LibExeObjStep, lib_name: []const u8) ![]const []const u8 {
         const pkg_name = match: {
             // First we have to map the library name to pkg config name. Unfortunately,
             // there are several examples where this is not straightforward:
@@ -1962,36 +2010,41 @@ pub const LibExeObjStep = struct {
             error.ExecNotSupported => return error.PkgConfigFailed,
             error.ExitCodeFailure => return error.PkgConfigFailed,
             error.FileNotFound => return error.PkgConfigNotInstalled,
+            error.ChildExecFailed => return error.PkgConfigFailed,
             else => return err,
         };
+
+        var zig_args = std.ArrayList([]const u8).init(self.builder.allocator);
+        defer zig_args.deinit();
+
         var it = mem.tokenize(u8, stdout, " \r\n\t");
         while (it.next()) |tok| {
             if (mem.eql(u8, tok, "-I")) {
                 const dir = it.next() orelse return error.PkgConfigInvalidOutput;
-                self.addIncludePath(dir);
+                try zig_args.appendSlice(&[_][]const u8{ "-I", dir });
             } else if (mem.startsWith(u8, tok, "-I")) {
-                self.addIncludePath(tok["-I".len..]);
+                try zig_args.append(tok);
             } else if (mem.eql(u8, tok, "-L")) {
                 const dir = it.next() orelse return error.PkgConfigInvalidOutput;
-                self.addLibraryPath(dir);
+                try zig_args.appendSlice(&[_][]const u8{ "-L", dir });
             } else if (mem.startsWith(u8, tok, "-L")) {
-                self.addLibraryPath(tok["-L".len..]);
+                try zig_args.append(tok);
             } else if (mem.eql(u8, tok, "-l")) {
                 const lib = it.next() orelse return error.PkgConfigInvalidOutput;
-                self.linkSystemLibraryName(lib);
+                try zig_args.appendSlice(&[_][]const u8{ "-l", lib });
             } else if (mem.startsWith(u8, tok, "-l")) {
-                self.linkSystemLibraryName(tok["-l".len..]);
+                try zig_args.append(tok);
             } else if (mem.eql(u8, tok, "-D")) {
                 const macro = it.next() orelse return error.PkgConfigInvalidOutput;
-                self.defineCMacroRaw(macro);
+                try zig_args.appendSlice(&[_][]const u8{ "-D", macro });
             } else if (mem.startsWith(u8, tok, "-D")) {
-                self.defineCMacroRaw(tok["-D".len..]);
-            } else if (mem.eql(u8, tok, "-pthread")) {
-                self.linkLibC();
+                try zig_args.append(tok);
             } else if (self.builder.verbose) {
                 warn("Ignoring pkg-config flag '{s}'\n", .{tok});
             }
         }
+
+        return zig_args.toOwnedSlice();
     }
 
     pub fn linkSystemLibrary(self: *LibExeObjStep, name: []const u8) void {
@@ -2003,21 +2056,13 @@ pub const LibExeObjStep = struct {
             self.linkLibCpp();
             return;
         }
-        if (self.linkSystemLibraryPkgConfigOnly(name)) |_| {
-            // pkg-config worked, so nothing further needed to do.
-            return;
-        } else |err| switch (err) {
-            error.PkgConfigInvalidOutput,
-            error.PkgConfigCrashed,
-            error.PkgConfigFailed,
-            error.PkgConfigNotInstalled,
-            error.PackageNotFound,
-            => {},
 
-            else => unreachable,
-        }
-
-        self.linkSystemLibraryName(name);
+        self.link_objects.append(.{
+            .system_lib = .{
+                .name = self.builder.dupe(name),
+                .use_pkg_config = .yes,
+            },
+        }) catch unreachable;
     }
 
     pub fn setNamePrefix(self: *LibExeObjStep, text: []const u8) void {
@@ -2296,6 +2341,20 @@ pub const LibExeObjStep = struct {
             try zig_args.append(@tagName(builder.color));
         }
 
+        if (self.use_stage1) |stage1| {
+            if (stage1) {
+                try zig_args.append("-fstage1");
+            } else {
+                try zig_args.append("-fno-stage1");
+            }
+        } else if (builder.use_stage1) |stage1| {
+            if (stage1) {
+                try zig_args.append("-fstage1");
+            } else {
+                try zig_args.append("-fno-stage1");
+            }
+        }
+
         if (self.entry_symbol_name) |entry| {
             try zig_args.append("--entry");
             try zig_args.append(entry);
@@ -2311,27 +2370,34 @@ pub const LibExeObjStep = struct {
         var prev_has_extra_flags = false;
 
         // Resolve transitive dependencies
-        for (self.link_objects.items) |link_object| {
-            switch (link_object) {
-                .other_step => |other| {
-                    // Inherit dependency on system libraries
-                    for (other.link_objects.items) |other_link_object| {
-                        switch (other_link_object) {
-                            .system_lib => |name| self.linkSystemLibrary(name),
-                            else => continue,
-                        }
-                    }
+        {
+            var transitive_dependencies = std.ArrayList(LinkObject).init(builder.allocator);
+            defer transitive_dependencies.deinit();
 
-                    // Inherit dependencies on darwin frameworks
-                    if (!other.isDynamicLibrary()) {
-                        var it = other.frameworks.iterator();
-                        while (it.next()) |framework| {
-                            self.frameworks.insert(framework.*) catch unreachable;
+            for (self.link_objects.items) |link_object| {
+                switch (link_object) {
+                    .other_step => |other| {
+                        // Inherit dependency on system libraries
+                        for (other.link_objects.items) |other_link_object| {
+                            switch (other_link_object) {
+                                .system_lib => try transitive_dependencies.append(other_link_object),
+                                else => continue,
+                            }
                         }
-                    }
-                },
-                else => continue,
+
+                        // Inherit dependencies on darwin frameworks
+                        if (!other.isDynamicLibrary()) {
+                            var it = other.frameworks.iterator();
+                            while (it.next()) |framework| {
+                                self.frameworks.insert(framework.*) catch unreachable;
+                            }
+                        }
+                    },
+                    else => continue,
+                }
             }
+
+            try self.link_objects.appendSlice(transitive_dependencies.items);
         }
 
         for (self.link_objects.items) |link_object| {
@@ -2357,8 +2423,35 @@ pub const LibExeObjStep = struct {
                         }
                     },
                 },
-                .system_lib => |name| {
-                    try zig_args.append(builder.fmt("-l{s}", .{name}));
+
+                .system_lib => |system_lib| {
+                    switch (system_lib.use_pkg_config) {
+                        .no => try zig_args.append(builder.fmt("-l{s}", .{system_lib.name})),
+                        .yes, .force => {
+                            if (self.runPkgConfig(system_lib.name)) |args| {
+                                try zig_args.appendSlice(args);
+                            } else |err| switch (err) {
+                                error.PkgConfigInvalidOutput,
+                                error.PkgConfigCrashed,
+                                error.PkgConfigFailed,
+                                error.PkgConfigNotInstalled,
+                                error.PackageNotFound,
+                                => switch (system_lib.use_pkg_config) {
+                                    .yes => {
+                                        // pkg-config failed, so fall back to linking the library
+                                        // by name directly.
+                                        try zig_args.append(builder.fmt("-l{s}", .{system_lib.name}));
+                                    },
+                                    .force => {
+                                        panic("pkg-config failed for library {s}", .{system_lib.name});
+                                    },
+                                    .no => unreachable,
+                                },
+
+                                else => |e| return e,
+                            }
+                        },
+                    }
                 },
 
                 .assembly_file => |asm_file| {
@@ -2512,6 +2605,10 @@ pub const LibExeObjStep = struct {
             }
         }
 
+        if (self.entitlements) |entitlements| {
+            try zig_args.appendSlice(&[_][]const u8{ "--entitlements", entitlements });
+        }
+
         if (self.bundle_compiler_rt) |x| {
             if (x) {
                 try zig_args.append("-fcompiler-rt");
@@ -2542,6 +2639,9 @@ pub const LibExeObjStep = struct {
             } else {
                 try zig_args.append("-fno-omit-frame-pointer");
             }
+        }
+        if (self.no_dll_export_fns) {
+            try zig_args.append("-fno-dll-export-fns");
         }
         if (self.disable_sanitize_c) {
             try zig_args.append("-fno-sanitize-c");
@@ -2892,6 +2992,41 @@ pub const LibExeObjStep = struct {
 
         try zig_args.append("--enable-cache");
 
+        // Windows has an argument length limit of 32,766 characters, macOS 262,144 and Linux
+        // 2,097,152. If our args exceed 30 KiB, we instead write them to a "response file" and
+        // pass that to zig, e.g. via 'zig build-lib @args.rsp'
+        var args_length: usize = 0;
+        for (zig_args.items) |arg| {
+            args_length += arg.len + 1; // +1 to account for null terminator
+        }
+        if (args_length >= 30 * 1024) {
+            const args_dir = try fs.path.join(
+                builder.allocator,
+                &[_][]const u8{ builder.pathFromRoot("zig-cache"), "args" },
+            );
+            try std.fs.cwd().makePath(args_dir);
+
+            // Write the args to zig-cache/args/<SHA256 hash of args> to avoid conflicts with
+            // other zig build commands running in parallel.
+            const partially_quoted = try std.mem.join(builder.allocator, "\" \"", zig_args.items[2..]);
+            const args = try std.mem.concat(builder.allocator, u8, &[_][]const u8{ "\"", partially_quoted, "\"" });
+
+            var args_hash: [Sha256.digest_length]u8 = undefined;
+            Sha256.hash(args, &args_hash, .{});
+            var args_hex_hash: [Sha256.digest_length * 2]u8 = undefined;
+            _ = try std.fmt.bufPrint(
+                &args_hex_hash,
+                "{s}",
+                .{std.fmt.fmtSliceHexLower(&args_hash)},
+            );
+
+            const args_file = try fs.path.join(builder.allocator, &[_][]const u8{ args_dir, args_hex_hash[0..] });
+            try std.fs.cwd().writeFile(args_file, args);
+
+            zig_args.shrinkRetainingCapacity(2);
+            try zig_args.append(try std.mem.concat(builder.allocator, u8, &[_][]const u8{ "@", args_file }));
+        }
+
         const output_dir_nl = try builder.execFromStep(zig_args.items, &self.step);
         const build_output_dir = mem.trimRight(u8, output_dir_nl, "\r\n");
 
@@ -3218,10 +3353,15 @@ const ThisModule = @This();
 pub const Step = struct {
     id: Id,
     name: []const u8,
-    makeFn: fn (self: *Step) anyerror!void,
+    makeFn: MakeFn,
     dependencies: ArrayList(*Step),
     loop_flag: bool,
     done_flag: bool,
+
+    const MakeFn = switch (builtin.zig_backend) {
+        .stage1 => fn (self: *Step) anyerror!void,
+        else => *const fn (self: *Step) anyerror!void,
+    };
 
     pub const Id = enum {
         top_level,
@@ -3241,7 +3381,7 @@ pub const Step = struct {
         custom,
     };
 
-    pub fn init(id: Id, name: []const u8, allocator: Allocator, makeFn: fn (*Step) anyerror!void) Step {
+    pub fn init(id: Id, name: []const u8, allocator: Allocator, makeFn: MakeFn) Step {
         return Step{
             .id = id,
             .name = allocator.dupe(u8, name) catch unreachable,
@@ -3441,4 +3581,59 @@ test "LibExeObjStep.addPackage" {
 
     const dupe = exe.packages.items[0];
     try std.testing.expectEqualStrings(pkg_top.name, dupe.name);
+}
+
+test "build_runner issue 10381" {
+    if (builtin.os.tag == .wasi) return error.SkipZigTest;
+
+    const progstr =
+        \\ pub fn main() u8 {
+        \\     return 1;
+        \\ }
+    ;
+
+    const buildstr =
+        \\ const std = @import("std");
+        \\ pub fn build(b: *std.build.Builder) void {
+        \\     const exe = b.addExecutable("source", "source.zig");
+        \\     exe.install();
+        \\     const run_cmd = exe.run();
+        \\     run_cmd.step.dependOn(b.getInstallStep());
+        \\     const run_step = b.step("run", "Run");
+        \\     run_step.dependOn(&run_cmd.step);
+        \\ }
+    ;
+
+    const testing = std.testing;
+    const allocator = testing.allocator;
+
+    var it = try std.process.argsWithAllocator(allocator);
+    defer it.deinit();
+    const testargs = try testing.getTestArgs(&it);
+
+    var tmpdir = testing.tmpDir(.{ .no_follow = true });
+    defer tmpdir.cleanup();
+    const tmpdir_path = try tmpdir.getFullPath(allocator);
+    defer allocator.free(tmpdir_path);
+
+    try tmpdir.dir.writeFile("source.zig", progstr);
+    try tmpdir.dir.writeFile("build.zig", buildstr);
+
+    const cwd_path = try std.process.getCwdAlloc(allocator);
+    defer allocator.free(cwd_path);
+    const lib_dir = try std.fs.path.join(allocator, &.{ cwd_path, "lib" });
+    defer allocator.free(lib_dir);
+
+    const result = try testing.runZigBuild(testargs.zigexec, .{
+        .subcmd = "run",
+        .cwd = tmpdir_path,
+        .lib_dir = lib_dir,
+    });
+    defer {
+        allocator.free(result.stdout);
+        allocator.free(result.stderr);
+    }
+
+    try testing.expectEqual(result.term, .{ .Exited = 1 });
+    try testing.expect(std.mem.indexOf(u8, result.stderr, "error: UnexpectedExitCode") == null);
 }

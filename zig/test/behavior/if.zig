@@ -4,8 +4,6 @@ const expect = std.testing.expect;
 const expectEqual = std.testing.expectEqual;
 
 test "if statements" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
-
     shouldBeEqual(1, 1);
     firstEqlThird(2, 1, 2);
 }
@@ -29,8 +27,6 @@ fn firstEqlThird(a: i32, b: i32, c: i32) void {
 }
 
 test "else if expression" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
-
     try expect(elseIfExpressionF(1) == 1);
 }
 fn elseIfExpressionF(c: u8) u8 {
@@ -48,7 +44,6 @@ var global_with_val: anyerror!u32 = 0;
 var global_with_err: anyerror!u32 = error.SomeError;
 
 test "unwrap mutable global var" {
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
 
@@ -65,8 +60,6 @@ test "unwrap mutable global var" {
 }
 
 test "labeled break inside comptime if inside runtime if" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
-
     var answer: i32 = 0;
     var c = true;
     if (c) {
@@ -78,8 +71,6 @@ test "labeled break inside comptime if inside runtime if" {
 }
 
 test "const result loc, runtime if cond, else unreachable" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
-
     const Num = enum { One, Two };
 
     var t = true;
@@ -107,8 +98,6 @@ test "if copies its payload" {
 }
 
 test "if prongs cast to expected type instead of peer type resolution" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
-
     const S = struct {
         fn doTheTest(f: bool) !void {
             var x: i32 = 0;

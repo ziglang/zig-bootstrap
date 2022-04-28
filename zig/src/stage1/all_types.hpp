@@ -1398,6 +1398,7 @@ enum StructSpecial {
 struct ZigTypeStruct {
     AstNode *decl_node;
     TypeStructField **fields;
+    TypeStructField *misaligned_field;
     ScopeDecls *decls_scope;
     HashMap<Buf *, TypeStructField *, buf_hash, buf_eql_buf> fields_by_name;
     RootStruct *root_struct;
@@ -1767,6 +1768,7 @@ enum BuiltinFnId {
     BuiltinFnIdSqrt,
     BuiltinFnIdSin,
     BuiltinFnIdCos,
+    BuiltinFnIdTan,
     BuiltinFnIdExp,
     BuiltinFnIdExp2,
     BuiltinFnIdLog,

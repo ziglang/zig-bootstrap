@@ -368,11 +368,13 @@ pub fn translate(
     resources_path: [*:0]const u8,
     zig_is_stage1: bool,
 ) !std.zig.Ast {
+    // TODO stage2 bug
+    var tmp = errors;
     const ast_unit = clang.LoadFromCommandLine(
         args_begin,
         args_end,
-        &errors.ptr,
-        &errors.len,
+        &tmp.ptr,
+        &tmp.len,
         resources_path,
     ) orelse {
         if (errors.len == 0) return error.ASTUnitFailure;
@@ -382,16 +384,16 @@ pub fn translate(
 
     // For memory that has the same lifetime as the Ast that we return
     // from this function.
-    var arena = std.heap.ArenaAllocator.init(gpa);
-    errdefer arena.deinit();
-    const arena_allocator = arena.allocator();
+    var arena_allocator = std.heap.ArenaAllocator.init(gpa);
+    errdefer arena_allocator.deinit();
+    const arena = arena_allocator.allocator();
 
     var context = Context{
         .gpa = gpa,
-        .arena = arena_allocator,
+        .arena = arena,
         .source_manager = ast_unit.getSourceManager(),
         .alias_list = AliasList.init(gpa),
-        .global_scope = try arena_allocator.create(Scope.Root),
+        .global_scope = try arena.create(Scope.Root),
         .clang_context = ast_unit.getASTContext(),
         .pattern_list = try PatternList.init(gpa),
         .zig_is_stage1 = zig_is_stage1,
@@ -410,9 +412,9 @@ pub fn translate(
 
     inline for (@typeInfo(std.zig.c_builtins).Struct.decls) |decl| {
         if (decl.is_pub) {
-            const builtin = try Tag.pub_var_simple.create(context.arena, .{
+            const builtin = try Tag.pub_var_simple.create(arena, .{
                 .name = decl.name,
-                .init = try Tag.import_c_builtin.create(context.arena, decl.name),
+                .init = try Tag.import_c_builtin.create(arena, decl.name),
             });
             try addTopLevelDecl(&context, decl.name, builtin);
         }
@@ -429,7 +431,7 @@ pub fn translate(
     try addMacros(&context);
     for (context.alias_list.items) |alias| {
         if (!context.global_scope.sym_table.contains(alias.alias)) {
-            const node = try Tag.alias.create(context.arena, .{ .actual = alias.alias, .mangled = alias.name });
+            const node = try Tag.alias.create(arena, .{ .actual = alias.alias, .mangled = alias.name });
             try addTopLevelDecl(&context, alias.alias, node);
         }
     }
@@ -1441,7 +1443,7 @@ fn makeShuffleMask(c: *Context, scope: *Scope, expr: *const clang.ShuffleVectorE
     assert(num_subexprs >= 3); // two source vectors + at least 1 index expression
     const mask_len = num_subexprs - 2;
 
-    const mask_type = try Tag.std_meta_vector.create(c.arena, .{
+    const mask_type = try Tag.vector.create(c.arena, .{
         .lhs = try transCreateNodeNumber(c, mask_len, .int),
         .rhs = try Tag.type.create(c.arena, "i32"),
     });
@@ -3996,7 +3998,7 @@ fn transFloatingLiteral(c: *Context, scope: *Scope, expr: *const clang.FloatingL
     var dbl = expr.getValueAsApproximateDouble();
     const is_negative = dbl < 0;
     if (is_negative) dbl = -dbl;
-    const str = if (dbl == std.math.floor(dbl))
+    const str = if (dbl == @floor(dbl))
         try std.fmt.allocPrint(c.arena, "{d}.0", .{dbl})
     else
         try std.fmt.allocPrint(c.arena, "{d}", .{dbl});
@@ -4800,7 +4802,7 @@ fn transType(c: *Context, scope: *Scope, ty: *const clang.Type, source_loc: clan
             const vector_ty = @ptrCast(*const clang.VectorType, ty);
             const num_elements = vector_ty.getNumElements();
             const element_qt = vector_ty.getElementType();
-            return Tag.std_meta_vector.create(c.arena, .{
+            return Tag.vector.create(c.arena, .{
                 .lhs = try transCreateNodeNumber(c, num_elements, .int),
                 .rhs = try transQualType(c, scope, element_qt, source_loc),
             });
@@ -5325,7 +5327,7 @@ const MacroCtx = struct {
             try self.fail(
                 c,
                 "unable to translate C expr: expected '{s}' instead got '{s}'",
-                .{ CToken.Id.symbol(expected_id), next_id.symbol() },
+                .{ CToken.Id.symbolName(expected_id), next_id.symbol() },
             );
             return error.ParseError;
         }
@@ -5563,7 +5565,7 @@ fn parseCExpr(c: *Context, m: *MacroCtx, scope: *Scope) ParseError!Node {
         const ignore = try Tag.discard.create(c.arena, .{ .should_skip = false, .value = last });
         try block_scope.statements.append(ignore);
 
-        last = try parseCCondExpr(c, m, scope);
+        last = try parseCCondExpr(c, m, &block_scope.base);
         if (m.next().? != .Comma) {
             m.i -= 1;
             break;

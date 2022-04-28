@@ -28,6 +28,12 @@ pub const Inst = struct {
         add_immediate,
         /// Add (shifted register)
         add_shifted_register,
+        /// Bitwise AND (shifted register)
+        and_shifted_register,
+        /// Arithmetic Shift Right (immediate)
+        asr_immediate,
+        /// Arithmetic Shift Right (register)
+        asr_register,
         /// Branch conditionally
         b_cond,
         /// Branch
@@ -54,6 +60,8 @@ pub const Inst = struct {
         dbg_epilogue_begin,
         /// Pseudo-instruction: Update debug line
         dbg_line,
+        /// Bitwise Exclusive OR (immediate)
+        eor_immediate,
         /// Bitwise Exclusive OR (shifted register)
         eor_shifted_register,
         /// Loads the contents into a register
@@ -92,6 +100,24 @@ pub const Inst = struct {
         ldrh_immediate,
         /// Load Register Halfword (register)
         ldrh_register,
+        /// Load Register Signed Byte (immediate)
+        ldrsb_immediate,
+        /// Pseudo-instruction: Load signed byte from stack
+        ldrsb_stack,
+        /// Load Register Signed Halfword (immediate)
+        ldrsh_immediate,
+        /// Pseudo-instruction: Load signed halfword from stack
+        ldrsh_stack,
+        /// Load Register Signed Word (immediate)
+        ldrsw_immediate,
+        /// Logical Shift Left (immediate)
+        lsl_immediate,
+        /// Logical Shift Left (register)
+        lsl_register,
+        /// Logical Shift Right (immediate)
+        lsr_immediate,
+        /// Logical Shift Right (register)
+        lsr_register,
         /// Move (to/from SP)
         mov_to_from_sp,
         /// Move (register)
@@ -106,12 +132,22 @@ pub const Inst = struct {
         mvn,
         /// No Operation
         nop,
+        /// Bitwise inclusive OR (shifted register)
+        orr_shifted_register,
         /// Pseudo-instruction: Pop multiple registers
         pop_regs,
         /// Psuedo-instruction: Push multiple registers
         push_regs,
         /// Return from subroutine
         ret,
+        /// Signed bitfield extract
+        sbfx,
+        /// Signed extend byte
+        sxtb,
+        /// Signed extend halfword
+        sxth,
+        /// Signed extend word
+        sxtw,
         /// Store Pair of Registers
         stp,
         /// Pseudo-instruction: Store to stack
@@ -138,6 +174,12 @@ pub const Inst = struct {
         sub_shifted_register,
         /// Supervisor Call
         svc,
+        /// Unsigned bitfield extract
+        ubfx,
+        /// Unsigned extend byte
+        uxtb,
+        /// Unsigned extend halfword
+        uxth,
     };
 
     /// The position of an MIR instruction within the `Mir` instructions array.
@@ -207,13 +249,6 @@ pub const Inst = struct {
             rt: Register,
             inst: Index,
         },
-        /// Two registers
-        ///
-        /// Used by e.g. mov_register
-        rr: struct {
-            rd: Register,
-            rn: Register,
-        },
         /// A register, an unsigned 12-bit immediate, and an optional shift
         ///
         /// Used by e.g. cmp_immediate
@@ -221,6 +256,13 @@ pub const Inst = struct {
             rn: Register,
             imm12: u12,
             sh: u1 = 0,
+        },
+        /// Two registers
+        ///
+        /// Used by e.g. mov_register
+        rr: struct {
+            rd: Register,
+            rn: Register,
         },
         /// Two registers, an unsigned 12-bit immediate, and an optional shift
         ///
@@ -233,14 +275,52 @@ pub const Inst = struct {
         },
         /// Two registers and a shift (shift type and 6-bit amount)
         ///
-        /// Used by e.g. mvn
+        /// Used by e.g. cmp_shifted_register
         rr_imm6_shift: struct {
-            rd: Register,
+            rn: Register,
             rm: Register,
             imm6: u6,
             shift: bits.Instruction.AddSubtractShiftedRegisterShift,
         },
-        /// Two registers
+        /// Two registers and a shift (logical instruction version)
+        /// (shift type and 6-bit amount)
+        ///
+        /// Used by e.g. mvn
+        rr_imm6_logical_shift: struct {
+            rd: Register,
+            rm: Register,
+            imm6: u6,
+            shift: bits.Instruction.LogicalShiftedRegisterShift,
+        },
+        /// Two registers and a lsb (range 0-63) and a width (range
+        /// 1-64)
+        ///
+        /// Used by e.g. ubfx
+        rr_lsb_width: struct {
+            rd: Register,
+            rn: Register,
+            lsb: u6,
+            width: u7,
+        },
+        /// Two registers and a bitmask immediate
+        ///
+        /// Used by e.g. eor_immediate
+        rr_bitmask: struct {
+            rd: Register,
+            rn: Register,
+            imms: u6,
+            immr: u6,
+            n: u1,
+        },
+        /// Two registers and a 6-bit unsigned shift
+        ///
+        /// Used by e.g. lsl_immediate
+        rr_shift: struct {
+            rd: Register,
+            rn: Register,
+            shift: u6,
+        },
+        /// Three registers
         ///
         /// Used by e.g. mul
         rrr: struct {
@@ -250,7 +330,7 @@ pub const Inst = struct {
         },
         /// Three registers and a shift (shift type and 6-bit amount)
         ///
-        /// Used by e.g. cmp_shifted_register
+        /// Used by e.g. add_shifted_register
         rrr_imm6_shift: struct {
             rd: Register,
             rn: Register,
