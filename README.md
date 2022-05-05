@@ -10,7 +10,7 @@ to find and inspect the patch diffs.
 
  * LLVM, LLD, Clang 13.0.1
  * zlib 1.2.12
- * Zig 0.10.0-dev.2061+080e870a7
+ * Zig 0.10.0-dev.2062+ba127058d
 
 For other versions, check the git tags of this repository.
 
