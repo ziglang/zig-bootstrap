@@ -1476,7 +1476,7 @@ pub const Value = extern union {
         while (i != 0) {
             i -= 1;
             const limb: f128 = @intToFloat(f128, limbs[i]);
-            result = @mulAdd(f128, base, limb, result);
+            result = @mulAdd(f128, base, result, limb);
         }
         if (positive) {
             return result;
@@ -2532,6 +2532,15 @@ pub const Value = extern union {
             .slice => val.castTag(.slice).?.data.len.toUnsignedInt(mod.getTarget()),
             .decl_ref => {
                 const decl_index = val.castTag(.decl_ref).?.data;
+                const decl = mod.declPtr(decl_index);
+                if (decl.ty.zigTypeTag() == .Array) {
+                    return decl.ty.arrayLen();
+                } else {
+                    return 1;
+                }
+            },
+            .decl_ref_mut => {
+                const decl_index = val.castTag(.decl_ref_mut).?.data.decl_index;
                 const decl = mod.declPtr(decl_index);
                 if (decl.ty.zigTypeTag() == .Array) {
                     return decl.ty.arrayLen();
@@ -5067,6 +5076,9 @@ pub const Value = extern union {
                 ptr: Value,
                 len: Value,
             },
+
+            pub const ptr_index = 0;
+            pub const len_index = 1;
         };
 
         pub const Ty = struct {

@@ -667,23 +667,47 @@ fn fnWithFloatMode() f32 {
 }
 
 test "float literal at compile time not lossy" {
-    if (builtin.zig_backend != .stage1) {
-        // https://github.com/ziglang/zig/issues/11169
-        return error.SkipZigTest;
-    }
-
     try expect(16777216.0 + 1.0 == 16777217.0);
     try expect(9007199254740992.0 + 1.0 == 9007199254740993.0);
 }
 
 test "f128 at compile time is lossy" {
-    if (builtin.zig_backend != .stage1) {
-        // this one is happening because we represent comptime-known f128 integers with
-        // Value.Tag.bigint and only convert to f128 representation if it stops being an
-        // integer. Is this something we want? need to have a lang spec discussion on this
-        // topic.
-        return error.SkipZigTest; // TODO
-    }
-
     try expect(@as(f128, 10384593717069655257060992658440192.0) + 1 == 10384593717069655257060992658440192.0);
+}
+
+test "comptime fixed-width float zero divided by zero produces NaN" {
+    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+
+    inline for (.{ f16, f32, f64, f80, f128 }) |F| {
+        try expect(math.isNan(@as(F, 0) / @as(F, 0)));
+    }
+}
+
+test "comptime fixed-width float non-zero divided by zero produces signed Inf" {
+    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+
+    inline for (.{ f16, f32, f64, f80, f128 }) |F| {
+        const pos = @as(F, 1) / @as(F, 0);
+        const neg = @as(F, -1) / @as(F, 0);
+        try expect(math.isInf(pos));
+        try expect(math.isInf(neg));
+        try expect(pos > 0);
+        try expect(neg < 0);
+    }
+}
+
+test "comptime_float zero divided by zero produces zero" {
+    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
+
+    try expect((0.0 / 0.0) == 0.0);
 }

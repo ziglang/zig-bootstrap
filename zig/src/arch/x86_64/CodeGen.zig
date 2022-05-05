@@ -1085,8 +1085,7 @@ fn airTrunc(self: *Self, inst: Air.Inst.Index) !void {
     // when truncating a `u16` to `u5`, for example, those top 3 bits in the result
     // have to be removed. this only happens if the dst if not a power-of-two size.
     const dst_bit_size = dst_ty.bitSize(self.target.*);
-    const is_power_of_two = (dst_bit_size & (dst_bit_size - 1)) == 0;
-    if (!is_power_of_two or dst_bit_size < 8) {
+    if (!math.isPowerOfTwo(dst_bit_size) or dst_bit_size < 8) {
         const max_reg_bit_width = Register.rax.size();
         const shift = @intCast(u6, max_reg_bit_width - dst_ty.bitSize(self.target.*));
         const mask = (~@as(u64, 0)) >> shift;
@@ -4739,10 +4738,12 @@ fn airAsm(self: *Self, inst: Air.Inst.Index) !void {
             if (output != .none) {
                 return self.fail("TODO implement codegen for non-expr asm", .{});
             }
+            const extra_bytes = std.mem.sliceAsBytes(self.air.extra[extra_i..]);
             const constraint = std.mem.sliceTo(std.mem.sliceAsBytes(self.air.extra[extra_i..]), 0);
+            const name = std.mem.sliceTo(extra_bytes[constraint.len + 1 ..], 0);
             // This equation accounts for the fact that even if we have exactly 4 bytes
             // for the string, we still use the next u32 for the null terminator.
-            extra_i += constraint.len / 4 + 1;
+            extra_i += (constraint.len + name.len + (2 + 3)) / 4;
 
             break constraint;
         } else null;
@@ -4750,10 +4751,10 @@ fn airAsm(self: *Self, inst: Air.Inst.Index) !void {
         for (inputs) |input| {
             const input_bytes = std.mem.sliceAsBytes(self.air.extra[extra_i..]);
             const constraint = std.mem.sliceTo(input_bytes, 0);
-            const input_name = std.mem.sliceTo(input_bytes[constraint.len + 1 ..], 0);
+            const name = std.mem.sliceTo(input_bytes[constraint.len + 1 ..], 0);
             // This equation accounts for the fact that even if we have exactly 4 bytes
             // for the string, we still use the next u32 for the null terminator.
-            extra_i += (constraint.len + input_name.len + 1) / 4 + 1;
+            extra_i += (constraint.len + name.len + (2 + 3)) / 4;
 
             if (constraint.len < 3 or constraint[0] != '{' or constraint[constraint.len - 1] != '}') {
                 return self.fail("unrecognized asm input constraint: '{s}'", .{constraint});
@@ -5125,8 +5126,7 @@ fn genSetStack(self: *Self, ty: Type, stack_offset: i32, mcv: MCValue, opts: Inl
             }
 
             const base_reg = opts.dest_stack_base orelse .rbp;
-            const is_power_of_two = (abi_size % 2) == 0;
-            if (!is_power_of_two) {
+            if (!math.isPowerOfTwo(abi_size)) {
                 self.register_manager.freezeRegs(&.{reg});
                 defer self.register_manager.unfreezeRegs(&.{reg});
 
@@ -5135,31 +5135,31 @@ fn genSetStack(self: *Self, ty: Type, stack_offset: i32, mcv: MCValue, opts: Inl
                 var next_offset = stack_offset;
                 var remainder = abi_size;
                 while (remainder > 0) {
-                    const closest_power_of_two = @as(u6, 1) << @intCast(u3, math.log2(remainder));
+                    const nearest_power_of_two = @as(u6, 1) << math.log2_int(u3, @intCast(u3, remainder));
 
                     _ = try self.addInst(.{
                         .tag = .mov,
                         .ops = (Mir.Ops{
                             .reg1 = base_reg,
-                            .reg2 = registerAlias(tmp_reg, closest_power_of_two),
+                            .reg2 = registerAlias(tmp_reg, nearest_power_of_two),
                             .flags = 0b10,
                         }).encode(),
                         .data = .{ .imm = @bitCast(u32, -next_offset) },
                     });
 
-                    if (closest_power_of_two > 1) {
+                    if (nearest_power_of_two > 1) {
                         _ = try self.addInst(.{
                             .tag = .shr,
                             .ops = (Mir.Ops{
                                 .reg1 = tmp_reg,
                                 .flags = 0b10,
                             }).encode(),
-                            .data = .{ .imm = closest_power_of_two * 8 },
+                            .data = .{ .imm = nearest_power_of_two * 8 },
                         });
                     }
 
-                    remainder -= closest_power_of_two;
-                    next_offset -= closest_power_of_two;
+                    remainder -= nearest_power_of_two;
+                    next_offset -= nearest_power_of_two;
                 }
             } else {
                 _ = try self.addInst(.{

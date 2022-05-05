@@ -971,9 +971,7 @@ pub const Builder = struct {
         if (!std.process.can_spawn)
             return error.ExecNotSupported;
 
-        const child = std.ChildProcess.init(argv, self.allocator) catch unreachable;
-        defer child.deinit();
-
+        var child = std.ChildProcess.init(argv, self.allocator);
         child.cwd = cwd;
         child.env_map = env_map;
 
@@ -1187,9 +1185,7 @@ pub const Builder = struct {
             return error.ExecNotSupported;
 
         const max_output_size = 400 * 1024;
-        const child = try std.ChildProcess.init(argv, self.allocator);
-        defer child.deinit();
-
+        var child = std.ChildProcess.init(argv, self.allocator);
         child.stdin_behavior = .Ignore;
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = stderr_behavior;
@@ -1583,7 +1579,7 @@ pub const LibExeObjStep = struct {
     red_zone: ?bool = null,
 
     omit_frame_pointer: ?bool = null,
-    no_dll_export_fns: bool = false,
+    dll_export_fns: ?bool = null,
 
     subsystem: ?std.Target.SubSystem = null,
 
@@ -2640,8 +2636,12 @@ pub const LibExeObjStep = struct {
                 try zig_args.append("-fno-omit-frame-pointer");
             }
         }
-        if (self.no_dll_export_fns) {
-            try zig_args.append("-fno-dll-export-fns");
+        if (self.dll_export_fns) |dll_export_fns| {
+            if (dll_export_fns) {
+                try zig_args.append("-fdll-export-fns");
+            } else {
+                try zig_args.append("-fno-dll-export-fns");
+            }
         }
         if (self.disable_sanitize_c) {
             try zig_args.append("-fno-sanitize-c");
@@ -3581,59 +3581,4 @@ test "LibExeObjStep.addPackage" {
 
     const dupe = exe.packages.items[0];
     try std.testing.expectEqualStrings(pkg_top.name, dupe.name);
-}
-
-test "build_runner issue 10381" {
-    if (builtin.os.tag == .wasi) return error.SkipZigTest;
-
-    const progstr =
-        \\ pub fn main() u8 {
-        \\     return 1;
-        \\ }
-    ;
-
-    const buildstr =
-        \\ const std = @import("std");
-        \\ pub fn build(b: *std.build.Builder) void {
-        \\     const exe = b.addExecutable("source", "source.zig");
-        \\     exe.install();
-        \\     const run_cmd = exe.run();
-        \\     run_cmd.step.dependOn(b.getInstallStep());
-        \\     const run_step = b.step("run", "Run");
-        \\     run_step.dependOn(&run_cmd.step);
-        \\ }
-    ;
-
-    const testing = std.testing;
-    const allocator = testing.allocator;
-
-    var it = try std.process.argsWithAllocator(allocator);
-    defer it.deinit();
-    const testargs = try testing.getTestArgs(&it);
-
-    var tmpdir = testing.tmpDir(.{ .no_follow = true });
-    defer tmpdir.cleanup();
-    const tmpdir_path = try tmpdir.getFullPath(allocator);
-    defer allocator.free(tmpdir_path);
-
-    try tmpdir.dir.writeFile("source.zig", progstr);
-    try tmpdir.dir.writeFile("build.zig", buildstr);
-
-    const cwd_path = try std.process.getCwdAlloc(allocator);
-    defer allocator.free(cwd_path);
-    const lib_dir = try std.fs.path.join(allocator, &.{ cwd_path, "lib" });
-    defer allocator.free(lib_dir);
-
-    const result = try testing.runZigBuild(testargs.zigexec, .{
-        .subcmd = "run",
-        .cwd = tmpdir_path,
-        .lib_dir = lib_dir,
-    });
-    defer {
-        allocator.free(result.stdout);
-        allocator.free(result.stderr);
-    }
-
-    try testing.expectEqual(result.term, .{ .Exited = 1 });
-    try testing.expect(std.mem.indexOf(u8, result.stderr, "error: UnexpectedExitCode") == null);
 }

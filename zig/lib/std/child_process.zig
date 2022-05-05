@@ -98,10 +98,8 @@ pub const ChildProcess = struct {
     };
 
     /// First argument in argv is the executable.
-    /// On success must call deinit.
-    pub fn init(argv: []const []const u8, allocator: mem.Allocator) !*ChildProcess {
-        const child = try allocator.create(ChildProcess);
-        child.* = ChildProcess{
+    pub fn init(argv: []const []const u8, allocator: mem.Allocator) ChildProcess {
+        return .{
             .allocator = allocator,
             .argv = argv,
             .pid = undefined,
@@ -121,8 +119,6 @@ pub const ChildProcess = struct {
             .stderr_behavior = StdIo.Inherit,
             .expand_arg0 = .no_expand,
         };
-        errdefer allocator.destroy(child);
-        return child;
     }
 
     pub fn setUserName(self: *ChildProcess, name: []const u8) !void {
@@ -199,7 +195,7 @@ pub const ChildProcess = struct {
     };
 
     fn collectOutputPosix(
-        child: *const ChildProcess,
+        child: ChildProcess,
         stdout: *std.ArrayList(u8),
         stderr: *std.ArrayList(u8),
         max_output_bytes: usize,
@@ -298,7 +294,7 @@ pub const ChildProcess = struct {
         }
     }
 
-    fn collectOutputWindows(child: *const ChildProcess, outs: [2]*std.ArrayList(u8), max_output_bytes: usize) !void {
+    fn collectOutputWindows(child: ChildProcess, outs: [2]*std.ArrayList(u8), max_output_bytes: usize) !void {
         const bump_amt = 512;
         const handles = [_]windows.HANDLE{
             child.stdout.?.handle,
@@ -383,9 +379,7 @@ pub const ChildProcess = struct {
         max_output_bytes: usize = 50 * 1024,
         expand_arg0: Arg0Expand = .no_expand,
     }) !ExecResult {
-        const child = try ChildProcess.init(args.argv, args.allocator);
-        defer child.deinit();
-
+        var child = ChildProcess.init(args.argv, args.allocator);
         child.stdin_behavior = .Ignore;
         child.stdout_behavior = .Pipe;
         child.stderr_behavior = .Pipe;
@@ -450,10 +444,6 @@ pub const ChildProcess = struct {
 
         try self.waitUnwrapped();
         return self.term.?;
-    }
-
-    pub fn deinit(self: *ChildProcess) void {
-        self.allocator.destroy(self);
     }
 
     fn waitUnwrappedWindows(self: *ChildProcess) !void {
@@ -1357,18 +1347,24 @@ test "build and call child_process" {
     var it = try std.process.argsWithAllocator(allocator);
     defer it.deinit(); // no-op unless WASI or Windows
     const testargs = try testing.getTestArgs(&it);
+
     var tmp = testing.tmpDir(.{ .no_follow = true }); // ie zig-cache/tmp/8DLgoSEqz593PAEE
     defer tmp.cleanup();
+    const tmpdirpath = try tmp.getFullPath(allocator);
+    defer allocator.free(tmpdirpath);
     const child_name = "child"; // no need for suffixes (.exe, .wasm) due to '-femit-bin'
-    const zigfile_path = try tmp.writeZigFile(allocator, childstr, child_name);
-    defer allocator.free(zigfile_path);
+    const suffix_zig = ".zig";
+    const child_path = try fs.path.join(allocator, &[_][]const u8{ tmpdirpath, child_name });
+    defer allocator.free(child_path);
+    const child_zig = try mem.concat(allocator, u8, &[_][]const u8{ child_path, suffix_zig });
+    defer allocator.free(child_zig);
 
-    const binary = zigfile_path[0 .. zigfile_path.len - 4]; // '.zig' is 4 characters
-    try testing.buildExe(testargs.zigexec, zigfile_path, binary);
+    try tmp.dir.writeFile("child.zig", childstr);
+    try testing.buildExe(testargs.zigexec, child_zig, child_path);
+
     // spawn compiled file as child_process with argument 'hello world' + expect success
-    const args = [_][]const u8{ binary, "hello world" };
-    var child_proc = try ChildProcess.init(&args, allocator);
-    defer child_proc.deinit();
+    const args = [_][]const u8{ child_path, "hello world" };
+    var child_proc = ChildProcess.init(&args, allocator);
     const ret_val = try child_proc.spawnAndWait();
     try testing.expectEqual(ret_val, .{ .Exited = 0 });
 }
@@ -1378,11 +1374,10 @@ test "creating a child process with stdin and stdout behavior set to StdIo.Pipe"
     const testing = std.testing;
     const allocator = testing.allocator;
 
-    var child_process = try std.ChildProcess.init(
+    var child_process = std.ChildProcess.init(
         &[_][]const u8{ testing.zig_exe_path, "fmt", "--stdin" },
         allocator,
     );
-    defer child_process.deinit();
     child_process.stdin_behavior = .Pipe;
     child_process.stdout_behavior = .Pipe;
 

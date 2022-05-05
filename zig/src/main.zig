@@ -3012,9 +3012,7 @@ fn runOrTest(
         const cmd = try std.mem.join(arena, " ", argv.items);
         fatal("the following command failed to execve with '{s}':\n{s}", .{ @errorName(err), cmd });
     } else if (std.process.can_spawn) {
-        const child = try std.ChildProcess.init(argv.items, gpa);
-        defer child.deinit();
-
+        var child = std.ChildProcess.init(argv.items, gpa);
         child.stdin_behavior = .Inherit;
         child.stdout_behavior = .Inherit;
         child.stderr_behavior = .Inherit;
@@ -3679,6 +3677,7 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
             .self_exe_path = self_exe_path,
             .thread_pool = &thread_pool,
             .use_stage1 = use_stage1,
+            .cache_mode = .whole,
         }) catch |err| {
             fatal("unable to create compilation: {s}", .{@errorName(err)});
         };
@@ -3700,9 +3699,7 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
     };
 
     if (std.process.can_spawn) {
-        const child = try std.ChildProcess.init(child_argv, gpa);
-        defer child.deinit();
-
+        var child = std.ChildProcess.init(child_argv, gpa);
         child.stdin_behavior = .Inherit;
         child.stdout_behavior = .Inherit;
         child.stderr_behavior = .Inherit;
