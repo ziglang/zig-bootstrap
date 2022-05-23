@@ -38,7 +38,7 @@ const arch_bits = switch (native_arch) {
     .aarch64 => @import("linux/arm64.zig"),
     .arm, .thumb => @import("linux/arm-eabi.zig"),
     .riscv64 => @import("linux/riscv64.zig"),
-    .sparcv9 => @import("linux/sparc64.zig"),
+    .sparc64 => @import("linux/sparc64.zig"),
     .mips, .mipsel => @import("linux/mips.zig"),
     .powerpc => @import("linux/powerpc.zig"),
     .powerpc64, .powerpc64le => @import("linux/powerpc64.zig"),
@@ -67,7 +67,6 @@ pub const LOCK = arch_bits.LOCK;
 pub const MMAP2_UNIT = arch_bits.MMAP2_UNIT;
 pub const REG = arch_bits.REG;
 pub const SC = arch_bits.SC;
-pub const SYS = arch_bits.SYS;
 pub const Stat = arch_bits.Stat;
 pub const VDSO = arch_bits.VDSO;
 pub const blkcnt_t = arch_bits.blkcnt_t;
@@ -92,6 +91,20 @@ pub const pie = @import("linux/start_pie.zig");
 pub const BPF = @import("linux/bpf.zig");
 pub const IOCTL = @import("linux/ioctl.zig");
 pub const SECCOMP = @import("linux/seccomp.zig");
+
+pub const syscalls = @import("linux/syscalls.zig");
+pub const SYS = switch (@import("builtin").cpu.arch) {
+    .i386 => syscalls.X86,
+    .x86_64 => syscalls.X64,
+    .aarch64 => syscalls.Arm64,
+    .arm, .thumb => syscalls.Arm,
+    .riscv64 => syscalls.RiscV64,
+    .sparc64 => syscalls.Sparc64,
+    .mips, .mipsel => syscalls.Mips,
+    .powerpc => syscalls.PowerPC,
+    .powerpc64, .powerpc64le => syscalls.PowerPC64,
+    else => @compileError("The Zig Standard Library is missing syscall definitions for the target CPU architecture"),
+};
 
 pub const MAP = struct {
     pub usingnamespace arch_bits.MAP;
@@ -1051,7 +1064,7 @@ pub fn getgroups(size: usize, list: *gid_t) usize {
     }
 }
 
-pub fn setgroups(size: usize, list: *const gid_t) usize {
+pub fn setgroups(size: usize, list: [*]const gid_t) usize {
     if (@hasField(SYS, "setgroups32")) {
         return syscall2(.setgroups32, size, @ptrToInt(list));
     } else {
@@ -1098,7 +1111,7 @@ pub fn sigaction(sig: u6, noalias act: ?*const Sigaction, noalias oact: ?*Sigact
 
     const result = switch (native_arch) {
         // The sparc version of rt_sigaction needs the restorer function to be passed as an argument too.
-        .sparc, .sparcv9 => syscall5(.rt_sigaction, sig, ksa_arg, oldksa_arg, @ptrToInt(ksa.restorer), mask_size),
+        .sparc, .sparc64 => syscall5(.rt_sigaction, sig, ksa_arg, oldksa_arg, @ptrToInt(ksa.restorer), mask_size),
         else => syscall4(.rt_sigaction, sig, ksa_arg, oldksa_arg, mask_size),
     };
     if (getErrno(result) != .SUCCESS) return result;
@@ -1698,7 +1711,7 @@ pub fn seccomp(operation: u32, flags: u32, args: ?*const anyopaque) usize {
 
 pub const E = switch (native_arch) {
     .mips, .mipsel => @import("linux/errno/mips.zig").E,
-    .sparc, .sparcel, .sparcv9 => @import("linux/errno/sparc.zig").E,
+    .sparc, .sparcel, .sparc64 => @import("linux/errno/sparc.zig").E,
     else => @import("linux/errno/generic.zig").E,
 };
 
@@ -3972,11 +3985,6 @@ pub const POLL = struct {
     pub const RDBAND = 0x080;
 };
 
-pub const MFD_CLOEXEC = 0x0001;
-pub const MFD_ALLOW_SEALING = 0x0002;
-pub const MFD_HUGETLB = 0x0004;
-pub const MFD_ALL_FLAGS = MFD_CLOEXEC | MFD_ALLOW_SEALING | MFD_HUGETLB;
-
 pub const HUGETLB_FLAG_ENCODE_SHIFT = 26;
 pub const HUGETLB_FLAG_ENCODE_MASK = 0x3f;
 pub const HUGETLB_FLAG_ENCODE_64KB = 16 << HUGETLB_FLAG_ENCODE_SHIFT;
@@ -3992,20 +4000,27 @@ pub const HUGETLB_FLAG_ENCODE_1GB = 30 << HUGETLB_FLAG_ENCODE_SHIFT;
 pub const HUGETLB_FLAG_ENCODE_2GB = 31 << HUGETLB_FLAG_ENCODE_SHIFT;
 pub const HUGETLB_FLAG_ENCODE_16GB = 34 << HUGETLB_FLAG_ENCODE_SHIFT;
 
-pub const MFD_HUGE_SHIFT = HUGETLB_FLAG_ENCODE_SHIFT;
-pub const MFD_HUGE_MASK = HUGETLB_FLAG_ENCODE_MASK;
-pub const MFD_HUGE_64KB = HUGETLB_FLAG_ENCODE_64KB;
-pub const MFD_HUGE_512KB = HUGETLB_FLAG_ENCODE_512KB;
-pub const MFD_HUGE_1MB = HUGETLB_FLAG_ENCODE_1MB;
-pub const MFD_HUGE_2MB = HUGETLB_FLAG_ENCODE_2MB;
-pub const MFD_HUGE_8MB = HUGETLB_FLAG_ENCODE_8MB;
-pub const MFD_HUGE_16MB = HUGETLB_FLAG_ENCODE_16MB;
-pub const MFD_HUGE_32MB = HUGETLB_FLAG_ENCODE_32MB;
-pub const MFD_HUGE_256MB = HUGETLB_FLAG_ENCODE_256MB;
-pub const MFD_HUGE_512MB = HUGETLB_FLAG_ENCODE_512MB;
-pub const MFD_HUGE_1GB = HUGETLB_FLAG_ENCODE_1GB;
-pub const MFD_HUGE_2GB = HUGETLB_FLAG_ENCODE_2GB;
-pub const MFD_HUGE_16GB = HUGETLB_FLAG_ENCODE_16GB;
+pub const MFD = struct {
+    pub const CLOEXEC = 0x0001;
+    pub const ALLOW_SEALING = 0x0002;
+    pub const HUGETLB = 0x0004;
+    pub const ALL_FLAGS = CLOEXEC | ALLOW_SEALING | HUGETLB;
+
+    pub const HUGE_SHIFT = HUGETLB_FLAG_ENCODE_SHIFT;
+    pub const HUGE_MASK = HUGETLB_FLAG_ENCODE_MASK;
+    pub const HUGE_64KB = HUGETLB_FLAG_ENCODE_64KB;
+    pub const HUGE_512KB = HUGETLB_FLAG_ENCODE_512KB;
+    pub const HUGE_1MB = HUGETLB_FLAG_ENCODE_1MB;
+    pub const HUGE_2MB = HUGETLB_FLAG_ENCODE_2MB;
+    pub const HUGE_8MB = HUGETLB_FLAG_ENCODE_8MB;
+    pub const HUGE_16MB = HUGETLB_FLAG_ENCODE_16MB;
+    pub const HUGE_32MB = HUGETLB_FLAG_ENCODE_32MB;
+    pub const HUGE_256MB = HUGETLB_FLAG_ENCODE_256MB;
+    pub const HUGE_512MB = HUGETLB_FLAG_ENCODE_512MB;
+    pub const HUGE_1GB = HUGETLB_FLAG_ENCODE_1GB;
+    pub const HUGE_2GB = HUGETLB_FLAG_ENCODE_2GB;
+    pub const HUGE_16GB = HUGETLB_FLAG_ENCODE_16GB;
+};
 
 pub const rusage = extern struct {
     utime: timeval,
@@ -4090,7 +4105,7 @@ pub const V = switch (native_arch) {
         pub const LNEXT = 15;
         pub const DISCARD = 16;
     },
-    .sparc, .sparcv9 => struct {
+    .sparc, .sparc64 => struct {
         pub const INTR = 0;
         pub const QUIT = 1;
         pub const ERASE = 2;
@@ -5427,7 +5442,7 @@ pub const AUDIT = struct {
             .aarch64 => .AARCH64,
             .arm, .thumb => .ARM,
             .riscv64 => .RISCV64,
-            .sparcv9 => .SPARC64,
+            .sparc64 => .SPARC64,
             .mips => .MIPS,
             .mipsel => .MIPSEL,
             .powerpc => .PPC,
@@ -5454,7 +5469,7 @@ pub const AUDIT = struct {
         RISCV64 = toAudit(.riscv64),
         S390X = toAudit(.s390x),
         SPARC = toAudit(.sparc),
-        SPARC64 = toAudit(.sparcv9),
+        SPARC64 = toAudit(.sparc64),
         X86_64 = toAudit(.x86_64),
 
         fn toAudit(arch: std.Target.Cpu.Arch) u32 {

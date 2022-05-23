@@ -21,6 +21,7 @@
 #include "zigendian.h"
 
 #include <stdio.h>
+#include <string.h>
 #include <errno.h>
 #include <math.h>
 
@@ -209,6 +210,9 @@ static ZigLLVM_CallingConv get_llvm_cc(CodeGen *g, CallingConvention cc) {
         case CallingConventionSysV:
             assert(g->zig_target->arch == ZigLLVM_x86_64);
             return ZigLLVM_X86_64_SysV;
+        case CallingConventionWin64:
+            assert(g->zig_target->arch == ZigLLVM_x86_64);
+            return ZigLLVM_Win64;
         case CallingConventionPtxKernel:
             assert(g->zig_target->arch == ZigLLVM_nvptx ||
                 g->zig_target->arch == ZigLLVM_nvptx64);
@@ -359,6 +363,7 @@ static bool cc_want_sret_attr(CallingConvention cc) {
         case CallingConventionAAPCS:
         case CallingConventionAAPCSVFP:
         case CallingConventionSysV:
+        case CallingConventionWin64:
         case CallingConventionPtxKernel:
             return true;
         case CallingConventionAsync:
@@ -3592,7 +3597,7 @@ static LLVMValueRef gen_soft_float_bin_op(CodeGen *g, LLVMValueRef op1_value, LL
         result = LLVMBuildLoad(g->builder, result, "");
     }
 
-    // Some operations are implemented as compound ops and require us to perform some 
+    // Some operations are implemented as compound ops and require us to perform some
     // more operations before we obtain the final result
     switch (op_id) {
         case IrBinOpDivTrunc:
@@ -9979,6 +9984,12 @@ Buf *codegen_generate_builtin_source(CodeGen *g) {
                 cur_arch = arch_name;
             }
         }
+
+        // Workaround to LLVM/Zig naming mismatch.
+        // LLVM calls it sparcv9, while Zig calls it sparc64.
+        if (!strcmp(cur_arch, "sparcv9")) {
+            cur_arch = "sparc64";
+        }
     }
     assert(cur_arch != nullptr);
 
@@ -10033,6 +10044,7 @@ Buf *codegen_generate_builtin_source(CodeGen *g) {
     static_assert(CallingConventionAAPCS == 12, "");
     static_assert(CallingConventionAAPCSVFP == 13, "");
     static_assert(CallingConventionSysV == 14, "");
+    static_assert(CallingConventionWin64 == 15, "");
 
     static_assert(BuiltinPtrSizeOne == 0, "");
     static_assert(BuiltinPtrSizeMany == 1, "");
@@ -10088,7 +10100,7 @@ Buf *codegen_generate_builtin_source(CodeGen *g) {
 }
 
 static ZigPackage *create_test_runner_pkg(CodeGen *g) {
-    return codegen_create_package(g, buf_ptr(g->zig_std_special_dir), "test_runner.zig", "std.special");
+    return codegen_create_package(g, buf_ptr(g->zig_lib_dir), "test_runner.zig", "");
 }
 
 static Error define_builtin_compile_vars(CodeGen *g) {
@@ -10141,12 +10153,17 @@ static Error define_builtin_compile_vars(CodeGen *g) {
     } else {
         g->root_pkg = g->main_pkg;
     }
+
+    ZigPackage *compiler_rt_pkg = codegen_create_package(g, buf_ptr(g->zig_lib_dir),
+            "compiler_rt.zig", "compiler_rt");
+
     g->compile_var_package->package_table.put(buf_create_from_str("std"), g->std_package);
     g->main_pkg->package_table.put(buf_create_from_str("builtin"), g->compile_var_package);
     g->main_pkg->package_table.put(buf_create_from_str("root"), g->root_pkg);
     g->std_package->package_table.put(buf_create_from_str("builtin"), g->compile_var_package);
     g->std_package->package_table.put(buf_create_from_str("std"), g->std_package);
     g->std_package->package_table.put(buf_create_from_str("root"), g->root_pkg);
+    g->std_package->package_table.put(buf_create_from_str("compiler_rt"), compiler_rt_pkg);
     g->compile_var_import = add_source_file(g, g->compile_var_package, g->builtin_zig_path, contents,
             SourceKindPkgMain);
 
@@ -10454,11 +10471,11 @@ static void gen_root_source(CodeGen *g) {
         Buf *import_target_path;
         Buf full_path = BUF_INIT;
         ZigType *compiler_rt_import;
-        if ((err = analyze_import(g, std_import, buf_create_from_str("./special/compiler_rt.zig"),
+        if ((err = analyze_import(g, std_import, buf_create_from_str("compiler_rt"),
             &compiler_rt_import, &import_target_path, &full_path)))
         {
             if (err == ErrorFileNotFound) {
-                fprintf(stderr, "unable to find '%s'", buf_ptr(import_target_path));
+                fprintf(stderr, "unable to find '%s'\n", buf_ptr(import_target_path));
             } else {
                 fprintf(stderr, "unable to open '%s': %s\n", buf_ptr(&full_path), err_str(err));
             }
@@ -10538,11 +10555,11 @@ void codegen_build_object(CodeGen *g) {
             fprintf(stderr, "Unable to create directory %s: %s\n", buf_ptr(doc_dir_path), err_str(err));
             exit(1);
         }
-        Buf *index_html_src_path = buf_sprintf("%s" OS_SEP "special" OS_SEP "docs" OS_SEP "index.html",
-                buf_ptr(g->zig_std_dir));
+        Buf *index_html_src_path = buf_sprintf("%s" OS_SEP "docs" OS_SEP "index.html",
+                buf_ptr(g->zig_lib_dir));
         Buf *index_html_dest_path = buf_sprintf("%s" OS_SEP "index.html", buf_ptr(doc_dir_path));
-        Buf *main_js_src_path = buf_sprintf("%s" OS_SEP "special" OS_SEP "docs" OS_SEP "main.js",
-                buf_ptr(g->zig_std_dir));
+        Buf *main_js_src_path = buf_sprintf("%s" OS_SEP "docs" OS_SEP "main.js",
+                buf_ptr(g->zig_lib_dir));
         Buf *main_js_dest_path = buf_sprintf("%s" OS_SEP "main.js", buf_ptr(doc_dir_path));
 
         if ((err = os_copy_file(index_html_src_path, index_html_dest_path))) {
@@ -10701,9 +10718,6 @@ CodeGen *codegen_create(Buf *main_pkg_path, Buf *root_src_path, const ZigTarget 
     } else {
         g->main_pkg = new_package(".", "", "");
     }
-
-    g->zig_std_special_dir = buf_alloc();
-    os_path_join(g->zig_std_dir, buf_sprintf("special"), g->zig_std_special_dir);
 
     target_triple_llvm(&g->llvm_triple_str, g->zig_target);
     g->pointer_size_bytes = target_arch_pointer_bit_width(g->zig_target->arch) / 8;

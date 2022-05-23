@@ -1040,7 +1040,7 @@ fn addOne(number: i32) i32 {
       </p>
       <aside>
         This documentation discusses the features of the default test runner as provided by the Zig Standard Library.
-        Its source code is located in <code class="file">lib/std/special/test_runner.zig</code>.
+        Its source code is located in <code class="file">lib/test_runner.zig</code>.
       </aside>
       <p>
         The shell output shown above displays two lines after the <kbd>zig test</kbd> command. These lines are
@@ -9220,8 +9220,8 @@ test "@setRuntimeSafety" {
       any bits that disagree with the resultant sign bit are shifted out.
       </p>
       <p>
-      The type of {#syntax#}shift_amt{#endsyntax#} is an unsigned integer with {#syntax#}log2(T.bit_count){#endsyntax#} bits.
-              This is because {#syntax#}shift_amt >= T.bit_count{#endsyntax#} is undefined behavior.
+      The type of {#syntax#}shift_amt{#endsyntax#} is an unsigned integer with {#syntax#}log2(@typeInfo(T).Int.bits){#endsyntax#} bits.
+              This is because {#syntax#}shift_amt >= @typeInfo(T).Int.bits{#endsyntax#} is undefined behavior.
       </p>
       {#see_also|@shrExact|@shlWithOverflow#}
       {#header_close#}
@@ -9234,8 +9234,8 @@ test "@setRuntimeSafety" {
                          If no overflow or underflow occurs, returns {#syntax#}false{#endsyntax#}.
       </p>
       <p>
-      The type of {#syntax#}shift_amt{#endsyntax#} is an unsigned integer with {#syntax#}log2(T.bit_count){#endsyntax#} bits.
-              This is because {#syntax#}shift_amt >= T.bit_count{#endsyntax#} is undefined behavior.
+      The type of {#syntax#}shift_amt{#endsyntax#} is an unsigned integer with {#syntax#}log2(@typeInfo(T).Int.bits){#endsyntax#} bits.
+              This is because {#syntax#}shift_amt >= @typeInfo(T).Int.bits{#endsyntax#} is undefined behavior.
       </p>
       {#see_also|@shlExact|@shrExact#}
       {#header_close#}
@@ -9247,8 +9247,8 @@ test "@setRuntimeSafety" {
       that the shift will not shift any 1 bits out.
       </p>
       <p>
-      The type of {#syntax#}shift_amt{#endsyntax#} is an unsigned integer with {#syntax#}log2(T.bit_count){#endsyntax#} bits.
-              This is because {#syntax#}shift_amt >= T.bit_count{#endsyntax#} is undefined behavior.
+      The type of {#syntax#}shift_amt{#endsyntax#} is an unsigned integer with {#syntax#}log2(@typeInfo(T).Int.bits){#endsyntax#} bits.
+              This is because {#syntax#}shift_amt >= @typeInfo(T).Int.bits{#endsyntax#} is undefined behavior.
       </p>
       {#see_also|@shlExact|@shlWithOverflow#}
       {#header_close#}
@@ -11392,7 +11392,7 @@ Architectures:
   riscv32
   riscv64
   sparc
-  sparcv9
+  sparc64
   sparcel
   s390x
   thumb
@@ -11543,7 +11543,7 @@ Available libcs:
   s390x-linux-gnu
   s390x-linux-musl
   sparc-linux-gnu
-  sparcv9-linux-gnu
+  sparc64-linux-gnu
   wasm32-freestanding-musl
   wasm32-wasi-musl
   x86_64-linux-gnu

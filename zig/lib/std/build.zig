@@ -12,7 +12,7 @@ const StringHashMap = std.StringHashMap;
 const Allocator = mem.Allocator;
 const process = std.process;
 const BufSet = std.BufSet;
-const BufMap = std.BufMap;
+const EnvMap = std.process.EnvMap;
 const fmt_lib = std.fmt;
 const File = std.fs.File;
 const CrossTarget = std.zig.CrossTarget;
@@ -48,7 +48,7 @@ pub const Builder = struct {
     invalid_user_input: bool,
     zig_exe: []const u8,
     default_step: *Step,
-    env_map: *BufMap,
+    env_map: *EnvMap,
     top_level_steps: ArrayList(*TopLevelStep),
     install_prefix: []const u8,
     dest_dir: ?[]const u8,
@@ -167,7 +167,7 @@ pub const Builder = struct {
         cache_root: []const u8,
         global_cache_root: []const u8,
     ) !*Builder {
-        const env_map = try allocator.create(BufMap);
+        const env_map = try allocator.create(EnvMap);
         env_map.* = try process.getEnvMap(allocator);
 
         const host = try NativeTargetInfo.detect(allocator, .{});
@@ -229,7 +229,7 @@ pub const Builder = struct {
         self.allocator.destroy(self);
     }
 
-    /// This function is intended to be called by std/special/build_runner.zig, not a build.zig file.
+    /// This function is intended to be called by lib/build_runner.zig, not a build.zig file.
     pub fn resolveInstallPrefix(self: *Builder, install_prefix: ?[]const u8, dir_list: DirList) void {
         if (self.dest_dir) |dest_dir| {
             self.install_prefix = install_prefix orelse "/usr";
@@ -963,7 +963,7 @@ pub const Builder = struct {
         warn("\n", .{});
     }
 
-    pub fn spawnChildEnvMap(self: *Builder, cwd: ?[]const u8, env_map: *const BufMap, argv: []const []const u8) !void {
+    pub fn spawnChildEnvMap(self: *Builder, cwd: ?[]const u8, env_map: *const EnvMap, argv: []const []const u8) !void {
         if (self.verbose) {
             printCmd(cwd, argv);
         }
@@ -1590,6 +1590,8 @@ pub const LibExeObjStep = struct {
 
     want_lto: ?bool = null,
     use_stage1: ?bool = null,
+    use_llvm: ?bool = null,
+    ofmt: ?std.Target.ObjectFormat = null,
 
     output_path_source: GeneratedFile,
     output_lib_path_source: GeneratedFile,
@@ -2351,6 +2353,18 @@ pub const LibExeObjStep = struct {
             }
         }
 
+        if (self.use_llvm) |use_llvm| {
+            if (use_llvm) {
+                try zig_args.append("-fLLVM");
+            } else {
+                try zig_args.append("-fno-LLVM");
+            }
+        }
+
+        if (self.ofmt) |ofmt| {
+            try zig_args.append(try std.fmt.allocPrint(builder.allocator, "-ofmt={s}", .{@tagName(ofmt)}));
+        }
+
         if (self.entry_symbol_name) |entry| {
             try zig_args.append("--entry");
             try zig_args.append(entry);
@@ -2995,6 +3009,7 @@ pub const LibExeObjStep = struct {
         // Windows has an argument length limit of 32,766 characters, macOS 262,144 and Linux
         // 2,097,152. If our args exceed 30 KiB, we instead write them to a "response file" and
         // pass that to zig, e.g. via 'zig build-lib @args.rsp'
+        // See @file syntax here: https://gcc.gnu.org/onlinedocs/gcc/Overall-Options.html
         var args_length: usize = 0;
         for (zig_args.items) |arg| {
             args_length += arg.len + 1; // +1 to account for null terminator
@@ -3006,9 +3021,33 @@ pub const LibExeObjStep = struct {
             );
             try std.fs.cwd().makePath(args_dir);
 
+            var args_arena = std.heap.ArenaAllocator.init(builder.allocator);
+            defer args_arena.deinit();
+
+            const args_to_escape = zig_args.items[2..];
+            var escaped_args = try ArrayList([]const u8).initCapacity(args_arena.allocator(), args_to_escape.len);
+
+            arg_blk: for (args_to_escape) |arg| {
+                for (arg) |c, arg_idx| {
+                    if (c == '\\' or c == '"') {
+                        // Slow path for arguments that need to be escaped. We'll need to allocate and copy
+                        var escaped = try ArrayList(u8).initCapacity(args_arena.allocator(), arg.len + 1);
+                        const writer = escaped.writer();
+                        writer.writeAll(arg[0..arg_idx]) catch unreachable;
+                        for (arg[arg_idx..]) |to_escape| {
+                            if (to_escape == '\\' or to_escape == '"') try writer.writeByte('\\');
+                            try writer.writeByte(to_escape);
+                        }
+                        escaped_args.appendAssumeCapacity(escaped.items);
+                        continue :arg_blk;
+                    }
+                }
+                escaped_args.appendAssumeCapacity(arg); // no escaping needed so just use original argument
+            }
+
             // Write the args to zig-cache/args/<SHA256 hash of args> to avoid conflicts with
             // other zig build commands running in parallel.
-            const partially_quoted = try std.mem.join(builder.allocator, "\" \"", zig_args.items[2..]);
+            const partially_quoted = try std.mem.join(builder.allocator, "\" \"", escaped_args.items);
             const args = try std.mem.concat(builder.allocator, u8, &[_][]const u8{ "\"", partially_quoted, "\"" });
 
             var args_hash: [Sha256.digest_length]u8 = undefined;

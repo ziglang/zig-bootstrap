@@ -112,6 +112,42 @@ test "@intToFloat" {
     comptime try S.doTheTest();
 }
 
+test "@intToFloat(f80)" {
+    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
+
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+
+    const S = struct {
+        fn doTheTest(comptime Int: type) !void {
+            try testIntToFloat(Int, -2);
+        }
+
+        fn testIntToFloat(comptime Int: type, k: Int) !void {
+            const f = @intToFloat(f80, k);
+            const i = @floatToInt(Int, f);
+            try expect(i == k);
+        }
+    };
+    try S.doTheTest(i31);
+    try S.doTheTest(i32);
+    try S.doTheTest(i45);
+    try S.doTheTest(i64);
+    try S.doTheTest(i80);
+    try S.doTheTest(i128);
+    // try S.doTheTest(i256); // TODO missing compiler_rt symbols
+    comptime try S.doTheTest(i31);
+    comptime try S.doTheTest(i32);
+    comptime try S.doTheTest(i45);
+    comptime try S.doTheTest(i64);
+    comptime try S.doTheTest(i80);
+    comptime try S.doTheTest(i128);
+    comptime try S.doTheTest(i256);
+}
+
 test "@floatToInt" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
@@ -290,8 +326,7 @@ test "array coersion to undefined at runtime" {
 
     @setRuntimeSafety(true);
 
-    // TODO implement @setRuntimeSafety in stage2
-    if (builtin.zig_backend != .stage1 and builtin.mode != .Debug and builtin.mode != .ReleaseSafe) {
+    if (builtin.mode != .Debug and builtin.mode != .ReleaseSafe) {
         return error.SkipZigTest;
     }
 
@@ -552,7 +587,11 @@ test "cast *[1][*]const u8 to [*]const ?[*]const u8" {
 }
 
 test "vector casts" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
 
     const S = struct {
         fn doTheTest() !void {
@@ -591,7 +630,9 @@ test "vector casts" {
 }
 
 test "@floatCast cast down" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
 
     {
         var double: f64 = 0.001534;
@@ -1389,4 +1430,24 @@ test "coerce undefined single-item pointer of array to error union of slice" {
 test "pointer to empty struct literal to mutable slice" {
     var x: []i32 = &.{};
     try expect(x.len == 0);
+}
+
+test "coerce between pointers of compatible differently-named floats" {
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+
+    const F = switch (@typeInfo(c_longdouble).Float.bits) {
+        16 => f16,
+        32 => f32,
+        64 => f64,
+        80 => f80,
+        128 => f128,
+        else => @compileError("unreachable"),
+    };
+    var f1: F = 12.34;
+    var f2: *c_longdouble = &f1;
+    f2.* += 1;
+    try expect(f1 == @as(F, 12.34) + 1);
 }

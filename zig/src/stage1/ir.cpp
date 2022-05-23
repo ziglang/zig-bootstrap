@@ -4480,6 +4480,12 @@ static ConstCastOnly types_match_const_cast_only(IrAnalyze *ira, ZigType *wanted
         return result;
     }
 
+    if (wanted_type->id == ZigTypeIdFloat && actual_type->id == ZigTypeIdFloat) {
+        if (wanted_type->data.floating.bit_count == actual_type->data.floating.bit_count) {
+            return result;
+        }
+    }
+
     if (wanted_type->id == ZigTypeIdVector && actual_type->id == ZigTypeIdVector) {
         if (actual_type->data.vector.len != wanted_type->data.vector.len) {
             result.id = ConstCastResultIdVectorLength;
@@ -11743,6 +11749,7 @@ static Stage1AirInst *ir_analyze_instruction_export(IrAnalyze *ira, Stage1ZirIns
                 case CallingConventionAAPCS:
                 case CallingConventionAAPCSVFP:
                 case CallingConventionSysV:
+                case CallingConventionWin64:
                 case CallingConventionPtxKernel:
                     add_fn_export(ira->codegen, fn_entry, buf_ptr(symbol_name), global_linkage_id, cc);
                     fn_entry->section_name = section_name;

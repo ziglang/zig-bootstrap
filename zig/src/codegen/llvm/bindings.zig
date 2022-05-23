@@ -117,6 +117,9 @@ pub const Value = opaque {
     pub const setLinkage = LLVMSetLinkage;
     extern fn LLVMSetLinkage(Global: *const Value, Linkage: Linkage) void;
 
+    pub const setVisibility = LLVMSetVisibility;
+    extern fn LLVMSetVisibility(Global: *const Value, Linkage: Visibility) void;
+
     pub const setUnnamedAddr = LLVMSetUnnamedAddr;
     extern fn LLVMSetUnnamedAddr(Global: *const Value, HasUnnamedAddr: Bool) void;
 
@@ -470,6 +473,14 @@ pub const Builder = opaque {
 
     pub const buildSExt = LLVMBuildSExt;
     extern fn LLVMBuildSExt(
+        *const Builder,
+        Val: *const Value,
+        DestTy: *const Type,
+        Name: [*:0]const u8,
+    ) *const Value;
+
+    pub const buildSExtOrBitCast = LLVMBuildSExtOrBitCast;
+    extern fn LLVMBuildSExtOrBitCast(
         *const Builder,
         Val: *const Value,
         DestTy: *const Type,
@@ -1008,6 +1019,9 @@ pub const TargetMachine = opaque {
 pub const TargetData = opaque {
     pub const dispose = LLVMDisposeTargetData;
     extern fn LLVMDisposeTargetData(*const TargetData) void;
+
+    pub const abiAlignmentOfType = LLVMABIAlignmentOfType;
+    extern fn LLVMABIAlignmentOfType(TD: *const TargetData, Ty: *const Type) c_uint;
 };
 
 pub const CodeModel = enum(c_int) {
@@ -1314,6 +1328,12 @@ pub const Linkage = enum(c_uint) {
     Common,
     LinkerPrivate,
     LinkerPrivateWeak,
+};
+
+pub const Visibility = enum(c_uint) {
+    Default,
+    Hidden,
+    Protected,
 };
 
 pub const ThreadLocalMode = enum(c_uint) {

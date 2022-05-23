@@ -70,6 +70,14 @@ pub const GlobalLinkage = enum {
 
 /// This data structure is used by the Zig language code generation and
 /// therefore must be kept in sync with the compiler implementation.
+pub const SymbolVisibility = enum {
+    default,
+    hidden,
+    protected,
+};
+
+/// This data structure is used by the Zig language code generation and
+/// therefore must be kept in sync with the compiler implementation.
 pub const AtomicOrder = enum {
     Unordered,
     Monotonic,
@@ -147,6 +155,7 @@ pub const CallingConvention = enum {
     AAPCS,
     AAPCSVFP,
     SysV,
+    Win64,
     PtxKernel,
 };
 
@@ -654,6 +663,7 @@ pub const ExportOptions = struct {
     name: []const u8,
     linkage: GlobalLinkage = .Strong,
     section: ?[]const u8 = null,
+    visibility: SymbolVisibility = .default,
 };
 
 /// This data structure is used by the Zig language code generation and
@@ -717,8 +727,8 @@ pub const CompilerBackend = enum(u64) {
     /// riscv64 backend.
     stage2_riscv64 = 9,
     /// The reference implementation self-hosted compiler of Zig, using the
-    /// sparcv9 backend.
-    stage2_sparcv9 = 10,
+    /// sparc64 backend.
+    stage2_sparc64 = 10,
 
     _,
 };
@@ -757,15 +767,14 @@ pub fn default_panic(msg: []const u8, error_return_trace: ?*StackTrace) noreturn
 
     // Until self-hosted catches up with stage1 language features, we have a simpler
     // default panic function:
-    if ((builtin.zig_backend == .stage2_llvm and builtin.link_libc) or
-        builtin.zig_backend == .stage2_c or
+    if (builtin.zig_backend == .stage2_c or
         builtin.zig_backend == .stage2_wasm or
         builtin.zig_backend == .stage2_arm or
         builtin.zig_backend == .stage2_aarch64 or
         builtin.zig_backend == .stage2_x86_64 or
         builtin.zig_backend == .stage2_x86 or
         builtin.zig_backend == .stage2_riscv64 or
-        builtin.zig_backend == .stage2_sparcv9)
+        builtin.zig_backend == .stage2_sparc64)
     {
         while (true) {
             @breakpoint();
@@ -835,6 +844,27 @@ pub fn default_panic(msg: []const u8, error_return_trace: ?*StackTrace) noreturn
             std.debug.panicImpl(error_return_trace, first_trace_addr, msg);
         },
     }
+}
+
+pub fn panicUnwrapError(st: ?*StackTrace, err: anyerror) noreturn {
+    @setCold(true);
+    std.debug.panicExtra(st, "attempt to unwrap error: {s}", .{@errorName(err)});
+}
+
+pub fn panicOutOfBounds(index: usize, len: usize) noreturn {
+    @setCold(true);
+    std.debug.panic("attempt to index out of bound: index {d}, len {d}", .{ index, len });
+}
+
+pub noinline fn returnError(maybe_st: ?*StackTrace) void {
+    @setCold(true);
+    const st = maybe_st orelse return;
+    addErrRetTraceAddr(st, @returnAddress());
+}
+
+pub inline fn addErrRetTraceAddr(st: *StackTrace, addr: usize) void {
+    st.instruction_addresses[st.index & (st.instruction_addresses.len - 1)] = addr;
+    st.index +%= 1;
 }
 
 const std = @import("std.zig");

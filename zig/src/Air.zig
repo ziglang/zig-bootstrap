@@ -113,13 +113,13 @@ pub const Inst = struct {
         /// The offset is in element type units, not bytes.
         /// Wrapping is undefined behavior.
         /// The lhs is the pointer, rhs is the offset. Result type is the same as lhs.
-        /// Uses the `bin_op` field.
+        /// Uses the `ty_pl` field. Payload is `Bin`.
         ptr_add,
         /// Subtract an offset from a pointer, returning a new pointer.
         /// The offset is in element type units, not bytes.
         /// Wrapping is undefined behavior.
         /// The lhs is the pointer, rhs is the offset. Result type is the same as lhs.
-        /// Uses the `bin_op` field.
+        /// Uses the `ty_pl` field. Payload is `Bin`.
         ptr_sub,
         /// Given two operands which can be floats, integers, or vectors, returns the
         /// greater of the operands. For vectors it operates element-wise.
@@ -649,6 +649,12 @@ pub const Inst = struct {
         /// flush().
         cmp_lt_errors_len,
 
+        /// Returns pointer to current error return trace.
+        err_return_trace,
+
+        /// Sets the operand as the current error return trace,
+        set_err_return_trace,
+
         pub fn fromCmpOp(op: std.math.CompareOperator) Tag {
             return switch (op) {
                 .lt => .cmp_lt,
@@ -910,8 +916,6 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .bit_and,
         .bit_or,
         .xor,
-        .ptr_add,
-        .ptr_sub,
         .shr,
         .shr_exact,
         .shl,
@@ -961,6 +965,7 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .alloc,
         .ret_ptr,
         .arg,
+        .err_return_trace,
         => return datas[inst].ty,
 
         .assembly,
@@ -982,6 +987,8 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .sub_with_overflow,
         .mul_with_overflow,
         .shl_with_overflow,
+        .ptr_add,
+        .ptr_sub,
         => return air.getRefType(datas[inst].ty_pl.ty),
 
         .not,
@@ -1048,6 +1055,7 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .memcpy,
         .set_union_tag,
         .prefetch,
+        .set_err_return_trace,
         => return Type.void,
 
         .ptrtoint,

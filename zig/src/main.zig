@@ -430,6 +430,7 @@ const usage_build_generic =
     \\    notext                       Permit read-only relocations in read-only segments
     \\    defs                         Force a fatal error if any undefined symbols remain
     \\    origin                       Indicate that the object must have its origin processed
+    \\    nocopyreloc                  Disable the creation of copy relocations
     \\    noexecstack                  Indicate that the object requires an executable stack
     \\    now                          Force all relocations to be processed on load
     \\    relro                        Force all relocations to be resolved and be read-only on load
@@ -594,7 +595,6 @@ fn buildOutputType(
     var verbose_link = std.process.hasEnvVarConstant("ZIG_VERBOSE_LINK");
     var verbose_cc = std.process.hasEnvVarConstant("ZIG_VERBOSE_CC");
     var verbose_air = false;
-    var verbose_mir = false;
     var verbose_llvm_ir = false;
     var verbose_cimport = false;
     var verbose_llvm_cpu_features = false;
@@ -1233,8 +1233,6 @@ fn buildOutputType(
                         verbose_cc = true;
                     } else if (mem.eql(u8, arg, "--verbose-air")) {
                         verbose_air = true;
-                    } else if (mem.eql(u8, arg, "--verbose-mir")) {
-                        verbose_mir = true;
                     } else if (mem.eql(u8, arg, "--verbose-llvm-ir")) {
                         verbose_llvm_ir = true;
                     } else if (mem.eql(u8, arg, "--verbose-cimport")) {
@@ -2720,7 +2718,6 @@ fn buildOutputType(
         .verbose_cc = verbose_cc,
         .verbose_link = verbose_link,
         .verbose_air = verbose_air,
-        .verbose_mir = verbose_mir,
         .verbose_llvm_ir = verbose_llvm_ir,
         .verbose_cimport = verbose_cimport,
         .verbose_llvm_cpu_features = verbose_llvm_cpu_features,
@@ -3421,8 +3418,8 @@ pub fn cmdInit(
     const s = fs.path.sep_str;
     const template_sub_path = switch (output_mode) {
         .Obj => unreachable,
-        .Lib => "std" ++ s ++ "special" ++ s ++ "init-lib",
-        .Exe => "std" ++ s ++ "special" ++ s ++ "init-exe",
+        .Lib => "init-lib",
+        .Exe => "init-exe",
     };
     var template_dir = zig_lib_directory.handle.openDir(template_sub_path, .{}) catch |err| {
         fatal("unable to open zig project template directory '{s}{s}{s}': {s}", .{ zig_lib_directory.path, s, template_sub_path, @errorName(err) });
@@ -3571,19 +3568,10 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
         };
         defer zig_lib_directory.handle.close();
 
-        const std_special = "std" ++ fs.path.sep_str ++ "special";
-        const special_dir_path = try zig_lib_directory.join(arena, &[_][]const u8{std_special});
-
         var main_pkg: Package = .{
-            .root_src_directory = .{
-                .path = special_dir_path,
-                .handle = zig_lib_directory.handle.openDir(std_special, .{}) catch |err| {
-                    fatal("unable to open directory '{s}{s}{s}': {s}", .{ override_lib_dir, fs.path.sep_str, std_special, @errorName(err) });
-                },
-            },
+            .root_src_directory = zig_lib_directory,
             .root_src_path = "build_runner.zig",
         };
-        defer main_pkg.root_src_directory.handle.close();
 
         var cleanup_build_dir: ?fs.Dir = null;
         defer if (cleanup_build_dir) |*dir| dir.close();
@@ -3969,7 +3957,10 @@ pub fn cmdFmt(gpa: Allocator, arena: Allocator, args: []const []const u8) !void 
     // Mark any excluded files/directories as already seen,
     // so that they are skipped later during actual processing
     for (excluded_files.items) |file_path| {
-        var dir = try fs.cwd().openDir(file_path, .{});
+        var dir = fs.cwd().openDir(file_path, .{}) catch |err| switch (err) {
+            error.FileNotFound => continue,
+            else => |e| return e,
+        };
         defer dir.close();
 
         const stat = try dir.stat();

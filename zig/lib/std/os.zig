@@ -97,6 +97,7 @@ pub const MADV = system.MADV;
 pub const MAP = system.MAP;
 pub const MSF = system.MSF;
 pub const MAX_ADDR_LEN = system.MAX_ADDR_LEN;
+pub const MFD = system.MFD;
 pub const MMAP2_UNIT = system.MMAP2_UNIT;
 pub const MSG = system.MSG;
 pub const NAME_MAX = system.NAME_MAX;
@@ -1883,18 +1884,22 @@ pub fn getenvZ(key: [*:0]const u8) ?[]const u8 {
 
 /// Windows-only. Get an environment variable with a null-terminated, WTF-16 encoded name.
 /// See also `getenv`.
-/// This function first attempts a case-sensitive lookup. If no match is found, and `key`
-/// is ASCII, then it attempts a second case-insensitive lookup.
+/// This function performs a Unicode-aware case-insensitive lookup using RtlEqualUnicodeString.
 pub fn getenvW(key: [*:0]const u16) ?[:0]const u16 {
     if (builtin.os.tag != .windows) {
         @compileError("std.os.getenvW is a Windows-only API");
     }
     const key_slice = mem.sliceTo(key, 0);
     const ptr = windows.peb().ProcessParameters.Environment;
-    var ascii_match: ?[:0]const u16 = null;
     var i: usize = 0;
     while (ptr[i] != 0) {
         const key_start = i;
+
+        // There are some special environment variables that start with =,
+        // so we need a special case to not treat = as a key/value separator
+        // if it's the first character.
+        // https://devblogs.microsoft.com/oldnewthing/20100506-00/?p=14133
+        if (ptr[key_start] == '=') i += 1;
 
         while (ptr[i] != 0 and ptr[i] != '=') : (i += 1) {}
         const this_key = ptr[key_start..i];
@@ -1905,22 +1910,25 @@ pub fn getenvW(key: [*:0]const u16) ?[:0]const u16 {
         while (ptr[i] != 0) : (i += 1) {}
         const this_value = ptr[value_start..i :0];
 
-        if (mem.eql(u16, key_slice, this_key)) return this_value;
-
-        ascii_check: {
-            if (ascii_match != null) break :ascii_check;
-            if (key_slice.len != this_key.len) break :ascii_check;
-            for (key_slice) |a_c, key_index| {
-                const a = math.cast(u8, a_c) catch break :ascii_check;
-                const b = math.cast(u8, this_key[key_index]) catch break :ascii_check;
-                if (std.ascii.toLower(a) != std.ascii.toLower(b)) break :ascii_check;
-            }
-            ascii_match = this_value;
+        const key_string_bytes = @intCast(u16, key_slice.len * 2);
+        const key_string = windows.UNICODE_STRING{
+            .Length = key_string_bytes,
+            .MaximumLength = key_string_bytes,
+            .Buffer = @intToPtr([*]u16, @ptrToInt(key)),
+        };
+        const this_key_string_bytes = @intCast(u16, this_key.len * 2);
+        const this_key_string = windows.UNICODE_STRING{
+            .Length = this_key_string_bytes,
+            .MaximumLength = this_key_string_bytes,
+            .Buffer = this_key.ptr,
+        };
+        if (windows.ntdll.RtlEqualUnicodeString(&key_string, &this_key_string, windows.TRUE) == windows.TRUE) {
+            return this_value;
         }
 
         i += 1; // skip over null byte
     }
-    return ascii_match;
+    return null;
 }
 
 pub const GetCwdError = error{
@@ -6515,20 +6523,37 @@ pub const MemFdCreateError = error{
 } || UnexpectedError;
 
 pub fn memfd_createZ(name: [*:0]const u8, flags: u32) MemFdCreateError!fd_t {
-    // memfd_create is available only in glibc versions starting with 2.27.
-    const use_c = std.c.versionCheck(.{ .major = 2, .minor = 27, .patch = 0 }).ok;
-    const sys = if (use_c) std.c else linux;
-    const getErrno = if (use_c) std.c.getErrno else linux.getErrno;
-    const rc = sys.memfd_create(name, flags);
-    switch (getErrno(rc)) {
-        .SUCCESS => return @intCast(fd_t, rc),
-        .FAULT => unreachable, // name has invalid memory
-        .INVAL => unreachable, // name/flags are faulty
-        .NFILE => return error.SystemFdQuotaExceeded,
-        .MFILE => return error.ProcessFdQuotaExceeded,
-        .NOMEM => return error.OutOfMemory,
-        .NOSYS => return error.SystemOutdated,
-        else => |err| return unexpectedErrno(err),
+    switch (builtin.os.tag) {
+        .linux => {
+            // memfd_create is available only in glibc versions starting with 2.27.
+            const use_c = std.c.versionCheck(.{ .major = 2, .minor = 27, .patch = 0 }).ok;
+            const sys = if (use_c) std.c else linux;
+            const getErrno = if (use_c) std.c.getErrno else linux.getErrno;
+            const rc = sys.memfd_create(name, flags);
+            switch (getErrno(rc)) {
+                .SUCCESS => return @intCast(fd_t, rc),
+                .FAULT => unreachable, // name has invalid memory
+                .INVAL => unreachable, // name/flags are faulty
+                .NFILE => return error.SystemFdQuotaExceeded,
+                .MFILE => return error.ProcessFdQuotaExceeded,
+                .NOMEM => return error.OutOfMemory,
+                .NOSYS => return error.SystemOutdated,
+                else => |err| return unexpectedErrno(err),
+            }
+        },
+        .freebsd => {
+            const rc = system.memfd_create(name, flags);
+            switch (errno(rc)) {
+                .SUCCESS => return rc,
+                .BADF => unreachable, // name argument NULL
+                .INVAL => unreachable, // name too long or invalid/unsupported flags.
+                .MFILE => return error.ProcessFdQuotaExceeded,
+                .NFILE => return error.SystemFdQuotaExceeded,
+                .NOSYS => return error.SystemOutdated,
+                else => |err| return unexpectedErrno(err),
+            }
+        },
+        else => @compileError("target OS does not support memfd_create()"),
     }
 }
 
@@ -6900,4 +6925,53 @@ pub fn perf_event_open(
         .SRCH => return error.ProcessNotFound,
         else => |err| return unexpectedErrno(err),
     }
+}
+
+pub const TimerFdCreateError = error{
+    AccessDenied,
+    ProcessFdQuotaExceeded,
+    SystemFdQuotaExceeded,
+    NoDevice,
+    SystemResources,
+} || UnexpectedError;
+
+pub const TimerFdGetError = error{InvalidHandle} || UnexpectedError;
+pub const TimerFdSetError = TimerFdGetError || error{Canceled};
+
+pub fn timerfd_create(clokid: i32, flags: u32) TimerFdCreateError!fd_t {
+    var rc = linux.timerfd_create(clokid, flags);
+    return switch (errno(rc)) {
+        .SUCCESS => @intCast(fd_t, rc),
+        .INVAL => unreachable,
+        .MFILE => return error.ProcessFdQuotaExceeded,
+        .NFILE => return error.SystemFdQuotaExceeded,
+        .NODEV => return error.NoDevice,
+        .NOMEM => return error.SystemResources,
+        .PERM => return error.AccessDenied,
+        else => |err| return unexpectedErrno(err),
+    };
+}
+
+pub fn timerfd_settime(fd: i32, flags: u32, new_value: *const linux.itimerspec, old_value: ?*linux.itimerspec) TimerFdSetError!void {
+    var rc = linux.timerfd_settime(fd, flags, new_value, old_value);
+    return switch (errno(rc)) {
+        .SUCCESS => {},
+        .BADF => error.InvalidHandle,
+        .FAULT => unreachable,
+        .INVAL => unreachable,
+        .CANCELED => error.Canceled,
+        else => |err| return unexpectedErrno(err),
+    };
+}
+
+pub fn timerfd_gettime(fd: i32) TimerFdGetError!linux.itimerspec {
+    var curr_value: linux.itimerspec = undefined;
+    var rc = linux.timerfd_gettime(fd, &curr_value);
+    return switch (errno(rc)) {
+        .SUCCESS => return curr_value,
+        .BADF => error.InvalidHandle,
+        .FAULT => unreachable,
+        .INVAL => unreachable,
+        else => |err| return unexpectedErrno(err),
+    };
 }

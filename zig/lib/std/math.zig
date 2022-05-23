@@ -270,6 +270,41 @@ pub const sinh = @import("math/sinh.zig").sinh;
 pub const cosh = @import("math/cosh.zig").cosh;
 pub const tanh = @import("math/tanh.zig").tanh;
 
+/// Sine trigonometric function on a floating point number.
+/// Uses a dedicated hardware instruction when available.
+/// This is the same as calling the builtin @sin
+pub inline fn sin(value: anytype) @TypeOf(value) {
+    return @sin(value);
+}
+
+/// Cosine trigonometric function on a floating point number.
+/// Uses a dedicated hardware instruction when available.
+/// This is the same as calling the builtin @cos
+pub inline fn cos(value: anytype) @TypeOf(value) {
+    return @cos(value);
+}
+
+/// Tangent trigonometric function on a floating point number.
+/// Uses a dedicated hardware instruction when available.
+/// This is the same as calling the builtin @tan
+pub inline fn tan(value: anytype) @TypeOf(value) {
+    return @tan(value);
+}
+
+/// Base-e exponential function on a floating point number.
+/// Uses a dedicated hardware instruction when available.
+/// This is the same as calling the builtin @exp
+pub inline fn exp(value: anytype) @TypeOf(value) {
+    return @exp(value);
+}
+
+/// Base-2 exponential function on a floating point number.
+/// Uses a dedicated hardware instruction when available.
+/// This is the same as calling the builtin @exp2
+pub inline fn exp2(value: anytype) @TypeOf(value) {
+    return @exp2(value);
+}
+
 pub const complex = @import("math/complex.zig");
 pub const Complex = complex.Complex;
 
@@ -611,15 +646,15 @@ pub fn IntFittingRange(comptime from: comptime_int, comptime to: comptime_int) t
     if (from == 0 and to == 0) {
         return u0;
     }
-    const sign: std.builtin.Signedness = if (from < 0) .signed else .unsigned;
+    const signedness: std.builtin.Signedness = if (from < 0) .signed else .unsigned;
     const largest_positive_integer = max(if (from < 0) (-from) - 1 else from, to); // two's complement
     const base = log2(largest_positive_integer);
     const upper = (1 << base) - 1;
     var magnitude_bits = if (upper >= largest_positive_integer) base else base + 1;
-    if (sign == .signed) {
+    if (signedness == .signed) {
         magnitude_bits += 1;
     }
-    return std.meta.Int(sign, magnitude_bits);
+    return std.meta.Int(signedness, magnitude_bits);
 }
 
 test "IntFittingRange" {
@@ -887,6 +922,13 @@ fn testRem() !void {
     try testing.expectError(error.DivisionByZero, rem(f32, 10, 0));
 }
 
+/// Returns the absolute value of a floating point number.
+/// Uses a dedicated hardware instruction when available.
+/// This is the same as calling the builtin @fabs
+pub inline fn fabs(value: anytype) @TypeOf(value) {
+    return @fabs(value);
+}
+
 /// Returns the absolute value of the integer parameter.
 /// Result is an unsigned integer.
 pub fn absCast(x: anytype) switch (@typeInfo(@TypeOf(x))) {
@@ -987,6 +1029,27 @@ pub fn isPowerOfTwo(v: anytype) bool {
     return (v & (v - 1)) == 0;
 }
 
+/// Rounds the given floating point number to an integer, away from zero.
+/// Uses a dedicated hardware instruction when available.
+/// This is the same as calling the builtin @round
+pub inline fn round(value: anytype) @TypeOf(value) {
+    return @round(value);
+}
+
+/// Rounds the given floating point number to an integer, towards zero.
+/// Uses a dedicated hardware instruction when available.
+/// This is the same as calling the builtin @trunc
+pub inline fn trunc(value: anytype) @TypeOf(value) {
+    return @trunc(value);
+}
+
+/// Returns the largest integral value not greater than the given floating point number.
+/// Uses a dedicated hardware instruction when available.
+/// This is the same as calling the builtin @floor
+pub inline fn floor(value: anytype) @TypeOf(value) {
+    return @floor(value);
+}
+
 /// Returns the nearest power of two less than or equal to value, or
 /// zero if value is less than or equal to zero.
 pub fn floorPowerOfTwo(comptime T: type, value: T) T {
@@ -1013,6 +1076,13 @@ fn testFloorPowerOfTwo() !void {
     try testing.expect(floorPowerOfTwo(i4, -8) == 0);
     try testing.expect(floorPowerOfTwo(i4, -1) == 0);
     try testing.expect(floorPowerOfTwo(i4, 0) == 0);
+}
+
+/// Returns the smallest integral value not less than the given floating point number.
+/// Uses a dedicated hardware instruction when available.
+/// This is the same as calling the builtin @ceil
+pub inline fn ceil(value: anytype) @TypeOf(value) {
+    return @ceil(value);
 }
 
 /// Returns the next power of two (if the value is not already a power of two).
@@ -1446,4 +1516,113 @@ pub fn break_f80(x: f80) F80 {
         .fraction = @truncate(u64, int),
         .exp = @truncate(u16, int >> 64),
     };
+}
+
+/// Returns -1, 0, or 1.
+/// Supports integer types, vectors of integer types, and float types.
+/// Unsigned integer types will always return 0 or 1.
+/// TODO: support vectors of floats
+/// Branchless.
+pub inline fn sign(i: anytype) @TypeOf(i) {
+    const T = @TypeOf(i);
+    return switch (@typeInfo(T)) {
+        .Int, .ComptimeInt => @as(T, @boolToInt(i > 0)) - @boolToInt(i < 0),
+        .Float, .ComptimeFloat => @intToFloat(T, @boolToInt(i > 0)) - @intToFloat(T, @boolToInt(i < 0)),
+        .Vector => |vinfo| blk: {
+            const u1xN = std.meta.Vector(vinfo.len, u1);
+            break :blk switch (@typeInfo(vinfo.child)) {
+                .Int => @as(T, @bitCast(u1xN, i > @splat(vinfo.len, @as(vinfo.child, 0)))) -
+                    @as(T, @bitCast(u1xN, i < @splat(vinfo.len, @as(vinfo.child, 0)))),
+                .Float => @compileError("TODO: add support for vectors of floats once @intToFloat accepts vector types"),
+                // break :blk @intToFloat(T, @bitCast(u1xN, i > @splat(vinfo.len, @as(vinfo.child, 0)))) -
+                //     @intToFloat(T, @bitCast(u1xN, i < @splat(vinfo.len, @as(vinfo.child, 0)))),
+                else => @compileError("Expected vector of ints or floats, found " ++ @typeName(T)),
+            };
+        },
+        else => @compileError("Expected an int, float or vector of one, found " ++ @typeName(T)),
+    };
+}
+
+fn testSign() !void {
+    // each of the following blocks checks the inputs
+    // 2, -2, 0, { 2, -2, 0 } provide expected output
+    // 1, -1, 0, { 1, -1, 0 } for the given T
+    // (negative values omitted for unsigned types)
+    {
+        const T = i8;
+        try std.testing.expectEqual(@as(T, 1), sign(@as(T, 2)));
+        try std.testing.expectEqual(@as(T, -1), sign(@as(T, -2)));
+        try std.testing.expectEqual(@as(T, 0), sign(@as(T, 0)));
+        try std.testing.expectEqual(@Vector(3, T){ 1, -1, 0 }, sign(@Vector(3, T){ 2, -2, 0 }));
+    }
+    {
+        const T = i32;
+        try std.testing.expectEqual(@as(T, 1), sign(@as(T, 2)));
+        try std.testing.expectEqual(@as(T, -1), sign(@as(T, -2)));
+        try std.testing.expectEqual(@as(T, 0), sign(@as(T, 0)));
+        try std.testing.expectEqual(@Vector(3, T){ 1, -1, 0 }, sign(@Vector(3, T){ 2, -2, 0 }));
+    }
+    {
+        const T = i64;
+        try std.testing.expectEqual(@as(T, 1), sign(@as(T, 2)));
+        try std.testing.expectEqual(@as(T, -1), sign(@as(T, -2)));
+        try std.testing.expectEqual(@as(T, 0), sign(@as(T, 0)));
+        try std.testing.expectEqual(@Vector(3, T){ 1, -1, 0 }, sign(@Vector(3, T){ 2, -2, 0 }));
+    }
+    {
+        const T = u8;
+        try std.testing.expectEqual(@as(T, 1), sign(@as(T, 2)));
+        try std.testing.expectEqual(@as(T, 0), sign(@as(T, 0)));
+        try std.testing.expectEqual(@Vector(2, T){ 1, 0 }, sign(@Vector(2, T){ 2, 0 }));
+    }
+    {
+        const T = u32;
+        try std.testing.expectEqual(@as(T, 1), sign(@as(T, 2)));
+        try std.testing.expectEqual(@as(T, 0), sign(@as(T, 0)));
+        try std.testing.expectEqual(@Vector(2, T){ 1, 0 }, sign(@Vector(2, T){ 2, 0 }));
+    }
+    {
+        const T = u64;
+        try std.testing.expectEqual(@as(T, 1), sign(@as(T, 2)));
+        try std.testing.expectEqual(@as(T, 0), sign(@as(T, 0)));
+        try std.testing.expectEqual(@Vector(2, T){ 1, 0 }, sign(@Vector(2, T){ 2, 0 }));
+    }
+    {
+        const T = f16;
+        try std.testing.expectEqual(@as(T, 1), sign(@as(T, 2)));
+        try std.testing.expectEqual(@as(T, -1), sign(@as(T, -2)));
+        try std.testing.expectEqual(@as(T, 0), sign(@as(T, 0)));
+        // TODO - uncomment once @intToFloat supports vectors
+        // try std.testing.expectEqual(@Vector(3, T){ 1, -1, 0 }, sign(@Vector(3, T){ 2, -2, 0 }));
+    }
+    {
+        const T = f32;
+        try std.testing.expectEqual(@as(T, 1), sign(@as(T, 2)));
+        try std.testing.expectEqual(@as(T, -1), sign(@as(T, -2)));
+        try std.testing.expectEqual(@as(T, 0), sign(@as(T, 0)));
+        // TODO - uncomment once @intToFloat supports vectors
+        // try std.testing.expectEqual(@Vector(3, T){ 1, -1, 0 }, sign(@Vector(3, T){ 2, -2, 0 }));
+    }
+    {
+        const T = f64;
+        try std.testing.expectEqual(@as(T, 1), sign(@as(T, 2)));
+        try std.testing.expectEqual(@as(T, -1), sign(@as(T, -2)));
+        try std.testing.expectEqual(@as(T, 0), sign(@as(T, 0)));
+        // TODO - uncomment once @intToFloat supports vectors
+        // try std.testing.expectEqual(@Vector(3, T){ 1, -1, 0 }, sign(@Vector(3, T){ 2, -2, 0 }));
+    }
+
+    // comptime_int
+    try std.testing.expectEqual(-1, sign(-10));
+    try std.testing.expectEqual(1, sign(10));
+    try std.testing.expectEqual(0, sign(0));
+    // comptime_float
+    try std.testing.expectEqual(-1.0, sign(-10.0));
+    try std.testing.expectEqual(1.0, sign(10.0));
+    try std.testing.expectEqual(0.0, sign(0.0));
+}
+
+test "sign" {
+    try testSign();
+    comptime try testSign();
 }

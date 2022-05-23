@@ -7,6 +7,8 @@ var foo: u8 align(4) = 100;
 
 test "global variable alignment" {
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
 
     comptime try expect(@typeInfo(@TypeOf(&foo)).Pointer.alignment == 4);
     comptime try expect(@TypeOf(&foo) == *align(4) u8);
@@ -14,11 +16,22 @@ test "global variable alignment" {
         const slice = @as(*align(4) [1]u8, &foo)[0..];
         comptime try expect(@TypeOf(slice) == *align(4) [1]u8);
     }
-    {
-        var runtime_zero: usize = 0;
-        const slice = @as(*align(4) [1]u8, &foo)[runtime_zero..];
-        comptime try expect(@TypeOf(slice) == []align(4) u8);
-    }
+}
+
+test "slicing array of length 1 can assume runtime index is always zero" {
+    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+
+    // TODO reevaluate this test case, because notice that you can
+    // change `runtime_zero` to be `1` and the test still passes for stage1.
+    // Reconsider also this code:
+    // var array: [4]u8 = undefined;
+    // var runtime: usize = 4;
+    // var ptr = array[runtime..];
+    // _ = ptr;
+
+    var runtime_zero: usize = 0;
+    const slice = @as(*align(4) [1]u8, &foo)[runtime_zero..];
+    comptime try expect(@TypeOf(slice) == []align(4) u8);
 }
 
 test "default alignment allows unspecified in type syntax" {
@@ -133,7 +146,7 @@ test "alignment and size of structs with 128-bit fields" {
         .powerpc64,
         .powerpc64le,
         .riscv64,
-        .sparcv9,
+        .sparc64,
         .x86_64,
         .aarch64,
         .aarch64_be,
@@ -232,7 +245,6 @@ test "return error union with 128-bit integer" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;
 
     try expect(3 == try give());
 }
@@ -407,7 +419,6 @@ const DefaultAligned = struct {
 
 test "read 128-bit field from default aligned struct in stack memory" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
 
@@ -426,7 +437,6 @@ var default_aligned_global = DefaultAligned{
 test "read 128-bit field from default aligned struct in global memory" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_llvm) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;

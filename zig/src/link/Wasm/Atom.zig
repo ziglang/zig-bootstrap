@@ -4,6 +4,7 @@ const std = @import("std");
 const types = @import("types.zig");
 const Wasm = @import("../Wasm.zig");
 const Symbol = @import("Symbol.zig");
+const Dwarf = @import("../Dwarf.zig");
 
 const leb = std.leb;
 const log = std.log.scoped(.link);
@@ -38,6 +39,9 @@ prev: ?*Atom,
 /// When the parent atom is being freed, it will also do so for all local atoms.
 locals: std.ArrayListUnmanaged(Atom) = .{},
 
+/// Represents the debug Atom that holds all debug information of this Atom.
+dbg_info_atom: Dwarf.Atom,
+
 /// Represents a default empty wasm `Atom`
 pub const empty: Atom = .{
     .alignment = 0,
@@ -47,6 +51,7 @@ pub const empty: Atom = .{
     .prev = null,
     .size = 0,
     .sym_index = 0,
+    .dbg_info_atom = undefined,
 };
 
 /// Frees all resources owned by this `Atom`.
@@ -83,15 +88,6 @@ pub fn getFirst(self: *Atom) *Atom {
     var tmp = self;
     while (tmp.prev) |prev| tmp = prev;
     return tmp;
-}
-
-/// Returns the atom for the given `symbol_index`.
-/// This can be either the `Atom` itself, or one of its locals.
-pub fn symbolAtom(self: *Atom, symbol_index: u32) *Atom {
-    if (self.sym_index == symbol_index) return self;
-    return for (self.locals.items) |*local_atom| {
-        if (local_atom.sym_index == symbol_index) break local_atom;
-    } else unreachable; // Used a symbol index not present in this atom or its children.
 }
 
 /// Returns the location of the symbol that represents this `Atom`

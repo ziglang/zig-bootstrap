@@ -82,7 +82,6 @@ clang_preprocessor_mode: ClangPreprocessorMode,
 /// Whether to print clang argvs to stdout.
 verbose_cc: bool,
 verbose_air: bool,
-verbose_mir: bool,
 verbose_llvm_ir: bool,
 verbose_cimport: bool,
 verbose_llvm_cpu_features: bool,
@@ -765,6 +764,7 @@ pub const InitOptions = struct {
     linker_z_noexecstack: bool = false,
     linker_z_now: bool = false,
     linker_z_relro: bool = false,
+    linker_z_nocopyreloc: bool = false,
     linker_tsaware: bool = false,
     linker_nxcompat: bool = false,
     linker_dynamicbase: bool = false,
@@ -775,7 +775,6 @@ pub const InitOptions = struct {
     verbose_cc: bool = false,
     verbose_link: bool = false,
     verbose_air: bool = false,
-    verbose_mir: bool = false,
     verbose_llvm_ir: bool = false,
     verbose_cimport: bool = false,
     verbose_llvm_cpu_features: bool = false,
@@ -1180,6 +1179,15 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
         if (must_single_thread and !single_threaded) {
             return error.TargetRequiresSingleThreaded;
         }
+        if (!single_threaded and options.link_libcpp) {
+            if (options.target.cpu.arch.isARM()) {
+                log.warn(
+                    \\libc++ does not work on multi-threaded ARM yet.
+                    \\For more details: https://github.com/ziglang/zig/issues/6573
+                , .{});
+                return error.TargetRequiresSingleThreaded;
+            }
+        }
 
         const llvm_cpu_features: ?[*:0]const u8 = if (build_options.have_llvm and use_llvm) blk: {
             var buf = std.ArrayList(u8).init(arena);
@@ -1352,7 +1360,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
                 const test_pkg = try Package.createWithDir(
                     gpa,
                     options.zig_lib_directory,
-                    "std" ++ std.fs.path.sep_str ++ "special",
+                    null,
                     "test_runner.zig",
                 );
                 errdefer test_pkg.destroy(gpa);
@@ -1381,6 +1389,20 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
 
             try builtin_pkg.add(gpa, "std", std_pkg);
             try builtin_pkg.add(gpa, "builtin", builtin_pkg);
+
+            const main_pkg_in_std = m: {
+                const std_path = try std.fs.path.resolve(arena, &[_][]const u8{
+                    std_pkg.root_src_directory.path orelse ".",
+                    std.fs.path.dirname(std_pkg.root_src_path) orelse ".",
+                });
+                defer arena.free(std_path);
+                const main_path = try std.fs.path.resolve(arena, &[_][]const u8{
+                    main_pkg.root_src_directory.path orelse ".",
+                    main_pkg.root_src_path,
+                });
+                defer arena.free(main_path);
+                break :m mem.startsWith(u8, main_path, std_path);
+            };
 
             // Pre-open the directory handles for cached ZIR code so that it does not need
             // to redundantly happen for each AstGen operation.
@@ -1418,14 +1440,15 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
                 .gpa = gpa,
                 .comp = comp,
                 .main_pkg = main_pkg,
+                .main_pkg_in_std = main_pkg_in_std,
                 .root_pkg = root_pkg,
                 .zig_cache_artifact_directory = zig_cache_artifact_directory,
                 .global_zir_cache = global_zir_cache,
                 .local_zir_cache = local_zir_cache,
                 .emit_h = emit_h,
-                .error_name_list = try std.ArrayListUnmanaged([]const u8).initCapacity(gpa, 1),
+                .error_name_list = .{},
             };
-            module.error_name_list.appendAssumeCapacity("(no error)");
+            try module.error_name_list.append(gpa, "(no error)");
 
             break :blk module;
         } else blk: {
@@ -1435,7 +1458,8 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
         errdefer if (module) |zm| zm.deinit();
 
         const error_return_tracing = !strip and switch (options.optimize_mode) {
-            .Debug, .ReleaseSafe => true,
+            .Debug, .ReleaseSafe => (!options.target.isWasm() or options.target.os.tag == .emscripten) and
+                !options.target.cpu.arch.isBpf(),
             .ReleaseFast, .ReleaseSmall => false,
         };
 
@@ -1574,6 +1598,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             .z_notext = options.linker_z_notext,
             .z_defs = options.linker_z_defs,
             .z_origin = options.linker_z_origin,
+            .z_nocopyreloc = options.linker_z_nocopyreloc,
             .z_noexecstack = options.linker_z_noexecstack,
             .z_now = options.linker_z_now,
             .z_relro = options.linker_z_relro,
@@ -1659,7 +1684,6 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             .clang_preprocessor_mode = options.clang_preprocessor_mode,
             .verbose_cc = options.verbose_cc,
             .verbose_air = options.verbose_air,
-            .verbose_mir = options.verbose_mir,
             .verbose_llvm_ir = options.verbose_llvm_ir,
             .verbose_cimport = options.verbose_cimport,
             .verbose_llvm_cpu_features = options.verbose_llvm_cpu_features,
@@ -1695,6 +1719,15 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
     const have_bin_emit = comp.bin_file.options.emit != null or comp.whole_bin_sub_path != null;
 
     if (have_bin_emit and !comp.bin_file.options.skip_linker_dependencies) {
+        if (comp.getTarget().isDarwin()) {
+            switch (comp.getTarget().abi) {
+                .none,
+                .simulator,
+                .macabi,
+                => {},
+                else => return error.LibCUnavailable,
+            }
+        }
         // If we need to build glibc for the target, add work items for it.
         // We go through the work queue so that building can be done in parallel.
         if (comp.wantBuildGLibCFromSource()) {
@@ -2233,7 +2266,7 @@ fn prepareWholeEmitSubPath(arena: Allocator, opt_emit: ?EmitLoc) error{OutOfMemo
 /// to remind the programmer to update multiple related pieces of code that
 /// are in different locations. Bump this number when adding or deleting
 /// anything from the link cache manifest.
-pub const link_hash_implementation_version = 2;
+pub const link_hash_implementation_version = 3;
 
 fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifest) !void {
     const gpa = comp.gpa;
@@ -2243,7 +2276,7 @@ fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifes
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
-    comptime assert(link_hash_implementation_version == 2);
+    comptime assert(link_hash_implementation_version == 3);
 
     if (comp.bin_file.options.module) |mod| {
         const main_zig_file = try mod.main_pkg.root_src_directory.join(arena, &[_][]const u8{
@@ -2311,6 +2344,7 @@ fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifes
     man.hash.add(comp.bin_file.options.z_notext);
     man.hash.add(comp.bin_file.options.z_defs);
     man.hash.add(comp.bin_file.options.z_origin);
+    man.hash.add(comp.bin_file.options.z_nocopyreloc);
     man.hash.add(comp.bin_file.options.z_noexecstack);
     man.hash.add(comp.bin_file.options.z_now);
     man.hash.add(comp.bin_file.options.z_relro);
@@ -3788,6 +3822,10 @@ pub fn addCCArgs(
         try argv.append("-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS");
         try argv.append("-D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS");
         try argv.append("-D_LIBCPP_HAS_NO_VENDOR_AVAILABILITY_ANNOTATIONS");
+
+        if (comp.bin_file.options.single_threaded) {
+            try argv.append("-D_LIBCPP_HAS_NO_THREADS");
+        }
     }
 
     if (comp.bin_file.options.link_libunwind) {
@@ -4260,7 +4298,7 @@ fn getZigShippedLibCIncludeDirsDarwin(arena: Allocator, zig_lib_dir: []const u8,
 
     list[0] = try std.fmt.allocPrint(
         arena,
-        "{s}" ++ s ++ "libc" ++ s ++ "include" ++ s ++ "{s}-{s}-gnu",
+        "{s}" ++ s ++ "libc" ++ s ++ "include" ++ s ++ "{s}-{s}-none",
         .{ zig_lib_dir, arch_name, os_name },
     );
     list[1] = try std.fmt.allocPrint(
@@ -4538,7 +4576,7 @@ pub fn generateBuiltinZigSource(comp: *Compilation, allocator: Allocator) Alloca
             .i386 => .stage2_x86,
             .aarch64, .aarch64_be, .aarch64_32 => .stage2_aarch64,
             .riscv64 => .stage2_riscv64,
-            .sparcv9 => .stage2_sparcv9,
+            .sparc64 => .stage2_sparc64,
             else => .other,
         };
     };
@@ -4779,18 +4817,9 @@ fn buildOutputFromZig(
     defer tracy_trace.end();
 
     std.debug.assert(output_mode != .Exe);
-    const special_sub = "std" ++ std.fs.path.sep_str ++ "special";
-    const special_path = try comp.zig_lib_directory.join(comp.gpa, &[_][]const u8{special_sub});
-    defer comp.gpa.free(special_path);
-
-    var special_dir = try comp.zig_lib_directory.handle.openDir(special_sub, .{});
-    defer special_dir.close();
 
     var main_pkg: Package = .{
-        .root_src_directory = .{
-            .path = special_path,
-            .handle = special_dir,
-        },
+        .root_src_directory = comp.zig_lib_directory,
         .root_src_path = src_basename,
     };
     defer main_pkg.deinitTable(comp.gpa);
