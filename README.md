@@ -71,7 +71,7 @@ is more portable across Linux distributions.
 | `aarch64-linux-gnu`        | OK             |
 | `aarch64-linux-musl`       | OK             |
 | `aarch64-windows-gnu`      | OK             |
-| `aarch64-macos-gnu`        | OK             |
+| `aarch64-macos-none`       | OK             |
 | `armeb-linux-gnueabi`      | not tested     |
 | `armeb-linux-gnueabihf`    | not tested     |
 | `armeb-linux-musleabi`     | not tested     |
@@ -112,7 +112,7 @@ is more portable across Linux distributions.
 | `x86_64-linux-gnux32`      | [#20](https://github.com/ziglang/bootstrap/issues/20) |
 | `x86_64-linux-musl`        | OK             |
 | `x86_64-windows-gnu`       | OK             |
-| `x86_64-macos-gnu`         | OK             |
+| `x86_64-macos-none`        | OK             |
 
 #### Other Notable Targets Known to Work
 
