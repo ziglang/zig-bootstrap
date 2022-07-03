@@ -79,6 +79,7 @@ pub fn print(
         .i8_type => return writer.writeAll("i8"),
         .u16_type => return writer.writeAll("u16"),
         .i16_type => return writer.writeAll("i16"),
+        .u29_type => return writer.writeAll("u29"),
         .u32_type => return writer.writeAll("u32"),
         .i32_type => return writer.writeAll("i32"),
         .u64_type => return writer.writeAll("u64"),
@@ -143,7 +144,41 @@ pub fn print(
                 return writer.writeAll(".{ ... }");
             }
             const vals = val.castTag(.aggregate).?.data;
-            if (ty.zigTypeTag() == .Struct) {
+            if (ty.castTag(.anon_struct)) |anon_struct| {
+                const field_names = anon_struct.data.names;
+                const types = anon_struct.data.types;
+                const max_len = std.math.min(types.len, max_aggregate_items);
+
+                var i: u32 = 0;
+                while (i < max_len) : (i += 1) {
+                    if (i != 0) try writer.writeAll(", ");
+                    try writer.print(".{s} = ", .{field_names[i]});
+                    try print(.{
+                        .ty = types[i],
+                        .val = vals[i],
+                    }, writer, level - 1, mod);
+                }
+                if (types.len > max_aggregate_items) {
+                    try writer.writeAll(", ...");
+                }
+                return writer.writeAll(" }");
+            } else if (ty.isTuple()) {
+                const fields = ty.tupleFields();
+                const max_len = std.math.min(fields.types.len, max_aggregate_items);
+
+                var i: u32 = 0;
+                while (i < max_len) : (i += 1) {
+                    if (i != 0) try writer.writeAll(", ");
+                    try print(.{
+                        .ty = fields.types[i],
+                        .val = vals[i],
+                    }, writer, level - 1, mod);
+                }
+                if (fields.types.len > max_aggregate_items) {
+                    try writer.writeAll(", ...");
+                }
+                return writer.writeAll(" }");
+            } else if (ty.zigTypeTag() == .Struct) {
                 try writer.writeAll(".{ ");
                 const struct_fields = ty.structFields();
                 const len = struct_fields.count();
@@ -193,7 +228,7 @@ pub fn print(
             try writer.writeAll(".{ ");
 
             try print(.{
-                .ty = ty.unionTagType().?,
+                .ty = ty.cast(Type.Payload.Union).?.data.tag_ty,
                 .val = union_val.tag,
             }, writer, level - 1, mod);
             try writer.writeAll(" = ");
@@ -264,22 +299,40 @@ pub fn print(
                 .val = decl.val,
             }, writer, level - 1, mod);
         },
+        .comptime_field_ptr => {
+            const payload = val.castTag(.comptime_field_ptr).?.data;
+            if (level == 0) {
+                return writer.writeAll("(comptime field ptr)");
+            }
+            return print(.{
+                .ty = payload.field_ty,
+                .val = payload.field_val,
+            }, writer, level - 1, mod);
+        },
         .elem_ptr => {
             const elem_ptr = val.castTag(.elem_ptr).?.data;
             try writer.writeAll("&");
-            try print(.{
-                .ty = elem_ptr.elem_ty,
-                .val = elem_ptr.array_ptr,
-            }, writer, level - 1, mod);
+            if (level == 0) {
+                try writer.writeAll("(ptr)");
+            } else {
+                try print(.{
+                    .ty = elem_ptr.elem_ty,
+                    .val = elem_ptr.array_ptr,
+                }, writer, level - 1, mod);
+            }
             return writer.print("[{}]", .{elem_ptr.index});
         },
         .field_ptr => {
             const field_ptr = val.castTag(.field_ptr).?.data;
             try writer.writeAll("&");
-            try print(.{
-                .ty = field_ptr.container_ty,
-                .val = field_ptr.container_ptr,
-            }, writer, level - 1, mod);
+            if (level == 0) {
+                try writer.writeAll("(ptr)");
+            } else {
+                try print(.{
+                    .ty = field_ptr.container_ty,
+                    .val = field_ptr.container_ptr,
+                }, writer, level - 1, mod);
+            }
 
             if (field_ptr.container_ty.zigTypeTag() == .Struct) {
                 const field_name = field_ptr.container_ty.structFields().keys()[field_ptr.field_index];
@@ -295,6 +348,11 @@ pub fn print(
             return writer.print(".{s}", .{ty.enumFieldName(val.castTag(.enum_field_index).?.data)});
         },
         .bytes => return writer.print("\"{}\"", .{std.zig.fmtEscapes(val.castTag(.bytes).?.data)}),
+        .str_lit => {
+            const str_lit = val.castTag(.str_lit).?.data;
+            const bytes = mod.string_literal_bytes.items[str_lit.index..][0..str_lit.len];
+            return writer.print("\"{}\"", .{std.zig.fmtEscapes(bytes)});
+        },
         .repeated => {
             if (level == 0) {
                 return writer.writeAll(".{ ... }");
@@ -328,6 +386,9 @@ pub fn print(
             return writer.writeAll(" }");
         },
         .slice => {
+            if (level == 0) {
+                return writer.writeAll(".{ ... }");
+            }
             const payload = val.castTag(.slice).?.data;
             try writer.writeAll(".{ ");
             const elem_ty = ty.elemType2();
@@ -348,25 +409,81 @@ pub fn print(
             }
             return writer.writeAll(" }");
         },
-        .float_16 => return writer.print("{}", .{val.castTag(.float_16).?.data}),
-        .float_32 => return writer.print("{}", .{val.castTag(.float_32).?.data}),
-        .float_64 => return writer.print("{}", .{val.castTag(.float_64).?.data}),
-        .float_80 => return writer.print("{}", .{val.castTag(.float_80).?.data}),
-        .float_128 => return writer.print("{}", .{val.castTag(.float_128).?.data}),
+        .float_16 => return writer.print("{d}", .{val.castTag(.float_16).?.data}),
+        .float_32 => return writer.print("{d}", .{val.castTag(.float_32).?.data}),
+        .float_64 => return writer.print("{d}", .{val.castTag(.float_64).?.data}),
+        .float_80 => return writer.print("{d}", .{@floatCast(f64, val.castTag(.float_80).?.data)}),
+        .float_128 => return writer.print("{d}", .{@floatCast(f64, val.castTag(.float_128).?.data)}),
         .@"error" => return writer.print("error.{s}", .{val.castTag(.@"error").?.data.name}),
         .eu_payload => {
             val = val.castTag(.eu_payload).?.data;
+            ty = ty.errorUnionPayload();
         },
         .opt_payload => {
             val = val.castTag(.opt_payload).?.data;
+            var buf: Type.Payload.ElemType = undefined;
+            ty = ty.optionalChild(&buf);
+            return print(.{ .ty = ty, .val = val }, writer, level, mod);
         },
         .eu_payload_ptr => {
             try writer.writeAll("&");
-            val = val.castTag(.eu_payload_ptr).?.data.container_ptr;
+
+            const data = val.castTag(.eu_payload_ptr).?.data;
+
+            var ty_val: Value.Payload.Ty = .{
+                .base = .{ .tag = .ty },
+                .data = ty,
+            };
+
+            try writer.writeAll("@as(");
+            try print(.{
+                .ty = Type.type,
+                .val = Value.initPayload(&ty_val.base),
+            }, writer, level - 1, mod);
+
+            try writer.writeAll(", &(payload of ");
+
+            var ptr_ty: Type.Payload.ElemType = .{
+                .base = .{ .tag = .single_mut_pointer },
+                .data = data.container_ty,
+            };
+
+            try print(.{
+                .ty = Type.initPayload(&ptr_ty.base),
+                .val = data.container_ptr,
+            }, writer, level - 1, mod);
+
+            try writer.writeAll("))");
+            return;
         },
         .opt_payload_ptr => {
-            try writer.writeAll("&");
-            val = val.castTag(.opt_payload_ptr).?.data.container_ptr;
+            const data = val.castTag(.opt_payload_ptr).?.data;
+
+            var ty_val: Value.Payload.Ty = .{
+                .base = .{ .tag = .ty },
+                .data = ty,
+            };
+
+            try writer.writeAll("@as(");
+            try print(.{
+                .ty = Type.type,
+                .val = Value.initPayload(&ty_val.base),
+            }, writer, level - 1, mod);
+
+            try writer.writeAll(", &(payload of ");
+
+            var ptr_ty: Type.Payload.ElemType = .{
+                .base = .{ .tag = .single_mut_pointer },
+                .data = data.container_ty,
+            };
+
+            try print(.{
+                .ty = Type.initPayload(&ptr_ty.base),
+                .val = data.container_ptr,
+            }, writer, level - 1, mod);
+
+            try writer.writeAll("))");
+            return;
         },
 
         // TODO these should not appear in this function

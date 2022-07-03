@@ -29,7 +29,6 @@ fn shouldBeNotEqual(a: anyerror, b: anyerror) void {
 }
 
 test "error binary operator" {
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
 
     const a = errBinaryOperatorG(true) catch 3;
@@ -61,14 +60,12 @@ pub fn baz() anyerror!i32 {
 }
 
 test "error wrapping" {
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
 
     try expect((baz() catch unreachable) == 15);
 }
 
 test "unwrap simple value from error" {
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
 
     const i = unwrapSimpleValueFromErrorDo() catch unreachable;
@@ -79,7 +76,6 @@ fn unwrapSimpleValueFromErrorDo() anyerror!isize {
 }
 
 test "error return in assignment" {
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
 
     doErrReturnInAssignment() catch unreachable;
@@ -119,15 +115,13 @@ test "widen cast integer payload of error union function call" {
 
 test "debug info for optional error set" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
 
-    const SomeError = error{Hello};
+    const SomeError = error{ Hello, Hello2 };
     var a_local_variable: ?SomeError = null;
     _ = a_local_variable;
 }
 
 test "implicit cast to optional to error union to return result loc" {
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
 
     const S = struct {
@@ -148,18 +142,44 @@ test "implicit cast to optional to error union to return result loc" {
     //comptime S.entry(); TODO
 }
 
-test "error: fn returning empty error set can be passed as fn returning any error" {
+test "fn returning empty error set can be passed as fn returning any error" {
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+
     entry();
     comptime entry();
+}
+
+test "fn returning empty error set can be passed as fn returning any error - pointer" {
+    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+
+    entryPtr();
+    comptime entryPtr();
 }
 
 fn entry() void {
     foo2(bar2);
 }
 
+fn entryPtr() void {
+    var ptr = &bar2;
+    fooPtr(ptr);
+}
+
 fn foo2(f: fn () anyerror!void) void {
     const x = f();
-    x catch {};
+    x catch {
+        @panic("fail");
+    };
+}
+
+fn fooPtr(f: *const fn () anyerror!void) void {
+    const x = f();
+    x catch {
+        @panic("fail");
+    };
 }
 
 fn bar2() (error{}!void) {}
@@ -222,7 +242,6 @@ fn testExplicitErrorSetCast(set1: Set1) !void {
 
 test "comptime test error for empty error set" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
 
     try testComptimeTestErrorEmptySet(1234);
@@ -239,7 +258,9 @@ fn testComptimeTestErrorEmptySet(x: EmptyErrorSet!i32) !void {
 }
 
 test "comptime err to int of error set with only 1 possible value" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
 
     testErrToIntWithOnePossibleValue(error.A, @errorToInt(error.A));
     comptime testErrToIntWithOnePossibleValue(error.A, @errorToInt(error.A));
@@ -293,7 +314,6 @@ fn quux_1() !i32 {
 }
 
 test "error: Zero sized error set returned with value payload crash" {
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
 
     _ = try foo3(0);
@@ -392,7 +412,6 @@ test "nested error union function call in optional unwrap" {
 
 test "return function call to error set from error union function" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
 
     const S = struct {
@@ -409,9 +428,11 @@ test "return function call to error set from error union function" {
 }
 
 test "optional error set is the same size as error set" {
-    if (builtin.zig_backend != .stage1) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
 
     comptime try expect(@sizeOf(?anyerror) == @sizeOf(anyerror));
+    comptime try expect(@alignOf(?anyerror) == @alignOf(anyerror));
     const S = struct {
         fn returnsOptErrSet() ?anyerror {
             return null;
@@ -423,7 +444,6 @@ test "optional error set is the same size as error set" {
 
 test "nested catch" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
 
     const S = struct {
@@ -455,7 +475,6 @@ test "function pointer with return type that is error union with payload which i
 
     if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
 
     const S = struct {
@@ -662,4 +681,46 @@ test "error union payload is properly aligned" {
     };
     const blk = S.foo() catch unreachable;
     if (blk.a != 1) unreachable;
+}
+
+test "ret_ptr doesn't cause own inferred error set to be resolved" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+
+    const S = struct {
+        fn foo() !void {}
+
+        fn doTheTest() !void {
+            errdefer @compileError("bad");
+
+            return try @This().foo();
+        }
+    };
+    try S.doTheTest();
+}
+
+test "simple else prong allowed even when all errors handled" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+
+    const S = struct {
+        fn foo() !u8 {
+            return error.Foo;
+        }
+    };
+    var value = S.foo() catch |err| switch (err) {
+        error.Foo => @as(u8, 255),
+        else => |e| return e,
+    };
+    try expect(value == 255);
+    value = S.foo() catch |err| switch (err) {
+        error.Foo => 255,
+        else => unreachable,
+    };
+    try expect(value == 255);
+    value = S.foo() catch |err| switch (err) {
+        error.Foo => 255,
+        else => return,
+    };
+    try expect(value == 255);
 }

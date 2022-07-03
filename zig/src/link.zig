@@ -19,8 +19,10 @@ const Package = @import("Package.zig");
 const Type = @import("type.zig").Type;
 const TypedValue = @import("TypedValue.zig");
 
+/// When adding a new field, remember to update `hashAddSystemLibs`.
 pub const SystemLib = struct {
     needed: bool = false,
+    weak: bool = false,
 };
 
 pub const CacheMode = enum { incremental, whole };
@@ -34,6 +36,7 @@ pub fn hashAddSystemLibs(
     hh.addListOfBytes(keys);
     for (hm.values()) |value| {
         hh.add(value.needed);
+        hh.add(value.weak);
     }
 }
 
@@ -113,7 +116,6 @@ pub const Options = struct {
     z_defs: bool,
     z_origin: bool,
     z_nocopyreloc: bool,
-    z_noexecstack: bool,
     z_now: bool,
     z_relro: bool,
     tsaware: bool,
@@ -146,6 +148,7 @@ pub const Options = struct {
     skip_linker_dependencies: bool,
     parent_compilation_link_libc: bool,
     each_lib_rpath: bool,
+    build_id: bool,
     disable_lld_caching: bool,
     is_test: bool,
     use_stage1: bool,
@@ -162,7 +165,7 @@ pub const Options = struct {
 
     objects: []Compilation.LinkObject,
     framework_dirs: []const []const u8,
-    frameworks: []const []const u8,
+    frameworks: std.StringArrayHashMapUnmanaged(SystemLib),
     system_libs: std.StringArrayHashMapUnmanaged(SystemLib),
     wasi_emulated_libs: []const wasi_libc.CRTFile,
     lib_dirs: []const []const u8,
@@ -186,6 +189,21 @@ pub const Options = struct {
 
     /// (Darwin) Path to entitlements file
     entitlements: ?[]const u8 = null,
+
+    /// (Darwin) size of the __PAGEZERO segment
+    pagezero_size: ?u64 = null,
+
+    /// (Darwin) search strategy for system libraries
+    search_strategy: ?File.MachO.SearchStrategy = null,
+
+    /// (Darwin) set minimum space for future expansion of the load commands
+    headerpad_size: ?u32 = null,
+
+    /// (Darwin) set enough space as if all paths were MATPATHLEN
+    headerpad_max_install_names: bool = false,
+
+    /// (Darwin) remove dylibs that are unreachable by the entry point or exported symbols
+    dead_strip_dylibs: bool = false,
 
     pub fn effectiveOutputMode(options: Options) std.builtin.OutputMode {
         return if (options.use_lld) .Obj else options.output_mode;
@@ -430,6 +448,25 @@ pub const File = struct {
             .spirv => unreachable,
             .c     => unreachable,
             .wasm  => return @fieldParentPtr(Wasm,  "base", base).lowerUnnamedConst(tv, decl_index),
+            .nvptx => unreachable,
+            // zig fmt: on
+        }
+    }
+
+    /// Called from within CodeGen to retrieve the symbol index of a global symbol.
+    /// If no symbol exists yet with this name, a new undefined global symbol will
+    /// be created. This symbol may get resolved once all relocatables are (re-)linked.
+    pub fn getGlobalSymbol(base: *File, name: []const u8) UpdateDeclError!u32 {
+        log.debug("getGlobalSymbol '{s}'", .{name});
+        switch (base.tag) {
+            // zig fmt: off
+            .coff  => unreachable,
+            .elf   => unreachable,
+            .macho => return @fieldParentPtr(MachO, "base", base).getGlobalSymbol(name),
+            .plan9 => unreachable,
+            .spirv => unreachable,
+            .c     => unreachable,
+            .wasm  => return @fieldParentPtr(Wasm,  "base", base).getGlobalSymbol(name),
             .nvptx => unreachable,
             // zig fmt: on
         }
@@ -792,14 +829,10 @@ pub const File = struct {
                     }),
                 }
             }
-            if (base.options.object_format == .macho) {
-                try base.cast(MachO).?.flushObject(comp, prog_node);
-            } else {
-                try base.flushModule(comp, prog_node);
-            }
-            break :blk try fs.path.join(arena, &.{
-                fs.path.dirname(full_out_path_z).?, base.intermediary_basename.?,
-            });
+            try base.flushModule(comp, prog_node);
+
+            const dirname = fs.path.dirname(full_out_path_z) orelse ".";
+            break :blk try fs.path.join(arena, &.{ dirname, base.intermediary_basename.? });
         } else null;
 
         log.debug("module_obj_path={s}", .{if (module_obj_path) |s| s else "(null)"});

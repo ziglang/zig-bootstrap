@@ -7,7 +7,7 @@ TARGET="$2" # Example: riscv64-linux-gnu
 MCPU="$3" # Examples: `baseline`, `native`, `generic+v7a`, or `arm1176jzf_s`
 
 ROOTDIR="$(pwd)"
-ZIG_VERSION="0.10.0-dev.2351+b64a1d5ab"
+ZIG_VERSION="0.10.0-dev.2858+b69816866"
 
 TARGET_OS_AND_ABI=${TARGET#*-} # Example: linux-gnu
 

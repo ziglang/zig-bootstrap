@@ -11,7 +11,6 @@ const ArrayList = std.ArrayList;
 const StringHashMap = std.StringHashMap;
 const Allocator = mem.Allocator;
 const process = std.process;
-const BufSet = std.BufSet;
 const EnvMap = std.process.EnvMap;
 const fmt_lib = std.fmt;
 const File = std.fs.File;
@@ -24,6 +23,7 @@ pub const TranslateCStep = @import("build/TranslateCStep.zig");
 pub const WriteFileStep = @import("build/WriteFileStep.zig");
 pub const RunStep = @import("build/RunStep.zig");
 pub const CheckFileStep = @import("build/CheckFileStep.zig");
+pub const CheckObjectStep = @import("build/CheckObjectStep.zig");
 pub const InstallRawStep = @import("build/InstallRawStep.zig");
 pub const OptionsStep = @import("build/OptionsStep.zig");
 
@@ -385,7 +385,7 @@ pub const Builder = struct {
     pub fn dupePkg(self: *Builder, package: Pkg) Pkg {
         var the_copy = Pkg{
             .name = self.dupe(package.name),
-            .path = package.path.dupe(self),
+            .source = package.source.dupe(self),
         };
 
         if (package.dependencies) |dependencies| {
@@ -1353,7 +1353,7 @@ pub const Target = @compileError("deprecated; Use `std.zig.CrossTarget`");
 
 pub const Pkg = struct {
     name: []const u8,
-    path: FileSource,
+    source: FileSource,
     dependencies: ?[]const Pkg = null,
 };
 
@@ -1483,7 +1483,7 @@ pub const LibExeObjStep = struct {
     lib_paths: ArrayList([]const u8),
     rpaths: ArrayList([]const u8),
     framework_dirs: ArrayList([]const u8),
-    frameworks: BufSet,
+    frameworks: StringHashMap(FrameworkLinkInfo),
     verbose_link: bool,
     verbose_cc: bool,
     emit_analysis: EmitOption = .default,
@@ -1549,6 +1549,12 @@ pub const LibExeObjStep = struct {
 
     valgrind_support: ?bool = null,
     each_lib_rpath: ?bool = null,
+    /// On ELF targets, this will emit a link section called ".note.gnu.build-id"
+    /// which can be used to coordinate a stripped binary with its debug symbols.
+    /// As an example, the bloaty project refuses to work unless its inputs have
+    /// build ids, in order to prevent accidental mismatches.
+    /// The default is to not include this section because it slows down linking.
+    build_id: ?bool = null,
 
     /// Create a .eh_frame_hdr section and a PT_GNU_EH_FRAME segment in the ELF
     /// file.
@@ -1564,11 +1570,38 @@ pub const LibExeObjStep = struct {
     /// Permit read-only relocations in read-only segments. Disallowed by default.
     link_z_notext: bool = false,
 
+    /// Force all relocations to be read-only after processing.
+    link_z_relro: bool = true,
+
+    /// Allow relocations to be lazily processed after load.
+    link_z_lazy: bool = false,
+
     /// (Darwin) Install name for the dylib
     install_name: ?[]const u8 = null,
 
     /// (Darwin) Path to entitlements file
     entitlements: ?[]const u8 = null,
+
+    /// (Darwin) Size of the pagezero segment.
+    pagezero_size: ?u64 = null,
+
+    /// (Darwin) Search strategy for searching system libraries. Either `paths_first` or `dylibs_first`.
+    /// The former lowers to `-search_paths_first` linker option, while the latter to `-search_dylibs_first`
+    /// option.
+    /// By default, if no option is specified, the linker assumes `paths_first` as the default
+    /// search strategy.
+    search_strategy: ?enum { paths_first, dylibs_first } = null,
+
+    /// (Darwin) Set size of the padding between the end of load commands
+    /// and start of `__TEXT,__text` section.
+    headerpad_size: ?u32 = null,
+
+    /// (Darwin) Automatically Set size of the padding between the end of load commands
+    /// and start of `__TEXT,__text` section to a value fitting all paths expanded to MAXPATHLEN.
+    headerpad_max_install_names: bool = false,
+
+    /// (Darwin) Remove dylibs that are unreachable by the entry point or exported symbols.
+    dead_strip_dylibs: bool = false,
 
     /// Position Independent Code
     force_pic: ?bool = null,
@@ -1609,6 +1642,8 @@ pub const LibExeObjStep = struct {
 
     pub const SystemLib = struct {
         name: []const u8,
+        needed: bool,
+        weak: bool,
         use_pkg_config: enum {
             /// Don't use pkg-config, just pass -lfoo where foo is name.
             no,
@@ -1619,6 +1654,11 @@ pub const LibExeObjStep = struct {
             /// If that fails, error out.
             force,
         },
+    };
+
+    const FrameworkLinkInfo = struct {
+        needed: bool = false,
+        weak: bool = false,
     };
 
     pub const IncludeDir = union(enum) {
@@ -1710,7 +1750,7 @@ pub const LibExeObjStep = struct {
             .kind = kind,
             .root_src = root_src,
             .name = name,
-            .frameworks = BufSet.init(builder.allocator),
+            .frameworks = StringHashMap(FrameworkLinkInfo).init(builder.allocator),
             .step = Step.init(base_id, name, builder.allocator, make),
             .version = ver,
             .out_filename = undefined,
@@ -1849,14 +1889,29 @@ pub const LibExeObjStep = struct {
         return run_step;
     }
 
+    pub fn checkObject(self: *LibExeObjStep, obj_format: std.Target.ObjectFormat) *CheckObjectStep {
+        return CheckObjectStep.create(self.builder, self.getOutputSource(), obj_format);
+    }
+
     pub fn setLinkerScriptPath(self: *LibExeObjStep, source: FileSource) void {
         self.linker_script = source.dupe(self.builder);
         source.addStepDependencies(&self.step);
     }
 
     pub fn linkFramework(self: *LibExeObjStep, framework_name: []const u8) void {
-        // Note: No need to dupe because frameworks dupes internally.
-        self.frameworks.insert(framework_name) catch unreachable;
+        self.frameworks.put(self.builder.dupe(framework_name), .{}) catch unreachable;
+    }
+
+    pub fn linkFrameworkNeeded(self: *LibExeObjStep, framework_name: []const u8) void {
+        self.frameworks.put(self.builder.dupe(framework_name), .{
+            .needed = true,
+        }) catch unreachable;
+    }
+
+    pub fn linkFrameworkWeak(self: *LibExeObjStep, framework_name: []const u8) void {
+        self.frameworks.put(self.builder.dupe(framework_name), .{
+            .weak = true,
+        }) catch unreachable;
     }
 
     /// Returns whether the library, executable, or object depends on a particular system library.
@@ -1897,6 +1952,8 @@ pub const LibExeObjStep = struct {
             self.link_objects.append(.{
                 .system_lib = .{
                     .name = "c",
+                    .needed = false,
+                    .weak = false,
                     .use_pkg_config = .no,
                 },
             }) catch unreachable;
@@ -1909,6 +1966,8 @@ pub const LibExeObjStep = struct {
             self.link_objects.append(.{
                 .system_lib = .{
                     .name = "c++",
+                    .needed = false,
+                    .weak = false,
                     .use_pkg_config = .no,
                 },
             }) catch unreachable;
@@ -1933,6 +1992,34 @@ pub const LibExeObjStep = struct {
         self.link_objects.append(.{
             .system_lib = .{
                 .name = self.builder.dupe(name),
+                .needed = false,
+                .weak = false,
+                .use_pkg_config = .no,
+            },
+        }) catch unreachable;
+    }
+
+    /// This one has no integration with anything, it just puts -needed-lname on the command line.
+    /// Prefer to use `linkSystemLibraryNeeded` instead.
+    pub fn linkSystemLibraryNeededName(self: *LibExeObjStep, name: []const u8) void {
+        self.link_objects.append(.{
+            .system_lib = .{
+                .name = self.builder.dupe(name),
+                .needed = true,
+                .weak = false,
+                .use_pkg_config = .no,
+            },
+        }) catch unreachable;
+    }
+
+    /// Darwin-only. This one has no integration with anything, it just puts -weak-lname on the
+    /// command line. Prefer to use `linkSystemLibraryWeak` instead.
+    pub fn linkSystemLibraryWeakName(self: *LibExeObjStep, name: []const u8) void {
+        self.link_objects.append(.{
+            .system_lib = .{
+                .name = self.builder.dupe(name),
+                .needed = false,
+                .weak = true,
                 .use_pkg_config = .no,
             },
         }) catch unreachable;
@@ -1944,6 +2031,21 @@ pub const LibExeObjStep = struct {
         self.link_objects.append(.{
             .system_lib = .{
                 .name = self.builder.dupe(lib_name),
+                .needed = false,
+                .weak = false,
+                .use_pkg_config = .force,
+            },
+        }) catch unreachable;
+    }
+
+    /// This links against a system library, exclusively using pkg-config to find the library.
+    /// Prefer to use `linkSystemLibraryNeeded` instead.
+    pub fn linkSystemLibraryNeededPkgConfigOnly(self: *LibExeObjStep, lib_name: []const u8) void {
+        self.link_objects.append(.{
+            .system_lib = .{
+                .name = self.builder.dupe(lib_name),
+                .needed = true,
+                .weak = false,
                 .use_pkg_config = .force,
             },
         }) catch unreachable;
@@ -2046,6 +2148,21 @@ pub const LibExeObjStep = struct {
     }
 
     pub fn linkSystemLibrary(self: *LibExeObjStep, name: []const u8) void {
+        self.linkSystemLibraryInner(name, .{});
+    }
+
+    pub fn linkSystemLibraryNeeded(self: *LibExeObjStep, name: []const u8) void {
+        self.linkSystemLibraryInner(name, .{ .needed = true });
+    }
+
+    pub fn linkSystemLibraryWeak(self: *LibExeObjStep, name: []const u8) void {
+        self.linkSystemLibraryInner(name, .{ .weak = true });
+    }
+
+    fn linkSystemLibraryInner(self: *LibExeObjStep, name: []const u8, opts: struct {
+        needed: bool = false,
+        weak: bool = false,
+    }) void {
         if (isLibCLibrary(name)) {
             self.linkLibC();
             return;
@@ -2058,6 +2175,8 @@ pub const LibExeObjStep = struct {
         self.link_objects.append(.{
             .system_lib = .{
                 .name = self.builder.dupe(name),
+                .needed = opts.needed,
+                .weak = opts.weak,
                 .use_pkg_config = .yes,
             },
         }) catch unreachable;
@@ -2228,7 +2347,7 @@ pub const LibExeObjStep = struct {
     }
 
     fn addRecursiveBuildDeps(self: *LibExeObjStep, package: Pkg) void {
-        package.path.addStepDependencies(&self.step);
+        package.source.addStepDependencies(&self.step);
         if (package.dependencies) |deps| {
             for (deps) |dep| {
                 self.addRecursiveBuildDeps(dep);
@@ -2239,7 +2358,7 @@ pub const LibExeObjStep = struct {
     pub fn addPackagePath(self: *LibExeObjStep, name: []const u8, pkg_index_path: []const u8) void {
         self.addPackage(Pkg{
             .name = self.builder.dupe(name),
-            .path = .{ .path = self.builder.dupe(pkg_index_path) },
+            .source = .{ .path = self.builder.dupe(pkg_index_path) },
         });
     }
 
@@ -2300,7 +2419,7 @@ pub const LibExeObjStep = struct {
 
         try zig_args.append("--pkg-begin");
         try zig_args.append(pkg.name);
-        try zig_args.append(builder.pathFromRoot(pkg.path.getPath(self.builder)));
+        try zig_args.append(builder.pathFromRoot(pkg.source.getPath(self.builder)));
 
         if (pkg.dependencies) |dependencies| {
             for (dependencies) |sub_pkg| {
@@ -2399,7 +2518,7 @@ pub const LibExeObjStep = struct {
                         if (!other.isDynamicLibrary()) {
                             var it = other.frameworks.iterator();
                             while (it.next()) |framework| {
-                                self.frameworks.insert(framework.*) catch unreachable;
+                                self.frameworks.put(framework.key_ptr.*, framework.value_ptr.*) catch unreachable;
                             }
                         }
                     },
@@ -2435,8 +2554,16 @@ pub const LibExeObjStep = struct {
                 },
 
                 .system_lib => |system_lib| {
+                    const prefix: []const u8 = prefix: {
+                        if (system_lib.needed) break :prefix "-needed-l";
+                        if (system_lib.weak) {
+                            if (self.target.isDarwin()) break :prefix "-weak-l";
+                            warn("Weak library import used for a non-darwin target, this will be converted to normally library import `-lname`\n", .{});
+                        }
+                        break :prefix "-l";
+                    };
                     switch (system_lib.use_pkg_config) {
-                        .no => try zig_args.append(builder.fmt("-l{s}", .{system_lib.name})),
+                        .no => try zig_args.append(builder.fmt("{s}{s}", .{ prefix, system_lib.name })),
                         .yes, .force => {
                             if (self.runPkgConfig(system_lib.name)) |args| {
                                 try zig_args.appendSlice(args);
@@ -2450,7 +2577,10 @@ pub const LibExeObjStep = struct {
                                     .yes => {
                                         // pkg-config failed, so fall back to linking the library
                                         // by name directly.
-                                        try zig_args.append(builder.fmt("-l{s}", .{system_lib.name}));
+                                        try zig_args.append(builder.fmt("{s}{s}", .{
+                                            prefix,
+                                            system_lib.name,
+                                        }));
                                     },
                                     .force => {
                                         panic("pkg-config failed for library {s}", .{system_lib.name});
@@ -2571,6 +2701,14 @@ pub const LibExeObjStep = struct {
             try zig_args.append("-z");
             try zig_args.append("notext");
         }
+        if (!self.link_z_relro) {
+            try zig_args.append("-z");
+            try zig_args.append("norelro");
+        }
+        if (self.link_z_lazy) {
+            try zig_args.append("-z");
+            try zig_args.append("lazy");
+        }
 
         if (self.libc_file) |libc_file| {
             try zig_args.append("--libc");
@@ -2617,6 +2755,24 @@ pub const LibExeObjStep = struct {
 
         if (self.entitlements) |entitlements| {
             try zig_args.appendSlice(&[_][]const u8{ "--entitlements", entitlements });
+        }
+        if (self.pagezero_size) |pagezero_size| {
+            const size = try std.fmt.allocPrint(builder.allocator, "{x}", .{pagezero_size});
+            try zig_args.appendSlice(&[_][]const u8{ "-pagezero_size", size });
+        }
+        if (self.search_strategy) |strat| switch (strat) {
+            .paths_first => try zig_args.append("-search_paths_first"),
+            .dylibs_first => try zig_args.append("-search_dylibs_first"),
+        };
+        if (self.headerpad_size) |headerpad_size| {
+            const size = try std.fmt.allocPrint(builder.allocator, "{x}", .{headerpad_size});
+            try zig_args.appendSlice(&[_][]const u8{ "-headerpad", size });
+        }
+        if (self.headerpad_max_install_names) {
+            try zig_args.append("-headerpad_max_install_names");
+        }
+        if (self.dead_strip_dylibs) {
+            try zig_args.append("-dead_strip_dylibs");
         }
 
         if (self.bundle_compiler_rt) |x| {
@@ -2908,9 +3064,17 @@ pub const LibExeObjStep = struct {
             }
 
             var it = self.frameworks.iterator();
-            while (it.next()) |framework| {
-                zig_args.append("-framework") catch unreachable;
-                zig_args.append(framework.*) catch unreachable;
+            while (it.next()) |entry| {
+                const name = entry.key_ptr.*;
+                const info = entry.value_ptr.*;
+                if (info.needed) {
+                    zig_args.append("-needed_framework") catch unreachable;
+                } else if (info.weak) {
+                    zig_args.append("-weak_framework") catch unreachable;
+                } else {
+                    zig_args.append("-framework") catch unreachable;
+                }
+                zig_args.append(name) catch unreachable;
             }
         } else {
             if (self.framework_dirs.items.len > 0) {
@@ -2950,6 +3114,14 @@ pub const LibExeObjStep = struct {
                 try zig_args.append("-feach-lib-rpath");
             } else {
                 try zig_args.append("-fno-each-lib-rpath");
+            }
+        }
+
+        if (self.build_id) |build_id| {
+            if (build_id) {
+                try zig_args.append("-fbuild-id");
+            } else {
+                try zig_args.append("-fno-build-id");
             }
         }
 
@@ -3415,6 +3587,7 @@ pub const Step = struct {
         write_file,
         run,
         check_file,
+        check_object,
         install_raw,
         options,
         custom,
@@ -3560,11 +3733,11 @@ test "Builder.dupePkg()" {
 
     var pkg_dep = Pkg{
         .name = "pkg_dep",
-        .path = .{ .path = "/not/a/pkg_dep.zig" },
+        .source = .{ .path = "/not/a/pkg_dep.zig" },
     };
     var pkg_top = Pkg{
         .name = "pkg_top",
-        .path = .{ .path = "/not/a/pkg_top.zig" },
+        .source = .{ .path = "/not/a/pkg_top.zig" },
         .dependencies = &[_]Pkg{pkg_dep},
     };
     const dupe = builder.dupePkg(pkg_top);
@@ -3583,9 +3756,9 @@ test "Builder.dupePkg()" {
     // the same as those in stack allocated package's fields
     try std.testing.expect(dupe_deps.ptr != original_deps.ptr);
     try std.testing.expect(dupe.name.ptr != pkg_top.name.ptr);
-    try std.testing.expect(dupe.path.path.ptr != pkg_top.path.path.ptr);
+    try std.testing.expect(dupe.source.path.ptr != pkg_top.source.path.ptr);
     try std.testing.expect(dupe_deps[0].name.ptr != pkg_dep.name.ptr);
-    try std.testing.expect(dupe_deps[0].path.path.ptr != pkg_dep.path.path.ptr);
+    try std.testing.expect(dupe_deps[0].source.path.ptr != pkg_dep.source.path.ptr);
 }
 
 test "LibExeObjStep.addPackage" {
@@ -3605,11 +3778,11 @@ test "LibExeObjStep.addPackage" {
 
     const pkg_dep = Pkg{
         .name = "pkg_dep",
-        .path = .{ .path = "/not/a/pkg_dep.zig" },
+        .source = .{ .path = "/not/a/pkg_dep.zig" },
     };
     const pkg_top = Pkg{
         .name = "pkg_dep",
-        .path = .{ .path = "/not/a/pkg_top.zig" },
+        .source = .{ .path = "/not/a/pkg_top.zig" },
         .dependencies = &[_]Pkg{pkg_dep},
     };
 

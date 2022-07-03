@@ -268,7 +268,7 @@ pub fn zeroes(comptime T: type) T {
         },
         .Struct => |struct_info| {
             if (@sizeOf(T) == 0) return T{};
-            if (comptime meta.containerLayout(T) == .Extern) {
+            if (struct_info.layout == .Extern) {
                 var item: T = undefined;
                 set(u8, asBytes(&item), 0);
                 return item;
@@ -1608,6 +1608,7 @@ pub fn tokenize(comptime T: type, buffer: []const T, delimiter_bytes: []const T)
 test "tokenize" {
     var it = tokenize(u8, "   abc def   ghi  ", " ");
     try testing.expect(eql(u8, it.next().?, "abc"));
+    try testing.expect(eql(u8, it.peek().?, "def"));
     try testing.expect(eql(u8, it.next().?, "def"));
     try testing.expect(eql(u8, it.next().?, "ghi"));
     try testing.expect(it.next() == null);
@@ -1626,9 +1627,11 @@ test "tokenize" {
 
     it = tokenize(u8, "|", "|");
     try testing.expect(it.next() == null);
+    try testing.expect(it.peek() == null);
 
     it = tokenize(u8, "", "|");
     try testing.expect(it.next() == null);
+    try testing.expect(it.peek() == null);
 
     it = tokenize(u8, "hello", "");
     try testing.expect(eql(u8, it.next().?, "hello"));
@@ -1650,11 +1653,13 @@ test "tokenize" {
 test "tokenize (multibyte)" {
     var it = tokenize(u8, "a|b,c/d e", " /,|");
     try testing.expect(eql(u8, it.next().?, "a"));
+    try testing.expect(eql(u8, it.peek().?, "b"));
     try testing.expect(eql(u8, it.next().?, "b"));
     try testing.expect(eql(u8, it.next().?, "c"));
     try testing.expect(eql(u8, it.next().?, "d"));
     try testing.expect(eql(u8, it.next().?, "e"));
     try testing.expect(it.next() == null);
+    try testing.expect(it.peek() == null);
 
     var it16 = tokenize(
         u16,
@@ -1702,23 +1707,32 @@ pub fn split(comptime T: type, buffer: []const T, delimiter: []const T) SplitIte
 
 test "split" {
     var it = split(u8, "abc|def||ghi", "|");
-    try testing.expect(eql(u8, it.next().?, "abc"));
-    try testing.expect(eql(u8, it.next().?, "def"));
-    try testing.expect(eql(u8, it.next().?, ""));
-    try testing.expect(eql(u8, it.next().?, "ghi"));
+    try testing.expectEqualSlices(u8, it.rest(), "abc|def||ghi");
+    try testing.expectEqualSlices(u8, it.next().?, "abc");
+
+    try testing.expectEqualSlices(u8, it.rest(), "def||ghi");
+    try testing.expectEqualSlices(u8, it.next().?, "def");
+
+    try testing.expectEqualSlices(u8, it.rest(), "|ghi");
+    try testing.expectEqualSlices(u8, it.next().?, "");
+
+    try testing.expectEqualSlices(u8, it.rest(), "ghi");
+    try testing.expectEqualSlices(u8, it.next().?, "ghi");
+
+    try testing.expectEqualSlices(u8, it.rest(), "");
     try testing.expect(it.next() == null);
 
     it = split(u8, "", "|");
-    try testing.expect(eql(u8, it.next().?, ""));
+    try testing.expectEqualSlices(u8, it.next().?, "");
     try testing.expect(it.next() == null);
 
     it = split(u8, "|", "|");
-    try testing.expect(eql(u8, it.next().?, ""));
-    try testing.expect(eql(u8, it.next().?, ""));
+    try testing.expectEqualSlices(u8, it.next().?, "");
+    try testing.expectEqualSlices(u8, it.next().?, "");
     try testing.expect(it.next() == null);
 
     it = split(u8, "hello", " ");
-    try testing.expect(eql(u8, it.next().?, "hello"));
+    try testing.expectEqualSlices(u8, it.next().?, "hello");
     try testing.expect(it.next() == null);
 
     var it16 = split(
@@ -1726,17 +1740,18 @@ test "split" {
         std.unicode.utf8ToUtf16LeStringLiteral("hello"),
         std.unicode.utf8ToUtf16LeStringLiteral(" "),
     );
-    try testing.expect(eql(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("hello")));
+    try testing.expectEqualSlices(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("hello"));
     try testing.expect(it16.next() == null);
 }
 
 test "split (multibyte)" {
     var it = split(u8, "a, b ,, c, d, e", ", ");
-    try testing.expect(eql(u8, it.next().?, "a"));
-    try testing.expect(eql(u8, it.next().?, "b ,"));
-    try testing.expect(eql(u8, it.next().?, "c"));
-    try testing.expect(eql(u8, it.next().?, "d"));
-    try testing.expect(eql(u8, it.next().?, "e"));
+    try testing.expectEqualSlices(u8, it.next().?, "a");
+    try testing.expectEqualSlices(u8, it.rest(), "b ,, c, d, e");
+    try testing.expectEqualSlices(u8, it.next().?, "b ,");
+    try testing.expectEqualSlices(u8, it.next().?, "c");
+    try testing.expectEqualSlices(u8, it.next().?, "d");
+    try testing.expectEqualSlices(u8, it.next().?, "e");
     try testing.expect(it.next() == null);
 
     var it16 = split(
@@ -1744,11 +1759,99 @@ test "split (multibyte)" {
         std.unicode.utf8ToUtf16LeStringLiteral("a, b ,, c, d, e"),
         std.unicode.utf8ToUtf16LeStringLiteral(", "),
     );
-    try testing.expect(eql(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("a")));
-    try testing.expect(eql(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("b ,")));
-    try testing.expect(eql(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("c")));
-    try testing.expect(eql(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("d")));
-    try testing.expect(eql(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("e")));
+    try testing.expectEqualSlices(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("a"));
+    try testing.expectEqualSlices(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("b ,"));
+    try testing.expectEqualSlices(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("c"));
+    try testing.expectEqualSlices(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("d"));
+    try testing.expectEqualSlices(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("e"));
+    try testing.expect(it16.next() == null);
+}
+
+/// Returns an iterator that iterates backwards over the slices of `buffer`
+/// that are separated by bytes in `delimiter`.
+/// splitBackwards(u8, "abc|def||ghi", "|")
+/// will return slices for "ghi", "", "def", "abc", null, in that order.
+/// If `delimiter` does not exist in buffer,
+/// the iterator will return `buffer`, null, in that order.
+/// The delimiter length must not be zero.
+pub fn splitBackwards(comptime T: type, buffer: []const T, delimiter: []const T) SplitBackwardsIterator(T) {
+    assert(delimiter.len != 0);
+    return SplitBackwardsIterator(T){
+        .index = buffer.len,
+        .buffer = buffer,
+        .delimiter = delimiter,
+    };
+}
+
+test "splitBackwards" {
+    var it = splitBackwards(u8, "abc|def||ghi", "|");
+    try testing.expectEqualSlices(u8, it.rest(), "abc|def||ghi");
+    try testing.expectEqualSlices(u8, it.next().?, "ghi");
+
+    try testing.expectEqualSlices(u8, it.rest(), "abc|def|");
+    try testing.expectEqualSlices(u8, it.next().?, "");
+
+    try testing.expectEqualSlices(u8, it.rest(), "abc|def");
+    try testing.expectEqualSlices(u8, it.next().?, "def");
+
+    try testing.expectEqualSlices(u8, it.rest(), "abc");
+    try testing.expectEqualSlices(u8, it.next().?, "abc");
+
+    try testing.expectEqualSlices(u8, it.rest(), "");
+    try testing.expect(it.next() == null);
+
+    it = splitBackwards(u8, "", "|");
+    try testing.expectEqualSlices(u8, it.next().?, "");
+    try testing.expect(it.next() == null);
+
+    it = splitBackwards(u8, "|", "|");
+    try testing.expectEqualSlices(u8, it.next().?, "");
+    try testing.expectEqualSlices(u8, it.next().?, "");
+    try testing.expect(it.next() == null);
+
+    it = splitBackwards(u8, "hello", " ");
+    try testing.expectEqualSlices(u8, it.next().?, "hello");
+    try testing.expect(it.next() == null);
+
+    var it16 = splitBackwards(
+        u16,
+        std.unicode.utf8ToUtf16LeStringLiteral("hello"),
+        std.unicode.utf8ToUtf16LeStringLiteral(" "),
+    );
+    try testing.expectEqualSlices(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("hello"));
+    try testing.expect(it16.next() == null);
+}
+
+test "splitBackwards (multibyte)" {
+    var it = splitBackwards(u8, "a, b ,, c, d, e", ", ");
+    try testing.expectEqualSlices(u8, it.rest(), "a, b ,, c, d, e");
+    try testing.expectEqualSlices(u8, it.next().?, "e");
+
+    try testing.expectEqualSlices(u8, it.rest(), "a, b ,, c, d");
+    try testing.expectEqualSlices(u8, it.next().?, "d");
+
+    try testing.expectEqualSlices(u8, it.rest(), "a, b ,, c");
+    try testing.expectEqualSlices(u8, it.next().?, "c");
+
+    try testing.expectEqualSlices(u8, it.rest(), "a, b ,");
+    try testing.expectEqualSlices(u8, it.next().?, "b ,");
+
+    try testing.expectEqualSlices(u8, it.rest(), "a");
+    try testing.expectEqualSlices(u8, it.next().?, "a");
+
+    try testing.expectEqualSlices(u8, it.rest(), "");
+    try testing.expect(it.next() == null);
+
+    var it16 = splitBackwards(
+        u16,
+        std.unicode.utf8ToUtf16LeStringLiteral("a, b ,, c, d, e"),
+        std.unicode.utf8ToUtf16LeStringLiteral(", "),
+    );
+    try testing.expectEqualSlices(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("e"));
+    try testing.expectEqualSlices(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("d"));
+    try testing.expectEqualSlices(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("c"));
+    try testing.expectEqualSlices(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("b ,"));
+    try testing.expectEqualSlices(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("a"));
     try testing.expect(it16.next() == null);
 }
 
@@ -1778,8 +1881,17 @@ pub fn TokenIterator(comptime T: type) type {
 
         const Self = @This();
 
-        /// Returns a slice of the next token, or null if tokenization is complete.
+        /// Returns a slice of the current token, or null if tokenization is
+        /// complete, and advances to the next token.
         pub fn next(self: *Self) ?[]const T {
+            const result = self.peek() orelse return null;
+            self.index += result.len;
+            return result;
+        }
+
+        /// Returns a slice of the current token, or null if tokenization is
+        /// complete. Does not advance to the next token.
+        pub fn peek(self: *Self) ?[]const T {
             // move to beginning of token
             while (self.index < self.buffer.len and self.isSplitByte(self.buffer[self.index])) : (self.index += 1) {}
             const start = self.index;
@@ -1788,8 +1900,8 @@ pub fn TokenIterator(comptime T: type) type {
             }
 
             // move to end of token
-            while (self.index < self.buffer.len and !self.isSplitByte(self.buffer[self.index])) : (self.index += 1) {}
-            const end = self.index;
+            var end = start;
+            while (end < self.buffer.len and !self.isSplitByte(self.buffer[end])) : (end += 1) {}
 
             return self.buffer[start..end];
         }
@@ -1844,6 +1956,35 @@ pub fn SplitIterator(comptime T: type) type {
             const end = self.buffer.len;
             const start = self.index orelse end;
             return self.buffer[start..end];
+        }
+    };
+}
+
+pub fn SplitBackwardsIterator(comptime T: type) type {
+    return struct {
+        buffer: []const T,
+        index: ?usize,
+        delimiter: []const T,
+
+        const Self = @This();
+
+        /// Returns a slice of the next field, or null if splitting is complete.
+        pub fn next(self: *Self) ?[]const T {
+            const end = self.index orelse return null;
+            const start = if (lastIndexOf(T, self.buffer[0..end], self.delimiter)) |delim_start| blk: {
+                self.index = delim_start;
+                break :blk delim_start + self.delimiter.len;
+            } else blk: {
+                self.index = null;
+                break :blk 0;
+            };
+            return self.buffer[start..end];
+        }
+
+        /// Returns a slice of the remaining bytes. Does not affect iterator state.
+        pub fn rest(self: Self) []const T {
+            const end = self.index orelse 0;
+            return self.buffer[0..end];
         }
     };
 }

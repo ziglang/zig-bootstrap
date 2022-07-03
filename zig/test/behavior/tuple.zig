@@ -124,7 +124,6 @@ test "tuple initializer for var" {
 test "array-like initializer for tuple types" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
 
     const T = @Type(.{
         .Struct = .{
@@ -191,4 +190,10 @@ test "tuple as the result from a labeled block" {
 
     try S.doTheTest();
     comptime try S.doTheTest();
+}
+
+test "initializing tuple with explicit type" {
+    const T = @TypeOf(.{ @as(i32, 0), @as(u32, 0) });
+    var a = T{ 0, 0 };
+    _ = a;
 }

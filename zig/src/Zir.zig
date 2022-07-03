@@ -74,7 +74,7 @@ pub fn extraData(code: Zir, comptime T: type, index: usize) struct { data: T, en
             Inst.Call.Flags => @bitCast(Inst.Call.Flags, code.extra[i]),
             Inst.BuiltinCall.Flags => @bitCast(Inst.BuiltinCall.Flags, code.extra[i]),
             Inst.SwitchBlock.Bits => @bitCast(Inst.SwitchBlock.Bits, code.extra[i]),
-            Inst.ExtendedFunc.Bits => @bitCast(Inst.ExtendedFunc.Bits, code.extra[i]),
+            Inst.FuncFancy.Bits => @bitCast(Inst.FuncFancy.Bits, code.extra[i]),
             else => @compileError("bad field type"),
         };
         i += 1;
@@ -221,9 +221,9 @@ pub const Inst = struct {
         /// Uses the `pl_node` union field with `Bin` payload.
         /// lhs is length, rhs is element type.
         vector_type,
-        /// Given an array type, returns the element type.
-        /// Uses the `un_node` union field.
-        elem_type,
+        /// Given an indexable type, returns the type of the element at given index.
+        /// Uses the `bin` union field. lhs is the indexable type, rhs is the index.
+        elem_type_index,
         /// Given a pointer to an indexable object, returns the len property. This is
         /// used by for loops. This instruction also emits a for-loop specific compile
         /// error if the indexable object is not indexable.
@@ -308,7 +308,7 @@ pub const Inst = struct {
         cmp_neq,
         /// Coerces a result location pointer to a new element type. It is evaluated "backwards"-
         /// as type coercion from the new element type to the old element type.
-        /// Uses the `bin` union field.
+        /// Uses the `pl_node` union field. Payload is `Bin`.
         /// LHS is destination element type, RHS is result pointer.
         coerce_result_ptr,
         /// Conditional branch. Splits control flow based on a boolean condition value.
@@ -319,6 +319,23 @@ pub const Inst = struct {
         /// only the taken branch is analyzed. The then block and else block must
         /// terminate with an "inline" variant of a noreturn instruction.
         condbr_inline,
+        /// Given an operand which is an error union, splits control flow. In
+        /// case of error, control flow goes into the block that is part of this
+        /// instruction, which is guaranteed to end with a return instruction
+        /// and never breaks out of the block.
+        /// In the case of non-error, control flow proceeds to the next instruction
+        /// after the `try`, with the result of this instruction being the unwrapped
+        /// payload value, as if `err_union_payload_unsafe` was executed on the operand.
+        /// Uses the `pl_node` union field. Payload is `Try`.
+        @"try",
+        ///// Same as `try` except the operand is coerced to a comptime value, and
+        ///// only the taken branch is analyzed. The block must terminate with an "inline"
+        ///// variant of a noreturn instruction.
+        //try_inline,
+        /// Same as `try` except the operand is a pointer and the result is a pointer.
+        try_ptr,
+        ///// Same as `try_inline` except the operand is a pointer and the result is a pointer.
+        //try_ptr_inline,
         /// An error set type definition. Contains a list of field names.
         /// Uses the `pl_node` union field. Payload is `ErrorSetDecl`.
         error_set_decl,
@@ -353,24 +370,23 @@ pub const Inst = struct {
         /// Uses the `pl_node` union field. Payload is `Bin`.
         div,
         /// Given a pointer to an array, slice, or pointer, returns a pointer to the element at
-        /// the provided index. Uses the `bin` union field. Source location is implied
-        /// to be the same as the previous instruction.
-        elem_ptr,
-        /// Same as `elem_ptr` except also stores a source location node.
+        /// the provided index.
         /// Uses the `pl_node` union field. AST node is a[b] syntax. Payload is `Bin`.
         elem_ptr_node,
+        /// Same as `elem_ptr_node` but used only for for loop.
+        /// Uses the `pl_node` union field. AST node is the condition of a for loop. Payload is `Bin`.
+        elem_ptr,
         /// Same as `elem_ptr_node` except the index is stored immediately rather than
         /// as a reference to another ZIR instruction.
         /// Uses the `pl_node` union field. AST node is an element inside array initialization
         /// syntax. Payload is `ElemPtrImm`.
         elem_ptr_imm,
         /// Given an array, slice, or pointer, returns the element at the provided index.
-        /// Uses the `bin` union field. Source location is implied to be the same
-        /// as the previous instruction.
-        elem_val,
-        /// Same as `elem_val` except also stores a source location node.
         /// Uses the `pl_node` union field. AST node is a[b] syntax. Payload is `Bin`.
         elem_val_node,
+        /// Same as `elem_val_node` but used only for for loop.
+        /// Uses the `pl_node` union field. AST node is the condition of a for loop. Payload is `Bin`.
+        elem_val,
         /// Emits a compile error if the operand is not `void`.
         /// Uses the `un_node` field.
         ensure_result_used,
@@ -424,8 +440,8 @@ pub const Inst = struct {
         func_inferred,
         /// Represents a function declaration or function prototype, depending on
         /// whether body_len is 0.
-        /// Uses the `pl_node` union field. `payload_index` points to a `ExtendedFunc`.
-        func_extended,
+        /// Uses the `pl_node` union field. `payload_index` points to a `FuncFancy`.
+        func_fancy,
         /// Implements the `@import` builtin.
         /// Uses the `str_tok` field.
         import,
@@ -712,6 +728,9 @@ pub const Inst = struct {
         /// Same as `validate_array_init` but additionally communicates that the
         /// resulting array initialization value is within a comptime scope.
         validate_array_init_comptime,
+        /// Check that operand type supports the dereference operand (.*).
+        /// Uses the `un_tok` field.
+        validate_deref,
         /// A struct literal with a specified type, with no fields.
         /// Uses the `un_node` field.
         struct_init_empty,
@@ -737,20 +756,12 @@ pub const Inst = struct {
         /// Array initialization syntax.
         /// Uses the `pl_node` field. Payload is `MultiOp`.
         array_init,
-        /// Array initialization with sentinel.
-        /// Uses the `pl_node` field. Payload is `MultiOp`.
-        /// Final op in MultiOp is the sentinel.
-        array_init_sent,
         /// Anonymous array initialization syntax.
         /// Uses the `pl_node` field. Payload is `MultiOp`.
         array_init_anon,
         /// Array initialization syntax, make the result a pointer.
         /// Uses the `pl_node` field. Payload is `MultiOp`.
         array_init_ref,
-        /// Array initialization with sentinel.
-        /// Uses the `pl_node` field. Payload is `MultiOp`.
-        /// Final op in MultiOp is the sentinel.
-        array_init_sent_ref,
         /// Anonymous array initialization syntax, make the result a pointer.
         /// Uses the `pl_node` field. Payload is `MultiOp`.
         array_init_anon_ref,
@@ -1019,7 +1030,7 @@ pub const Inst = struct {
                 .array_type,
                 .array_type_sentinel,
                 .vector_type,
-                .elem_type,
+                .elem_type_index,
                 .indexable_ptr_len,
                 .anyframe_type,
                 .as,
@@ -1070,7 +1081,7 @@ pub const Inst = struct {
                 .field_val_named,
                 .func,
                 .func_inferred,
-                .func_extended,
+                .func_fancy,
                 .has_decl,
                 .int,
                 .int_big,
@@ -1147,16 +1158,15 @@ pub const Inst = struct {
                 .validate_struct_init_comptime,
                 .validate_array_init,
                 .validate_array_init_comptime,
+                .validate_deref,
                 .struct_init_empty,
                 .struct_init,
                 .struct_init_ref,
                 .struct_init_anon,
                 .struct_init_anon_ref,
                 .array_init,
-                .array_init_sent,
                 .array_init_anon,
                 .array_init_ref,
-                .array_init_sent_ref,
                 .array_init_anon_ref,
                 .union_init,
                 .field_type,
@@ -1241,6 +1251,10 @@ pub const Inst = struct {
                 .closure_capture,
                 .ret_ptr,
                 .ret_type,
+                .@"try",
+                .try_ptr,
+                //.try_inline,
+                //.try_ptr_inline,
                 => false,
 
                 .@"break",
@@ -1257,6 +1271,18 @@ pub const Inst = struct {
                 .repeat_inline,
                 .panic,
                 => true,
+            };
+        }
+
+        pub fn isParam(tag: Tag) bool {
+            return switch (tag) {
+                .param,
+                .param_comptime,
+                .param_anytype,
+                .param_anytype_comptime,
+                => true,
+
+                else => false,
             };
         }
 
@@ -1286,6 +1312,7 @@ pub const Inst = struct {
                 .validate_struct_init_comptime,
                 .validate_array_init,
                 .validate_array_init_comptime,
+                .validate_deref,
                 .@"export",
                 .export_value,
                 .set_cold,
@@ -1314,7 +1341,7 @@ pub const Inst = struct {
                 .array_type,
                 .array_type_sentinel,
                 .vector_type,
-                .elem_type,
+                .elem_type_index,
                 .indexable_ptr_len,
                 .anyframe_type,
                 .as,
@@ -1356,7 +1383,7 @@ pub const Inst = struct {
                 .field_val_named,
                 .func,
                 .func_inferred,
-                .func_extended,
+                .func_fancy,
                 .has_decl,
                 .int,
                 .int_big,
@@ -1426,10 +1453,8 @@ pub const Inst = struct {
                 .struct_init_anon,
                 .struct_init_anon_ref,
                 .array_init,
-                .array_init_sent,
                 .array_init_anon,
                 .array_init_ref,
-                .array_init_sent_ref,
                 .array_init_anon_ref,
                 .union_init,
                 .field_type,
@@ -1521,6 +1546,10 @@ pub const Inst = struct {
                 .repeat,
                 .repeat_inline,
                 .panic,
+                .@"try",
+                .try_ptr,
+                //.try_inline,
+                //.try_ptr_inline,
                 => false,
 
                 .extended => switch (data.extended.opcode) {
@@ -1554,7 +1583,7 @@ pub const Inst = struct {
                 .array_type = .bin,
                 .array_type_sentinel = .pl_node,
                 .vector_type = .pl_node,
-                .elem_type = .un_node,
+                .elem_type_index = .bin,
                 .indexable_ptr_len = .un_node,
                 .anyframe_type = .un_node,
                 .as = .bin,
@@ -1578,9 +1607,13 @@ pub const Inst = struct {
                 .cmp_gte = .pl_node,
                 .cmp_gt = .pl_node,
                 .cmp_neq = .pl_node,
-                .coerce_result_ptr = .bin,
+                .coerce_result_ptr = .pl_node,
                 .condbr = .pl_node,
                 .condbr_inline = .pl_node,
+                .@"try" = .pl_node,
+                .try_ptr = .pl_node,
+                //.try_inline = .pl_node,
+                //.try_ptr_inline = .pl_node,
                 .error_set_decl = .pl_node,
                 .error_set_decl_anon = .pl_node,
                 .error_set_decl_func = .pl_node,
@@ -1593,10 +1626,10 @@ pub const Inst = struct {
                 .decl_val = .str_tok,
                 .load = .un_node,
                 .div = .pl_node,
-                .elem_ptr = .bin,
+                .elem_ptr = .pl_node,
                 .elem_ptr_node = .pl_node,
                 .elem_ptr_imm = .pl_node,
-                .elem_val = .bin,
+                .elem_val = .pl_node,
                 .elem_val_node = .pl_node,
                 .ensure_result_used = .un_node,
                 .ensure_result_non_error = .un_node,
@@ -1611,7 +1644,7 @@ pub const Inst = struct {
                 .field_call_bind = .pl_node,
                 .func = .pl_node,
                 .func_inferred = .pl_node,
-                .func_extended = .pl_node,
+                .func_fancy = .pl_node,
                 .import = .str_tok,
                 .int = .int,
                 .int_big = .str,
@@ -1680,6 +1713,7 @@ pub const Inst = struct {
                 .validate_struct_init_comptime = .pl_node,
                 .validate_array_init = .pl_node,
                 .validate_array_init_comptime = .pl_node,
+                .validate_deref = .un_tok,
                 .struct_init_empty = .un_node,
                 .field_type = .pl_node,
                 .field_type_ref = .pl_node,
@@ -1688,10 +1722,8 @@ pub const Inst = struct {
                 .struct_init_anon = .pl_node,
                 .struct_init_anon_ref = .pl_node,
                 .array_init = .pl_node,
-                .array_init_sent = .pl_node,
                 .array_init_anon = .pl_node,
                 .array_init_ref = .pl_node,
-                .array_init_sent_ref = .pl_node,
                 .array_init_anon_ref = .pl_node,
                 .union_init = .pl_node,
                 .type_info = .un_node,
@@ -1975,6 +2007,7 @@ pub const Inst = struct {
         i8_type,
         u16_type,
         i16_type,
+        u29_type,
         u32_type,
         i32_type,
         u64_type,
@@ -2085,6 +2118,10 @@ pub const Inst = struct {
             .i16_type = .{
                 .ty = Type.initTag(.type),
                 .val = Value.initTag(.i16_type),
+            },
+            .u29_type = .{
+                .ty = Type.initTag(.type),
+                .val = Value.initTag(.u29_type),
             },
             .u32_type = .{
                 .ty = Type.initTag(.type),
@@ -2395,7 +2432,7 @@ pub const Inst = struct {
             operand: Ref,
 
             pub fn src(self: @This()) LazySrcLoc {
-                return .{ .node_offset = self.src_node };
+                return LazySrcLoc.nodeOffset(self.src_node);
             }
         },
         /// Used for unary operators, with a token source location.
@@ -2418,7 +2455,7 @@ pub const Inst = struct {
             payload_index: u32,
 
             pub fn src(self: @This()) LazySrcLoc {
-                return .{ .node_offset = self.src_node };
+                return LazySrcLoc.nodeOffset(self.src_node);
             }
         },
         pl_tok: struct {
@@ -2494,7 +2531,7 @@ pub const Inst = struct {
             bit_count: u16,
 
             pub fn src(self: @This()) LazySrcLoc {
-                return .{ .node_offset = self.src_node };
+                return LazySrcLoc.nodeOffset(self.src_node);
             }
         },
         bool_br: struct {
@@ -2513,7 +2550,7 @@ pub const Inst = struct {
             force_comptime: bool,
 
             pub fn src(self: @This()) LazySrcLoc {
-                return .{ .node_offset = self.src_node };
+                return LazySrcLoc.nodeOffset(self.src_node);
             }
         },
         @"break": struct {
@@ -2534,7 +2571,7 @@ pub const Inst = struct {
             inst: Index,
 
             pub fn src(self: @This()) LazySrcLoc {
-                return .{ .node_offset = self.src_node };
+                return LazySrcLoc.nodeOffset(self.src_node);
             }
         },
         str_op: struct {
@@ -2620,29 +2657,103 @@ pub const Inst = struct {
     };
 
     /// Trailing:
-    /// 0. lib_name: u32, // null terminated string index, if has_lib_name is set
-    /// 1. cc: Ref, // if has_cc is set
-    /// 2. align: Ref, // if has_align is set
-    /// 3. return_type: Index // for each ret_body_len
-    /// 4. body: Index // for each body_len
-    /// 5. src_locs: Func.SrcLocs // if body_len != 0
-    pub const ExtendedFunc = struct {
+    /// if (ret_body_len == 1) {
+    ///   0. return_type: Ref
+    /// }
+    /// if (ret_body_len > 1) {
+    ///   1. return_type: Index // for each ret_body_len
+    /// }
+    /// 2. body: Index // for each body_len
+    /// 3. src_locs: SrcLocs // if body_len != 0
+    pub const Func = struct {
         /// If this is 0 it means a void return type.
+        /// If this is 1 it means return_type is a simple Ref
         ret_body_len: u32,
+        /// Points to the block that contains the param instructions for this function.
+        param_block: Index,
+        body_len: u32,
+
+        pub const SrcLocs = struct {
+            /// Line index in the source file relative to the parent decl.
+            lbrace_line: u32,
+            /// Line index in the source file relative to the parent decl.
+            rbrace_line: u32,
+            /// lbrace_column is least significant bits u16
+            /// rbrace_column is most significant bits u16
+            columns: u32,
+        };
+    };
+
+    /// Trailing:
+    /// 0. lib_name: u32, // null terminated string index, if has_lib_name is set
+    /// if (has_align_ref and !has_align_body) {
+    ///   1. align: Ref,
+    /// }
+    /// if (has_align_body) {
+    ///   2. align_body_len: u32
+    ///   3. align_body: u32 // for each align_body_len
+    /// }
+    /// if (has_addrspace_ref and !has_addrspace_body) {
+    ///   4. addrspace: Ref,
+    /// }
+    /// if (has_addrspace_body) {
+    ///   5. addrspace_body_len: u32
+    ///   6. addrspace_body: u32 // for each addrspace_body_len
+    /// }
+    /// if (has_section_ref and !has_section_body) {
+    ///   7. section: Ref,
+    /// }
+    /// if (has_section_body) {
+    ///   8. section_body_len: u32
+    ///   9. section_body: u32 // for each section_body_len
+    /// }
+    /// if (has_cc_ref and !has_cc_body) {
+    ///   10. cc: Ref,
+    /// }
+    /// if (has_cc_body) {
+    ///   11. cc_body_len: u32
+    ///   12. cc_body: u32 // for each cc_body_len
+    /// }
+    /// if (has_ret_ty_ref and !has_ret_ty_body) {
+    ///   13. ret_ty: Ref,
+    /// }
+    /// if (has_ret_ty_body) {
+    ///   14. ret_ty_body_len: u32
+    ///   15. ret_ty_body: u32 // for each ret_ty_body_len
+    /// }
+    /// 16. noalias_bits: u32 // if has_any_noalias
+    ///     - each bit starting with LSB corresponds to parameter indexes
+    /// 17. body: Index // for each body_len
+    /// 18. src_locs: Func.SrcLocs // if body_len != 0
+    pub const FuncFancy = struct {
         /// Points to the block that contains the param instructions for this function.
         param_block: Index,
         body_len: u32,
         bits: Bits,
 
+        /// If both has_cc_ref and has_cc_body are false, it means auto calling convention.
+        /// If both has_align_ref and has_align_body are false, it means default alignment.
+        /// If both has_ret_ty_ref and has_ret_ty_body are false, it means void return type.
+        /// If both has_section_ref and has_section_body are false, it means default section.
+        /// If both has_addrspace_ref and has_addrspace_body are false, it means default addrspace.
         pub const Bits = packed struct {
             is_var_args: bool,
             is_inferred_error: bool,
-            has_lib_name: bool,
-            has_cc: bool,
-            has_align: bool,
             is_test: bool,
             is_extern: bool,
-            _: u25 = undefined,
+            has_align_ref: bool,
+            has_align_body: bool,
+            has_addrspace_ref: bool,
+            has_addrspace_body: bool,
+            has_section_ref: bool,
+            has_section_body: bool,
+            has_cc_ref: bool,
+            has_cc_body: bool,
+            has_ret_ty_ref: bool,
+            has_ret_ty_body: bool,
+            has_lib_name: bool,
+            has_any_noalias: bool,
+            _: u16 = undefined,
         };
     };
 
@@ -2661,28 +2772,6 @@ pub const Inst = struct {
             is_extern: bool,
             is_threadlocal: bool,
             _: u11 = undefined,
-        };
-    };
-
-    /// Trailing:
-    /// 0. return_type: Index // for each ret_body_len
-    /// 1. body: Index // for each body_len
-    /// 2. src_locs: SrcLocs // if body_len != 0
-    pub const Func = struct {
-        /// If this is 0 it means a void return type.
-        ret_body_len: u32,
-        /// Points to the block that contains the param instructions for this function.
-        param_block: Index,
-        body_len: u32,
-
-        pub const SrcLocs = struct {
-            /// Line index in the source file relative to the parent decl.
-            lbrace_line: u32,
-            /// Line index in the source file relative to the parent decl.
-            rbrace_line: u32,
-            /// lbrace_column is least significant bits u16
-            /// rbrace_column is most significant bits u16
-            columns: u32,
         };
     };
 
@@ -2763,6 +2852,14 @@ pub const Inst = struct {
         condition: Ref,
         then_body_len: u32,
         else_body_len: u32,
+    };
+
+    /// This data is stored inside extra, trailed by:
+    /// * 0. body: Index //  for each `body_len`.
+    pub const Try = struct {
+        /// The error union to unwrap.
+        operand: Ref,
+        body_len: u32,
     };
 
     /// Stored in extra. Depending on the flags in Data, there will be up to 5
@@ -3064,6 +3161,8 @@ pub const Inst = struct {
         /// Create an anonymous name for this declaration.
         /// Like this: "ParentDeclName_struct_69"
         anon,
+        /// Use the name specified in the next `dbg_var_{val,ptr}` instruction.
+        dbg_var,
     };
 
     /// Trailing:
@@ -3487,7 +3586,7 @@ pub fn declIterator(zir: Zir, decl_inst: u32) DeclIterator {
     switch (tags[decl_inst]) {
         // Functions are allowed and yield no iterations.
         // There is one case matching this in the extended instruction set below.
-        .func, .func_inferred, .func_extended => return declIteratorInner(zir, 0, 0),
+        .func, .func_inferred, .func_fancy => return declIteratorInner(zir, 0, 0),
 
         .extended => {
             const extended = datas[decl_inst].extended;
@@ -3593,18 +3692,79 @@ fn findDeclsInner(
 
             const inst_data = datas[inst].pl_node;
             const extra = zir.extraData(Inst.Func, inst_data.payload_index);
-            const body = zir.extra[extra.end..][0..extra.data.body_len];
+            var extra_index: usize = extra.end;
+            switch (extra.data.ret_body_len) {
+                0 => {},
+                1 => extra_index += 1,
+                else => {
+                    const body = zir.extra[extra_index..][0..extra.data.ret_body_len];
+                    extra_index += body.len;
+                    try zir.findDeclsBody(list, body);
+                },
+            }
+            const body = zir.extra[extra_index..][0..extra.data.body_len];
             return zir.findDeclsBody(list, body);
         },
-        .func_extended => {
+        .func_fancy => {
             try list.append(inst);
 
             const inst_data = datas[inst].pl_node;
-            const extra = zir.extraData(Inst.ExtendedFunc, inst_data.payload_index);
+            const extra = zir.extraData(Inst.FuncFancy, inst_data.payload_index);
             var extra_index: usize = extra.end;
             extra_index += @boolToInt(extra.data.bits.has_lib_name);
-            extra_index += @boolToInt(extra.data.bits.has_cc);
-            extra_index += @boolToInt(extra.data.bits.has_align);
+
+            if (extra.data.bits.has_align_body) {
+                const body_len = zir.extra[extra_index];
+                extra_index += 1;
+                const body = zir.extra[extra_index..][0..body_len];
+                try zir.findDeclsBody(list, body);
+                extra_index += body.len;
+            } else if (extra.data.bits.has_align_ref) {
+                extra_index += 1;
+            }
+
+            if (extra.data.bits.has_addrspace_body) {
+                const body_len = zir.extra[extra_index];
+                extra_index += 1;
+                const body = zir.extra[extra_index..][0..body_len];
+                try zir.findDeclsBody(list, body);
+                extra_index += body.len;
+            } else if (extra.data.bits.has_addrspace_ref) {
+                extra_index += 1;
+            }
+
+            if (extra.data.bits.has_section_body) {
+                const body_len = zir.extra[extra_index];
+                extra_index += 1;
+                const body = zir.extra[extra_index..][0..body_len];
+                try zir.findDeclsBody(list, body);
+                extra_index += body.len;
+            } else if (extra.data.bits.has_section_ref) {
+                extra_index += 1;
+            }
+
+            if (extra.data.bits.has_cc_body) {
+                const body_len = zir.extra[extra_index];
+                extra_index += 1;
+                const body = zir.extra[extra_index..][0..body_len];
+                try zir.findDeclsBody(list, body);
+                extra_index += body.len;
+            } else if (extra.data.bits.has_cc_ref) {
+                extra_index += 1;
+            }
+
+            if (extra.data.bits.has_ret_ty_body) {
+                const body_len = zir.extra[extra_index];
+                extra_index += 1;
+                const body = zir.extra[extra_index..][0..body_len];
+                try zir.findDeclsBody(list, body);
+                extra_index += body.len;
+            } else if (extra.data.bits.has_ret_ty_ref) {
+                extra_index += 1;
+            }
+
+            extra_index += @boolToInt(extra.data.bits.has_any_noalias);
+
             const body = zir.extra[extra_index..][0..extra.data.body_len];
             return zir.findDeclsBody(list, body);
         },
@@ -3639,6 +3799,12 @@ fn findDeclsInner(
             const else_body = zir.extra[extra.end + then_body.len ..][0..extra.data.else_body_len];
             try zir.findDeclsBody(list, then_body);
             try zir.findDeclsBody(list, else_body);
+        },
+        .@"try", .try_ptr => {
+            const inst_data = datas[inst].pl_node;
+            const extra = zir.extraData(Inst.Try, inst_data.payload_index);
+            const body = zir.extra[extra.end..][0..extra.data.body_len];
+            try zir.findDeclsBody(list, body);
         },
         .switch_block => return findDeclsSwitch(zir, list, inst),
 
@@ -3729,6 +3895,7 @@ pub const FnInfo = struct {
     param_body_inst: Inst.Index,
     ret_ty_body: []const Inst.Index,
     body: []const Inst.Index,
+    ret_ty_ref: Zir.Inst.Ref,
     total_params_len: u32,
 };
 
@@ -3738,38 +3905,87 @@ pub fn getFnInfo(zir: Zir, fn_inst: Inst.Index) FnInfo {
     const info: struct {
         param_block: Inst.Index,
         body: []const Inst.Index,
+        ret_ty_ref: Inst.Ref,
         ret_ty_body: []const Inst.Index,
     } = switch (tags[fn_inst]) {
         .func, .func_inferred => blk: {
             const inst_data = datas[fn_inst].pl_node;
             const extra = zir.extraData(Inst.Func, inst_data.payload_index);
-            var extra_index: usize = extra.end;
 
-            const ret_ty_body = zir.extra[extra_index..][0..extra.data.ret_body_len];
-            extra_index += ret_ty_body.len;
+            var extra_index: usize = extra.end;
+            var ret_ty_ref: Inst.Ref = .none;
+            var ret_ty_body: []const Inst.Index = &.{};
+
+            switch (extra.data.ret_body_len) {
+                0 => {
+                    ret_ty_ref = .void_type;
+                },
+                1 => {
+                    ret_ty_ref = @intToEnum(Inst.Ref, zir.extra[extra_index]);
+                    extra_index += 1;
+                },
+                else => {
+                    ret_ty_body = zir.extra[extra_index..][0..extra.data.ret_body_len];
+                    extra_index += ret_ty_body.len;
+                },
+            }
 
             const body = zir.extra[extra_index..][0..extra.data.body_len];
             extra_index += body.len;
 
             break :blk .{
                 .param_block = extra.data.param_block,
+                .ret_ty_ref = ret_ty_ref,
                 .ret_ty_body = ret_ty_body,
                 .body = body,
             };
         },
-        .func_extended => blk: {
+        .func_fancy => blk: {
             const inst_data = datas[fn_inst].pl_node;
-            const extra = zir.extraData(Inst.ExtendedFunc, inst_data.payload_index);
+            const extra = zir.extraData(Inst.FuncFancy, inst_data.payload_index);
+
             var extra_index: usize = extra.end;
+            var ret_ty_ref: Inst.Ref = .void_type;
+            var ret_ty_body: []const Inst.Index = &.{};
+
             extra_index += @boolToInt(extra.data.bits.has_lib_name);
-            extra_index += @boolToInt(extra.data.bits.has_cc);
-            extra_index += @boolToInt(extra.data.bits.has_align);
-            const ret_ty_body = zir.extra[extra_index..][0..extra.data.ret_body_len];
-            extra_index += ret_ty_body.len;
+            if (extra.data.bits.has_align_body) {
+                extra_index += zir.extra[extra_index] + 1;
+            } else if (extra.data.bits.has_align_ref) {
+                extra_index += 1;
+            }
+            if (extra.data.bits.has_addrspace_body) {
+                extra_index += zir.extra[extra_index] + 1;
+            } else if (extra.data.bits.has_addrspace_ref) {
+                extra_index += 1;
+            }
+            if (extra.data.bits.has_section_body) {
+                extra_index += zir.extra[extra_index] + 1;
+            } else if (extra.data.bits.has_section_ref) {
+                extra_index += 1;
+            }
+            if (extra.data.bits.has_cc_body) {
+                extra_index += zir.extra[extra_index] + 1;
+            } else if (extra.data.bits.has_cc_ref) {
+                extra_index += 1;
+            }
+            if (extra.data.bits.has_ret_ty_body) {
+                const body_len = zir.extra[extra_index];
+                extra_index += 1;
+                ret_ty_body = zir.extra[extra_index..][0..body_len];
+                extra_index += ret_ty_body.len;
+            } else if (extra.data.bits.has_ret_ty_ref) {
+                ret_ty_ref = @intToEnum(Inst.Ref, zir.extra[extra_index]);
+                extra_index += 1;
+            }
+
+            extra_index += @boolToInt(extra.data.bits.has_any_noalias);
+
             const body = zir.extra[extra_index..][0..extra.data.body_len];
             extra_index += body.len;
             break :blk .{
                 .param_block = extra.data.param_block,
+                .ret_ty_ref = ret_ty_ref,
                 .ret_ty_body = ret_ty_body,
                 .body = body,
             };
@@ -3792,6 +4008,7 @@ pub fn getFnInfo(zir: Zir, fn_inst: Inst.Index) FnInfo {
         .param_body = param_body,
         .param_body_inst = info.param_block,
         .ret_ty_body = info.ret_ty_body,
+        .ret_ty_ref = info.ret_ty_ref,
         .body = info.body,
         .total_params_len = total_params_len,
     };

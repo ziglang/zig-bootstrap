@@ -45,7 +45,7 @@ static int print_full_usage(const char *arg0, FILE *file, int return_code) {
         "  -OReleaseFast                build with optimizations on and safety off\n"
         "  -OReleaseSafe                build with optimizations on and safety on\n"
         "  -OReleaseSmall               build with size optimizations on and safety off\n"
-        "  --single-threaded            source may assume it is only used single-threaded\n"
+        "  -fsingle-threaded            source may assume it is only used single-threaded\n"
         "  -dynamic                     create a shared library (.so; .dll; .dylib)\n"
         "  --strip                      exclude debug symbols\n"
         "  -target [name]               <arch>-<os>-<abi> see the targets command\n"
@@ -157,6 +157,17 @@ static void get_native_target(ZigTarget *target) {
     }
 }
 
+static const char* get_baseline_llvm_cpu_name(ZigLLVM_ArchType arch) {
+    return "";
+}
+
+static const char* get_baseline_llvm_cpu_features(ZigLLVM_ArchType arch) {
+    switch (arch) {
+        case ZigLLVM_riscv64: return "+a,+c,+d,+m";
+        default: return "";
+    }
+}
+
 static Error target_parse_triple(struct ZigTarget *target, const char *zig_triple, const char *mcpu,
         const char *dynamic_linker)
 {
@@ -175,8 +186,8 @@ static Error target_parse_triple(struct ZigTarget *target, const char *zig_tripl
         } else if (strcmp(mcpu, "baseline") == 0) {
             target->is_native_os = false;
             target->is_native_cpu = false;
-            target->llvm_cpu_name = "";
-            target->llvm_cpu_features = "";
+            target->llvm_cpu_name = get_baseline_llvm_cpu_name(target->arch);
+            target->llvm_cpu_features = get_baseline_llvm_cpu_features(target->arch);
         } else {
             const char *msg = "stage0 can't handle CPU/features in the target";
             stage2_panic(msg, strlen(msg));
@@ -217,6 +228,9 @@ static Error target_parse_triple(struct ZigTarget *target, const char *zig_tripl
             const char *msg = "stage0 can't handle CPU/features in the target";
             stage2_panic(msg, strlen(msg));
         }
+
+        target->llvm_cpu_name = get_baseline_llvm_cpu_name(target->arch);
+        target->llvm_cpu_features = get_baseline_llvm_cpu_features(target->arch);
     }
 
     return ErrorNone;
@@ -282,7 +296,7 @@ int main(int argc, char **argv) {
                 optimize_mode = BuildModeSafeRelease;
             } else if (strcmp(arg, "-OReleaseSmall") == 0) {
                 optimize_mode = BuildModeSmallRelease;
-            } else if (strcmp(arg, "--single-threaded") == 0) {
+            } else if (strcmp(arg, "-fsingle-threaded") == 0) {
                 single_threaded = true;
             } else if (strcmp(arg, "--help") == 0) {
                 return print_full_usage(arg0, stdout, EXIT_SUCCESS);

@@ -501,7 +501,7 @@ static LLVMValueRef make_fn_llvm_value(CodeGen *g, ZigFn *fn) {
 
         for (size_t i = 1; i < fn->export_list.length; i += 1) {
             GlobalExport *fn_export = &fn->export_list.items[i];
-            LLVMAddAlias(g->module, LLVMTypeOf(llvm_fn), llvm_fn, buf_ptr(&fn_export->name));
+            LLVMAddAlias2(g->module, LLVMTypeOf(llvm_fn), 0, llvm_fn, buf_ptr(&fn_export->name));
         }
     }
 
@@ -638,7 +638,7 @@ static LLVMValueRef make_fn_llvm_value(CodeGen *g, ZigFn *fn) {
         } else if (want_first_arg_sret(g, &fn_type->data.fn.fn_type_id)) {
             // Sret pointers must not be address 0
             addLLVMArgAttr(llvm_fn, 0, "nonnull");
-            ZigLLVMAddSretAttr(llvm_fn, 0, get_llvm_type(g, return_type));
+            ZigLLVMAddSretAttr(llvm_fn, get_llvm_type(g, return_type));
             if (cc_want_sret_attr(cc)) {
                 addLLVMArgAttr(llvm_fn, 0, "noalias");
             }
@@ -3868,16 +3868,33 @@ static LLVMValueRef ir_render_bin_op(CodeGen *g, Stage1Air *executable,
             } else {
                 zig_unreachable();
             }
-        case IrBinOpShlSat:
-            if (scalar_type->id == ZigTypeIdInt) {
-                if (scalar_type->data.integral.is_signed) {
-                    return ZigLLVMBuildSShlSat(g->builder, op1_value, op2_value, "");
-                } else {
-                    return ZigLLVMBuildUShlSat(g->builder, op1_value, op2_value, "");
-                }
-            } else {
+        case IrBinOpShlSat: {
+            if (scalar_type->id != ZigTypeIdInt) {
                 zig_unreachable();
             }
+            LLVMValueRef result = scalar_type->data.integral.is_signed ?
+                ZigLLVMBuildSShlSat(g->builder, op1_value, op2_value, "") :
+                ZigLLVMBuildUShlSat(g->builder, op1_value, op2_value, "");
+            // LLVM langref says "If b is (statically or dynamically) equal to or
+            // larger than the integer bit width of the arguments, the result is a
+            // poison value."
+            // However Zig semantics says that saturating shift left can never produce
+            // undefined; instead it saturates.
+            LLVMTypeRef lhs_scalar_llvm_ty = get_llvm_type(g, scalar_type);
+            LLVMValueRef bits = LLVMConstInt(lhs_scalar_llvm_ty,
+                    scalar_type->data.integral.bit_count, false);
+            LLVMValueRef lhs_max = LLVMConstAllOnes(lhs_scalar_llvm_ty);
+            if (operand_type->id == ZigTypeIdVector) {
+                uint64_t vec_len = operand_type->data.vector.len;
+                LLVMValueRef bits_vec = LLVMBuildVectorSplat(g->builder, vec_len, bits, "");
+                LLVMValueRef lhs_max_vec = LLVMBuildVectorSplat(g->builder, vec_len, lhs_max, "");
+                LLVMValueRef in_range = LLVMBuildICmp(g->builder, LLVMIntULT, op2_value, bits_vec, "");
+                return LLVMBuildSelect(g->builder, in_range, result, lhs_max_vec, "");
+            } else {
+                LLVMValueRef in_range = LLVMBuildICmp(g->builder, LLVMIntULT, op2_value, bits, "");
+                return LLVMBuildSelect(g->builder, in_range, result, lhs_max, "");
+            }
+        }
     }
     zig_unreachable();
 }
@@ -5559,6 +5576,7 @@ static LLVMValueRef ir_render_asm_gen(CodeGen *g, Stage1Air *executable, Stage1A
     size_t param_index = 0;
     LLVMTypeRef *param_types = heap::c_allocator.allocate<LLVMTypeRef>(input_and_output_count);
     LLVMValueRef *param_values = heap::c_allocator.allocate<LLVMValueRef>(input_and_output_count);
+    bool *param_needs_attr = heap::c_allocator.allocate<bool>(input_and_output_count);
     for (size_t i = 0; i < asm_expr->output_list.length; i += 1, total_index += 1) {
         AsmOutput *asm_output = asm_expr->output_list.at(i);
         bool is_return = (asm_output->return_type != nullptr);
@@ -5574,6 +5592,7 @@ static LLVMValueRef ir_render_asm_gen(CodeGen *g, Stage1Air *executable, Stage1A
             buf_appendf(&constraint_buf, "=%s", buf_ptr(asm_output->constraint) + 1);
         } else {
             buf_appendf(&constraint_buf, "=*%s", buf_ptr(asm_output->constraint) + 1);
+            param_needs_attr[param_index] = true;
         }
         if (total_index + 1 < total_constraint_count) {
             buf_append_char(&constraint_buf, ',');
@@ -5616,6 +5635,8 @@ static LLVMValueRef ir_render_asm_gen(CodeGen *g, Stage1Air *executable, Stage1A
 
         param_types[param_index] = type_ref;
         param_values[param_index] = value_ref;
+        // In the case of indirect inputs, LLVM requires the callsite to have an elementtype(<ty>) attribute.
+        param_needs_attr[param_index] = buf_ptr(asm_input->constraint)[0] == '*';
     }
     for (size_t i = 0; i < asm_expr->clobber_list.length; i += 1, total_index += 1) {
         Buf *clobber_buf = asm_expr->clobber_list.at(i);
@@ -5655,14 +5676,25 @@ static LLVMValueRef ir_render_asm_gen(CodeGen *g, Stage1Air *executable, Stage1A
         ret_type = get_llvm_type(g, instruction->base.value->type);
     }
     LLVMTypeRef function_type = LLVMFunctionType(ret_type, param_types, (unsigned)input_and_output_count, false);
-    heap::c_allocator.deallocate(param_types, input_and_output_count);
 
     bool is_volatile = instruction->has_side_effects || (asm_expr->output_list.length == 0);
     LLVMValueRef asm_fn = LLVMGetInlineAsm(function_type, buf_ptr(&llvm_template), buf_len(&llvm_template),
             buf_ptr(&constraint_buf), buf_len(&constraint_buf), is_volatile, false, LLVMInlineAsmDialectATT, false);
 
     LLVMValueRef built_call = LLVMBuildCall(g->builder, asm_fn, param_values, (unsigned)input_and_output_count, "");
+
+    for (size_t i = 0; i < input_and_output_count; i += 1) {
+        if (param_needs_attr[i]) {
+            LLVMTypeRef elem_ty = LLVMGetElementType(param_types[i]);
+            ZigLLVMSetCallElemTypeAttr(built_call, i, elem_ty);
+        }
+    }
+
+
+
+    heap::c_allocator.deallocate(param_types, input_and_output_count);
     heap::c_allocator.deallocate(param_values, input_and_output_count);
+    heap::c_allocator.deallocate(param_needs_attr, input_and_output_count);
     return built_call;
 }
 
@@ -6764,8 +6796,8 @@ static LLVMValueRef ir_render_return_address(CodeGen *g, Stage1Air *executable,
         Stage1AirInstReturnAddress *instruction)
 {
     if ((target_is_wasm(g->zig_target) && g->zig_target->os != OsEmscripten) || target_is_bpf(g->zig_target)) {
-        // I got this error from LLVM 10:
-        // "Non-Emscripten WebAssembly hasn't implemented __builtin_return_address"
+        // LLVM 13 reports "Non-Emscripten WebAssembly hasn't implemented __builtin_return_address"
+        // https://github.com/ziglang/zig/issues/11946
         return LLVMConstNull(get_llvm_type(g, instruction->base.value->type));
     }
 
@@ -9015,7 +9047,7 @@ static void do_code_gen(CodeGen *g) {
 
         for (size_t export_i = 1; export_i < var->export_list.length; export_i += 1) {
             GlobalExport *global_export = &var->export_list.items[export_i];
-            LLVMAddAlias(g->module, LLVMTypeOf(var->value_ref), var->value_ref, buf_ptr(&global_export->name));
+            LLVMAddAlias2(g->module, LLVMTypeOf(var->value_ref), 0, var->value_ref, buf_ptr(&global_export->name));
         }
     }
 

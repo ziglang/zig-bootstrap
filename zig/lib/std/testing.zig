@@ -355,19 +355,6 @@ pub const TmpDir = struct {
     const random_bytes_count = 12;
     const sub_path_len = std.fs.base64_encoder.calcSize(random_bytes_count);
 
-    /// caller owns memory
-    pub fn getFullPath(self: *TmpDir, alloc: std.mem.Allocator) ![]u8 {
-        const cwd_str = try std.process.getCwdAlloc(alloc);
-        defer alloc.free(cwd_str);
-        const path = try std.fs.path.join(alloc, &[_][]const u8{
-            cwd_str,
-            "zig-cache",
-            "tmp",
-            &self.sub_path,
-        });
-        return path;
-    }
-
     pub fn cleanup(self: *TmpDir) void {
         self.dir.close();
         self.parent_dir.deleteTree(&self.sub_path) catch {};
@@ -411,44 +398,6 @@ pub fn tmpDir(opts: std.fs.Dir.OpenDirOptions) TmpDir {
         .parent_dir = parent_dir,
         .sub_path = sub_path,
     };
-}
-
-const TestArgs = struct {
-    testexec: [:0]const u8 = undefined,
-    zigexec: [:0]const u8 = undefined,
-};
-
-/// Get test arguments inside test block by regular test runner ('zig test file.zig')
-/// Caller must provide backing ArgIterator
-pub fn getTestArgs(it: *std.process.ArgIterator) !TestArgs {
-    var testargs = TestArgs{};
-    testargs.testexec = it.next() orelse unreachable;
-    testargs.zigexec = it.next() orelse unreachable;
-    try expect(!it.skip());
-    return testargs;
-}
-
-test "getTestArgs" {
-    var it = try std.process.argsWithAllocator(allocator);
-    const testargs = try getTestArgs(&it);
-    defer it.deinit(); // no-op unless WASI or Windows
-    try expect(testargs.testexec.len > 0); // zig compiler executable path
-    try expect(testargs.zigexec.len > 0); // test runner executable path
-}
-
-/// Spawns child process with 'zigexec build-exe zigfile -femit-bin=binfile'
-/// and expects success
-pub fn buildExe(zigexec: []const u8, zigfile: []const u8, binfile: []const u8) !void {
-    const flag_emit = "-femit-bin=";
-    const cmd_emit = try std.mem.concat(allocator, u8, &[_][]const u8{ flag_emit, binfile });
-    defer allocator.free(cmd_emit);
-
-    const args = [_][]const u8{ zigexec, "build-exe", zigfile, cmd_emit };
-    var procCompileChild = std.ChildProcess.init(&args, allocator);
-    try procCompileChild.spawn();
-
-    const ret_val = try procCompileChild.wait();
-    try expectEqual(ret_val, .{ .Exited = 0 });
 }
 
 test "expectEqual nested array" {
@@ -585,18 +534,27 @@ test {
 ///
 /// Any relevant state shared between runs of `test_fn` *must* be reset within `test_fn`.
 ///
-/// Expects that the `test_fn` has a deterministic number of memory allocations
-/// (an error will be returned if non-deterministic allocations are detected).
-///
 /// The strategy employed is to:
 /// - Run the test function once to get the total number of allocations.
 /// - Then, iterate and run the function X more times, incrementing
 ///   the failing index each iteration (where X is the total number of
 ///   allocations determined previously)
 ///
+/// Expects that `test_fn` has a deterministic number of memory allocations:
+/// - If an allocation was made to fail during a run of `test_fn`, but `test_fn`
+///   didn't return `error.OutOfMemory`, then `error.SwallowedOutOfMemoryError`
+///   is returned from `checkAllAllocationFailures`. You may want to ignore this
+///   depending on whether or not the code you're testing includes some strategies
+///   for recovering from `error.OutOfMemory`.
+/// - If a run of `test_fn` with an expected allocation failure executes without
+///   an allocation failure being induced, then `error.NondeterministicMemoryUsage`
+///   is returned. This error means that there are allocation points that won't be
+///   tested by the strategy this function employs (that is, there are sometimes more
+///   points of allocation than the initial run of `test_fn` detects).
+///
 /// ---
 ///
-/// Here's an example of using a simple test case that will cause a leak when the
+/// Here's an example using a simple test case that will cause a leak when the
 /// allocation of `bar` fails (but will pass normally):
 ///
 /// ```zig
@@ -696,12 +654,16 @@ pub fn checkAllAllocationFailures(backing_allocator: std.mem.Allocator, comptime
         args.@"0" = failing_allocator_inst.allocator();
 
         if (@call(.{}, test_fn, args)) |_| {
-            return error.NondeterministicMemoryUsage;
+            if (failing_allocator_inst.has_induced_failure) {
+                return error.SwallowedOutOfMemoryError;
+            } else {
+                return error.NondeterministicMemoryUsage;
+            }
         } else |err| switch (err) {
             error.OutOfMemory => {
                 if (failing_allocator_inst.allocated_bytes != failing_allocator_inst.freed_bytes) {
                     print(
-                        "\nfail_index: {d}/{d}\nallocated bytes: {d}\nfreed bytes: {d}\nallocations: {d}\ndeallocations: {d}\n",
+                        "\nfail_index: {d}/{d}\nallocated bytes: {d}\nfreed bytes: {d}\nallocations: {d}\ndeallocations: {d}\nallocation that was made to fail: {s}",
                         .{
                             fail_index,
                             needed_alloc_count,
@@ -709,6 +671,7 @@ pub fn checkAllAllocationFailures(backing_allocator: std.mem.Allocator, comptime
                             failing_allocator_inst.freed_bytes,
                             failing_allocator_inst.allocations,
                             failing_allocator_inst.deallocations,
+                            failing_allocator_inst.getStackTrace(),
                         },
                     );
                     return error.MemoryLeakDetected;

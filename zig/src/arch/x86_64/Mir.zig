@@ -14,6 +14,7 @@ const assert = std.debug.assert;
 const bits = @import("bits.zig");
 const Air = @import("../../Air.zig");
 const CodeGen = @import("CodeGen.zig");
+const IntegerBitSet = std.bit_set.IntegerBitSet;
 const Register = bits.Register;
 
 instructions: std.MultiArrayList(Inst).Slice,
@@ -275,42 +276,25 @@ pub const Inst = struct {
         call,
 
         /// ops flags:
-        ///     0b00 gte
-        ///     0b01 gt
-        ///     0b10 lt
-        ///     0b11 lte
-        cond_jmp_greater_less,
-        cond_set_byte_greater_less,
+        ///     unused
+        /// Notes:
+        ///  * uses `inst_cc` in Data.
+        cond_jmp,
 
         /// ops flags:
-        ///     0b00 above or equal
-        ///     0b01 above
-        ///     0b10 below
-        ///     0b11 below or equal
-        cond_jmp_above_below,
-        cond_set_byte_above_below,
-
-        /// ops flags:
-        ///     0bX0 ne
-        ///     0bX1 eq
-        cond_jmp_eq_ne,
-        cond_set_byte_eq_ne,
+        ///      0b00 reg1
+        /// Notes:
+        ///  * uses condition code (CC) stored as part of data
+        cond_set_byte,
 
         /// ops flags:
         ///     0b00 reg1, reg2,
         ///     0b01 reg1, word ptr  [reg2 + imm]
         ///     0b10 reg1, dword ptr [reg2 + imm]
         ///     0b11 reg1, qword ptr [reg2 + imm]
-        cond_mov_eq,
-        cond_mov_lt,
-        cond_mov_below,
-
-        /// ops flags:
-        ///     0b00 reg1 if OF = 1
-        ///     0b01 reg1 if OF = 0
-        ///     0b10 reg1 if CF = 1
-        ///     0b11 reg1 if CF = 0
-        cond_set_byte_overflow,
+        /// Notes:
+        ///  * uses condition code (CC) stored as part of data
+        cond_mov,
 
         /// ops flags:  form:
         ///       0b00   reg1
@@ -396,19 +380,13 @@ pub const Inst = struct {
         /// update debug line
         dbg_line,
 
-        /// push registers from the callee_preserved_regs
-        /// data is the bitfield of which regs to push
-        /// for example on x86_64, the callee_preserved_regs are [_]Register{ .rcx, .rsi, .rdi, .r8, .r9, .r10, .r11 };    };
-        /// so to push rcx and r8 one would make data 0b00000000_00000000_00000000_00001001 (the first and fourth bits are set)
-        /// ops is unused
-        push_regs_from_callee_preserved_regs,
+        /// push registers
+        /// Uses `payload` field with `SaveRegisterList` as payload.
+        push_regs,
 
-        /// pop registers from the callee_preserved_regs
-        /// data is the bitfield of which regs to pop
-        /// for example on x86_64, the callee_preserved_regs are [_]Register{ .rcx, .rsi, .rdi, .r8, .r9, .r10, .r11 };    };
-        /// so to pop rcx and r8 one would make data 0b00000000_00000000_00000000_00001001 (the first and fourth bits are set)
-        /// ops is unused
-        pop_regs_from_callee_preserved_regs,
+        /// pop registers
+        /// Uses `payload` field with `SaveRegisterList` as payload.
+        pop_regs,
     };
     /// The position of an MIR instruction within the `Mir` instructions array.
     pub const Index = u32;
@@ -451,6 +429,16 @@ pub const Inst = struct {
         inst: Index,
         /// A 32-bit immediate value.
         imm: u32,
+        /// A condition code for use with EFLAGS register.
+        cc: bits.Condition,
+        /// Another instruction with condition code.
+        /// Used by `cond_jmp`.
+        inst_cc: struct {
+            /// Another instruction.
+            inst: Index,
+            /// A condition code for use with EFLAGS register.
+            cc: bits.Condition,
+        },
         /// An extern function.
         extern_fn: struct {
             /// Index of the containing atom.
@@ -478,9 +466,51 @@ pub const Inst = struct {
     }
 };
 
-pub const RegsToPushOrPop = struct {
-    regs: u32,
-    disp: u32,
+pub fn RegisterList(comptime Reg: type, comptime registers: []const Reg) type {
+    assert(registers.len <= @bitSizeOf(u32));
+    return struct {
+        bitset: RegBitSet = RegBitSet.initEmpty(),
+
+        const RegBitSet = IntegerBitSet(registers.len);
+        const Self = @This();
+
+        fn getIndexForReg(reg: Reg) RegBitSet.MaskInt {
+            inline for (registers) |cpreg, i| {
+                if (reg.id() == cpreg.id()) return i;
+            }
+            unreachable; // register not in input register list!
+        }
+
+        pub fn push(self: *Self, reg: Reg) void {
+            const index = getIndexForReg(reg);
+            self.bitset.set(index);
+        }
+
+        pub fn isSet(self: Self, reg: Reg) bool {
+            const index = getIndexForReg(reg);
+            return self.bitset.isSet(index);
+        }
+
+        pub fn asInt(self: Self) u32 {
+            return self.bitset.mask;
+        }
+
+        pub fn fromInt(mask: u32) Self {
+            return .{
+                .bitset = RegBitSet{ .mask = @intCast(RegBitSet.MaskInt, mask) },
+            };
+        }
+
+        pub fn count(self: Self) u32 {
+            return @intCast(u32, self.bitset.count());
+        }
+    };
+}
+
+pub const SaveRegisterList = struct {
+    /// Use `RegisterList` to populate.
+    register_list: u32,
+    stack_end: u32,
 };
 
 pub const ImmPair = struct {

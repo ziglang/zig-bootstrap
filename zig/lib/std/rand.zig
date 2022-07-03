@@ -18,14 +18,15 @@ const maxInt = std.math.maxInt;
 pub const DefaultPrng = Xoshiro256;
 
 /// Cryptographically secure random numbers.
-pub const DefaultCsprng = Gimli;
+pub const DefaultCsprng = Xoodoo;
 
 pub const Isaac64 = @import("rand/Isaac64.zig");
-pub const Gimli = @import("rand/Gimli.zig");
+pub const Xoodoo = @import("rand/Xoodoo.zig");
 pub const Pcg = @import("rand/Pcg.zig");
 pub const Xoroshiro128 = @import("rand/Xoroshiro128.zig");
 pub const Xoshiro256 = @import("rand/Xoshiro256.zig");
 pub const Sfc64 = @import("rand/Sfc64.zig");
+pub const RomuTrio = @import("rand/RomuTrio.zig");
 
 pub const Random = struct {
     ptr: *anyopaque,

@@ -30,6 +30,7 @@ pub const Value = extern union {
         i8_type,
         u16_type,
         i16_type,
+        u29_type,
         u32_type,
         i32_type,
         u64_type,
@@ -120,12 +121,16 @@ pub const Value = extern union {
         /// This Tag will never be seen by machine codegen backends. It is changed into a
         /// `decl_ref` when a comptime variable goes out of scope.
         decl_ref_mut,
+        /// Behaves like `decl_ref_mut` but validates that the stored value matches the field value.
+        comptime_field_ptr,
         /// Pointer to a specific element of an array, vector or slice.
         elem_ptr,
         /// Pointer to a specific field of a struct or union.
         field_ptr,
         /// A slice of u8 whose memory is managed externally.
         bytes,
+        /// Similar to bytes however it stores an index relative to `Module.string_literal_bytes`.
+        str_lit,
         /// This value is repeated some number of times. The amount of times to repeat
         /// is stored externally.
         repeated,
@@ -192,6 +197,7 @@ pub const Value = extern union {
                 .i8_type,
                 .u16_type,
                 .i16_type,
+                .u29_type,
                 .u32_type,
                 .i32_type,
                 .u64_type,
@@ -285,6 +291,7 @@ pub const Value = extern union {
                 .enum_literal,
                 => Payload.Bytes,
 
+                .str_lit => Payload.StrLit,
                 .slice => Payload.Slice,
 
                 .enum_field_index => Payload.U32,
@@ -313,6 +320,7 @@ pub const Value = extern union {
                 .aggregate => Payload.Aggregate,
                 .@"union" => Payload.Union,
                 .bound_fn => Payload.BoundFn,
+                .comptime_field_ptr => Payload.ComptimeFieldPtr,
             };
         }
 
@@ -391,6 +399,7 @@ pub const Value = extern union {
             .i8_type,
             .u16_type,
             .i16_type,
+            .u29_type,
             .u32_type,
             .i32_type,
             .u64_type,
@@ -503,6 +512,18 @@ pub const Value = extern union {
                 };
                 return Value{ .ptr_otherwise = &new_payload.base };
             },
+            .comptime_field_ptr => {
+                const payload = self.cast(Payload.ComptimeFieldPtr).?;
+                const new_payload = try arena.create(Payload.ComptimeFieldPtr);
+                new_payload.* = .{
+                    .base = payload.base,
+                    .data = .{
+                        .field_val = try payload.data.field_val.copy(arena),
+                        .field_ty = try payload.data.field_ty.copy(arena),
+                    },
+                };
+                return Value{ .ptr_otherwise = &new_payload.base };
+            },
             .elem_ptr => {
                 const payload = self.castTag(.elem_ptr).?;
                 const new_payload = try arena.create(Payload.ElemPtr);
@@ -538,6 +559,7 @@ pub const Value = extern union {
                 };
                 return Value{ .ptr_otherwise = &new_payload.base };
             },
+            .str_lit => return self.copyPayloadShallow(arena, Payload.StrLit),
             .repeated,
             .eu_payload,
             .opt_payload,
@@ -641,6 +663,7 @@ pub const Value = extern union {
             .u8_type => return out_stream.writeAll("u8"),
             .i8_type => return out_stream.writeAll("i8"),
             .u16_type => return out_stream.writeAll("u16"),
+            .u29_type => return out_stream.writeAll("u29"),
             .i16_type => return out_stream.writeAll("i16"),
             .u32_type => return out_stream.writeAll("u32"),
             .i32_type => return out_stream.writeAll("i32"),
@@ -750,6 +773,9 @@ pub const Value = extern union {
                 const decl_index = val.castTag(.decl_ref).?.data;
                 return out_stream.print("(decl_ref {d})", .{decl_index});
             },
+            .comptime_field_ptr => {
+                return out_stream.writeAll("(comptime_field_ptr)");
+            },
             .elem_ptr => {
                 const elem_ptr = val.castTag(.elem_ptr).?.data;
                 try out_stream.print("&[{}] ", .{elem_ptr.index});
@@ -764,6 +790,12 @@ pub const Value = extern union {
             .enum_literal => return out_stream.print(".{}", .{std.zig.fmtId(val.castTag(.enum_literal).?.data)}),
             .enum_field_index => return out_stream.print("(enum field {d})", .{val.castTag(.enum_field_index).?.data}),
             .bytes => return out_stream.print("\"{}\"", .{std.zig.fmtEscapes(val.castTag(.bytes).?.data)}),
+            .str_lit => {
+                const str_lit = val.castTag(.str_lit).?.data;
+                return out_stream.print("(.str_lit index={d} len={d})", .{
+                    str_lit.index, str_lit.len,
+                });
+            },
             .repeated => {
                 try out_stream.writeAll("(repeated) ");
                 val = val.castTag(.repeated).?.data;
@@ -824,6 +856,11 @@ pub const Value = extern union {
                 const adjusted_bytes = bytes[0..adjusted_len];
                 return allocator.dupe(u8, adjusted_bytes);
             },
+            .str_lit => {
+                const str_lit = val.castTag(.str_lit).?.data;
+                const bytes = mod.string_literal_bytes.items[str_lit.index..][0..str_lit.len];
+                return allocator.dupe(u8, bytes);
+            },
             .enum_literal => return allocator.dupe(u8, val.castTag(.enum_literal).?.data),
             .repeated => {
                 const byte = @intCast(u8, val.castTag(.repeated).?.data.toUnsignedInt(target));
@@ -867,6 +904,7 @@ pub const Value = extern union {
             .i8_type => Type.initTag(.i8),
             .u16_type => Type.initTag(.u16),
             .i16_type => Type.initTag(.i16),
+            .u29_type => Type.initTag(.u29),
             .u32_type => Type.initTag(.u32),
             .i32_type => Type.initTag(.i32),
             .u64_type => Type.initTag(.u64),
@@ -1024,6 +1062,7 @@ pub const Value = extern union {
         sema_kit: ?Module.WipAnalysis,
     ) Module.CompileError!BigIntConst {
         switch (val.tag()) {
+            .null_value,
             .zero,
             .bool_false,
             .the_only_possible_value, // i0, u0
@@ -1159,6 +1198,10 @@ pub const Value = extern union {
             return;
         }
         switch (ty.zigTypeTag()) {
+            .Void => {},
+            .Bool => {
+                buffer[0] = @boolToInt(val.toBool());
+            },
             .Int => {
                 var bigint_buffer: BigIntSpace = undefined;
                 const bigint = val.toBigInt(&bigint_buffer, target);
@@ -1240,11 +1283,11 @@ pub const Value = extern union {
             const field_val = field_vals[i];
             const field_bigint_const = switch (field.ty.zigTypeTag()) {
                 .Float => switch (field.ty.floatBits(target)) {
-                    16 => bitcastFloatToBigInt(f16, val.toFloat(f16), &field_buf),
-                    32 => bitcastFloatToBigInt(f32, val.toFloat(f32), &field_buf),
-                    64 => bitcastFloatToBigInt(f64, val.toFloat(f64), &field_buf),
-                    80 => bitcastFloatToBigInt(f80, val.toFloat(f80), &field_buf),
-                    128 => bitcastFloatToBigInt(f128, val.toFloat(f128), &field_buf),
+                    16 => bitcastFloatToBigInt(f16, field_val.toFloat(f16), &field_buf),
+                    32 => bitcastFloatToBigInt(f32, field_val.toFloat(f32), &field_buf),
+                    64 => bitcastFloatToBigInt(f64, field_val.toFloat(f64), &field_buf),
+                    80 => bitcastFloatToBigInt(f80, field_val.toFloat(f80), &field_buf),
+                    128 => bitcastFloatToBigInt(f128, field_val.toFloat(f128), &field_buf),
                     else => unreachable,
                 },
                 .Int, .Bool => field_val.toBigInt(&field_space, target),
@@ -1276,6 +1319,14 @@ pub const Value = extern union {
     ) Allocator.Error!Value {
         const target = mod.getTarget();
         switch (ty.zigTypeTag()) {
+            .Void => return Value.@"void",
+            .Bool => {
+                if (buffer[0] == 0) {
+                    return Value.@"false";
+                } else {
+                    return Value.@"true";
+                }
+            },
             .Int => {
                 if (buffer.len == 0) return Value.zero;
                 const int_info = ty.intInfo(target);
@@ -1296,7 +1347,7 @@ pub const Value = extern union {
                 128 => return Value.Tag.float_128.create(arena, floatReadFromMemory(f128, target, buffer)),
                 else => unreachable,
             },
-            .Array => {
+            .Array, .Vector => {
                 const elem_ty = ty.childType();
                 const elem_size = elem_ty.abiSize(target);
                 const elems = try arena.alloc(Value, @intCast(usize, ty.arrayLen()));
@@ -1679,6 +1730,7 @@ pub const Value = extern union {
             .int_big_negative => return self.castTag(.int_big_negative).?.asBigInt().bitCountTwosComp(),
 
             .decl_ref_mut,
+            .comptime_field_ptr,
             .extern_fn,
             .decl_ref,
             .function,
@@ -1743,6 +1795,7 @@ pub const Value = extern union {
             .bool_true,
             .decl_ref,
             .decl_ref_mut,
+            .comptime_field_ptr,
             .extern_fn,
             .function,
             .variable,
@@ -2133,15 +2186,28 @@ pub const Value = extern union {
                 // A tuple can be represented with .empty_struct_value,
                 // the_one_possible_value, .aggregate in which case we could
                 // end up here and the values are equal if the type has zero fields.
-                return ty.structFieldCount() != 0;
+                return ty.isTupleOrAnonStruct() and ty.structFieldCount() != 0;
             },
             .Float => {
-                const a_nan = a.isNan();
-                const b_nan = b.isNan();
-                if (a_nan or b_nan) {
-                    return a_nan and b_nan;
+                switch (ty.floatBits(target)) {
+                    16 => return @bitCast(u16, a.toFloat(f16)) == @bitCast(u16, b.toFloat(f16)),
+                    32 => return @bitCast(u32, a.toFloat(f32)) == @bitCast(u32, b.toFloat(f32)),
+                    64 => return @bitCast(u64, a.toFloat(f64)) == @bitCast(u64, b.toFloat(f64)),
+                    80 => return @bitCast(u80, a.toFloat(f80)) == @bitCast(u80, b.toFloat(f80)),
+                    128 => return @bitCast(u128, a.toFloat(f128)) == @bitCast(u128, b.toFloat(f128)),
+                    else => unreachable,
                 }
-                return order(a, b, target).compare(.eq);
+            },
+            .ComptimeFloat => {
+                const a_float = a.toFloat(f128);
+                const b_float = b.toFloat(f128);
+
+                const a_nan = std.math.isNan(a_float);
+                const b_nan = std.math.isNan(b_float);
+                if (a_nan != b_nan) return false;
+                if (std.math.signbit(a_float) != std.math.signbit(b_float)) return false;
+                if (a_nan) return true;
+                return a_float == b_float;
             },
             .Optional => {
                 if (a.tag() != .opt_payload and b.tag() == .opt_payload) {
@@ -2178,18 +2244,25 @@ pub const Value = extern union {
                 var buf: ToTypeBuffer = undefined;
                 return val.toType(&buf).hashWithHasher(hasher, mod);
             },
-            .Float, .ComptimeFloat => {
-                // Normalize the float here because this hash must match eql semantics.
-                // These functions are used for hash maps so we want NaN to equal itself,
-                // and -0.0 to equal +0.0.
+            .Float => {
+                // For hash/eql purposes, we treat floats as their IEEE integer representation.
+                switch (ty.floatBits(mod.getTarget())) {
+                    16 => std.hash.autoHash(hasher, @bitCast(u16, val.toFloat(f16))),
+                    32 => std.hash.autoHash(hasher, @bitCast(u32, val.toFloat(f32))),
+                    64 => std.hash.autoHash(hasher, @bitCast(u64, val.toFloat(f64))),
+                    80 => std.hash.autoHash(hasher, @bitCast(u80, val.toFloat(f80))),
+                    128 => std.hash.autoHash(hasher, @bitCast(u128, val.toFloat(f128))),
+                    else => unreachable,
+                }
+            },
+            .ComptimeFloat => {
                 const float = val.toFloat(f128);
-                if (std.math.isNan(float)) {
-                    std.hash.autoHash(hasher, std.math.nan_u128);
-                } else if (float == 0.0) {
-                    var normalized_zero: f128 = 0.0;
-                    std.hash.autoHash(hasher, @bitCast(u128, normalized_zero));
-                } else {
+                const is_nan = std.math.isNan(float);
+                std.hash.autoHash(hasher, is_nan);
+                if (!is_nan) {
                     std.hash.autoHash(hasher, @bitCast(u128, float));
+                } else {
+                    std.hash.autoHash(hasher, std.math.signbit(float));
                 }
             },
             .Bool, .Int, .ComptimeInt, .Pointer => switch (val.tag()) {
@@ -2335,7 +2408,7 @@ pub const Value = extern union {
 
     pub fn isComptimeMutablePtr(val: Value) bool {
         return switch (val.tag()) {
-            .decl_ref_mut => true,
+            .decl_ref_mut, .comptime_field_ptr => true,
             .elem_ptr => isComptimeMutablePtr(val.castTag(.elem_ptr).?.data.array_ptr),
             .field_ptr => isComptimeMutablePtr(val.castTag(.field_ptr).?.data.container_ptr),
             .eu_payload_ptr => isComptimeMutablePtr(val.castTag(.eu_payload_ptr).?.data.container_ptr),
@@ -2361,6 +2434,7 @@ pub const Value = extern union {
                 return false;
             },
             .@"union" => return val.cast(Payload.Union).?.data.val.canMutateComptimeVarState(),
+            .slice => return val.castTag(.slice).?.data.ptr.canMutateComptimeVarState(),
             else => return false,
         }
     }
@@ -2398,6 +2472,9 @@ pub const Value = extern union {
             => {
                 const decl: Module.Decl.Index = ptr_val.pointerDecl().?;
                 std.hash.autoHash(hasher, decl);
+            },
+            .comptime_field_ptr => {
+                std.hash.autoHash(hasher, Value.Tag.comptime_field_ptr);
             },
 
             .elem_ptr => {
@@ -2444,7 +2521,7 @@ pub const Value = extern union {
         return switch (val.tag()) {
             .slice => val.castTag(.slice).?.data.ptr,
             // TODO this should require being a slice tag, and not allow decl_ref, field_ptr, etc.
-            .decl_ref, .decl_ref_mut, .field_ptr, .elem_ptr => val,
+            .decl_ref, .decl_ref_mut, .field_ptr, .elem_ptr, .comptime_field_ptr => val,
             else => unreachable,
         };
     }
@@ -2466,6 +2543,14 @@ pub const Value = extern union {
                 const decl = mod.declPtr(decl_index);
                 if (decl.ty.zigTypeTag() == .Array) {
                     return decl.ty.arrayLen();
+                } else {
+                    return 1;
+                }
+            },
+            .comptime_field_ptr => {
+                const payload = val.castTag(.comptime_field_ptr).?.data;
+                if (payload.field_ty.zigTypeTag() == .Array) {
+                    return payload.field_ty.arrayLen();
                 } else {
                     return 1;
                 }
@@ -2537,6 +2622,20 @@ pub const Value = extern union {
                     return initPayload(&buffer.base);
                 }
             },
+            .str_lit => {
+                const str_lit = val.castTag(.str_lit).?.data;
+                const bytes = mod.string_literal_bytes.items[str_lit.index..][0..str_lit.len];
+                const byte = bytes[index];
+                if (arena) |a| {
+                    return Tag.int_u64.create(a, byte);
+                } else {
+                    buffer.* = .{
+                        .base = .{ .tag = .int_u64 },
+                        .data = byte,
+                    };
+                    return initPayload(&buffer.base);
+                }
+            },
 
             // No matter the index; all the elements are the same!
             .repeated => return val.castTag(.repeated).?.data,
@@ -2546,6 +2645,7 @@ pub const Value = extern union {
 
             .decl_ref => return mod.declPtr(val.castTag(.decl_ref).?.data).val.elemValueAdvanced(mod, index, arena, buffer),
             .decl_ref_mut => return mod.declPtr(val.castTag(.decl_ref_mut).?.data.decl_index).val.elemValueAdvanced(mod, index, arena, buffer),
+            .comptime_field_ptr => return val.castTag(.comptime_field_ptr).?.data.field_val.elemValueAdvanced(mod, index, arena, buffer),
             .elem_ptr => {
                 const data = val.castTag(.elem_ptr).?.data;
                 return data.array_ptr.elemValueAdvanced(mod, index + data.index, arena, buffer);
@@ -2570,11 +2670,19 @@ pub const Value = extern union {
         return switch (val.tag()) {
             .empty_array_sentinel => if (start == 0 and end == 1) val else Value.initTag(.empty_array),
             .bytes => Tag.bytes.create(arena, val.castTag(.bytes).?.data[start..end]),
+            .str_lit => {
+                const str_lit = val.castTag(.str_lit).?.data;
+                return Tag.str_lit.create(arena, .{
+                    .index = @intCast(u32, str_lit.index + start),
+                    .len = @intCast(u32, end - start),
+                });
+            },
             .aggregate => Tag.aggregate.create(arena, val.castTag(.aggregate).?.data[start..end]),
             .slice => sliceArray(val.castTag(.slice).?.data.ptr, mod, arena, start, end),
 
             .decl_ref => sliceArray(mod.declPtr(val.castTag(.decl_ref).?.data).val, mod, arena, start, end),
             .decl_ref_mut => sliceArray(mod.declPtr(val.castTag(.decl_ref_mut).?.data.decl_index).val, mod, arena, start, end),
+            .comptime_field_ptr => sliceArray(val.castTag(.comptime_field_ptr).?.data.field_val, mod, arena, start, end),
             .elem_ptr => blk: {
                 const elem_ptr = val.castTag(.elem_ptr).?.data;
                 break :blk sliceArray(elem_ptr.array_ptr, mod, arena, start + elem_ptr.index, end + elem_ptr.index);
@@ -2609,6 +2717,7 @@ pub const Value = extern union {
                 }
                 unreachable;
             },
+            .undef => return Value.undef,
 
             else => unreachable,
         }
@@ -4681,7 +4790,7 @@ pub const Value = extern union {
 
             pub const Data = struct {
                 decl_index: Module.Decl.Index,
-                runtime_index: u32,
+                runtime_index: RuntimeIndex,
             };
         };
 
@@ -4690,6 +4799,14 @@ pub const Value = extern union {
             data: struct {
                 container_ptr: Value,
                 container_ty: Type,
+            },
+        };
+
+        pub const ComptimeFieldPtr = struct {
+            base: Payload,
+            data: struct {
+                field_val: Value,
+                field_ty: Type,
             },
         };
 
@@ -4719,6 +4836,11 @@ pub const Value = extern union {
             base: Payload,
             /// Includes the sentinel, if any.
             data: []const u8,
+        };
+
+        pub const StrLit = struct {
+            base: Payload,
+            data: Module.StringLiteralContext.Key,
         };
 
         pub const Aggregate = struct {
@@ -4810,7 +4932,7 @@ pub const Value = extern union {
                 /// `Module.resolvePeerTypes`.
                 stored_inst_list: std.ArrayListUnmanaged(Air.Inst.Ref) = .{},
                 /// 0 means ABI-aligned.
-                alignment: u16,
+                alignment: u32,
             },
         };
 
@@ -4821,7 +4943,7 @@ pub const Value = extern union {
             data: struct {
                 decl_index: Module.Decl.Index,
                 /// 0 means ABI-aligned.
-                alignment: u16,
+                alignment: u32,
             },
         };
 
@@ -4865,6 +4987,16 @@ pub const Value = extern union {
     pub fn makeBool(x: bool) Value {
         return if (x) Value.@"true" else Value.@"false";
     }
+
+    pub const RuntimeIndex = enum(u32) {
+        zero = 0,
+        comptime_field_ptr = std.math.maxInt(u32),
+        _,
+
+        pub fn increment(ri: *RuntimeIndex) void {
+            ri.* = @intToEnum(RuntimeIndex, @enumToInt(ri.*) + 1);
+        }
+    };
 };
 
 var negative_one_payload: Value.Payload.I64 = .{

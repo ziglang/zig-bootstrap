@@ -7,7 +7,6 @@ const minInt = std.math.minInt;
 const native_endian = builtin.target.cpu.arch.endian();
 
 test "@bitCast iX -> uX (32, 64)" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
 
     const bit_values = [_]usize{ 32, 64 };
@@ -245,13 +244,6 @@ test "comptime bitcast used in expression has the correct type" {
 }
 
 test "bitcast passed as tuple element" {
-    if (builtin.zig_backend == .stage2_llvm) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
-
     const S = struct {
         fn foo(args: anytype) !void {
             comptime try expect(@TypeOf(args[0]) == f32);
@@ -271,4 +263,39 @@ test "triple level result location with bitcast sandwich passed as tuple element
         }
     };
     try S.foo(.{@as(f64, @bitCast(f32, @as(u32, 0x414570A4)))});
+}
+
+test "@bitCast packed struct of floats" {
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+
+    const Foo = packed struct {
+        a: f16 = 0,
+        b: f32 = 1,
+        c: f64 = 2,
+        d: f128 = 3,
+    };
+
+    const Foo2 = packed struct {
+        a: f16 = 0,
+        b: f32 = 1,
+        c: f64 = 2,
+        d: f128 = 3,
+    };
+
+    const S = struct {
+        fn doTheTest() !void {
+            var foo = Foo{};
+            var v = @bitCast(Foo2, foo);
+            try expect(v.a == foo.a);
+            try expect(v.b == foo.b);
+            try expect(v.c == foo.c);
+            try expect(v.d == foo.d);
+        }
+    };
+    try S.doTheTest();
+    comptime try S.doTheTest();
 }
