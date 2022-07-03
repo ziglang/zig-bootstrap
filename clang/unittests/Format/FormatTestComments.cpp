@@ -2842,6 +2842,12 @@ TEST_F(FormatTestComments, AlignTrailingComments) {
              "#define FOO_NODELOCAL 4  // Loopback\n\n"
              "} // namespace m\n",
              getLLVMStyleWithColumns(80)));
+
+  // https://llvm.org/PR53441
+  verifyFormat("/* */  //\n"
+               "int a; //\n");
+  verifyFormat("/**/   //\n"
+               "int a; //\n");
 }
 
 TEST_F(FormatTestComments, AlignsBlockCommentDecorations) {
@@ -3591,6 +3597,11 @@ TEST_F(FormatTestComments, SpaceAtLineCommentBegin) {
             "           // World\n"
             "}",
             format(WrapCode, Style));
+  EXPECT_EQ("// x\n"
+            "// y",
+            format("//   x\n"
+                   "// y",
+                   Style));
 
   Style.SpacesInLineCommentPrefix = {3, 3};
   EXPECT_EQ("//   Lorem ipsum\n"
@@ -3976,6 +3987,18 @@ TEST_F(FormatTestComments, SpaceAtLineCommentBegin) {
             "//  vv will only move\n"
             "//  } if the line above does\n",
             format(Code, Style));
+}
+
+TEST_F(FormatTestComments, SplitCommentIntroducers) {
+  EXPECT_EQ(R"(//
+/\
+/
+)",
+            format(R"(//
+/\
+/ 
+  )",
+                   getLLVMStyleWithColumns(10)));
 }
 
 } // end namespace

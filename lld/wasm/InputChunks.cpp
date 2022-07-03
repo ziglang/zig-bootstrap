@@ -116,7 +116,10 @@ void InputChunk::relocate(uint8_t *buf) const {
       LLVM_DEBUG(dbgs() << " sym=" << file->getSymbols()[rel.Index]->getName());
     LLVM_DEBUG(dbgs() << " addend=" << rel.Addend << " index=" << rel.Index
                       << " offset=" << rel.Offset << "\n");
-    auto value = file->calcNewValue(rel, tombstone, this);
+    // TODO(sbc): Check that the value is within the range of the
+    // relocation type below.  Most likely we must error out here
+    // if its not with range.
+    uint64_t value = file->calcNewValue(rel, tombstone, this);
 
     switch (rel.Type) {
     case R_WASM_TYPE_INDEX_LEB:
@@ -125,7 +128,7 @@ void InputChunk::relocate(uint8_t *buf) const {
     case R_WASM_TAG_INDEX_LEB:
     case R_WASM_MEMORY_ADDR_LEB:
     case R_WASM_TABLE_NUMBER_LEB:
-      encodeULEB128(value, loc, 5);
+      encodeULEB128(static_cast<uint32_t>(value), loc, 5);
       break;
     case R_WASM_MEMORY_ADDR_LEB64:
       encodeULEB128(value, loc, 10);
@@ -355,7 +358,7 @@ uint64_t InputChunk::getVA(uint64_t offset) const {
 }
 
 // Generate code to apply relocations to the data section at runtime.
-// This is only called when generating shared libaries (PIC) where address are
+// This is only called when generating shared libraries (PIC) where address are
 // not known at static link time.
 void InputChunk::generateRelocationCode(raw_ostream &os) const {
   LLVM_DEBUG(dbgs() << "generating runtime relocations: " << getName()
