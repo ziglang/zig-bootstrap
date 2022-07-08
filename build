@@ -124,7 +124,6 @@ $ZIG build \
   -Dstatic-llvm \
   -Drelease \
   -Dstrip \
-  -fno-stage1 \
   -Dtarget="$TARGET" \
   -Dcpu="$MCPU" \
   -Dversion-string="$ZIG_VERSION"
