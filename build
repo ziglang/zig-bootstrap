@@ -1,6 +1,6 @@
 #!/bin/sh
 
-set -e
+set -eu
 
 JOBS="$1"
 TARGET="$2" # Example: riscv64-linux-gnu
@@ -50,7 +50,8 @@ cmake "$ROOTDIR/zig" \
   -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/host" \
   -DCMAKE_PREFIX_PATH="$ROOTDIR/out/host" \
   -DCMAKE_BUILD_TYPE=Release \
-  -DZIG_VERSION="$ZIG_VERSION"
+  -DZIG_VERSION="$ZIG_VERSION" \
+  -DZIG_STATIC_ZLIB=ON
 make "$JOBS" install
 
 # Now we have Zig as a cross compiler.
