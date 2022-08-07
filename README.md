@@ -66,7 +66,7 @@ is more portable across Linux distributions.
 | triple                     | support status |
 |----------------------------|----------------|
 | `aarch64_be-linux-gnu`     | [#90](https://github.com/ziglang/zig-bootstrap/issues/90) |
-| `aarch64_be-linux-musl`    | not tested     |
+| `aarch64_be-linux-musl`    | [#92](https://github.com/ziglang/zig-bootstrap/issues/92) |
 | `aarch64_be-windows-gnu`   | [#94](https://github.com/ziglang/zig-bootstrap/issues/94) |
 | `aarch64-linux-gnu`        | OK             |
 | `aarch64-linux-musl`       | OK             |
