@@ -93,7 +93,7 @@ is more portable across Linux distributions.
 | `mips64-linux-musl`        | not tested     |
 | `mipsel-linux-gnu`         | not tested     |
 | `mipsel-linux-musl`        | [#12](https://github.com/ziglang/bootstrap/issues/12) |
-| `mips-linux-gnu`           | not tested     |
+| `mips-linux-gnu`           | [#112](https://github.com/ziglang/zig-bootstrap/issues/112) |
 | `mips-linux-musl`          | not tested     |
 | `powerpc64le-linux-gnu`    | [#24](https://github.com/ziglang/zig-bootstrap/issues/24) |
 | `powerpc64le-linux-musl`   | [#5](https://github.com/ziglang/bootstrap/issues/5) |
