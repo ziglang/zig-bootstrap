@@ -101,7 +101,7 @@ is more portable across Linux distributions.
 | `powerpc64-linux-musl`     | not tested     |
 | `powerpc-linux-gnu`        | not tested     |
 | `powerpc-linux-musl`       | not tested     |
-| `riscv64-linux-gnu`        | not tested     |
+| `riscv64-linux-gnu`        | [#115](https://github.com/ziglang/zig-bootstrap/issues/115) |
 | `riscv64-linux-musl`       | OK             |
 | `s390x-linux-gnu`          | [#116](https://github.com/ziglang/zig-bootstrap/issues/116) |
 | `s390x-linux-musl`         | [#52](https://github.com/ziglang/bootstrap/issues/52) |
