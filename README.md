@@ -105,7 +105,7 @@ is more portable across Linux distributions.
 | `riscv64-linux-musl`       | OK             |
 | `s390x-linux-gnu`          | not tested     |
 | `s390x-linux-musl`         | [#52](https://github.com/ziglang/bootstrap/issues/52) |
-| `sparc-linux-gnu`          | not tested     |
+| `sparc-linux-gnu`          | [#117](https://github.com/ziglang/zig-bootstrap/issues/117) |
 | `sparcv9-linux-gnu`        | [ziglang/zig#4931](https://github.com/ziglang/zig/issues/4931) |
 | `x86_64-freebsd-gnu`       | [#45](https://github.com/ziglang/bootstrap/issues/45) |
 | `x86_64-linux-gnu`         | OK             |
