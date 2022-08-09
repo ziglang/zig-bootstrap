@@ -72,26 +72,26 @@ is more portable across Linux distributions.
 | `aarch64-linux-musl`       | OK             |
 | `aarch64-windows-gnu`      | OK             |
 | `aarch64-macos-none`       | OK             |
-| `armeb-linux-gnueabi`      | not tested     |
-| `armeb-linux-gnueabihf`    | not tested     |
-| `armeb-linux-musleabi`     | not tested     |
-| `armeb-linux-musleabihf`   | not tested     |
-| `armeb-windows-gnu`        | not tested     |
-| `arm-linux-gnueabi`        | not tested     |
-| `arm-linux-gnueabihf`      | not tested     |
+| `armeb-linux-gnueabi`      | [#96](https://github.com/ziglang/zig-bootstrap/issues/96) |
+| `armeb-linux-gnueabihf`    | [#97](https://github.com/ziglang/zig-bootstrap/issues/97) |
+| `armeb-linux-musleabi`     | [#98](https://github.com/ziglang/zig-bootstrap/issues/98) |
+| `armeb-linux-musleabihf`   | [#99](https://github.com/ziglang/zig-bootstrap/issues/99) |
+| `armeb-windows-gnu`        | [#100](https://github.com/ziglang/zig-bootstrap/issues/100) |
+| `arm-linux-gnueabi`        | [#101](https://github.com/ziglang/zig-bootstrap/issues/101) |
+| `arm-linux-gnueabihf`      | [#102](https://github.com/ziglang/zig-bootstrap/issues/102) |
 | `arm-linux-musleabi`       | OK             |
 | `arm-linux-musleabihf`     | OK             |
-| `arm-windows-gnu`          | not tested     |
+| `arm-windows-gnu`          | [#105](https://github.com/ziglang/zig-bootstrap/issues/105) |
 | `i386-linux-gnu`           | not tested     |
 | `i386-linux-musl`          | OK             |
 | `i386-windows-gnu`         | OK             |
-| `mips64el-linux-gnuabi64`  | not tested     |
-| `mips64el-linux-gnuabin32` | not tested     |
+| `mips64el-linux-gnuabi64`  | [#106](https://github.com/ziglang/zig-bootstrap/issues/106) |
+| `mips64el-linux-gnuabin32` | [#107](https://github.com/ziglang/zig-bootstrap/issues/107) |
 | `mips64el-linux-musl`      | [#3](https://github.com/ziglang/bootstrap/issues/3) |
-| `mips64-linux-gnuabi64`    | not tested     |
-| `mips64-linux-gnuabin32`   | not tested     |
-| `mips64-linux-musl`        | not tested     |
-| `mipsel-linux-gnu`         | not tested     |
+| `mips64-linux-gnuabi64`    | [#108](https://github.com/ziglang/zig-bootstrap/issues/108) |
+| `mips64-linux-gnuabin32`   | [#109](https://github.com/ziglang/zig-bootstrap/issues/109) |
+| `mips64-linux-musl`        | [#110](https://github.com/ziglang/zig-bootstrap/issues/110) |
+| `mipsel-linux-gnu`         | [#111](https://github.com/ziglang/zig-bootstrap/issues/111) |
 | `mipsel-linux-musl`        | [#12](https://github.com/ziglang/bootstrap/issues/12) |
 | `mips-linux-gnu`           | [#112](https://github.com/ziglang/zig-bootstrap/issues/112) |
 | `mips-linux-musl`          | not tested     |
