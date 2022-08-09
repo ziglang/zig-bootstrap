@@ -103,7 +103,7 @@ is more portable across Linux distributions.
 | `powerpc-linux-musl`       | not tested     |
 | `riscv64-linux-gnu`        | not tested     |
 | `riscv64-linux-musl`       | OK             |
-| `s390x-linux-gnu`          | not tested     |
+| `s390x-linux-gnu`          | [#116](https://github.com/ziglang/zig-bootstrap/issues/116) |
 | `s390x-linux-musl`         | [#52](https://github.com/ziglang/bootstrap/issues/52) |
 | `sparc-linux-gnu`          | not tested     |
 | `sparcv9-linux-gnu`        | [ziglang/zig#4931](https://github.com/ziglang/zig/issues/4931) |
