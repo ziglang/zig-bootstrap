@@ -97,7 +97,7 @@ is more portable across Linux distributions.
 | `mips-linux-musl`          | not tested     |
 | `powerpc64le-linux-gnu`    | [#24](https://github.com/ziglang/zig-bootstrap/issues/24) |
 | `powerpc64le-linux-musl`   | [#5](https://github.com/ziglang/bootstrap/issues/5) |
-| `powerpc64-linux-gnu`      | not tested     |
+| `powerpc64-linux-gnu`      | [#113](https://github.com/ziglang/zig-bootstrap/issues/113) |
 | `powerpc64-linux-musl`     | not tested     |
 | `powerpc-linux-gnu`        | not tested     |
 | `powerpc-linux-musl`       | not tested     |
