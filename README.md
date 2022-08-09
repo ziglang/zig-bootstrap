@@ -99,7 +99,7 @@ is more portable across Linux distributions.
 | `powerpc64le-linux-musl`   | [#5](https://github.com/ziglang/bootstrap/issues/5) |
 | `powerpc64-linux-gnu`      | not tested     |
 | `powerpc64-linux-musl`     | not tested     |
-| `powerpc-linux-gnu`        | not tested     |
+| `powerpc-linux-gnu`        | [#114](https://github.com/ziglang/zig-bootstrap/issues/114) |
 | `powerpc-linux-musl`       | not tested     |
 | `riscv64-linux-gnu`        | [#115](https://github.com/ziglang/zig-bootstrap/issues/115) |
 | `riscv64-linux-musl`       | OK             |
