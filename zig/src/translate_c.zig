@@ -1950,7 +1950,10 @@ fn transDeclRefExpr(
     const value_decl = expr.getDecl();
     const name = try c.str(@ptrCast(*const clang.NamedDecl, value_decl).getName_bytes_begin());
     const mangled_name = scope.getAlias(name);
-    var ref_expr = try Tag.identifier.create(c.arena, mangled_name);
+    var ref_expr = if (cIsFunctionDeclRef(@ptrCast(*const clang.Expr, expr)))
+        try Tag.fn_identifier.create(c.arena, mangled_name)
+    else
+        try Tag.identifier.create(c.arena, mangled_name);
 
     if (@ptrCast(*const clang.Decl, value_decl).getKind() == .Var) {
         const var_decl = @ptrCast(*const clang.VarDecl, value_decl);
@@ -1999,7 +2002,11 @@ fn transImplicitCastExpr(
         },
         .PointerToBoolean => {
             // @ptrToInt(val) != 0
-            const ptr_to_int = try Tag.ptr_to_int.create(c.arena, try transExpr(c, scope, sub_expr, .used));
+            var ptr_node = try transExpr(c, scope, sub_expr, .used);
+            if (ptr_node.tag() == .fn_identifier) {
+                ptr_node = try Tag.address_of.create(c.arena, ptr_node);
+            }
+            const ptr_to_int = try Tag.ptr_to_int.create(c.arena, ptr_node);
 
             const ne = try Tag.not_equal.create(c.arena, .{ .lhs = ptr_to_int, .rhs = Tag.zero_literal.init() });
             return maybeSuppressResult(c, scope, result_used, ne);
@@ -2042,7 +2049,7 @@ fn isBuiltinDefined(name: []const u8) bool {
 
 fn transBuiltinFnExpr(c: *Context, scope: *Scope, expr: *const clang.Expr, used: ResultUsed) TransError!Node {
     const node = try transExpr(c, scope, expr, used);
-    if (node.castTag(.identifier)) |ident| {
+    if (node.castTag(.fn_identifier)) |ident| {
         const name = ident.data;
         if (!isBuiltinDefined(name)) return fail(c, error.UnsupportedTranslation, expr.getBeginLoc(), "TODO implement function '{s}' in std.zig.c_builtins", .{name});
     }
@@ -2447,7 +2454,10 @@ fn transCCast(
     }
     if (cIsInteger(dst_type) and qualTypeIsPtr(src_type)) {
         // @intCast(dest_type, @ptrToInt(val))
-        const ptr_to_int = try Tag.ptr_to_int.create(c.arena, expr);
+        const ptr_to_int = if (expr.tag() == .fn_identifier)
+            try Tag.ptr_to_int.create(c.arena, try Tag.address_of.create(c.arena, expr))
+        else
+            try Tag.ptr_to_int.create(c.arena, expr);
         return Tag.int_cast.create(c.arena, .{ .lhs = dst_node, .rhs = ptr_to_int });
     }
     if (cIsInteger(src_type) and qualTypeIsPtr(dst_type)) {
@@ -2678,15 +2688,25 @@ fn transInitListExprVector(
 ) TransError!Node {
     _ = ty;
     const qt = getExprQualType(c, @ptrCast(*const clang.Expr, expr));
-    const vector_type = try transQualType(c, scope, qt, loc);
+    const vector_ty = @ptrCast(*const clang.VectorType, qualTypeCanon(qt));
+
     const init_count = expr.getNumInits();
+    const num_elements = vector_ty.getNumElements();
+    const element_qt = vector_ty.getElementType();
 
     if (init_count == 0) {
-        return Tag.container_init.create(c.arena, .{
-            .lhs = vector_type,
-            .inits = try c.arena.alloc(ast.Payload.ContainerInit.Initializer, 0),
+        const zero_node = try Tag.as.create(c.arena, .{
+            .lhs = try transQualType(c, scope, element_qt, loc),
+            .rhs = Tag.zero_literal.init(),
+        });
+
+        return Tag.vector_zero_init.create(c.arena, .{
+            .lhs = try transCreateNodeNumber(c, num_elements, .int),
+            .rhs = zero_node,
         });
     }
+
+    const vector_type = try transQualType(c, scope, qt, loc);
 
     var block_scope = try Scope.Block.init(c, scope, true);
     defer block_scope.deinit();
@@ -2706,11 +2726,15 @@ fn transInitListExprVector(
         try block_scope.statements.append(tmp_decl_node);
     }
 
-    const init_list = try c.arena.alloc(Node, init_count);
+    const init_list = try c.arena.alloc(Node, num_elements);
     for (init_list) |*init, init_index| {
-        const tmp_decl = block_scope.statements.items[init_index];
-        const name = tmp_decl.castTag(.var_simple).?.data.name;
-        init.* = try Tag.identifier.create(c.arena, name);
+        if (init_index < init_count) {
+            const tmp_decl = block_scope.statements.items[init_index];
+            const name = tmp_decl.castTag(.var_simple).?.data.name;
+            init.* = try Tag.identifier.create(c.arena, name);
+        } else {
+            init.* = Tag.undefined_literal.init();
+        }
     }
 
     const array_init = try Tag.array_init.create(c.arena, .{
@@ -2765,7 +2789,7 @@ fn transInitListExpr(
             qual_type,
         ));
     } else {
-        const type_name = c.str(qual_type.getTypeClassName());
+        const type_name = try c.str(qual_type.getTypeClassName());
         return fail(c, error.UnsupportedType, source_loc, "unsupported initlist type: '{s}'", .{type_name});
     }
 }
@@ -3269,7 +3293,7 @@ fn transConstantExpr(c: *Context, scope: *Scope, expr: *const clang.Expr, used: 
             return maybeSuppressResult(c, scope, used, as_node);
         },
         else => |kind| {
-            return fail(c, error.UnsupportedTranslation, expr.getBeginLoc(), "unsupported constant expression kind '{s}'", .{kind});
+            return fail(c, error.UnsupportedTranslation, expr.getBeginLoc(), "unsupported constant expression kind '{}'", .{kind});
         },
     }
 }
@@ -3977,8 +4001,7 @@ fn transCPtrCast(
             // For opaque types a ptrCast is enough
             expr
         else blk: {
-            const child_type_node = try transQualType(c, scope, child_type, loc);
-            const alignof = try Tag.std_meta_alignment.create(c.arena, child_type_node);
+            const alignof = try Tag.std_meta_alignment.create(c.arena, dst_type_node);
             const align_cast = try Tag.align_cast.create(c.arena, .{ .lhs = alignof, .rhs = expr });
             break :blk align_cast;
         };
@@ -4812,11 +4835,11 @@ fn transType(c: *Context, scope: *Scope, ty: *const clang.Type, source_loc: clan
             });
         },
         .BitInt, .ExtVector => {
-            const type_name = c.str(ty.getTypeClassName());
+            const type_name = try c.str(ty.getTypeClassName());
             return fail(c, error.UnsupportedType, source_loc, "TODO implement translation of type: '{s}'", .{type_name});
         },
         else => {
-            const type_name = c.str(ty.getTypeClassName());
+            const type_name = try c.str(ty.getTypeClassName());
             return fail(c, error.UnsupportedType, source_loc, "unsupported type: '{s}'", .{type_name});
         },
     }
@@ -5052,8 +5075,8 @@ fn finishTransFnProto(
 }
 
 fn warn(c: *Context, scope: *Scope, loc: clang.SourceLocation, comptime format: []const u8, args: anytype) !void {
-    const args_prefix = .{c.locStr(loc)};
-    const value = try std.fmt.allocPrint(c.arena, "// {s}: warning: " ++ format, args_prefix ++ args);
+    const str = try c.locStr(loc);
+    const value = try std.fmt.allocPrint(c.arena, "// {s}: warning: " ++ format, .{str} ++ args);
     try scope.appendNode(try Tag.warning.create(c.arena, value));
 }
 
@@ -5073,7 +5096,8 @@ pub fn failDecl(c: *Context, loc: clang.SourceLocation, name: []const u8, compti
     // pub const name = @compileError(msg);
     const fail_msg = try std.fmt.allocPrint(c.arena, format, args);
     try addTopLevelDecl(c, name, try Tag.fail_decl.create(c.arena, .{ .actual = name, .mangled = fail_msg }));
-    const location_comment = try std.fmt.allocPrint(c.arena, "// {s}", .{c.locStr(loc)});
+    const str = try c.locStr(loc);
+    const location_comment = try std.fmt.allocPrint(c.arena, "// {s}", .{str});
     try c.global_scope.nodes.append(try Tag.warning.create(c.arena, location_comment));
 }
 

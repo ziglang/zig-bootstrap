@@ -328,7 +328,7 @@ pub fn createEmpty(gpa: Allocator, options: link.Options) !*Elf {
         .page_size = page_size,
     };
     const use_llvm = build_options.have_llvm and options.use_llvm;
-    const use_stage1 = build_options.is_stage1 and options.use_stage1;
+    const use_stage1 = build_options.have_stage1 and options.use_stage1;
     if (use_llvm and !use_stage1) {
         self.llvm_object = try LlvmObject.create(gpa, options);
     }
@@ -1351,6 +1351,7 @@ fn linkWithLLD(self: *Elf, comp: *Compilation, prog_node: *std.Progress.Node) !v
         link.hashAddSystemLibs(&man.hash, self.base.options.system_libs);
         man.hash.add(allow_shlib_undefined);
         man.hash.add(self.base.options.bind_global_refs_locally);
+        man.hash.add(self.base.options.compress_debug_sections);
         man.hash.add(self.base.options.tsan);
         man.hash.addOptionalBytes(self.base.options.sysroot);
         man.hash.add(self.base.options.linker_optimization);
@@ -1591,6 +1592,15 @@ fn linkWithLLD(self: *Elf, comp: *Compilation, prog_node: *std.Progress.Node) !v
                     }
                 }
             }
+            for (self.base.options.objects) |obj| {
+                if (Compilation.classifyFileExt(obj.path) == .shared_library) {
+                    const lib_dir_path = std.fs.path.dirname(obj.path).?;
+                    if ((try rpath_table.fetchPut(lib_dir_path, {})) == null) {
+                        try argv.append("-rpath");
+                        try argv.append(lib_dir_path);
+                    }
+                }
+            }
         }
 
         for (self.base.options.lib_dirs) |lib_dir| {
@@ -1752,6 +1762,11 @@ fn linkWithLLD(self: *Elf, comp: *Compilation, prog_node: *std.Progress.Node) !v
 
         if (allow_shlib_undefined) {
             try argv.append("--allow-shlib-undefined");
+        }
+
+        switch (self.base.options.compress_debug_sections) {
+            .none => {},
+            .zlib => try argv.append("--compress-debug-sections=zlib"),
         }
 
         if (self.base.options.bind_global_refs_locally) {

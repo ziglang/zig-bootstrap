@@ -3,14 +3,14 @@ pub const List = struct {
     allocator: *Allocator,
 
     pub fn init(allocator: *Allocator) List {
-        return List {
+        return List{
             .len = 0,
             .allocator = allocator,
         };
     }
 };
 
-pub var global_allocator = Allocator {
+pub var global_allocator = Allocator{
     .field = 1234,
 };
 
@@ -27,4 +27,5 @@ export fn foo() void {
 // backend=llvm
 // target=native
 //
-// :23:6: error: type 'tmp.List' has no field or member function named 'init'
+// :23:6: error: no field or member function named 'init' in 'tmp.List'
+// :1:18: note: struct declared here

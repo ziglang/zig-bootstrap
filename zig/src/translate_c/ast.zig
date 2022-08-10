@@ -36,6 +36,7 @@ pub const Node = extern union {
         /// "string"[0..end]
         string_slice,
         identifier,
+        fn_identifier,
         @"if",
         /// if (!operand) break;
         if_not_break,
@@ -153,6 +154,8 @@ pub const Node = extern union {
         div_exact,
         /// @offsetOf(lhs, rhs)
         offset_of,
+        /// @splat(lhs, rhs)
+        vector_zero_init,
         /// @shuffle(type, a, b, mask)
         shuffle,
 
@@ -327,6 +330,7 @@ pub const Node = extern union {
                 .div_exact,
                 .offset_of,
                 .helpers_cast,
+                .vector_zero_init,
                 => Payload.BinOp,
 
                 .integer_literal,
@@ -335,6 +339,7 @@ pub const Node = extern union {
                 .char_literal,
                 .enum_literal,
                 .identifier,
+                .fn_identifier,
                 .warning,
                 .type,
                 .helpers_macro,
@@ -1052,6 +1057,14 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
         },
         .identifier => {
             const payload = node.castTag(.identifier).?.data;
+            return c.addNode(.{
+                .tag = .identifier,
+                .main_token = try c.addIdentifier(payload),
+                .data = undefined,
+            });
+        },
+        .fn_identifier => {
+            const payload = node.castTag(.fn_identifier).?.data;
             return c.addNode(.{
                 .tag = .identifier,
                 .main_token = try c.addIdentifier(payload),
@@ -1819,6 +1832,10 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
             const type_expr = try renderNode(c, payload.cond);
             return renderArrayInit(c, type_expr, payload.cases);
         },
+        .vector_zero_init => {
+            const payload = node.castTag(.vector_zero_init).?.data;
+            return renderBuiltinCall(c, "@splat", &.{ payload.lhs, payload.rhs });
+        },
         .field_access => {
             const payload = node.castTag(.field_access).?.data;
             const lhs = try renderNodeGrouped(c, payload.lhs);
@@ -2234,6 +2251,7 @@ fn renderNodeGrouped(c: *Context, node: Node) !NodeIndex {
         .char_literal,
         .enum_literal,
         .identifier,
+        .fn_identifier,
         .field_access,
         .ptr_cast,
         .type,
@@ -2294,6 +2312,7 @@ fn renderNodeGrouped(c: *Context, node: Node) !NodeIndex {
         .@"struct",
         .@"union",
         .array_init,
+        .vector_zero_init,
         .tuple,
         .container_init,
         .container_init_dot,

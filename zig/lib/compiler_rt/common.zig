@@ -17,6 +17,10 @@ pub const want_aeabi = switch (builtin.abi) {
 };
 pub const want_ppc_abi = builtin.cpu.arch.isPPC() or builtin.cpu.arch.isPPC64();
 
+// Libcalls that involve u128 on Windows x86-64 are expected by LLVM to use the
+// calling convention of @Vector(2, u64), rather than what's standard.
+pub const want_windows_v2u64_abi = builtin.os.tag == .windows and builtin.cpu.arch == .x86_64;
+
 /// This governs whether to use these symbol names for f16/f32 conversions
 /// rather than the standard names:
 /// * __gnu_f2h_ieee
@@ -64,7 +68,11 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace) nore
 /// need for extending them to wider fp types.
 /// TODO remove this; do this type selection in the language rather than
 /// here in compiler-rt.
-pub const F16T = if (builtin.cpu.arch.isAARCH64()) f16 else u16;
+pub const F16T = switch (builtin.cpu.arch) {
+    .aarch64, .aarch64_be, .aarch64_32 => f16,
+    .riscv64 => if (builtin.zig_backend == .stage1) u16 else f16,
+    else => u16,
+};
 
 pub fn wideMultiply(comptime Z: type, a: Z, b: Z, hi: *Z, lo: *Z) void {
     switch (Z) {

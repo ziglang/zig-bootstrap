@@ -108,7 +108,7 @@ fn callMain2() noreturn {
     exit2(0);
 }
 
-fn wasiMain2() noreturn {
+fn wasiMain2() callconv(.C) noreturn {
     switch (@typeInfo(@typeInfo(@TypeOf(root.main)).Fn.return_type.?)) {
         .Void => {
             root.main();
@@ -131,7 +131,7 @@ fn wWinMainCRTStartup2() callconv(.C) noreturn {
 
 fn exit2(code: usize) noreturn {
     switch (native_os) {
-        .linux => switch (builtin.stage2_arch) {
+        .linux => switch (builtin.cpu.arch) {
             .x86_64 => {
                 asm volatile ("syscall"
                     :
@@ -175,7 +175,7 @@ fn exit2(code: usize) noreturn {
             else => @compileError("TODO"),
         },
         // exits(0)
-        .plan9 => switch (builtin.stage2_arch) {
+        .plan9 => switch (builtin.cpu.arch) {
             .x86_64 => {
                 asm volatile (
                     \\push $0
@@ -361,7 +361,6 @@ fn wWinMainCRTStartup() callconv(std.os.windows.WINAPI) noreturn {
     std.os.windows.kernel32.ExitProcess(@bitCast(std.os.windows.UINT, result));
 }
 
-// TODO https://github.com/ziglang/zig/issues/265
 fn posixCallMainAndExit() noreturn {
     @setAlignStack(16);
 
@@ -455,10 +454,6 @@ fn expandStackSize(phdrs: []elf.Phdr) void {
 fn callMainWithArgs(argc: usize, argv: [*][*:0]u8, envp: [][*:0]u8) u8 {
     std.os.argv = argv[0..argc];
     std.os.environ = envp;
-
-    if (builtin.zig_backend == .stage2_llvm) {
-        return @call(.{ .modifier = .always_inline }, callMain, .{});
-    }
 
     std.debug.maybeEnableSegfaultHandler();
 

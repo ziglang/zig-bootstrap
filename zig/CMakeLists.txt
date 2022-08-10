@@ -12,7 +12,7 @@ if(NOT CMAKE_BUILD_TYPE)
 endif()
 
 if(NOT CMAKE_INSTALL_PREFIX)
-    set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/stage1" CACHE STRING
+    set(CMAKE_INSTALL_PREFIX "${CMAKE_BINARY_DIR}/stage2" CACHE STRING
       "Directory to install zig to" FORCE)
 endif()
 
@@ -31,7 +31,7 @@ set(ZIG_VERSION "" CACHE STRING "Override Zig version string. Default is to find
 
 if("${ZIG_VERSION}" STREQUAL "")
     set(ZIG_VERSION "${ZIG_VERSION_MAJOR}.${ZIG_VERSION_MINOR}.${ZIG_VERSION_PATCH}")
-    find_program(GIT_EXE NAMES git)
+    find_program(GIT_EXE NAMES git NAMES_PER_DIR)
     if(GIT_EXE)
         execute_process(
             COMMAND ${GIT_EXE} -C ${CMAKE_SOURCE_DIR} describe --match *.*.* --tags
@@ -66,9 +66,9 @@ endif()
 message(STATUS "Configuring zig version ${ZIG_VERSION}")
 
 set(ZIG_STATIC off CACHE BOOL "Attempt to build a static zig executable (not compatible with glibc)")
+set(ZIG_SHARED_LLVM off CACHE BOOL "Prefer linking against shared LLVM libraries")
 set(ZIG_STATIC_LLVM off CACHE BOOL "Prefer linking against static LLVM libraries")
 set(ZIG_STATIC_ZLIB off CACHE BOOL "Prefer linking against static zlib")
-set(ZIG_PREFER_CLANG_CPP_DYLIB off CACHE BOOL "Try to link against -lclang-cpp")
 set(ZIG_USE_CCACHE off CACHE BOOL "Use ccache if available")
 
 if(CCACHE_PROGRAM AND ZIG_USE_CCACHE)
@@ -78,6 +78,10 @@ endif()
 if(ZIG_STATIC)
     set(ZIG_STATIC_LLVM ON)
     set(ZIG_STATIC_ZLIB ON)
+endif()
+
+if (ZIG_SHARED_LLVM AND ZIG_STATIC_LLVM)
+    message(SEND_ERROR "-DZIG_SHARED_LLVM and -DZIG_STATIC_LLVM cannot both be enabled simultaneously")
 endif()
 
 string(REGEX REPLACE "\\\\" "\\\\\\\\" ZIG_LIBC_LIB_DIR_ESCAPED "${ZIG_LIBC_LIB_DIR}")
@@ -104,19 +108,19 @@ else()
     set(ZIG_USE_LLVM_CONFIG OFF CACHE BOOL "use llvm-config to find LLVM libraries")
 endif()
 
-find_package(llvm 13)
-find_package(clang 13)
-find_package(lld 13)
+find_package(llvm 14)
+find_package(clang 14)
+find_package(lld 14)
 
 if(ZIG_STATIC_ZLIB)
     list(REMOVE_ITEM LLVM_LIBRARIES "-lz")
-    find_library(ZLIB NAMES libz.a libzlibstatic.a z zlib libz)
+    find_library(ZLIB NAMES libz.a libzlibstatic.a z zlib libz NAMES_PER_DIR)
     list(APPEND LLVM_LIBRARIES "${ZLIB}")
 endif()
 
 if(APPLE AND ZIG_STATIC)
     list(REMOVE_ITEM LLVM_LIBRARIES "-lcurses")
-    find_library(CURSES NAMES libcurses.a libncurses.a
+    find_library(CURSES NAMES libcurses.a libncurses.a NAMES_PER_DIR
       PATHS
         /usr/local/opt/ncurses/lib
         /opt/homebrew/opt/ncurses/lib)
@@ -340,7 +344,6 @@ set(STAGE1_SOURCES
     "${CMAKE_SOURCE_DIR}/src/stage1/bigint.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/buffer.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/codegen.cpp"
-    "${CMAKE_SOURCE_DIR}/src/stage1/dump_analysis.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/errmsg.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/error.cpp"
     "${CMAKE_SOURCE_DIR}/src/stage1/heap.cpp"
@@ -667,7 +670,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/target/powerpc.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/target/riscv.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/target/sparc.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/target/systemz.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/target/s390x.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/target/wasm.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/target/x86.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/Thread.zig"
@@ -746,7 +749,6 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/libunwind.zig"
     "${CMAKE_SOURCE_DIR}/src/link.zig"
     "${CMAKE_SOURCE_DIR}/src/link/C.zig"
-    "${CMAKE_SOURCE_DIR}/src/link/C/zig.h"
     "${CMAKE_SOURCE_DIR}/src/link/Coff.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Elf.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO.zig"
@@ -758,10 +760,12 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/link/MachO/Object.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/Trie.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/bind.zig"
+    "${CMAKE_SOURCE_DIR}/src/link/MachO/dead_strip.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Plan9.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Plan9/aout.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Wasm.zig"
     "${CMAKE_SOURCE_DIR}/src/link/msdos-stub.bin"
+    "${CMAKE_SOURCE_DIR}/src/link/strtab.zig"
     "${CMAKE_SOURCE_DIR}/src/link/tapi.zig"
     "${CMAKE_SOURCE_DIR}/src/link/tapi/Tokenizer.zig"
     "${CMAKE_SOURCE_DIR}/src/link/tapi/parse.zig"

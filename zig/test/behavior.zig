@@ -159,12 +159,13 @@ test {
     _ = @import("behavior/while.zig");
     _ = @import("behavior/widening.zig");
 
-    if (builtin.stage2_arch == .wasm32) {
+    if (builtin.cpu.arch == .wasm32) {
         _ = @import("behavior/wasm.zig");
     }
 
     if (builtin.zig_backend != .stage1) {
         _ = @import("behavior/decltest.zig");
+        _ = @import("behavior/packed_struct_explicit_backing_int.zig");
     }
 
     if (builtin.os.tag != .wasi) {

@@ -462,6 +462,11 @@ pub fn addStandaloneTests(
     skip_non_native: bool,
     enable_macos_sdk: bool,
     target: std.zig.CrossTarget,
+    enable_darling: bool,
+    enable_qemu: bool,
+    enable_rosetta: bool,
+    enable_wasmtime: bool,
+    enable_wine: bool,
 ) *build.Step {
     const cases = b.allocator.create(StandaloneContext) catch unreachable;
     cases.* = StandaloneContext{
@@ -473,6 +478,11 @@ pub fn addStandaloneTests(
         .skip_non_native = skip_non_native,
         .enable_macos_sdk = enable_macos_sdk,
         .target = target,
+        .enable_darling = enable_darling,
+        .enable_qemu = enable_qemu,
+        .enable_rosetta = enable_rosetta,
+        .enable_wasmtime = enable_wasmtime,
+        .enable_wine = enable_wine,
     };
 
     standalone.addCases(cases);
@@ -591,7 +601,6 @@ pub fn addPkgTests(
     skip_libc: bool,
     skip_stage1: bool,
     skip_stage2: bool,
-    is_stage1: bool,
 ) *build.Step {
     const step = b.step(b.fmt("test-{s}", .{name}), desc);
 
@@ -620,7 +629,7 @@ pub fn addPkgTests(
         if (test_target.backend) |backend| switch (backend) {
             .stage1 => if (skip_stage1) continue,
             else => if (skip_stage2) continue,
-        } else if (is_stage1 and skip_stage1) continue;
+        } else if (skip_stage2) continue;
 
         const want_this_mode = for (modes) |m| {
             if (m == test_target.mode) break true;
@@ -957,6 +966,11 @@ pub const StandaloneContext = struct {
     skip_non_native: bool,
     enable_macos_sdk: bool,
     target: std.zig.CrossTarget,
+    enable_darling: bool = false,
+    enable_qemu: bool = false,
+    enable_rosetta: bool = false,
+    enable_wasmtime: bool = false,
+    enable_wine: bool = false,
 
     pub fn addC(self: *StandaloneContext, root_src: []const u8) void {
         self.addAllArgs(root_src, true);
@@ -970,6 +984,8 @@ pub const StandaloneContext = struct {
         build_modes: bool = false,
         cross_targets: bool = false,
         requires_macos_sdk: bool = false,
+        requires_stage2: bool = false,
+        use_emulation: bool = false,
     }) void {
         const b = self.b;
 
@@ -1000,6 +1016,24 @@ pub const StandaloneContext = struct {
             zig_args.append(target_arg) catch unreachable;
         }
 
+        if (features.use_emulation) {
+            if (self.enable_darling) {
+                zig_args.append("-fdarling") catch unreachable;
+            }
+            if (self.enable_qemu) {
+                zig_args.append("-fqemu") catch unreachable;
+            }
+            if (self.enable_rosetta) {
+                zig_args.append("-frosetta") catch unreachable;
+            }
+            if (self.enable_wasmtime) {
+                zig_args.append("-fwasmtime") catch unreachable;
+            }
+            if (self.enable_wine) {
+                zig_args.append("-fwine") catch unreachable;
+            }
+        }
+
         const modes = if (features.build_modes) self.modes else &[1]Mode{.Debug};
         for (modes) |mode| {
             const arg = switch (mode) {
@@ -1014,7 +1048,7 @@ pub const StandaloneContext = struct {
             defer zig_args.resize(zig_args_base_len) catch unreachable;
 
             const run_cmd = b.addSystemCommand(zig_args.items);
-            const log_step = b.addLog("PASS {s} ({s})\n", .{ annotated_case_name, @tagName(mode) });
+            const log_step = b.addLog("PASS {s} ({s})", .{ annotated_case_name, @tagName(mode) });
             log_step.step.dependOn(&run_cmd.step);
 
             self.step.dependOn(&log_step.step);
@@ -1039,7 +1073,7 @@ pub const StandaloneContext = struct {
                 exe.linkSystemLibrary("c");
             }
 
-            const log_step = b.addLog("PASS {s}\n", .{annotated_case_name});
+            const log_step = b.addLog("PASS {s}", .{annotated_case_name});
             log_step.step.dependOn(&exe.step);
 
             self.step.dependOn(&log_step.step);

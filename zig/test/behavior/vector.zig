@@ -101,18 +101,20 @@ test "vector float operators" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
 
-    const S = struct {
-        fn doTheTest() !void {
-            var v: @Vector(4, f32) = [4]f32{ 10, 20, 30, 40 };
-            var x: @Vector(4, f32) = [4]f32{ 1, 2, 3, 4 };
-            try expect(mem.eql(f32, &@as([4]f32, v + x), &[4]f32{ 11, 22, 33, 44 }));
-            try expect(mem.eql(f32, &@as([4]f32, v - x), &[4]f32{ 9, 18, 27, 36 }));
-            try expect(mem.eql(f32, &@as([4]f32, v * x), &[4]f32{ 10, 40, 90, 160 }));
-            try expect(mem.eql(f32, &@as([4]f32, -x), &[4]f32{ -1, -2, -3, -4 }));
-        }
-    };
-    try S.doTheTest();
-    comptime try S.doTheTest();
+    inline for ([_]type{ f16, f32, f64, f80, f128 }) |T| {
+        const S = struct {
+            fn doTheTest() !void {
+                var v: @Vector(4, T) = [4]T{ 10, 20, 30, 40 };
+                var x: @Vector(4, T) = [4]T{ 1, 2, 3, 4 };
+                try expect(mem.eql(T, &@as([4]T, v + x), &[4]T{ 11, 22, 33, 44 }));
+                try expect(mem.eql(T, &@as([4]T, v - x), &[4]T{ 9, 18, 27, 36 }));
+                try expect(mem.eql(T, &@as([4]T, v * x), &[4]T{ 10, 40, 90, 160 }));
+                try expect(mem.eql(T, &@as([4]T, -x), &[4]T{ -1, -2, -3, -4 }));
+            }
+        };
+        try S.doTheTest();
+        comptime try S.doTheTest();
+    }
 }
 
 test "vector bit operators" {
@@ -803,6 +805,23 @@ test "vector reduce operation" {
 
     try S.doTheTest();
     comptime try S.doTheTest();
+}
+
+test "vector @reduce comptime" {
+    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+
+    const value = @Vector(4, i32){ 1, -1, 1, -1 };
+    const result = value > @splat(4, @as(i32, 0));
+    // result is { true, false, true, false };
+    comptime try expect(@TypeOf(result) == @Vector(4, bool));
+    const is_all_true = @reduce(.And, result);
+    comptime try expect(@TypeOf(is_all_true) == bool);
+    try expect(is_all_true == false);
 }
 
 test "mask parameter of @shuffle is comptime scope" {

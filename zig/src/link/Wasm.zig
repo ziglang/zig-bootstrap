@@ -356,7 +356,7 @@ pub fn createEmpty(gpa: Allocator, options: link.Options) !*Wasm {
     }
 
     const use_llvm = build_options.have_llvm and options.use_llvm;
-    const use_stage1 = build_options.is_stage1 and options.use_stage1;
+    const use_stage1 = build_options.have_stage1 and options.use_stage1;
     if (use_llvm and !use_stage1) {
         self.llvm_object = try LlvmObject.create(gpa, options);
     }
@@ -1206,6 +1206,14 @@ fn parseAtom(self: *Wasm, atom: *Atom, kind: Kind) !void {
             };
             symbol.tag = .data;
 
+            // when creating an object file, or importing memory and the data belongs in the .bss segment
+            // we set the entire region of it to zeroes.
+            // We do not have to do this when exporting the memory (the default) because the runtime
+            // will do it for us, and we do not emit the bss segment at all.
+            if ((self.base.options.output_mode == .Obj or self.base.options.import_memory) and kind.data == .uninitialized) {
+                std.mem.set(u8, atom.code.items, 0);
+            }
+
             const should_merge = self.base.options.output_mode != .Obj;
             const gop = try self.data_segments.getOrPut(self.base.allocator, segment_info.outputName(should_merge));
             if (gop.found_existing) {
@@ -1621,7 +1629,7 @@ fn setupMemory(self: *Wasm) !void {
             return error.MemoryTooBig;
         }
         self.memories.limits.max = @intCast(u32, max_memory / page_size);
-        log.debug("Maximum memory pages: {d}", .{self.memories.limits.max});
+        log.debug("Maximum memory pages: {?d}", .{self.memories.limits.max});
     }
 }
 
@@ -2014,9 +2022,10 @@ pub fn flushModule(self: *Wasm, comp: *Compilation, prog_node: *std.Progress.Nod
         }
 
         if (import_memory) {
+            const mem_name = if (is_obj) "__linear_memory" else "memory";
             const mem_imp: types.Import = .{
                 .module_name = try self.string_table.put(self.base.allocator, self.host_name),
-                .name = try self.string_table.put(self.base.allocator, "__linear_memory"),
+                .name = try self.string_table.put(self.base.allocator, mem_name),
                 .kind = .{ .memory = self.memories.limits },
             };
             try self.emitImport(writer, mem_imp);
@@ -2492,7 +2501,7 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation, prog_node: *std.Progress.Node) !
     // If there is no Zig code to compile, then we should skip flushing the output file because it
     // will not be part of the linker line anyway.
     const module_obj_path: ?[]const u8 = if (self.base.options.module) |mod| blk: {
-        const use_stage1 = build_options.is_stage1 and self.base.options.use_stage1;
+        const use_stage1 = build_options.have_stage1 and self.base.options.use_stage1;
         if (use_stage1) {
             const obj_basename = try std.zig.binNameAlloc(arena, .{
                 .root_name = self.base.options.root_name,
@@ -2702,7 +2711,7 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation, prog_node: *std.Progress.Node) !
             if (self.base.options.module) |mod| {
                 // when we use stage1, we use the exports that stage1 provided us.
                 // For stage2, we can directly retrieve them from the module.
-                const use_stage1 = build_options.is_stage1 and self.base.options.use_stage1;
+                const use_stage1 = build_options.have_stage1 and self.base.options.use_stage1;
                 if (use_stage1) {
                     for (comp.export_symbol_names.items) |symbol_name| {
                         try argv.append(try std.fmt.allocPrint(arena, "--export={s}", .{symbol_name}));

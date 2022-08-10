@@ -126,6 +126,9 @@ pub const Value = opaque {
     pub const setThreadLocalMode = LLVMSetThreadLocalMode;
     extern fn LLVMSetThreadLocalMode(Global: *const Value, Mode: ThreadLocalMode) void;
 
+    pub const setSection = LLVMSetSection;
+    extern fn LLVMSetSection(Global: *const Value, Section: [*:0]const u8) void;
+
     pub const deleteGlobal = LLVMDeleteGlobal;
     extern fn LLVMDeleteGlobal(GlobalVar: *const Value) void;
 
@@ -168,6 +171,9 @@ pub const Value = opaque {
 
     pub const constNot = LLVMConstNot;
     extern fn LLVMConstNot(ConstantVal: *const Value) *const Value;
+
+    pub const constAdd = LLVMConstAdd;
+    extern fn LLVMConstAdd(LHSConstant: *const Value, RHSConstant: *const Value) *const Value;
 
     pub const setWeak = LLVMSetWeak;
     extern fn LLVMSetWeak(CmpXchgInst: *const Value, IsWeak: Bool) void;
@@ -301,6 +307,12 @@ pub const Type = opaque {
 
     pub const countStructElementTypes = LLVMCountStructElementTypes;
     extern fn LLVMCountStructElementTypes(StructTy: *const Type) c_uint;
+
+    pub const isOpaqueStruct = LLVMIsOpaqueStruct;
+    extern fn LLVMIsOpaqueStruct(StructTy: *const Type) Bool;
+
+    pub const isSized = LLVMTypeIsSized;
+    extern fn LLVMTypeIsSized(Ty: *const Type) Bool;
 };
 
 pub const Module = opaque {
@@ -935,6 +947,9 @@ pub const Builder = opaque {
 
     pub const buildFPMulReduce = ZigLLVMBuildFPMulReduce;
     extern fn ZigLLVMBuildFPMulReduce(B: *const Builder, Acc: *const Value, Val: *const Value) *const Value;
+
+    pub const setFastMath = ZigLLVMSetFastMath;
+    extern fn ZigLLVMSetFastMath(B: *const Builder, on_state: bool) void;
 };
 
 pub const MDString = opaque {
@@ -1032,6 +1047,9 @@ pub const TargetData = opaque {
 
     pub const abiAlignmentOfType = LLVMABIAlignmentOfType;
     extern fn LLVMABIAlignmentOfType(TD: *const TargetData, Ty: *const Type) c_uint;
+
+    pub const abiSizeOfType = LLVMABISizeOfType;
+    extern fn LLVMABISizeOfType(TD: *const TargetData, Ty: *const Type) c_ulonglong;
 };
 
 pub const CodeModel = enum(c_int) {

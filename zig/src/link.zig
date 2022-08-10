@@ -123,6 +123,7 @@ pub const Options = struct {
     nxcompat: bool,
     dynamicbase: bool,
     linker_optimization: u8,
+    compress_debug_sections: CompressDebugSections,
     bind_global_refs_locally: bool,
     import_memory: bool,
     import_table: bool,
@@ -219,6 +220,8 @@ pub const Options = struct {
 
 pub const HashStyle = enum { sysv, gnu, both };
 
+pub const CompressDebugSections = enum { none, zlib };
+
 pub const File = struct {
     tag: Tag,
     options: Options,
@@ -274,7 +277,7 @@ pub const File = struct {
             return &(try MachO.openPath(allocator, options)).base;
         }
 
-        const use_stage1 = build_options.is_stage1 and options.use_stage1;
+        const use_stage1 = build_options.have_stage1 and options.use_stage1;
         if (use_stage1 or options.emit == null) {
             return switch (options.object_format) {
                 .coff => &(try Coff.createEmpty(allocator, options)).base,
@@ -348,7 +351,7 @@ pub const File = struct {
 
     pub fn makeWritable(base: *File) !void {
         switch (base.tag) {
-            .coff, .elf, .macho, .plan9 => {
+            .coff, .elf, .macho, .plan9, .wasm => {
                 if (base.file != null) return;
                 const emit = base.options.emit orelse return;
                 base.file = try emit.directory.handle.createFile(emit.sub_path, .{
@@ -357,7 +360,7 @@ pub const File = struct {
                     .mode = determineMode(base.options),
                 });
             },
-            .c, .wasm, .spirv, .nvptx => {},
+            .c, .spirv, .nvptx => {},
         }
     }
 
@@ -391,7 +394,7 @@ pub const File = struct {
                     base.file = null;
                 }
             },
-            .coff, .elf, .plan9 => if (base.file) |f| {
+            .coff, .elf, .plan9, .wasm => if (base.file) |f| {
                 if (base.intermediary_basename != null) {
                     // The file we have open is not the final file that we want to
                     // make executable, so we don't have to close it.
@@ -400,7 +403,7 @@ pub const File = struct {
                 f.close();
                 base.file = null;
             },
-            .c, .wasm, .spirv, .nvptx => {},
+            .c, .spirv, .nvptx => {},
         }
     }
 
@@ -541,12 +544,7 @@ pub const File = struct {
         switch (base.tag) {
             .coff => return @fieldParentPtr(Coff, "base", base).allocateDeclIndexes(decl_index),
             .elf => return @fieldParentPtr(Elf, "base", base).allocateDeclIndexes(decl_index),
-            .macho => return @fieldParentPtr(MachO, "base", base).allocateDeclIndexes(decl_index) catch |err| switch (err) {
-                // remap this error code because we are transitioning away from
-                // `allocateDeclIndexes`.
-                error.Overflow => return error.OutOfMemory,
-                error.OutOfMemory => return error.OutOfMemory,
-            },
+            .macho => return @fieldParentPtr(MachO, "base", base).allocateDeclIndexes(decl_index),
             .wasm => return @fieldParentPtr(Wasm, "base", base).allocateDeclIndexes(decl_index),
             .plan9 => return @fieldParentPtr(Plan9, "base", base).allocateDeclIndexes(decl_index),
             .c, .spirv, .nvptx => {},
@@ -813,7 +811,7 @@ pub const File = struct {
         // If there is no Zig code to compile, then we should skip flushing the output file
         // because it will not be part of the linker line anyway.
         const module_obj_path: ?[]const u8 = if (base.options.module) |module| blk: {
-            const use_stage1 = build_options.is_stage1 and base.options.use_stage1;
+            const use_stage1 = build_options.have_stage1 and base.options.use_stage1;
             if (use_stage1) {
                 const obj_basename = try std.zig.binNameAlloc(arena, .{
                     .root_name = base.options.root_name,

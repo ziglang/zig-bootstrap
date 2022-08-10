@@ -751,6 +751,32 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .wrap_errunion_payload => try self.airWrapErrUnionPayload(inst),
             .wrap_errunion_err     => try self.airWrapErrUnionErr(inst),
 
+            .add_optimized,
+            .addwrap_optimized,
+            .sub_optimized,
+            .subwrap_optimized,
+            .mul_optimized,
+            .mulwrap_optimized,
+            .div_float_optimized,
+            .div_trunc_optimized,
+            .div_floor_optimized,
+            .div_exact_optimized,
+            .rem_optimized,
+            .mod_optimized,
+            .neg_optimized,
+            .cmp_lt_optimized,
+            .cmp_lte_optimized,
+            .cmp_eq_optimized,
+            .cmp_gte_optimized,
+            .cmp_gt_optimized,
+            .cmp_neq_optimized,
+            .cmp_vector_optimized,
+            .reduce_optimized,
+            .float_to_int_optimized,
+            => return self.fail("TODO implement optimized float mode", .{}),
+
+            .is_named_enum_value => return self.fail("TODO implement is_named_enum_value", .{}),
+
             .wasm_memory_size => unreachable,
             .wasm_memory_grow => unreachable,
             // zig fmt: on
@@ -2644,8 +2670,8 @@ fn loadMemPtrIntoRegister(self: *Self, reg: Register, ptr_ty: Type, ptr: MCValue
                     .flags = flags,
                 }),
                 .data = .{
-                    .load_reloc = .{
-                        .atom_index = fn_owner_decl.link.macho.local_sym_index,
+                    .relocation = .{
+                        .atom_index = fn_owner_decl.link.macho.sym_index,
                         .sym_index = sym_index,
                     },
                 },
@@ -3765,7 +3791,7 @@ fn airArg(self: *Self, inst: Air.Inst.Index) !void {
 
     const ty = self.air.typeOfIndex(inst);
     const mcv = self.args[arg_index];
-    const name = self.mod_fn.getParamName(arg_index);
+    const name = self.mod_fn.getParamName(self.bin_file.options.module.?, arg_index);
     const name_with_null = name.ptr[0 .. name.len + 1];
 
     if (self.liveness.isUnused(inst))
@@ -3977,7 +4003,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallOptions.
                 const func = func_payload.data;
                 const fn_owner_decl = mod.declPtr(func.owner_decl);
                 try self.genSetReg(Type.initTag(.usize), .rax, .{
-                    .got_load = fn_owner_decl.link.macho.local_sym_index,
+                    .got_load = fn_owner_decl.link.macho.sym_index,
                 });
                 // callq *%rax
                 _ = try self.addInst(.{
@@ -3997,14 +4023,14 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallOptions.
                         lib_name,
                     });
                 }
-                const n_strx = try macho_file.getGlobalSymbol(mem.sliceTo(decl_name, 0));
+                const sym_index = try macho_file.getGlobalSymbol(mem.sliceTo(decl_name, 0));
                 _ = try self.addInst(.{
                     .tag = .call_extern,
                     .ops = undefined,
                     .data = .{
-                        .extern_fn = .{
-                            .atom_index = mod.declPtr(self.mod_fn.owner_decl).link.macho.local_sym_index,
-                            .sym_name = n_strx,
+                        .relocation = .{
+                            .atom_index = mod.declPtr(self.mod_fn.owner_decl).link.macho.sym_index,
+                            .sym_index = sym_index,
                         },
                     },
                 });
@@ -6771,8 +6797,8 @@ fn lowerDeclRef(self: *Self, tv: TypedValue, decl_index: Module.Decl.Index) Inne
     } else if (self.bin_file.cast(link.File.MachO)) |_| {
         // Because MachO is PIE-always-on, we defer memory address resolution until
         // the linker has enough info to perform relocations.
-        assert(decl.link.macho.local_sym_index != 0);
-        return MCValue{ .got_load = decl.link.macho.local_sym_index };
+        assert(decl.link.macho.sym_index != 0);
+        return MCValue{ .got_load = decl.link.macho.sym_index };
     } else if (self.bin_file.cast(link.File.Coff)) |coff_file| {
         const got_addr = coff_file.offset_table_virtual_address + decl.link.coff.offset_table_index * ptr_bytes;
         return MCValue{ .memory = got_addr };

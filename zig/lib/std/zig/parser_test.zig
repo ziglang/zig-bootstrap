@@ -184,15 +184,6 @@ test "zig fmt: file ends in comment after var decl" {
     );
 }
 
-test "zig fmt: doc comments on test" {
-    try testCanonical(
-        \\/// hello
-        \\/// world
-        \\test "" {}
-        \\
-    );
-}
-
 test "zig fmt: if statment" {
     try testCanonical(
         \\test "" {
@@ -210,6 +201,27 @@ test "zig fmt: top-level fields" {
         \\structs: ?x,
         \\
     );
+}
+
+test "zig fmt: C style containers" {
+    try testError(
+        \\struct Foo {
+        \\    a: u32,
+        \\};
+    , &[_]Error{
+        .c_style_container,
+        .zig_style_container,
+    });
+    try testError(
+        \\test {
+        \\    struct Foo {
+        \\        a: u32,
+        \\    };
+        \\}
+    , &[_]Error{
+        .c_style_container,
+        .zig_style_container,
+    });
 }
 
 test "zig fmt: decl between fields" {
@@ -2679,9 +2691,6 @@ test "zig fmt: comments in statements" {
 
 test "zig fmt: comments before test decl" {
     try testCanonical(
-        \\/// top level doc comment
-        \\test "hi" {}
-        \\
         \\// top level normal comment
         \\test "hi" {}
         \\
@@ -3053,6 +3062,13 @@ test "zig fmt: struct declaration" {
         \\    b: u8,
         \\
         \\    c: u8,
+        \\};
+        \\
+        \\const Ps = packed struct(u32) {
+        \\    a: u1,
+        \\    b: u2,
+        \\
+        \\    c: u29,
         \\};
         \\
         \\const Es = extern struct {
@@ -5106,6 +5122,14 @@ test "zig fmt: while continue expr" {
         \\}
     , &[_]Error{
         .expected_continue_expr,
+    });
+}
+
+test "zig fmt: error for missing sentinel value in sentinel slice" {
+    try testError(
+        \\const foo = foo[0..:];
+    , &[_]Error{
+        .expected_expr,
     });
 }
 

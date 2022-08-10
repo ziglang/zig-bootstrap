@@ -7,7 +7,7 @@ TARGET="$2" # Example: riscv64-linux-gnu
 MCPU="$3" # Examples: `baseline`, `native`, `generic+v7a`, or `arm1176jzf_s`
 
 ROOTDIR="$(pwd)"
-ZIG_VERSION="0.10.0-dev.2931+bdf3fa12f"
+ZIG_VERSION="0.10.0-dev.3530+d2ecb0d7c"
 
 TARGET_OS_AND_ABI=${TARGET#*-} # Example: linux-gnu
 
@@ -60,7 +60,7 @@ export CC="$ZIG cc -fno-sanitize=all -s -target $TARGET -mcpu=$MCPU"
 export CXX="$ZIG c++ -fno-sanitize=all -s -target $TARGET -mcpu=$MCPU"
 
 # First cross compile zlib for the target, as we need the LLVM linked into
-# the finaly zig binary to have zlib support enabled.
+# the final zig binary to have zlib support enabled.
 mkdir -p "$ROOTDIR/out/build-zlib-$TARGET-$MCPU"
 cd "$ROOTDIR/out/build-zlib-$TARGET-$MCPU"
 cmake "$ROOTDIR/zlib" \

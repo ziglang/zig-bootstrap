@@ -2781,7 +2781,7 @@ static Error type_is_valid_extern_enum_tag(CodeGen *g, ZigType *ty, bool *result
 
     // According to the ANSI C standard the enumeration type should be either a
     // signed char, a signed integer or an unsigned one. But GCC/Clang allow
-    // other integral types as a compiler extension so let's accomodate them
+    // other integral types as a compiler extension so let's accommodate them
     // aswell.
     return type_allowed_in_extern(g, ty, ExternPositionOther, result);
 }
@@ -3033,6 +3033,12 @@ static Error resolve_struct_zero_bits(CodeGen *g, ZigType *struct_type) {
         return ErrorNone;
 
     AstNode *decl_node = struct_type->data.structure.decl_node;
+
+    if (decl_node->data.container_decl.unsupported_explicit_backing_int) {
+        add_node_error(g, decl_node, buf_create_from_str(
+            "the stage1 compiler does not support explicit backing integer types on packed structs"));
+        return ErrorSemanticAnalyzeFail;
+    }
 
     if (struct_type->data.structure.resolve_loop_flag_zero_bits) {
         if (struct_type->data.structure.resolve_status != ResolveStatusInvalid) {

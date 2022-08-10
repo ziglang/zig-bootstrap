@@ -6,6 +6,8 @@ const expectEqual = std.testing.expectEqual;
 const native_endian = builtin.cpu.arch.endian();
 
 test "correct size of packed structs" {
+    // Stage2 has different packed struct semantics.
+    if (builtin.zig_backend != .stage1) return error.SkipZigTest;
     const T1 = packed struct { one: u8, three: [3]u8 };
 
     try expectEqual(4, @sizeOf(T1));
@@ -118,18 +120,6 @@ test "flags in packed structs" {
     try expectEqual(32, @bitSizeOf(Flags3));
 }
 
-test "arrays in packed structs" {
-    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
-
-    const T1 = packed struct { array: [3][3]u8 };
-    const T2 = packed struct { array: [9]u8 };
-
-    try expectEqual(@sizeOf(u72), @sizeOf(T1));
-    try expectEqual(72, @bitSizeOf(T1));
-    try expectEqual(@sizeOf(u72), @sizeOf(T2));
-    try expectEqual(72, @bitSizeOf(T2));
-}
-
 test "consistent size of packed structs" {
     if (builtin.zig_backend == .stage1) return error.SkipZigTest;
 
@@ -145,22 +135,14 @@ test "consistent size of packed structs" {
     try expectEqual(register_size_bits, @bitSizeOf(TxData2));
     try expectEqual(register_size_bytes, @sizeOf(TxData2));
 
-    const TxData3 = packed struct { a: u32, b: [3]u8 };
     const TxData4 = packed struct { a: u32, b: u24 };
-    const TxData5 = packed struct { a: [3]u8, b: u32 };
     const TxData6 = packed struct { a: u24, b: u32 };
 
     const expectedBitSize = 56;
     const expectedByteSize = @sizeOf(u56);
 
-    try expectEqual(expectedBitSize, @bitSizeOf(TxData3));
-    try expectEqual(expectedByteSize, @sizeOf(TxData3));
-
     try expectEqual(expectedBitSize, @bitSizeOf(TxData4));
     try expectEqual(expectedByteSize, @sizeOf(TxData4));
-
-    try expectEqual(expectedBitSize, @bitSizeOf(TxData5));
-    try expectEqual(expectedByteSize, @sizeOf(TxData5));
 
     try expectEqual(expectedBitSize, @bitSizeOf(TxData6));
     try expectEqual(expectedByteSize, @sizeOf(TxData6));
@@ -234,12 +216,6 @@ test "correct sizeOf and offsets in packed structs" {
         try expectEqual(@as(u7, 0b1111010), s2.y);
         try expectEqual(@as(u24, 0xd5c71f), s2.z);
     }
-
-    const S = packed struct { a: u32, pad: [3]u32, b: u32 };
-
-    try expectEqual(16, @offsetOf(S, "b"));
-    try expectEqual(128, @bitOffsetOf(S, "b"));
-    try expectEqual(@sizeOf(u160), @sizeOf(S));
 }
 
 test "nested packed structs" {
@@ -412,4 +388,49 @@ test "byte-aligned field pointer offsets" {
 
     try S.doTheTest();
     comptime try S.doTheTest();
+}
+
+test "load pointer from packed struct" {
+    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;
+
+    const A = struct {
+        index: u16,
+    };
+    const B = packed struct {
+        x: *A,
+        y: u32,
+    };
+    var a: A = .{ .index = 123 };
+    var b_list: []B = &.{.{ .x = &a, .y = 99 }};
+    for (b_list) |b| {
+        var i = b.x.index;
+        try expect(i == 123);
+    }
+}
+
+test "@ptrToInt on a packed struct field" {
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+
+    const S = struct {
+        const P = packed struct {
+            x: u8,
+            y: u8,
+            z: u32,
+        };
+        var p0: P = P{
+            .x = 1,
+            .y = 2,
+            .z = 0,
+        };
+    };
+    try expect(@ptrToInt(&S.p0.z) - @ptrToInt(&S.p0.x) == 2);
 }

@@ -603,7 +603,7 @@ stack_alignment: u32 = 16,
 
 const InnerError = error{
     OutOfMemory,
-    /// An error occured when trying to lower AIR to MIR.
+    /// An error occurred when trying to lower AIR to MIR.
     CodegenFail,
     /// Can occur when dereferencing a pointer that points to a `Decl` of which the analysis has failed
     AnalysisFail,
@@ -1621,7 +1621,32 @@ fn genInst(self: *Self, inst: Air.Inst.Index) !WValue {
         .tag_name,
         .err_return_trace,
         .set_err_return_trace,
+        .is_named_enum_value,
         => |tag| return self.fail("TODO: Implement wasm inst: {s}", .{@tagName(tag)}),
+
+        .add_optimized,
+        .addwrap_optimized,
+        .sub_optimized,
+        .subwrap_optimized,
+        .mul_optimized,
+        .mulwrap_optimized,
+        .div_float_optimized,
+        .div_trunc_optimized,
+        .div_floor_optimized,
+        .div_exact_optimized,
+        .rem_optimized,
+        .mod_optimized,
+        .neg_optimized,
+        .cmp_lt_optimized,
+        .cmp_lte_optimized,
+        .cmp_eq_optimized,
+        .cmp_gte_optimized,
+        .cmp_gt_optimized,
+        .cmp_neq_optimized,
+        .cmp_vector_optimized,
+        .reduce_optimized,
+        .float_to_int_optimized,
+        => return self.fail("TODO implement optimized float mode", .{}),
     };
 }
 
@@ -1650,7 +1675,7 @@ fn airRet(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
                 try self.emitWValue(operand);
                 const opcode = buildOpcode(.{
                     .op = .load,
-                    .width = @intCast(u8, scalar_type.abiSize(self.target)),
+                    .width = @intCast(u8, scalar_type.abiSize(self.target) * 8),
                     .signedness = if (scalar_type.isSignedInt()) .signed else .unsigned,
                     .valtype1 = typeToValtype(scalar_type, self.target),
                 });
@@ -1749,7 +1774,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallOptions.
         } else if (func_val.castTag(.decl_ref)) |decl_ref| {
             break :blk module.declPtr(decl_ref.data);
         }
-        return self.fail("Expected a function, but instead found type '{s}'", .{func_val.tag()});
+        return self.fail("Expected a function, but instead found type '{}'", .{func_val.tag()});
     };
 
     const sret = if (first_param_sret) blk: {
@@ -1967,7 +1992,7 @@ fn airArg(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     switch (self.debug_output) {
         .dwarf => |dwarf| {
             // TODO: Get the original arg index rather than wasm arg index
-            const name = self.mod_fn.getParamName(arg_index);
+            const name = self.mod_fn.getParamName(self.bin_file.base.options.module.?, arg_index);
             const leb_size = link.File.Wasm.getULEB128Size(arg.local);
             const dbg_info = &dwarf.dbg_info;
             try dbg_info.ensureUnusedCapacity(3 + leb_size + 5 + name.len + 1);
@@ -2341,7 +2366,7 @@ fn lowerConstant(self: *Self, val: Value, ty: Type) InnerError!WValue {
             },
             .int_u64, .one => return WValue{ .imm32 = @intCast(u32, val.toUnsignedInt(target)) },
             .zero, .null_value => return WValue{ .imm32 = 0 },
-            else => return self.fail("Wasm TODO: lowerConstant for other const pointer tag {s}", .{val.tag()}),
+            else => return self.fail("Wasm TODO: lowerConstant for other const pointer tag {}", .{val.tag()}),
         },
         .Enum => {
             if (val.castTag(.enum_field_index)) |field_index| {
@@ -2397,7 +2422,7 @@ fn lowerConstant(self: *Self, val: Value, ty: Type) InnerError!WValue {
             const is_pl = val.tag() == .opt_payload;
             return WValue{ .imm32 = if (is_pl) @as(u32, 1) else 0 };
         },
-        else => |zig_type| return self.fail("Wasm TODO: LowerConstant for zigTypeTag {s}", .{zig_type}),
+        else => |zig_type| return self.fail("Wasm TODO: LowerConstant for zigTypeTag {}", .{zig_type}),
     }
 }
 
@@ -4386,7 +4411,7 @@ fn airMulWithOverflow(self: *Self, inst: Air.Inst.Index) InnerError!WValue {
     }
 
     // We store the bit if it's overflowed or not in this. As it's zero-initialized
-    // we only need to update it if an overflow (or underflow) occured.
+    // we only need to update it if an overflow (or underflow) occurred.
     const overflow_bit = try self.allocLocal(Type.initTag(.u1));
     const int_info = lhs_ty.intInfo(self.target);
     const wasm_bits = toWasmBits(int_info.bits) orelse {

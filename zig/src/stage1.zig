@@ -18,7 +18,7 @@ const target_util = @import("target.zig");
 
 comptime {
     assert(builtin.link_libc);
-    assert(build_options.is_stage1);
+    assert(build_options.have_stage1);
     assert(build_options.have_llvm);
     if (!builtin.is_test) {
         @export(main, .{ .name = "main" });
@@ -96,10 +96,6 @@ pub const Module = extern struct {
     emit_llvm_ir_len: usize,
     emit_bitcode_ptr: [*]const u8,
     emit_bitcode_len: usize,
-    emit_analysis_json_ptr: [*]const u8,
-    emit_analysis_json_len: usize,
-    emit_docs_ptr: [*]const u8,
-    emit_docs_len: usize,
     builtin_zig_path_ptr: [*]const u8,
     builtin_zig_path_len: usize,
     test_filter_ptr: [*]const u8,
@@ -416,7 +412,7 @@ export fn stage2_add_link_lib(
     _ = symbol_name_len;
     _ = symbol_name_ptr;
     const comp = @intToPtr(*Compilation, stage1.userdata);
-    const lib_name = std.ascii.allocLowerString(comp.gpa, lib_name_ptr[0..lib_name_len]) catch return "out of memory";
+    const lib_name = lib_name_ptr[0..lib_name_len];
     const target = comp.getTarget();
     const is_libc = target_util.is_libc_lib_name(target, lib_name);
     if (is_libc) {

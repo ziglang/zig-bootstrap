@@ -34,6 +34,7 @@ const ThreadPool = @import("ThreadPool.zig");
 const WaitGroup = @import("WaitGroup.zig");
 const libtsan = @import("libtsan.zig");
 const Zir = @import("Zir.zig");
+const Autodoc = @import("Autodoc.zig");
 const Color = @import("main.zig").Color;
 
 /// General-purpose allocator. Used for both temporary and long-term storage.
@@ -338,12 +339,26 @@ pub const AllErrors = struct {
             src_path: []const u8,
             line: u32,
             column: u32,
-            byte_offset: u32,
+            span: Module.SrcLoc.Span,
             /// Usually one, but incremented for redundant messages.
             count: u32 = 1,
             /// Does not include the trailing newline.
             source_line: ?[]const u8,
             notes: []Message = &.{},
+
+            /// Splits the error message up into lines to properly indent them
+            /// to allow for long, good-looking error messages.
+            ///
+            /// This is used to split the message in `@compileError("hello\nworld")` for example.
+            fn writeMsg(src: @This(), stderr: anytype, indent: usize) !void {
+                var lines = mem.split(u8, src.msg, "\n");
+                while (lines.next()) |line| {
+                    try stderr.writeAll(line);
+                    if (lines.index == null) break;
+                    try stderr.writeByte('\n');
+                    try stderr.writeByteNTimes(' ', indent);
+                }
+            }
         },
         plain: struct {
             msg: []const u8,
@@ -367,35 +382,41 @@ pub const AllErrors = struct {
             std.debug.getStderrMutex().lock();
             defer std.debug.getStderrMutex().unlock();
             const stderr = std.io.getStdErr();
-            return msg.renderToStdErrInner(ttyconf, stderr, "error:", .Red, 0) catch return;
+            return msg.renderToWriter(ttyconf, stderr.writer(), "error", .Red, 0) catch return;
         }
 
-        fn renderToStdErrInner(
+        pub fn renderToWriter(
             msg: Message,
             ttyconf: std.debug.TTY.Config,
-            stderr_file: std.fs.File,
+            stderr: anytype,
             kind: []const u8,
             color: std.debug.TTY.Color,
             indent: usize,
         ) anyerror!void {
-            const stderr = stderr_file.writer();
+            var counting_writer = std.io.countingWriter(stderr);
+            const counting_stderr = counting_writer.writer();
             switch (msg) {
                 .src => |src| {
-                    try stderr.writeByteNTimes(' ', indent);
+                    try counting_stderr.writeByteNTimes(' ', indent);
                     ttyconf.setColor(stderr, .Bold);
-                    try stderr.print("{s}:{d}:{d}: ", .{
+                    try counting_stderr.print("{s}:{d}:{d}: ", .{
                         src.src_path,
                         src.line + 1,
                         src.column + 1,
                     });
                     ttyconf.setColor(stderr, color);
-                    try stderr.writeAll(kind);
+                    try counting_stderr.writeAll(kind);
+                    try counting_stderr.writeAll(": ");
+                    // This is the length of the part before the error message:
+                    // e.g. "file.zig:4:5: error: "
+                    const prefix_len = @intCast(usize, counting_stderr.context.bytes_written);
                     ttyconf.setColor(stderr, .Reset);
                     ttyconf.setColor(stderr, .Bold);
                     if (src.count == 1) {
-                        try stderr.print(" {s}\n", .{src.msg});
+                        try src.writeMsg(stderr, prefix_len);
+                        try stderr.writeByte('\n');
                     } else {
-                        try stderr.print(" {s}", .{src.msg});
+                        try src.writeMsg(stderr, prefix_len);
                         ttyconf.setColor(stderr, .Dim);
                         try stderr.print(" ({d} times)\n", .{src.count});
                     }
@@ -407,31 +428,39 @@ pub const AllErrors = struct {
                                 else => try stderr.writeByte(b),
                             };
                             try stderr.writeByte('\n');
-                            try stderr.writeByteNTimes(' ', src.column);
+                            // TODO basic unicode code point monospace width
+                            const before_caret = src.span.main - src.span.start;
+                            // -1 since span.main includes the caret
+                            const after_caret = src.span.end - src.span.main -| 1;
+                            try stderr.writeByteNTimes(' ', src.column - before_caret);
                             ttyconf.setColor(stderr, .Green);
-                            try stderr.writeAll("^\n");
+                            try stderr.writeByteNTimes('~', before_caret);
+                            try stderr.writeByte('^');
+                            try stderr.writeByteNTimes('~', after_caret);
+                            try stderr.writeByte('\n');
                             ttyconf.setColor(stderr, .Reset);
                         }
                     }
                     for (src.notes) |note| {
-                        try note.renderToStdErrInner(ttyconf, stderr_file, "note:", .Cyan, indent);
+                        try note.renderToWriter(ttyconf, stderr, "note", .Cyan, indent);
                     }
                 },
                 .plain => |plain| {
                     ttyconf.setColor(stderr, color);
                     try stderr.writeByteNTimes(' ', indent);
                     try stderr.writeAll(kind);
+                    try stderr.writeAll(": ");
                     ttyconf.setColor(stderr, .Reset);
                     if (plain.count == 1) {
-                        try stderr.print(" {s}\n", .{plain.msg});
+                        try stderr.print("{s}\n", .{plain.msg});
                     } else {
-                        try stderr.print(" {s}", .{plain.msg});
+                        try stderr.print("{s}", .{plain.msg});
                         ttyconf.setColor(stderr, .Dim);
                         try stderr.print(" ({d} times)\n", .{plain.count});
                     }
                     ttyconf.setColor(stderr, .Reset);
                     for (plain.notes) |note| {
-                        try note.renderToStdErrInner(ttyconf, stderr_file, "error:", .Red, indent + 4);
+                        try note.renderToWriter(ttyconf, stderr, "error", .Red, indent + 4);
                     }
                 },
             }
@@ -448,7 +477,7 @@ pub const AllErrors = struct {
                         hasher.update(src.src_path);
                         std.hash.autoHash(&hasher, src.line);
                         std.hash.autoHash(&hasher, src.column);
-                        std.hash.autoHash(&hasher, src.byte_offset);
+                        std.hash.autoHash(&hasher, src.span.main);
                     },
                     .plain => |plain| {
                         hasher.update(plain.msg);
@@ -467,7 +496,7 @@ pub const AllErrors = struct {
                                 mem.eql(u8, a_src.src_path, b_src.src_path) and
                                 a_src.line == b_src.line and
                                 a_src.column == b_src.column and
-                                a_src.byte_offset == b_src.byte_offset;
+                                a_src.span.main == b_src.span.main;
                         },
                         .plain => return false,
                     },
@@ -505,21 +534,24 @@ pub const AllErrors = struct {
             Message.HashContext,
             std.hash_map.default_max_load_percentage,
         ).init(allocator);
+        const err_source = try module_err_msg.src_loc.file_scope.getSource(module.gpa);
+        const err_span = try module_err_msg.src_loc.span(module.gpa);
+        const err_loc = std.zig.findLineColumn(err_source.bytes, err_span.main);
 
         for (module_err_msg.notes) |module_note| {
             const source = try module_note.src_loc.file_scope.getSource(module.gpa);
-            const byte_offset = try module_note.src_loc.byteOffset(module.gpa);
-            const loc = std.zig.findLineColumn(source.bytes, byte_offset);
+            const span = try module_note.src_loc.span(module.gpa);
+            const loc = std.zig.findLineColumn(source.bytes, span.main);
             const file_path = try module_note.src_loc.file_scope.fullPath(allocator);
             const note = &notes_buf[note_i];
             note.* = .{
                 .src = .{
                     .src_path = file_path,
                     .msg = try allocator.dupe(u8, module_note.msg),
-                    .byte_offset = byte_offset,
+                    .span = span,
                     .line = @intCast(u32, loc.line),
                     .column = @intCast(u32, loc.column),
-                    .source_line = try allocator.dupe(u8, loc.source_line),
+                    .source_line = if (err_loc.eql(loc)) null else try allocator.dupe(u8, loc.source_line),
                 },
             };
             const gop = try seen_notes.getOrPut(note);
@@ -537,19 +569,16 @@ pub const AllErrors = struct {
             });
             return;
         }
-        const source = try module_err_msg.src_loc.file_scope.getSource(module.gpa);
-        const byte_offset = try module_err_msg.src_loc.byteOffset(module.gpa);
-        const loc = std.zig.findLineColumn(source.bytes, byte_offset);
         const file_path = try module_err_msg.src_loc.file_scope.fullPath(allocator);
         try errors.append(.{
             .src = .{
                 .src_path = file_path,
                 .msg = try allocator.dupe(u8, module_err_msg.msg),
-                .byte_offset = byte_offset,
-                .line = @intCast(u32, loc.line),
-                .column = @intCast(u32, loc.column),
+                .span = err_span,
+                .line = @intCast(u32, err_loc.line),
+                .column = @intCast(u32, err_loc.column),
                 .notes = notes_buf[0..note_i],
-                .source_line = try allocator.dupe(u8, loc.source_line),
+                .source_line = try allocator.dupe(u8, err_loc.source_line),
             },
         });
     }
@@ -572,6 +601,16 @@ pub const AllErrors = struct {
         while (item_i < items_len) : (item_i += 1) {
             const item = file.zir.extraData(Zir.Inst.CompileErrors.Item, extra_index);
             extra_index = item.end;
+            const err_span = blk: {
+                if (item.data.node != 0) {
+                    break :blk Module.SrcLoc.nodeToSpan(&file.tree, item.data.node);
+                }
+                const token_starts = file.tree.tokens.items(.start);
+                const start = token_starts[item.data.token] + item.data.byte_offset;
+                const end = start + @intCast(u32, file.tree.tokenSlice(item.data.token).len);
+                break :blk Module.SrcLoc.Span{ .start = start, .end = end, .main = start };
+            };
+            const err_loc = std.zig.findLineColumn(file.source, err_span.main);
 
             var notes: []Message = &[0]Message{};
             if (item.data.notes != 0) {
@@ -581,52 +620,41 @@ pub const AllErrors = struct {
                 for (notes) |*note, i| {
                     const note_item = file.zir.extraData(Zir.Inst.CompileErrors.Item, body[i]);
                     const msg = file.zir.nullTerminatedString(note_item.data.msg);
-                    const byte_offset = blk: {
-                        const token_starts = file.tree.tokens.items(.start);
+                    const span = blk: {
                         if (note_item.data.node != 0) {
-                            const main_tokens = file.tree.nodes.items(.main_token);
-                            const main_token = main_tokens[note_item.data.node];
-                            break :blk token_starts[main_token];
+                            break :blk Module.SrcLoc.nodeToSpan(&file.tree, note_item.data.node);
                         }
-                        break :blk token_starts[note_item.data.token] + note_item.data.byte_offset;
+                        const token_starts = file.tree.tokens.items(.start);
+                        const start = token_starts[note_item.data.token] + note_item.data.byte_offset;
+                        const end = start + @intCast(u32, file.tree.tokenSlice(note_item.data.token).len);
+                        break :blk Module.SrcLoc.Span{ .start = start, .end = end, .main = start };
                     };
-                    const loc = std.zig.findLineColumn(file.source, byte_offset);
+                    const loc = std.zig.findLineColumn(file.source, span.main);
 
                     note.* = .{
                         .src = .{
                             .src_path = try file.fullPath(arena),
                             .msg = try arena.dupe(u8, msg),
-                            .byte_offset = byte_offset,
+                            .span = span,
                             .line = @intCast(u32, loc.line),
                             .column = @intCast(u32, loc.column),
                             .notes = &.{}, // TODO rework this function to be recursive
-                            .source_line = try arena.dupe(u8, loc.source_line),
+                            .source_line = if (loc.eql(err_loc)) null else try arena.dupe(u8, loc.source_line),
                         },
                     };
                 }
             }
 
             const msg = file.zir.nullTerminatedString(item.data.msg);
-            const byte_offset = blk: {
-                const token_starts = file.tree.tokens.items(.start);
-                if (item.data.node != 0) {
-                    const main_tokens = file.tree.nodes.items(.main_token);
-                    const main_token = main_tokens[item.data.node];
-                    break :blk token_starts[main_token];
-                }
-                break :blk token_starts[item.data.token] + item.data.byte_offset;
-            };
-            const loc = std.zig.findLineColumn(file.source, byte_offset);
-
             try errors.append(.{
                 .src = .{
                     .src_path = try file.fullPath(arena),
                     .msg = try arena.dupe(u8, msg),
-                    .byte_offset = byte_offset,
-                    .line = @intCast(u32, loc.line),
-                    .column = @intCast(u32, loc.column),
+                    .span = err_span,
+                    .line = @intCast(u32, err_loc.line),
+                    .column = @intCast(u32, err_loc.column),
                     .notes = notes,
-                    .source_line = try arena.dupe(u8, loc.source_line),
+                    .source_line = try arena.dupe(u8, err_loc.source_line),
                 },
             });
         }
@@ -668,7 +696,7 @@ pub const AllErrors = struct {
                     .src_path = try arena.dupe(u8, src.src_path),
                     .line = src.line,
                     .column = src.column,
-                    .byte_offset = src.byte_offset,
+                    .span = src.span,
                     .source_line = if (src.source_line) |s| try arena.dupe(u8, s) else null,
                     .notes = try dupeList(src.notes, arena),
                 } },
@@ -860,6 +888,7 @@ pub const InitOptions = struct {
     linker_nxcompat: bool = false,
     linker_dynamicbase: bool = false,
     linker_optimization: ?u8 = null,
+    linker_compress_debug_sections: ?link.CompressDebugSections = null,
     major_subsystem_version: ?u32 = null,
     minor_subsystem_version: ?u32 = null,
     clang_passthrough_mode: bool = false,
@@ -1000,20 +1029,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
 
         const ofmt = options.object_format orelse options.target.getObjectFormat();
 
-        const use_stage1 = options.use_stage1 orelse blk: {
-            // Even though we may have no Zig code to compile (depending on `options.main_pkg`),
-            // we may need to use stage1 for building compiler-rt and other dependencies.
-
-            if (build_options.omit_stage2)
-                break :blk true;
-            if (options.use_llvm) |use_llvm| {
-                if (!use_llvm) {
-                    break :blk false;
-                }
-            }
-
-            break :blk build_options.is_stage1;
-        };
+        const use_stage1 = options.use_stage1 orelse false;
 
         const cache_mode = if (use_stage1 and !options.disable_lld_caching)
             CacheMode.whole
@@ -1436,7 +1452,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
                 .handle = artifact_dir,
                 .path = try options.local_cache_directory.join(arena, &[_][]const u8{artifact_sub_dir}),
             };
-            log.debug("zig_cache_artifact_directory='{s}' use_stage1={}", .{
+            log.debug("zig_cache_artifact_directory='{?s}' use_stage1={}", .{
                 zig_cache_artifact_directory.path, use_stage1,
             });
 
@@ -1465,30 +1481,13 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
                 );
                 errdefer test_pkg.destroy(gpa);
 
-                try test_pkg.add(gpa, "builtin", builtin_pkg);
-                try test_pkg.add(gpa, "root", test_pkg);
-                try test_pkg.add(gpa, "std", std_pkg);
-
                 break :root_pkg test_pkg;
             } else main_pkg;
             errdefer if (options.is_test) root_pkg.destroy(gpa);
 
-            var other_pkg_iter = main_pkg.table.valueIterator();
-            while (other_pkg_iter.next()) |pkg| {
-                try pkg.*.add(gpa, "builtin", builtin_pkg);
-                try pkg.*.add(gpa, "std", std_pkg);
-            }
-
             try main_pkg.addAndAdopt(gpa, "builtin", builtin_pkg);
             try main_pkg.add(gpa, "root", root_pkg);
             try main_pkg.addAndAdopt(gpa, "std", std_pkg);
-
-            try std_pkg.add(gpa, "builtin", builtin_pkg);
-            try std_pkg.add(gpa, "root", root_pkg);
-            try std_pkg.add(gpa, "std", std_pkg);
-
-            try builtin_pkg.add(gpa, "std", std_pkg);
-            try builtin_pkg.add(gpa, "builtin", builtin_pkg);
 
             const main_pkg_in_std = m: {
                 const std_path = try std.fs.path.resolve(arena, &[_][]const u8{
@@ -1687,6 +1686,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             .no_builtin = options.no_builtin,
             .allow_shlib_undefined = options.linker_allow_shlib_undefined,
             .bind_global_refs_locally = options.linker_bind_global_refs_locally orelse false,
+            .compress_debug_sections = options.linker_compress_debug_sections orelse .none,
             .import_memory = options.linker_import_memory orelse false,
             .import_table = options.linker_import_table,
             .export_table = options.linker_export_table,
@@ -2163,8 +2163,7 @@ pub fn update(comp: *Compilation) !void {
         comp.c_object_work_queue.writeItemAssumeCapacity(key);
     }
 
-    const use_stage1 = build_options.omit_stage2 or
-        (build_options.is_stage1 and comp.bin_file.options.use_stage1);
+    const use_stage1 = build_options.have_stage1 and comp.bin_file.options.use_stage1;
     if (comp.bin_file.options.module) |module| {
         module.compile_log_text.shrinkAndFree(module.gpa, 0);
         module.generation += 1;
@@ -2258,6 +2257,14 @@ pub fn update(comp: *Compilation) !void {
         return;
     }
 
+    if (comp.emit_docs) |doc_location| {
+        if (comp.bin_file.options.module) |module| {
+            var autodoc = Autodoc.init(module, doc_location);
+            defer autodoc.deinit();
+            try autodoc.generateZirData();
+        }
+    }
+
     // Flush takes care of -femit-bin, but we still have -femit-llvm-ir, -femit-llvm-bc, and
     // -femit-asm to handle, in the case of C objects.
     comp.emitOthers();
@@ -2332,8 +2339,7 @@ fn flush(comp: *Compilation, prog_node: *std.Progress.Node) !void {
     };
     comp.link_error_flags = comp.bin_file.errorFlags();
 
-    const use_stage1 = build_options.omit_stage2 or
-        (build_options.is_stage1 and comp.bin_file.options.use_stage1);
+    const use_stage1 = build_options.have_stage1 and comp.bin_file.options.use_stage1;
     if (!use_stage1) {
         if (comp.bin_file.options.module) |module| {
             try link.File.C.flushEmitH(module);
@@ -2459,6 +2465,7 @@ fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifes
     man.hash.add(comp.bin_file.options.z_now);
     man.hash.add(comp.bin_file.options.z_relro);
     man.hash.add(comp.bin_file.options.hash_style);
+    man.hash.add(comp.bin_file.options.compress_debug_sections);
     man.hash.add(comp.bin_file.options.include_compiler_rt);
     if (comp.bin_file.options.link_libc) {
         man.hash.add(comp.bin_file.options.libc_installation != null);
@@ -2639,7 +2646,7 @@ pub fn getAllErrorsAlloc(self: *Compilation) !AllErrors {
                     .msg = try std.fmt.allocPrint(arena_allocator, "unable to build C object: {s}", .{
                         err_msg.msg,
                     }),
-                    .byte_offset = 0,
+                    .span = .{ .start = 0, .end = 1, .main = 0 },
                     .line = err_msg.line,
                     .column = err_msg.column,
                     .source_line = null, // TODO
@@ -2790,7 +2797,7 @@ pub fn performAllTheWork(
     comp.work_queue_wait_group.reset();
     defer comp.work_queue_wait_group.wait();
 
-    const use_stage1 = build_options.is_stage1 and comp.bin_file.options.use_stage1;
+    const use_stage1 = build_options.have_stage1 and comp.bin_file.options.use_stage1;
 
     {
         const astgen_frame = tracy.namedFrame("astgen");
@@ -2893,9 +2900,6 @@ pub fn performAllTheWork(
 fn processOneJob(comp: *Compilation, job: Job) !void {
     switch (job) {
         .codegen_decl => |decl_index| {
-            if (build_options.omit_stage2)
-                @panic("sadly stage2 is omitted from this build to save memory on the CI server");
-
             const module = comp.bin_file.options.module.?;
             const decl = module.declPtr(decl_index);
 
@@ -2930,9 +2934,6 @@ fn processOneJob(comp: *Compilation, job: Job) !void {
             }
         },
         .codegen_func => |func| {
-            if (build_options.omit_stage2)
-                @panic("sadly stage2 is omitted from this build to save memory on the CI server");
-
             const named_frame = tracy.namedFrame("codegen_func");
             defer named_frame.end();
 
@@ -2943,9 +2944,6 @@ fn processOneJob(comp: *Compilation, job: Job) !void {
             };
         },
         .emit_h_decl => |decl_index| {
-            if (build_options.omit_stage2)
-                @panic("sadly stage2 is omitted from this build to save memory on the CI server");
-
             const module = comp.bin_file.options.module.?;
             const decl = module.declPtr(decl_index);
 
@@ -3004,9 +3002,6 @@ fn processOneJob(comp: *Compilation, job: Job) !void {
             }
         },
         .analyze_decl => |decl_index| {
-            if (build_options.omit_stage2)
-                @panic("sadly stage2 is omitted from this build to save memory on the CI server");
-
             const module = comp.bin_file.options.module.?;
             module.ensureDeclAnalyzed(decl_index) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
@@ -3014,9 +3009,6 @@ fn processOneJob(comp: *Compilation, job: Job) !void {
             };
         },
         .update_embed_file => |embed_file| {
-            if (build_options.omit_stage2)
-                @panic("sadly stage2 is omitted from this build to save memory on the CI server");
-
             const named_frame = tracy.namedFrame("update_embed_file");
             defer named_frame.end();
 
@@ -3027,9 +3019,6 @@ fn processOneJob(comp: *Compilation, job: Job) !void {
             };
         },
         .update_line_number => |decl_index| {
-            if (build_options.omit_stage2)
-                @panic("sadly stage2 is omitted from this build to save memory on the CI server");
-
             const named_frame = tracy.namedFrame("update_line_number");
             defer named_frame.end();
 
@@ -3048,9 +3037,6 @@ fn processOneJob(comp: *Compilation, job: Job) !void {
             };
         },
         .analyze_pkg => |pkg| {
-            if (build_options.omit_stage2)
-                @panic("sadly stage2 is omitted from this build to save memory on the CI server");
-
             const named_frame = tracy.namedFrame("analyze_pkg");
             defer named_frame.end();
 
@@ -3396,7 +3382,7 @@ pub fn cImport(comp: *Compilation, c_src: []const u8) !CImportResult {
     var man = comp.obtainCObjectCacheManifest();
     defer man.deinit();
 
-    const use_stage1 = build_options.is_stage1 and comp.bin_file.options.use_stage1;
+    const use_stage1 = build_options.have_stage1 and comp.bin_file.options.use_stage1;
 
     man.hash.add(@as(u16, 0xb945)); // Random number to distinguish translate-c from compiling C objects
     man.hash.add(use_stage1);
@@ -4353,7 +4339,7 @@ pub fn hasSharedLibraryExt(filename: []const u8) bool {
     }
     // Look for .so.X, .so.X.Y, .so.X.Y.Z
     var it = mem.split(u8, filename, ".");
-    _ = it.next().?;
+    _ = it.first();
     var so_txt = it.next() orelse return false;
     while (!mem.eql(u8, so_txt, "so")) {
         so_txt = it.next() orelse return false;
@@ -4716,7 +4702,7 @@ pub fn generateBuiltinZigSource(comp: *Compilation, allocator: Allocator) Alloca
 
     const target = comp.getTarget();
     const generic_arch_name = target.cpu.arch.genericName();
-    const use_stage1 = build_options.is_stage1 and comp.bin_file.options.use_stage1;
+    const use_stage1 = build_options.have_stage1 and comp.bin_file.options.use_stage1;
 
     const zig_backend: std.builtin.CompilerBackend = blk: {
         if (use_stage1) break :blk .stage1;
@@ -4741,8 +4727,6 @@ pub fn generateBuiltinZigSource(comp: *Compilation, allocator: Allocator) Alloca
         \\/// feature detection (i.e. with `@hasDecl` or `@hasField`) over version checks.
         \\pub const zig_version = std.SemanticVersion.parse("{s}") catch unreachable;
         \\pub const zig_backend = std.builtin.CompilerBackend.{};
-        \\/// Temporary until self-hosted supports the `cpu.arch` value.
-        \\pub const stage2_arch: std.Target.Cpu.Arch = .{};
         \\
         \\pub const output_mode = std.builtin.OutputMode.{};
         \\pub const link_mode = std.builtin.LinkMode.{};
@@ -4757,7 +4741,6 @@ pub fn generateBuiltinZigSource(comp: *Compilation, allocator: Allocator) Alloca
     , .{
         build_options.version,
         std.zig.fmtId(@tagName(zig_backend)),
-        std.zig.fmtId(@tagName(target.cpu.arch)),
         std.zig.fmtId(@tagName(comp.bin_file.options.output_mode)),
         std.zig.fmtId(@tagName(comp.bin_file.options.link_mode)),
         comp.bin_file.options.is_test,
@@ -4789,7 +4772,7 @@ pub fn generateBuiltinZigSource(comp: *Compilation, allocator: Allocator) Alloca
     );
 
     switch (target.os.getVersionRange()) {
-        .none => try buffer.appendSlice(" .none = {} }\n"),
+        .none => try buffer.appendSlice(" .none = {} },\n"),
         .semver => |semver| try buffer.writer().print(
             \\ .semver = .{{
             \\        .min = .{{
@@ -5005,7 +4988,7 @@ fn buildOutputFromZig(
         .link_mode = .Static,
         .function_sections = true,
         .no_builtin = true,
-        .use_stage1 = build_options.is_stage1 and comp.bin_file.options.use_stage1,
+        .use_stage1 = build_options.have_stage1 and comp.bin_file.options.use_stage1,
         .want_sanitize_c = false,
         .want_stack_check = false,
         .want_red_zone = comp.bin_file.options.red_zone,
@@ -5130,8 +5113,6 @@ fn updateStage1Module(comp: *Compilation, main_progress_node: *std.Progress.Node
     const emit_asm_path = try stage1LocPath(arena, comp.emit_asm, directory);
     const emit_llvm_ir_path = try stage1LocPath(arena, comp.emit_llvm_ir, directory);
     const emit_llvm_bc_path = try stage1LocPath(arena, comp.emit_llvm_bc, directory);
-    const emit_analysis_path = try stage1LocPath(arena, comp.emit_analysis, directory);
-    const emit_docs_path = try stage1LocPath(arena, comp.emit_docs, directory);
     const stage1_pkg = try createStage1Pkg(arena, "root", mod.main_pkg, null);
     const test_filter = comp.test_filter orelse ""[0..0];
     const test_name_prefix = comp.test_name_prefix orelse ""[0..0];
@@ -5152,10 +5133,6 @@ fn updateStage1Module(comp: *Compilation, main_progress_node: *std.Progress.Node
         .emit_llvm_ir_len = emit_llvm_ir_path.len,
         .emit_bitcode_ptr = emit_llvm_bc_path.ptr,
         .emit_bitcode_len = emit_llvm_bc_path.len,
-        .emit_analysis_json_ptr = emit_analysis_path.ptr,
-        .emit_analysis_json_len = emit_analysis_path.len,
-        .emit_docs_ptr = emit_docs_path.ptr,
-        .emit_docs_len = emit_docs_path.len,
         .builtin_zig_path_ptr = builtin_zig_path.ptr,
         .builtin_zig_path_len = builtin_zig_path.len,
         .test_filter_ptr = test_filter.ptr,

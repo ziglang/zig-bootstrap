@@ -127,6 +127,7 @@ test "@intToFloat(f80)" {
         }
 
         fn testIntToFloat(comptime Int: type, k: Int) !void {
+            @setRuntimeSafety(false); // TODO
             const f = @intToFloat(f80, k);
             const i = @floatToInt(Int, f);
             try expect(i == k);
@@ -151,6 +152,8 @@ test "@intToFloat(f80)" {
 test "@floatToInt" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
 
     try testFloatToInts();
     comptime try testFloatToInts();
@@ -1427,6 +1430,11 @@ test "coerce between pointers of compatible differently-named floats" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+
+    if (builtin.os.tag == .windows) {
+        // https://github.com/ziglang/zig/issues/12396
+        return error.SkipZigTest;
+    }
 
     const F = switch (@typeInfo(c_longdouble).Float.bits) {
         16 => f16,

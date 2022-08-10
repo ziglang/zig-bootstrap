@@ -1261,3 +1261,52 @@ test "comptime write through extern struct reinterpreted as array" {
         assert(s.c == 3);
     }
 }
+
+test "continue nested in a conditional in an inline for" {
+    var x: u32 = 1;
+    inline for ([_]u8{ 1, 2, 3 }) |_| {
+        if (1 == 1) {
+            x = 0;
+            continue;
+        }
+    }
+    try expect(x == 0);
+}
+
+test "optional pointer represented as a pointer value" {
+    comptime {
+        var val: u8 = 15;
+        const opt_ptr: ?*u8 = &val;
+
+        const payload_ptr = &opt_ptr.?;
+        try expect(payload_ptr.*.* == 15);
+    }
+}
+
+test "mutate through pointer-like optional at comptime" {
+    comptime {
+        var val: u8 = 15;
+        var opt_ptr: ?*const u8 = &val;
+
+        const payload_ptr = &opt_ptr.?;
+        payload_ptr.* = &@as(u8, 16);
+        try expect(payload_ptr.*.* == 16);
+    }
+}
+
+test "repeated value is correctly expanded" {
+    const S = struct { x: [4]i8 = std.mem.zeroes([4]i8) };
+    const M = struct { x: [4]S = std.mem.zeroes([4]S) };
+
+    comptime {
+        var res = M{};
+        for (.{ 1, 2, 3 }) |i| res.x[i].x[i] = i;
+
+        try expectEqual(M{ .x = .{
+            .{ .x = .{ 0, 0, 0, 0 } },
+            .{ .x = .{ 0, 1, 0, 0 } },
+            .{ .x = .{ 0, 0, 2, 0 } },
+            .{ .x = .{ 0, 0, 0, 3 } },
+        } }, res);
+    }
+}

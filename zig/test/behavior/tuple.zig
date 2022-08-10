@@ -197,3 +197,96 @@ test "initializing tuple with explicit type" {
     var a = T{ 0, 0 };
     _ = a;
 }
+
+test "initializing anon struct with explicit type" {
+    const T = @TypeOf(.{ .foo = @as(i32, 1), .bar = @as(i32, 2) });
+    var a = T{ .foo = 1, .bar = 2 };
+    _ = a;
+}
+
+test "fieldParentPtr of tuple" {
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+
+    var x: u32 = 0;
+    const tuple = .{ x, x };
+    try testing.expect(&tuple == @fieldParentPtr(@TypeOf(tuple), "1", &tuple[1]));
+}
+
+test "fieldParentPtr of anon struct" {
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+
+    var x: u32 = 0;
+    const anon_st = .{ .foo = x, .bar = x };
+    try testing.expect(&anon_st == @fieldParentPtr(@TypeOf(anon_st), "bar", &anon_st.bar));
+}
+
+test "offsetOf tuple" {
+    var x: u32 = 0;
+    const T = @TypeOf(.{ x, x });
+    _ = @offsetOf(T, "1");
+}
+
+test "offsetOf anon struct" {
+    var x: u32 = 0;
+    const T = @TypeOf(.{ .foo = x, .bar = x });
+    _ = @offsetOf(T, "bar");
+}
+
+test "initializing tuple with mixed comptime-runtime fields" {
+    if (true) return error.SkipZigTest; // TODO
+
+    var x: u32 = 15;
+    const T = @TypeOf(.{ @as(i32, -1234), @as(u32, 5678), x });
+    var a: T = .{ -1234, 5678, x + 1 };
+    _ = a;
+}
+
+test "initializing anon struct with mixed comptime-runtime fields" {
+    if (true) return error.SkipZigTest; // TODO
+
+    var x: u32 = 15;
+    const T = @TypeOf(.{ .foo = @as(i32, -1234), .bar = x });
+    var a: T = .{ .foo = -1234, .bar = x + 1 };
+    _ = a;
+}
+
+test "tuple in tuple passed to generic function" {
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+
+    const S = struct {
+        fn pair(x: f32, y: f32) std.meta.Tuple(&.{ f32, f32 }) {
+            return .{ x, y };
+        }
+
+        fn foo(x: anytype) !void {
+            try expect(x[0][0] == 1.5);
+            try expect(x[0][1] == 2.5);
+        }
+    };
+    const x = comptime S.pair(1.5, 2.5);
+    try S.foo(.{x});
+}
+
+test "coerce tuple to tuple" {
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+
+    const T = std.meta.Tuple(&.{u8});
+    const S = struct {
+        fn foo(x: T) !void {
+            try expect(x[0] == 123);
+        }
+    };
+    try S.foo(.{123});
+}

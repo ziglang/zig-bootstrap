@@ -681,6 +681,32 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .wrap_errunion_payload => @panic("TODO try self.airWrapErrUnionPayload(inst)"),
             .wrap_errunion_err     => try self.airWrapErrUnionErr(inst),
 
+            .add_optimized,
+            .addwrap_optimized,
+            .sub_optimized,
+            .subwrap_optimized,
+            .mul_optimized,
+            .mulwrap_optimized,
+            .div_float_optimized,
+            .div_trunc_optimized,
+            .div_floor_optimized,
+            .div_exact_optimized,
+            .rem_optimized,
+            .mod_optimized,
+            .neg_optimized,
+            .cmp_lt_optimized,
+            .cmp_lte_optimized,
+            .cmp_eq_optimized,
+            .cmp_gte_optimized,
+            .cmp_gt_optimized,
+            .cmp_neq_optimized,
+            .cmp_vector_optimized,
+            .reduce_optimized,
+            .float_to_int_optimized,
+            => @panic("TODO implement optimized float mode"),
+
+            .is_named_enum_value => @panic("TODO implement is_named_enum_value"),
+
             .wasm_memory_size => unreachable,
             .wasm_memory_grow => unreachable,
             // zig fmt: on
@@ -2935,7 +2961,7 @@ fn finishAir(self: *Self, inst: Air.Inst.Index, result: MCValue, operands: [Live
 
 fn genArgDbgInfo(self: *Self, inst: Air.Inst.Index, mcv: MCValue, arg_index: u32) !void {
     const ty = self.air.instructions.items(.data)[inst].ty;
-    const name = self.mod_fn.getParamName(arg_index);
+    const name = self.mod_fn.getParamName(self.bin_file.options.module.?, arg_index);
     const name_with_null = name.ptr[0 .. name.len + 1];
 
     switch (mcv) {

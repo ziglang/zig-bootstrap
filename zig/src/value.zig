@@ -1194,6 +1194,16 @@ pub const Value = extern union {
         return switch (self.tag()) {
             .bool_true, .one => true,
             .bool_false, .zero => false,
+            .int_u64 => switch (self.castTag(.int_u64).?.data) {
+                0 => false,
+                1 => true,
+                else => unreachable,
+            },
+            .int_i64 => switch (self.castTag(.int_i64).?.data) {
+                0 => false,
+                1 => true,
+                else => unreachable,
+            },
             else => unreachable,
         };
     }
@@ -1468,8 +1478,7 @@ pub const Value = extern union {
             const repr = std.math.break_f80(f);
             std.mem.writeInt(u64, buffer[0..8], repr.fraction, endian);
             std.mem.writeInt(u16, buffer[8..10], repr.exp, endian);
-            // TODO set the rest of the bytes to undefined. should we use 0xaa
-            // or is there a different way?
+            std.mem.set(u8, buffer[10..], 0);
             return;
         }
         const Int = @Type(.{ .Int = .{
@@ -1481,20 +1490,18 @@ pub const Value = extern union {
     }
 
     fn floatReadFromMemory(comptime F: type, target: Target, buffer: []const u8) F {
+        const endian = target.cpu.arch.endian();
         if (F == f80) {
-            switch (target.cpu.arch) {
-                .i386, .x86_64 => return std.math.make_f80(.{
-                    .fraction = std.mem.readIntLittle(u64, buffer[0..8]),
-                    .exp = std.mem.readIntLittle(u16, buffer[8..10]),
-                }),
-                else => {},
-            }
+            return std.math.make_f80(.{
+                .fraction = readInt(u64, buffer[0..8], endian),
+                .exp = readInt(u16, buffer[8..10], endian),
+            });
         }
         const Int = @Type(.{ .Int = .{
             .signedness = .unsigned,
             .bits = @typeInfo(F).Float.bits,
         } });
-        const int = readInt(Int, buffer[0..@sizeOf(Int)], target.cpu.arch.endian());
+        const int = readInt(Int, buffer[0..@sizeOf(Int)], endian);
         return @bitCast(F, int);
     }
 
@@ -2295,25 +2302,13 @@ pub const Value = extern union {
                 }
             },
             .Struct => {
-                if (ty.isTupleOrAnonStruct()) {
-                    const fields = ty.tupleFields();
-                    for (fields.values) |field_val, i| {
-                        field_val.hash(fields.types[i], hasher, mod);
-                    }
-                    return;
-                }
-                const fields = ty.structFields().values();
-                if (fields.len == 0) return;
                 switch (val.tag()) {
-                    .empty_struct_value => {
-                        for (fields) |field| {
-                            field.default_val.hash(field.ty, hasher, mod);
-                        }
-                    },
+                    .empty_struct_value => {},
                     .aggregate => {
                         const field_values = val.castTag(.aggregate).?.data;
                         for (field_values) |field_val, i| {
-                            field_val.hash(fields[i].ty, hasher, mod);
+                            const field_ty = ty.structFieldType(i);
+                            field_val.hash(field_ty, hasher, mod);
                         }
                     },
                     else => unreachable,
@@ -2667,6 +2662,26 @@ pub const Value = extern union {
         }
     }
 
+    /// Returns true if a Value is backed by a variable
+    pub fn isVariable(
+        val: Value,
+        mod: *Module,
+    ) bool {
+        return switch (val.tag()) {
+            .slice => val.castTag(.slice).?.data.ptr.isVariable(mod),
+            .comptime_field_ptr => val.castTag(.comptime_field_ptr).?.data.field_val.isVariable(mod),
+            .elem_ptr => val.castTag(.elem_ptr).?.data.array_ptr.isVariable(mod),
+            .field_ptr => val.castTag(.field_ptr).?.data.container_ptr.isVariable(mod),
+            .eu_payload_ptr => val.castTag(.eu_payload_ptr).?.data.container_ptr.isVariable(mod),
+            .opt_payload_ptr => val.castTag(.opt_payload_ptr).?.data.container_ptr.isVariable(mod),
+            .decl_ref => mod.declPtr(val.castTag(.decl_ref).?.data).val.isVariable(mod),
+            .decl_ref_mut => mod.declPtr(val.castTag(.decl_ref_mut).?.data.decl_index).val.isVariable(mod),
+
+            .variable => true,
+            else => false,
+        };
+    }
+
     // Asserts that the provided start/end are in-bounds.
     pub fn sliceArray(
         val: Value,
@@ -2778,6 +2793,19 @@ pub const Value = extern union {
     /// values are marked undef, or struct that is not marked undef but all fields are marked
     /// undef, etc.
     pub fn isUndefDeep(self: Value) bool {
+        return self.isUndef();
+    }
+
+    /// Returns true if any value contained in `self` is undefined.
+    /// TODO: check for cases such as array that is not marked undef but all the element
+    /// values are marked undef, or struct that is not marked undef but all fields are marked
+    /// undef, etc.
+    pub fn anyUndef(self: Value) bool {
+        if (self.castTag(.aggregate)) |aggregate| {
+            for (aggregate.data) |val| {
+                if (val.anyUndef()) return true;
+            }
+        }
         return self.isUndef();
     }
 
@@ -3452,44 +3480,6 @@ pub const Value = extern union {
         var result_r = BigIntMutable{ .limbs = limbs_r, .positive = undefined, .len = undefined };
         result_q.divFloor(&result_r, lhs_bigint, rhs_bigint, limbs_buffer);
         return fromBigInt(allocator, result_q.toConst());
-    }
-
-    pub fn intRem(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, target: Target) !Value {
-        if (ty.zigTypeTag() == .Vector) {
-            const result_data = try allocator.alloc(Value, ty.vectorLen());
-            for (result_data) |*scalar, i| {
-                scalar.* = try intRemScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), allocator, target);
-            }
-            return Value.Tag.aggregate.create(allocator, result_data);
-        }
-        return intRemScalar(lhs, rhs, allocator, target);
-    }
-
-    pub fn intRemScalar(lhs: Value, rhs: Value, allocator: Allocator, target: Target) !Value {
-        // TODO is this a performance issue? maybe we should try the operation without
-        // resorting to BigInt first.
-        var lhs_space: Value.BigIntSpace = undefined;
-        var rhs_space: Value.BigIntSpace = undefined;
-        const lhs_bigint = lhs.toBigInt(&lhs_space, target);
-        const rhs_bigint = rhs.toBigInt(&rhs_space, target);
-        const limbs_q = try allocator.alloc(
-            std.math.big.Limb,
-            lhs_bigint.limbs.len,
-        );
-        const limbs_r = try allocator.alloc(
-            std.math.big.Limb,
-            // TODO: consider reworking Sema to re-use Values rather than
-            // always producing new Value objects.
-            rhs_bigint.limbs.len,
-        );
-        const limbs_buffer = try allocator.alloc(
-            std.math.big.Limb,
-            std.math.big.int.calcDivLimbsBufferLen(lhs_bigint.limbs.len, rhs_bigint.limbs.len),
-        );
-        var result_q = BigIntMutable{ .limbs = limbs_q, .positive = undefined, .len = undefined };
-        var result_r = BigIntMutable{ .limbs = limbs_r, .positive = undefined, .len = undefined };
-        result_q.divTrunc(&result_r, lhs_bigint, rhs_bigint, limbs_buffer);
-        return fromBigInt(allocator, result_r.toConst());
     }
 
     pub fn intMod(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, target: Target) !Value {
@@ -4938,7 +4928,16 @@ pub const Value = extern union {
                 /// peer type resolution. This is stored in a separate list so that
                 /// the items are contiguous in memory and thus can be passed to
                 /// `Module.resolvePeerTypes`.
-                stored_inst_list: std.ArrayListUnmanaged(Air.Inst.Ref) = .{},
+                prongs: std.MultiArrayList(struct {
+                    /// The dummy instruction used as a peer to resolve the type.
+                    /// Although this has a redundant type with placeholder, this is
+                    /// needed in addition because it may be a constant value, which
+                    /// affects peer type resolution.
+                    stored_inst: Air.Inst.Ref,
+                    /// The bitcast instruction used as a placeholder when the
+                    /// new result pointer type is not yet known.
+                    placeholder: Air.Inst.Index,
+                }) = .{},
                 /// 0 means ABI-aligned.
                 alignment: u32,
             },

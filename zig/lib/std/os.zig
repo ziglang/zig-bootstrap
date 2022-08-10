@@ -308,7 +308,7 @@ pub fn fchmod(fd: fd_t, mode: mode_t) FChmodError!void {
         switch (system.getErrno(res)) {
             .SUCCESS => return,
             .INTR => continue,
-            .BADF => unreachable, // Can be reached if the fd refers to a directory opened without `OpenDirOptions{ .iterate = true }`
+            .BADF => unreachable, // Can be reached if the fd refers to a non-iterable directory.
 
             .FAULT => unreachable,
             .INVAL => unreachable,
@@ -349,7 +349,7 @@ pub fn fchown(fd: fd_t, owner: ?uid_t, group: ?gid_t) FChownError!void {
         switch (system.getErrno(res)) {
             .SUCCESS => return,
             .INTR => continue,
-            .BADF => unreachable, // Can be reached if the fd refers to a directory opened without `OpenDirOptions{ .iterate = true }`
+            .BADF => unreachable, // Can be reached if the fd refers to a non-iterable directory.
 
             .FAULT => unreachable,
             .INVAL => unreachable,
@@ -3966,6 +3966,7 @@ pub fn connect(sock: socket_t, sock_addr: *const sockaddr, len: socklen_t) Conne
             .FAULT => unreachable, // The socket structure address is outside the user's address space.
             .INTR => continue,
             .ISCONN => unreachable, // The socket is already connected.
+            .HOSTUNREACH => return error.NetworkUnreachable,
             .NETUNREACH => return error.NetworkUnreachable,
             .NOTSOCK => unreachable, // The file descriptor sockfd does not refer to a socket.
             .PROTOTYPE => unreachable, // The socket type does not support the requested communications protocol.
@@ -3995,6 +3996,7 @@ pub fn getsockoptError(sockfd: fd_t) ConnectError!void {
             .CONNREFUSED => return error.ConnectionRefused,
             .FAULT => unreachable, // The socket structure address is outside the user's address space.
             .ISCONN => unreachable, // The socket is already connected.
+            .HOSTUNREACH => return error.NetworkUnreachable,
             .NETUNREACH => return error.NetworkUnreachable,
             .NOTSOCK => unreachable, // The file descriptor sockfd does not refer to a socket.
             .PROTOTYPE => unreachable, // The socket type does not support the requested communications protocol.
@@ -4242,6 +4244,7 @@ pub const INotifyAddWatchError = error{
     SystemResources,
     UserResourceLimitReached,
     NotDir,
+    WatchAlreadyExists,
 } || UnexpectedError;
 
 /// add a watch to an initialized inotify instance
@@ -4264,6 +4267,7 @@ pub fn inotify_add_watchZ(inotify_fd: i32, pathname: [*:0]const u8, mask: u32) I
         .NOMEM => return error.SystemResources,
         .NOSPC => return error.UserResourceLimitReached,
         .NOTDIR => return error.NotDir,
+        .EXIST => return error.WatchAlreadyExists,
         else => |err| return unexpectedErrno(err),
     }
 }
@@ -5165,8 +5169,8 @@ pub fn realpathW(pathname: []const u16, out_buffer: *[MAX_PATH_BYTES]u8) RealPat
 
 /// Return canonical path of handle `fd`.
 /// This function is very host-specific and is not universally supported by all hosts.
-/// For example, while it generally works on Linux, macOS or Windows, it is unsupported
-/// on FreeBSD, or WASI.
+/// For example, while it generally works on Linux, macOS, FreeBSD or Windows, it is
+/// unsupported on WASI.
 pub fn getFdPath(fd: fd_t, out_buffer: *[MAX_PATH_BYTES]u8) RealPathError![]u8 {
     switch (builtin.os.tag) {
         .windows => {
@@ -5214,6 +5218,22 @@ pub fn getFdPath(fd: fd_t, out_buffer: *[MAX_PATH_BYTES]u8) RealPathError![]u8 {
                 else => |e| return e,
             };
             return target;
+        },
+        .freebsd => {
+            comptime if (builtin.os.version_range.semver.max.order(.{ .major = 13, .minor = 0 }) == .lt)
+                @compileError("querying for canonical path of a handle is unsupported on FreeBSD 12 and below");
+
+            var kfile: system.kinfo_file = undefined;
+            kfile.structsize = system.KINFO_FILE_SIZE;
+            switch (errno(system.fcntl(fd, system.F.KINFO, @ptrToInt(&kfile)))) {
+                .SUCCESS => {},
+                .BADF => return error.FileNotFound,
+                else => |err| return unexpectedErrno(err),
+            }
+
+            const len = mem.indexOfScalar(u8, &kfile.path, 0) orelse MAX_PATH_BYTES;
+            mem.copy(u8, out_buffer, kfile.path[0..len]);
+            return out_buffer[0..len];
         },
         else => @compileError("querying for canonical path of a handle is unsupported on this host"),
     }
@@ -6476,7 +6496,7 @@ pub fn dn_expand(
             p = msg.ptr + j;
         } else if (p[0] != 0) {
             if (dest != exp_dn.ptr) {
-                dest.* = '.';
+                dest[0] = '.';
                 dest += 1;
             }
             var j = p[0];
@@ -6486,12 +6506,12 @@ pub fn dn_expand(
             }
             while (j != 0) {
                 j -= 1;
-                dest.* = p[0];
+                dest[0] = p[0];
                 dest += 1;
                 p += 1;
             }
         } else {
-            dest.* = 0;
+            dest[0] = 0;
             if (len == std.math.maxInt(usize)) len = @ptrToInt(p) + 1 - @ptrToInt(comp_dn.ptr);
             return len;
         }

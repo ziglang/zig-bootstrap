@@ -704,10 +704,8 @@ const FooArray24Bits = packed struct {
 };
 
 test "aligned array of packed struct" {
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    // Stage2 has different packed struct semantics.
+    if (builtin.zig_backend != .stage1) return error.SkipZigTest;
 
     comptime {
         try expect(@sizeOf(FooStructAligned) == 2);
@@ -965,7 +963,7 @@ test "tuple assigned to variable" {
 
 test "comptime struct field" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.stage2_arch == .arm) return error.SkipZigTest; // TODO
+    if (builtin.cpu.arch == .arm) return error.SkipZigTest; // TODO
 
     const T = struct {
         a: i32,
@@ -998,6 +996,9 @@ test "tuple element initialized with fn call" {
 }
 
 test "struct with union field" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+
     const Value = struct {
         ref: u32 = 2,
         kind: union(enum) {
@@ -1357,4 +1358,41 @@ test "store to comptime field" {
         s.a = T{ .a = 1, .b = 2 };
         s.a.a = 1;
     }
+}
+
+test "struct field init value is size of the struct" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+
+    const namespace = struct {
+        const S = extern struct {
+            size: u8 = @sizeOf(S),
+            blah: u16,
+        };
+    };
+    var s: namespace.S = .{ .blah = 1234 };
+    try expect(s.size == 4);
+}
+
+test "under-aligned struct field" {
+    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+
+    const U = extern union {
+        fd: i32,
+        u32: u32,
+        u64: u64,
+    };
+    const S = extern struct {
+        events: u32,
+        data: U align(4),
+    };
+    var runtime: usize = 1234;
+    const ptr = &S{ .events = 0, .data = .{ .u64 = runtime } };
+    const array = @ptrCast(*const [12]u8, ptr);
+    const result = std.mem.readIntNative(u64, array[4..12]);
+    try expect(result == 1234);
 }

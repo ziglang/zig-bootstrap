@@ -1116,6 +1116,7 @@ struct AstNodeContainerDecl {
     ContainerLayout layout;
 
     bool auto_enum, is_root; // union(enum)
+    bool unsupported_explicit_backing_int;
 };
 
 struct AstNodeErrorSetField {
@@ -2141,8 +2142,6 @@ struct CodeGen {
     Buf asm_file_output_path;
     Buf llvm_ir_file_output_path;
     Buf bitcode_file_output_path;
-    Buf analysis_json_output_path;
-    Buf docs_output_path;
 
     Buf *builtin_zig_path;
 

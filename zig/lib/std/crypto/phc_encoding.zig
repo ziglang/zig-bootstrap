@@ -216,7 +216,7 @@ fn serializeTo(params: anytype, out: anytype) !void {
 
     var has_params = false;
     inline for (comptime meta.fields(HashResult)) |p| {
-        if (!(mem.eql(u8, p.name, "alg_id") or
+        if (comptime !(mem.eql(u8, p.name, "alg_id") or
             mem.eql(u8, p.name, "alg_version") or
             mem.eql(u8, p.name, "hash") or
             mem.eql(u8, p.name, "salt")))
@@ -253,7 +253,7 @@ fn serializeTo(params: anytype, out: anytype) !void {
 // Split a `key=value` string into `key` and `value`
 fn kvSplit(str: []const u8) !struct { key: []const u8, value: []const u8 } {
     var it = mem.split(u8, str, kv_delimiter);
-    const key = it.next() orelse return Error.InvalidEncoding;
+    const key = it.first();
     const value = it.next() orelse return Error.InvalidEncoding;
     const ret = .{ .key = key, .value = value };
     return ret;

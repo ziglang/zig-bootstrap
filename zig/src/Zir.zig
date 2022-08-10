@@ -280,6 +280,9 @@ pub const Inst = struct {
         /// break instruction in a block, and the target block is the parent.
         /// Uses the `break` union field.
         break_inline,
+        /// Checks that comptime control flow does not happen inside a runtime block.
+        /// Uses the `node` union field.
+        check_comptime_control_flow,
         /// Function call.
         /// Uses the `pl_node` union field with payload `Call`.
         /// AST node is the function call.
@@ -410,6 +413,8 @@ pub const Inst = struct {
         /// to the named field. The field name is stored in string_bytes. Used by a.b syntax.
         /// Uses `pl_node` field. The AST node is the a.b syntax. Payload is Field.
         field_ptr,
+        /// Same as `field_ptr` but used for struct init.
+        field_ptr_init,
         /// Given a struct or object that contains virtual fields, returns the named field.
         /// The field name is stored in string_bytes. Used by a.b syntax.
         /// This instruction also accepts a pointer.
@@ -485,14 +490,6 @@ pub const Inst = struct {
         /// Merge two error sets into one, `E1 || E2`.
         /// Uses the `pl_node` field with payload `Bin`.
         merge_error_sets,
-        /// Given a reference to a function and a parameter index, returns the
-        /// type of the parameter. The only usage of this instruction is for the
-        /// result location of parameters of function calls. In the case of a function's
-        /// parameter type being `anytype`, it is the type coercion's job to detect this
-        /// scenario and skip the coercion, so that semantic analysis of this instruction
-        /// is not in a position where it must create an invalid type.
-        /// Uses the `param_type` union field.
-        param_type,
         /// Turns an R-Value into a const L-Value. In other words, it takes a value,
         /// stores it in a memory location, and returns a const pointer to it. If the value
         /// is `comptime`, the memory location is global static constant data. Otherwise,
@@ -534,9 +531,9 @@ pub const Inst = struct {
         /// Obtains the return type of the in-scope function.
         /// Uses the `node` union field.
         ret_type,
-        /// Create a pointer type that does not have a sentinel, alignment, address space, or bit range specified.
-        /// Uses the `ptr_type_simple` union field.
-        ptr_type_simple,
+        /// Create a pointer type for overflow arithmetic.
+        /// TODO remove when doing https://github.com/ziglang/zig/issues/10248
+        overflow_arithmetic_ptr,
         /// Create a pointer type which can have a sentinel, alignment, address space, and/or bit range.
         /// Uses the `ptr_type` union field.
         ptr_type,
@@ -834,8 +831,6 @@ pub const Inst = struct {
         round,
         /// Implement builtin `@tagName`. Uses `un_node`.
         tag_name,
-        /// Implement builtin `@Type`. Uses `un_node`.
-        reify,
         /// Implement builtin `@typeName`. Uses `un_node`.
         type_name,
         /// Implement builtin `@Frame`. Uses `un_node`.
@@ -1070,6 +1065,7 @@ pub const Inst = struct {
                 .@"export",
                 .export_value,
                 .field_ptr,
+                .field_ptr_init,
                 .field_val,
                 .field_call_bind,
                 .field_ptr_named,
@@ -1091,7 +1087,6 @@ pub const Inst = struct {
                 .mul,
                 .mulwrap,
                 .mul_sat,
-                .param_type,
                 .ref,
                 .shl,
                 .shl_sat,
@@ -1121,7 +1116,7 @@ pub const Inst = struct {
                 .err_union_code,
                 .err_union_code_ptr,
                 .ptr_type,
-                .ptr_type_simple,
+                .overflow_arithmetic_ptr,
                 .ensure_err_payload_void,
                 .enum_literal,
                 .merge_error_sets,
@@ -1191,7 +1186,6 @@ pub const Inst = struct {
                 .trunc,
                 .round,
                 .tag_name,
-                .reify,
                 .type_name,
                 .frame_type,
                 .frame_size,
@@ -1263,6 +1257,7 @@ pub const Inst = struct {
                 .repeat_inline,
                 .panic,
                 .panic_comptime,
+                .check_comptime_control_flow,
                 => true,
             };
         }
@@ -1312,6 +1307,7 @@ pub const Inst = struct {
                 .set_runtime_safety,
                 .memcpy,
                 .memset,
+                .check_comptime_control_flow,
                 => true,
 
                 .param,
@@ -1370,6 +1366,7 @@ pub const Inst = struct {
                 .elem_ptr_imm,
                 .elem_val_node,
                 .field_ptr,
+                .field_ptr_init,
                 .field_val,
                 .field_call_bind,
                 .field_ptr_named,
@@ -1391,7 +1388,6 @@ pub const Inst = struct {
                 .mul,
                 .mulwrap,
                 .mul_sat,
-                .param_type,
                 .ref,
                 .shl,
                 .shl_sat,
@@ -1417,7 +1413,7 @@ pub const Inst = struct {
                 .err_union_code,
                 .err_union_code_ptr,
                 .ptr_type,
-                .ptr_type_simple,
+                .overflow_arithmetic_ptr,
                 .enum_literal,
                 .merge_error_sets,
                 .error_union_type,
@@ -1475,7 +1471,6 @@ pub const Inst = struct {
                 .trunc,
                 .round,
                 .tag_name,
-                .reify,
                 .type_name,
                 .frame_type,
                 .frame_size,
@@ -1564,7 +1559,6 @@ pub const Inst = struct {
                 .mulwrap = .pl_node,
                 .mul_sat = .pl_node,
 
-                .param_type = .param_type,
                 .param = .pl_tok,
                 .param_comptime = .pl_tok,
                 .param_anytype = .str_tok,
@@ -1591,6 +1585,7 @@ pub const Inst = struct {
                 .bool_br_or = .bool_br,
                 .@"break" = .@"break",
                 .break_inline = .@"break",
+                .check_comptime_control_flow = .node,
                 .call = .pl_node,
                 .cmp_lt = .pl_node,
                 .cmp_lte = .pl_node,
@@ -1629,6 +1624,7 @@ pub const Inst = struct {
                 .@"export" = .pl_node,
                 .export_value = .pl_node,
                 .field_ptr = .pl_node,
+                .field_ptr_init = .pl_node,
                 .field_val = .pl_node,
                 .field_ptr_named = .pl_node,
                 .field_val_named = .pl_node,
@@ -1659,7 +1655,7 @@ pub const Inst = struct {
                 .ret_err_value_code = .str_tok,
                 .ret_ptr = .node,
                 .ret_type = .node,
-                .ptr_type_simple = .ptr_type_simple,
+                .overflow_arithmetic_ptr = .un_node,
                 .ptr_type = .ptr_type,
                 .slice_start = .pl_node,
                 .slice_end = .pl_node,
@@ -1698,7 +1694,7 @@ pub const Inst = struct {
                 .switch_capture_multi_ref = .switch_capture,
                 .array_base_ptr = .un_node,
                 .field_base_ptr = .un_node,
-                .validate_array_init_ty = .un_node,
+                .validate_array_init_ty = .pl_node,
                 .validate_struct_init_ty = .un_node,
                 .validate_struct_init = .pl_node,
                 .validate_struct_init_comptime = .pl_node,
@@ -1748,7 +1744,6 @@ pub const Inst = struct {
                 .trunc = .un_node,
                 .round = .un_node,
                 .tag_name = .un_node,
-                .reify = .un_node,
                 .type_name = .un_node,
                 .frame_type = .un_node,
                 .frame_size = .un_node,
@@ -1969,6 +1964,10 @@ pub const Inst = struct {
         /// Implement builtin `@intToError`.
         /// `operand` is payload index to `UnNode`.
         int_to_error,
+        /// Implement builtin `@Type`.
+        /// `operand` is payload index to `UnNode`.
+        /// `small` contains `NameStrategy
+        reify,
 
         pub const InstData = struct {
             opcode: Extended,
@@ -2499,13 +2498,6 @@ pub const Inst = struct {
         node: i32,
         int: u64,
         float: f64,
-        ptr_type_simple: struct {
-            is_allowzero: bool,
-            is_mutable: bool,
-            is_volatile: bool,
-            size: std.builtin.Type.Pointer.Size,
-            elem_type: Ref,
-        },
         ptr_type: struct {
             flags: packed struct {
                 is_allowzero: bool,
@@ -2536,10 +2528,6 @@ pub const Inst = struct {
             lhs: Ref,
             /// Points to a `Block`.
             payload_index: u32,
-        },
-        param_type: struct {
-            callee: Ref,
-            param_index: u32,
         },
         @"unreachable": struct {
             /// Offset from Decl AST node index.
@@ -2608,11 +2596,9 @@ pub const Inst = struct {
             node,
             int,
             float,
-            ptr_type_simple,
             ptr_type,
             int_type,
             bool_br,
-            param_type,
             @"unreachable",
             @"break",
             switch_capture,
@@ -2739,6 +2725,7 @@ pub const Inst = struct {
             is_inferred_error: bool,
             is_test: bool,
             is_extern: bool,
+            is_noinline: bool,
             has_align_ref: bool,
             has_align_body: bool,
             has_addrspace_ref: bool,
@@ -2751,7 +2738,7 @@ pub const Inst = struct {
             has_ret_ty_body: bool,
             has_lib_name: bool,
             has_any_noalias: bool,
-            _: u16 = undefined,
+            _: u15 = undefined,
         };
     };
 
@@ -2791,7 +2778,9 @@ pub const Inst = struct {
     };
 
     /// Stored inside extra, with trailing arguments according to `args_len`.
-    /// Each argument is a `Ref`.
+    /// Implicit 0. arg_0_start: u32, // always same as `args_len`
+    /// 1. arg_end: u32, // for each `args_len`
+    /// arg_N_start is the same as arg_N-1_end
     pub const Call = struct {
         // Note: Flags *must* come first so that unusedResultExpr
         // can find it when it goes to modify them.
@@ -2869,6 +2858,7 @@ pub const Inst = struct {
     /// 4. host_size: Ref // if `has_bit_range` flag is set
     pub const PtrType = struct {
         elem_type: Ref,
+        src_node: i32,
     };
 
     pub const ArrayTypeSentinel = struct {
@@ -3093,16 +3083,18 @@ pub const Inst = struct {
 
     /// Trailing:
     /// 0. src_node: i32, // if has_src_node
-    /// 1. body_len: u32, // if has_body_len
-    /// 2. fields_len: u32, // if has_fields_len
-    /// 3. decls_len: u32, // if has_decls_len
-    /// 4. decl_bits: u32 // for every 8 decls
+    /// 1. fields_len: u32, // if has_fields_len
+    /// 2. decls_len: u32, // if has_decls_len
+    /// 3. backing_int_body_len: u32, // if has_backing_int
+    /// 4. backing_int_ref: Ref, // if has_backing_int and backing_int_body_len is 0
+    /// 5. backing_int_body_inst: Inst, // if has_backing_int and backing_int_body_len is > 0
+    /// 6. decl_bits: u32 // for every 8 decls
     ///    - sets of 4 bits:
     ///      0b000X: whether corresponding decl is pub
     ///      0b00X0: whether corresponding decl is exported
     ///      0b0X00: whether corresponding decl has an align expression
     ///      0bX000: whether corresponding decl has a linksection or an address space expression
-    /// 5. decl: { // for every decls_len
+    /// 7. decl: { // for every decls_len
     ///        src_hash: [4]u32, // hash of source bytes
     ///        line: u32, // line number of decl, relative to parent
     ///        name: u32, // null terminated string index
@@ -3120,27 +3112,31 @@ pub const Inst = struct {
     ///            address_space: Ref,
     ///        }
     ///    }
-    /// 6. inst: Index // for every body_len
-    /// 7. flags: u32 // for every 8 fields
+    /// 8. flags: u32 // for every 8 fields
     ///    - sets of 4 bits:
     ///      0b000X: whether corresponding field has an align expression
     ///      0b00X0: whether corresponding field has a default expression
     ///      0b0X00: whether corresponding field is comptime
-    ///      0bX000: unused
-    /// 8. fields: { // for every fields_len
+    ///      0bX000: whether corresponding field has a type expression
+    /// 9. fields: { // for every fields_len
     ///        field_name: u32,
-    ///        field_type: Ref,
-    ///        - if none, means `anytype`.
     ///        doc_comment: u32, // 0 if no doc comment
-    ///        align: Ref, // if corresponding bit is set
-    ///        default_value: Ref, // if corresponding bit is set
+    ///        field_type: Ref, // if corresponding bit is not set. none means anytype.
+    ///        field_type_body_len: u32, // if corresponding bit is set
+    ///        align_body_len: u32, // if corresponding bit is set
+    ///        init_body_len: u32, // if corresponding bit is set
+    ///    }
+    /// 10. bodies: { // for every fields_len
+    ///        field_type_body_inst: Inst, // for each field_type_body_len
+    ///        align_body_inst: Inst, // for each align_body_len
+    ///        init_body_inst: Inst, // for each init_body_len
     ///    }
     pub const StructDecl = struct {
         pub const Small = packed struct {
             has_src_node: bool,
-            has_body_len: bool,
             has_fields_len: bool,
             has_decls_len: bool,
+            has_backing_int: bool,
             known_non_opv: bool,
             known_comptime_only: bool,
             name_strategy: NameStrategy,
@@ -3536,6 +3532,17 @@ pub const Inst = struct {
         line: u32,
         column: u32,
     };
+
+    pub const ArrayInit = struct {
+        ty: Ref,
+        init_count: u32,
+    };
+
+    pub const Src = struct {
+        node: i32,
+        line: u32,
+        column: u32,
+    };
 };
 
 pub const SpecialProng = enum { none, @"else", under };
@@ -3594,7 +3601,6 @@ pub fn declIterator(zir: Zir, decl_inst: u32) DeclIterator {
                     const small = @bitCast(Inst.StructDecl.Small, extended.small);
                     var extra_index: usize = extended.operand;
                     extra_index += @boolToInt(small.has_src_node);
-                    extra_index += @boolToInt(small.has_body_len);
                     extra_index += @boolToInt(small.has_fields_len);
                     const decls_len = if (small.has_decls_len) decls_len: {
                         const decls_len = zir.extra[extra_index];
@@ -3897,6 +3903,27 @@ pub const FnInfo = struct {
     ret_ty_ref: Zir.Inst.Ref,
     total_params_len: u32,
 };
+
+pub fn getParamBody(zir: Zir, fn_inst: Inst.Index) []const u32 {
+    const tags = zir.instructions.items(.tag);
+    const datas = zir.instructions.items(.data);
+    const inst_data = datas[fn_inst].pl_node;
+
+    const param_block_index = switch (tags[fn_inst]) {
+        .func, .func_inferred => blk: {
+            const extra = zir.extraData(Inst.Func, inst_data.payload_index);
+            break :blk extra.data.param_block;
+        },
+        .func_fancy => blk: {
+            const extra = zir.extraData(Inst.FuncFancy, inst_data.payload_index);
+            break :blk extra.data.param_block;
+        },
+        else => unreachable,
+    };
+
+    const param_block = zir.extraData(Inst.Block, datas[param_block_index].pl_node.payload_index);
+    return zir.extra[param_block.end..][0..param_block.data.body_len];
+}
 
 pub fn getFnInfo(zir: Zir, fn_inst: Inst.Index) FnInfo {
     const tags = zir.instructions.items(.tag);
