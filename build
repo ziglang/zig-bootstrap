@@ -118,22 +118,14 @@ cd "$ROOTDIR/out/build-llvm-$TARGET-$MCPU"
 make "$JOBS" install-llvm-headers install-clang-headers install-LLVMSupport install-LLVMDemangle
 
 # Finally, we can cross compile Zig itself, with Zig.
-mkdir -p "$ROOTDIR/out/build-zig-$TARGET-$MCPU"
-cd "$ROOTDIR/out/build-zig-$TARGET-$MCPU"
-cmake "$ROOTDIR/zig" \
-  -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/zig-$TARGET-$MCPU" \
-  -DCMAKE_PREFIX_PATH="$ROOTDIR/out/$TARGET-$MCPU" \
-  -DCMAKE_CROSSCOMPILING=True \
-  -DCMAKE_SYSTEM_NAME="$TARGET_OS_CMAKE" \
-  -DCMAKE_AR="$ROOTDIR/out/host/bin/llvm-ar" \
-  -DCMAKE_RANLIB="$ROOTDIR/out/host/bin/llvm-ranlib" \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DZIG_TARGET_TRIPLE="$TARGET" \
-  -DZIG_TARGET_MCPU="$MCPU" \
-  -DZIG_EXECUTABLE="$ZIG" \
-  -DZIG_VERSION="$ZIG_VERSION" \
-  -DZIG_USE_LLVM_CONFIG=OFF \
-  -DZIG_STATIC_ZLIB=ON
-unset CC
-unset CXX
-make "$JOBS" install
+cd "$ROOTDIR/zig"
+$ZIG build \
+  --prefix "$ROOTDIR/out/zig-$TARGET-$MCPU" \
+  --search-prefix "$ROOTDIR/out/$TARGET-$MCPU" \
+  -Dstatic-llvm \
+  -Drelease \
+  -Dstrip \
+  -Dtarget="$TARGET" \
+  -Dcpu="$MCPU" \
+  -Dversion-string="$ZIG_VERSION" \
+  -Denable-stage1
