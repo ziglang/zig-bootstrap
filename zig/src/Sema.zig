@@ -27173,6 +27173,9 @@ pub fn resolveTypeLayout(
     src: LazySrcLoc,
     ty: Type,
 ) CompileError!void {
+    if (build_options.omit_stage2)
+        @panic("sadly stage2 is omitted from this build to save memory on the CI server");
+
     switch (ty.zigTypeTag()) {
         .Struct => return sema.resolveStructLayout(block, src, ty),
         .Union => return sema.resolveUnionLayout(block, src, ty),
@@ -27511,6 +27514,8 @@ fn resolveUnionFully(
 }
 
 pub fn resolveTypeFields(sema: *Sema, block: *Block, src: LazySrcLoc, ty: Type) CompileError!Type {
+    if (build_options.omit_stage2)
+        @panic("sadly stage2 is omitted from this build to save memory on the CI server");
     switch (ty.tag()) {
         .@"struct" => {
             const struct_obj = ty.castTag(.@"struct").?.data;
@@ -29109,6 +29114,8 @@ fn typePtrOrOptionalPtrTy(
 /// TODO merge these implementations together with the "advanced"/sema_kit pattern seen
 /// elsewhere in value.zig
 pub fn typeRequiresComptime(sema: *Sema, block: *Block, src: LazySrcLoc, ty: Type) CompileError!bool {
+    if (build_options.omit_stage2)
+        @panic("sadly stage2 is omitted from this build to save memory on the CI server");
     return switch (ty.tag()) {
         .u1,
         .u8,
