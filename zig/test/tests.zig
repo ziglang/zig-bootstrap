@@ -462,7 +462,6 @@ pub fn addStandaloneTests(
     skip_non_native: bool,
     enable_macos_sdk: bool,
     target: std.zig.CrossTarget,
-    omit_stage2: bool,
     enable_darling: bool,
     enable_qemu: bool,
     enable_rosetta: bool,
@@ -479,7 +478,6 @@ pub fn addStandaloneTests(
         .skip_non_native = skip_non_native,
         .enable_macos_sdk = enable_macos_sdk,
         .target = target,
-        .omit_stage2 = omit_stage2,
         .enable_darling = enable_darling,
         .enable_qemu = enable_qemu,
         .enable_rosetta = enable_rosetta,
@@ -497,7 +495,6 @@ pub fn addLinkTests(
     test_filter: ?[]const u8,
     modes: []const Mode,
     enable_macos_sdk: bool,
-    omit_stage2: bool,
 ) *build.Step {
     const cases = b.allocator.create(StandaloneContext) catch unreachable;
     cases.* = StandaloneContext{
@@ -509,7 +506,6 @@ pub fn addLinkTests(
         .skip_non_native = true,
         .enable_macos_sdk = enable_macos_sdk,
         .target = .{},
-        .omit_stage2 = omit_stage2,
     };
     link.addCases(cases);
     return cases.step;
@@ -605,7 +601,6 @@ pub fn addPkgTests(
     skip_libc: bool,
     skip_stage1: bool,
     skip_stage2: bool,
-    is_stage1: bool,
 ) *build.Step {
     const step = b.step(b.fmt("test-{s}", .{name}), desc);
 
@@ -634,12 +629,19 @@ pub fn addPkgTests(
         if (test_target.backend) |backend| switch (backend) {
             .stage1 => if (skip_stage1) continue,
             else => if (skip_stage2) continue,
-        } else if (is_stage1 and skip_stage1) continue;
+        } else if (skip_stage2) continue;
 
         const want_this_mode = for (modes) |m| {
             if (m == test_target.mode) break true;
         } else false;
         if (!want_this_mode) continue;
+
+        if (test_target.backend) |backend| {
+            if (backend == .stage2_c and builtin.os.tag == .windows) {
+                // https://github.com/ziglang/zig/issues/12415
+                continue;
+            }
+        }
 
         const libc_prefix = if (test_target.target.getOs().requiresLibC())
             ""
@@ -971,7 +973,6 @@ pub const StandaloneContext = struct {
     skip_non_native: bool,
     enable_macos_sdk: bool,
     target: std.zig.CrossTarget,
-    omit_stage2: bool,
     enable_darling: bool = false,
     enable_qemu: bool = false,
     enable_rosetta: bool = false,
@@ -996,7 +997,6 @@ pub const StandaloneContext = struct {
         const b = self.b;
 
         if (features.requires_macos_sdk and !self.enable_macos_sdk) return;
-        if (features.requires_stage2 and self.omit_stage2) return;
 
         const annotated_case_name = b.fmt("build {s}", .{build_file});
         if (self.test_filter) |filter| {

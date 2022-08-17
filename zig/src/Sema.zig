@@ -1495,7 +1495,8 @@ pub fn resolveInst(sema: *Sema, zir_ref: Zir.Inst.Ref) !Air.Inst.Ref {
 
     // Finally, the last section of indexes refers to the map of ZIR=>AIR.
     const inst = sema.inst_map.get(@intCast(u32, i)).?;
-    if (sema.typeOf(inst).tag() == .generic_poison) return error.GenericPoison;
+    const ty = sema.typeOf(inst);
+    if (ty.tag() == .generic_poison) return error.GenericPoison;
     return inst;
 }
 
@@ -1906,8 +1907,6 @@ fn failWithOwnedErrorMsg(sema: *Sema, err_msg: *Module.ErrorMsg) CompileError {
     }
 
     const mod = sema.mod;
-    sema.err = err_msg;
-
     {
         errdefer err_msg.destroy(mod.gpa);
         if (err_msg.src_loc.lazy == .unneeded) {
@@ -1925,8 +1924,10 @@ fn failWithOwnedErrorMsg(sema: *Sema, err_msg: *Module.ErrorMsg) CompileError {
     const gop = mod.failed_decls.getOrPutAssumeCapacity(sema.owner_decl_index);
     if (gop.found_existing) {
         // If there are multiple errors for the same Decl, prefer the first one added.
+        sema.err = null;
         err_msg.destroy(mod.gpa);
     } else {
+        sema.err = err_msg;
         gop.value_ptr.* = err_msg;
     }
     return error.AnalysisFail;
@@ -5384,6 +5385,17 @@ fn lookupInNamespace(
             }
         }
 
+        {
+            var i: usize = 0;
+            while (i < candidates.items.len) {
+                if (candidates.items[i] == sema.owner_decl_index) {
+                    _ = candidates.orderedRemove(i);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
         switch (candidates.items.len) {
             0 => {},
             1 => {
@@ -5559,10 +5571,14 @@ const GenericCallAdapter = struct {
     generic_fn: *Module.Fn,
     precomputed_hash: u64,
     func_ty_info: Type.Payload.Function.Data,
-    /// Unlike comptime_args, the Type here is not always present.
-    /// .generic_poison is used to communicate non-anytype parameters.
-    comptime_tvs: []const TypedValue,
+    args: []const Arg,
     module: *Module,
+
+    const Arg = struct {
+        ty: Type,
+        val: Value,
+        is_anytype: bool,
+    };
 
     pub fn eql(ctx: @This(), adapted_key: void, other_key: *Module.Fn) bool {
         _ = adapted_key;
@@ -5574,10 +5590,10 @@ const GenericCallAdapter = struct {
 
         const other_comptime_args = other_key.comptime_args.?;
         for (other_comptime_args[0..ctx.func_ty_info.param_types.len]) |other_arg, i| {
-            const this_arg = ctx.comptime_tvs[i];
+            const this_arg = ctx.args[i];
             const this_is_comptime = this_arg.val.tag() != .generic_poison;
             const other_is_comptime = other_arg.val.tag() != .generic_poison;
-            const this_is_anytype = this_arg.ty.tag() != .generic_poison;
+            const this_is_anytype = this_arg.is_anytype;
             const other_is_anytype = other_key.isAnytypeParam(ctx.module, @intCast(u32, i));
 
             if (other_is_anytype != this_is_anytype) return false;
@@ -5596,7 +5612,17 @@ const GenericCallAdapter = struct {
                 }
             } else if (this_is_comptime) {
                 // Both are comptime parameters but not anytype parameters.
-                if (!this_arg.val.eql(other_arg.val, other_arg.ty, ctx.module)) {
+                // We assert no error is possible here because any lazy values must be resolved
+                // before inserting into the generic function hash map.
+                const is_eql = Value.eqlAdvanced(
+                    this_arg.val,
+                    this_arg.ty,
+                    other_arg.val,
+                    other_arg.ty,
+                    ctx.module,
+                    null,
+                ) catch unreachable;
+                if (!is_eql) {
                     return false;
                 }
             }
@@ -6247,8 +6273,7 @@ fn instantiateGenericCall(
     var hasher = std.hash.Wyhash.init(0);
     std.hash.autoHash(&hasher, @ptrToInt(module_fn));
 
-    const comptime_tvs = try sema.arena.alloc(TypedValue, func_ty_info.param_types.len);
-
+    const generic_args = try sema.arena.alloc(GenericCallAdapter.Arg, func_ty_info.param_types.len);
     {
         var i: usize = 0;
         for (fn_info.param_body) |inst| {
@@ -6272,8 +6297,9 @@ fn instantiateGenericCall(
                 else => continue,
             }
 
+            const arg_ty = sema.typeOf(uncasted_args[i]);
+
             if (is_comptime) {
-                const arg_ty = sema.typeOf(uncasted_args[i]);
                 const arg_val = sema.analyzeGenericCallArgVal(block, .unneeded, uncasted_args[i]) catch |err| switch (err) {
                     error.NeededSourceLocation => {
                         const decl = sema.mod.declPtr(block.src_decl);
@@ -6286,27 +6312,30 @@ fn instantiateGenericCall(
                 arg_val.hash(arg_ty, &hasher, mod);
                 if (is_anytype) {
                     arg_ty.hashWithHasher(&hasher, mod);
-                    comptime_tvs[i] = .{
+                    generic_args[i] = .{
                         .ty = arg_ty,
                         .val = arg_val,
+                        .is_anytype = true,
                     };
                 } else {
-                    comptime_tvs[i] = .{
-                        .ty = Type.initTag(.generic_poison),
+                    generic_args[i] = .{
+                        .ty = arg_ty,
                         .val = arg_val,
+                        .is_anytype = false,
                     };
                 }
             } else if (is_anytype) {
-                const arg_ty = sema.typeOf(uncasted_args[i]);
                 arg_ty.hashWithHasher(&hasher, mod);
-                comptime_tvs[i] = .{
+                generic_args[i] = .{
                     .ty = arg_ty,
                     .val = Value.initTag(.generic_poison),
+                    .is_anytype = true,
                 };
             } else {
-                comptime_tvs[i] = .{
-                    .ty = Type.initTag(.generic_poison),
+                generic_args[i] = .{
+                    .ty = arg_ty,
                     .val = Value.initTag(.generic_poison),
+                    .is_anytype = false,
                 };
             }
 
@@ -6320,7 +6349,7 @@ fn instantiateGenericCall(
         .generic_fn = module_fn,
         .precomputed_hash = precomputed_hash,
         .func_ty_info = func_ty_info,
-        .comptime_tvs = comptime_tvs,
+        .args = generic_args,
         .module = mod,
     };
     const gop = try mod.monomorphed_funcs.getOrPutAdapted(gpa, {}, adapter);
@@ -6804,11 +6833,10 @@ fn zirErrorToInt(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstDat
     const operand_src: LazySrcLoc = .{ .node_offset_builtin_call_arg0 = extra.node };
     const uncasted_operand = try sema.resolveInst(extra.operand);
     const operand = try sema.coerce(block, Type.anyerror, uncasted_operand, operand_src);
-    const result_ty = Type.u16;
 
     if (try sema.resolveMaybeUndefVal(block, src, operand)) |val| {
         if (val.isUndef()) {
-            return sema.addConstUndef(result_ty);
+            return sema.addConstUndef(Type.err_int);
         }
         switch (val.tag()) {
             .@"error" => {
@@ -6817,14 +6845,14 @@ fn zirErrorToInt(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstDat
                     .base = .{ .tag = .int_u64 },
                     .data = (try sema.mod.getErrorValue(val.castTag(.@"error").?.data.name)).value,
                 };
-                return sema.addConstant(result_ty, Value.initPayload(&payload.base));
+                return sema.addConstant(Type.err_int, Value.initPayload(&payload.base));
             },
 
             // This is not a valid combination with the type `anyerror`.
             .the_only_possible_value => unreachable,
 
             // Assume it's already encoded as an integer.
-            else => return sema.addConstant(result_ty, val),
+            else => return sema.addConstant(Type.err_int, val),
         }
     }
 
@@ -6833,14 +6861,14 @@ fn zirErrorToInt(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstDat
     if (!op_ty.isAnyError()) {
         const names = op_ty.errorSetNames();
         switch (names.len) {
-            0 => return sema.addConstant(result_ty, Value.zero),
-            1 => return sema.addIntUnsigned(result_ty, sema.mod.global_error_set.get(names[0]).?),
+            0 => return sema.addConstant(Type.err_int, Value.zero),
+            1 => return sema.addIntUnsigned(Type.err_int, sema.mod.global_error_set.get(names[0]).?),
             else => {},
         }
     }
 
     try sema.requireRuntimeBlock(block, src, operand_src);
-    return block.addBitCast(result_ty, operand);
+    return block.addBitCast(Type.err_int, operand);
 }
 
 fn zirIntToError(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstData) CompileError!Air.Inst.Ref {
@@ -6851,7 +6879,7 @@ fn zirIntToError(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstDat
     const src = LazySrcLoc.nodeOffset(extra.node);
     const operand_src: LazySrcLoc = .{ .node_offset_builtin_call_arg0 = extra.node };
     const uncasted_operand = try sema.resolveInst(extra.operand);
-    const operand = try sema.coerce(block, Type.u16, uncasted_operand, operand_src);
+    const operand = try sema.coerce(block, Type.err_int, uncasted_operand, operand_src);
     const target = sema.mod.getTarget();
 
     if (try sema.resolveDefinedValue(block, operand_src, operand)) |value| {
@@ -6868,7 +6896,10 @@ fn zirIntToError(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstDat
     try sema.requireRuntimeBlock(block, src, operand_src);
     if (block.wantSafety()) {
         const is_lt_len = try block.addUnOp(.cmp_lt_errors_len, operand);
-        try sema.addSafetyCheck(block, is_lt_len, .invalid_error_code);
+        const zero_val = try sema.addConstant(Type.err_int, Value.zero);
+        const is_non_zero = try block.addBinOp(.cmp_neq, operand, zero_val);
+        const ok = try block.addBinOp(.bit_and, is_lt_len, is_non_zero);
+        try sema.addSafetyCheck(block, ok, .invalid_error_code);
     }
     return block.addInst(.{
         .tag = .bitcast,
@@ -10441,7 +10472,7 @@ fn zirShr(
                 // Detect if any ones would be shifted out.
                 const truncated = try lhs_val.intTruncBitsAsValue(lhs_ty, sema.arena, .unsigned, rhs_val, target);
                 if (!(try truncated.compareWithZeroAdvanced(.eq, sema.kit(block, src)))) {
-                    return sema.addConstUndef(lhs_ty);
+                    return sema.fail(block, src, "exact shift shifted out 1 bits", .{});
                 }
             }
             const val = try lhs_val.shr(rhs_val, lhs_ty, sema.arena, target);
@@ -11171,6 +11202,21 @@ fn zirDiv(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Ins
     const maybe_lhs_val = try sema.resolveMaybeUndefValIntable(block, lhs_src, casted_lhs);
     const maybe_rhs_val = try sema.resolveMaybeUndefValIntable(block, rhs_src, casted_rhs);
 
+    if ((lhs_ty.zigTypeTag() == .ComptimeFloat and rhs_ty.zigTypeTag() == .ComptimeInt) or
+        (lhs_ty.zigTypeTag() == .ComptimeInt and rhs_ty.zigTypeTag() == .ComptimeFloat))
+    {
+        // If it makes a difference whether we coerce to ints or floats before doing the division, error.
+        // If lhs % rhs is 0, it doesn't matter.
+        const lhs_val = maybe_lhs_val orelse unreachable;
+        const rhs_val = maybe_rhs_val orelse unreachable;
+        const rem = lhs_val.floatRem(rhs_val, resolved_type, sema.arena, target) catch unreachable;
+        if (rem.compareWithZero(.neq)) {
+            return sema.fail(block, src, "ambiguous coercion of division operands '{s}' and '{s}'; non-zero remainder '{}'", .{
+                @tagName(lhs_ty.tag()), @tagName(rhs_ty.tag()), rem.fmtValue(resolved_type, sema.mod),
+            });
+        }
+    }
+
     // TODO: emit compile error when .div is used on integers and there would be an
     // ambiguous result between div_floor and div_trunc.
 
@@ -11261,7 +11307,12 @@ fn zirDiv(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Ins
         try sema.addDivByZeroSafety(block, resolved_type, maybe_rhs_val, casted_rhs, is_int);
     }
 
-    const air_tag = if (is_int) Air.Inst.Tag.div_trunc else switch (block.float_mode) {
+    const air_tag = if (is_int) blk: {
+        if (lhs_ty.isSignedInt() or rhs_ty.isSignedInt()) {
+            return sema.fail(block, src, "division with '{s}' and '{s}': signed integers must use @divTrunc, @divFloor, or @divExact", .{ @tagName(lhs_ty.tag()), @tagName(rhs_ty.tag()) });
+        }
+        break :blk Air.Inst.Tag.div_trunc;
+    } else switch (block.float_mode) {
         .Optimized => Air.Inst.Tag.div_float_optimized,
         .Strict => Air.Inst.Tag.div_float,
     };
@@ -11341,13 +11392,19 @@ fn zirDivExact(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
         if (maybe_lhs_val) |lhs_val| {
             if (maybe_rhs_val) |rhs_val| {
                 if (is_int) {
-                    // TODO: emit compile error if there is a remainder
+                    const modulus_val = try lhs_val.intMod(rhs_val, resolved_type, sema.arena, target);
+                    if (modulus_val.compareWithZero(.neq)) {
+                        return sema.fail(block, src, "exact division produced remainder", .{});
+                    }
                     return sema.addConstant(
                         resolved_type,
                         try lhs_val.intDiv(rhs_val, resolved_type, sema.arena, target),
                     );
                 } else {
-                    // TODO: emit compile error if there is a remainder
+                    const modulus_val = try lhs_val.floatMod(rhs_val, resolved_type, sema.arena, target);
+                    if (modulus_val.compareWithZero(.neq)) {
+                        return sema.fail(block, src, "exact division produced remainder", .{});
+                    }
                     return sema.addConstant(
                         resolved_type,
                         try lhs_val.floatDiv(rhs_val, resolved_type, sema.arena, target),
@@ -17359,17 +17416,10 @@ fn zirErrSetCast(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstDat
     }
 
     try sema.requireRuntimeBlock(block, src, operand_src);
-    if (block.wantSafety() and !dest_ty.isAnyError()) {
-        const err_int_inst = try block.addBitCast(Type.u16, operand);
-        // TODO: Output a switch instead of chained OR's.
-        var found_match: Air.Inst.Ref = undefined;
-        for (dest_ty.errorSetNames()) |dest_err_name, i| {
-            const dest_err_int = (try sema.mod.getErrorValue(dest_err_name)).value;
-            const dest_err_int_inst = try sema.addIntUnsigned(Type.u16, dest_err_int);
-            const next_match = try block.addBinOp(.cmp_eq, dest_err_int_inst, err_int_inst);
-            found_match = if (i == 0) next_match else try block.addBinOp(.bool_or, found_match, next_match);
-        }
-        try sema.addSafetyCheck(block, found_match, .invalid_error_code);
+    if (block.wantSafety() and !dest_ty.isAnyError() and sema.mod.comp.bin_file.options.use_llvm) {
+        const err_int_inst = try block.addBitCast(Type.err_int, operand);
+        const ok = try block.addTyOp(.error_set_has_value, dest_ty, err_int_inst);
+        try sema.addSafetyCheck(block, ok, .invalid_error_code);
     }
     return block.addBitCast(dest_ty, operand);
 }
@@ -27173,9 +27223,6 @@ pub fn resolveTypeLayout(
     src: LazySrcLoc,
     ty: Type,
 ) CompileError!void {
-    if (build_options.omit_stage2)
-        @panic("sadly stage2 is omitted from this build to save memory on the CI server");
-
     switch (ty.zigTypeTag()) {
         .Struct => return sema.resolveStructLayout(block, src, ty),
         .Union => return sema.resolveUnionLayout(block, src, ty),
@@ -27514,8 +27561,6 @@ fn resolveUnionFully(
 }
 
 pub fn resolveTypeFields(sema: *Sema, block: *Block, src: LazySrcLoc, ty: Type) CompileError!Type {
-    if (build_options.omit_stage2)
-        @panic("sadly stage2 is omitted from this build to save memory on the CI server");
     switch (ty.tag()) {
         .@"struct" => {
             const struct_obj = ty.castTag(.@"struct").?.data;
@@ -29114,8 +29159,6 @@ fn typePtrOrOptionalPtrTy(
 /// TODO merge these implementations together with the "advanced"/sema_kit pattern seen
 /// elsewhere in value.zig
 pub fn typeRequiresComptime(sema: *Sema, block: *Block, src: LazySrcLoc, ty: Type) CompileError!bool {
-    if (build_options.omit_stage2)
-        @panic("sadly stage2 is omitted from this build to save memory on the CI server");
     return switch (ty.tag()) {
         .u1,
         .u8,
@@ -30107,7 +30150,7 @@ fn valuesEqual(
     rhs: Value,
     ty: Type,
 ) CompileError!bool {
-    return Value.eqlAdvanced(lhs, rhs, ty, sema.mod, sema.kit(block, src));
+    return Value.eqlAdvanced(lhs, ty, rhs, ty, sema.mod, sema.kit(block, src));
 }
 
 /// Asserts the values are comparable vectors of type `ty`.

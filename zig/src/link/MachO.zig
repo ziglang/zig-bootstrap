@@ -272,7 +272,7 @@ pub const Export = struct {
 pub fn openPath(allocator: Allocator, options: link.Options) !*MachO {
     assert(options.object_format == .macho);
 
-    const use_stage1 = build_options.is_stage1 and options.use_stage1;
+    const use_stage1 = build_options.have_stage1 and options.use_stage1;
     if (use_stage1 or options.emit == null) {
         return createEmpty(allocator, options);
     }
@@ -363,7 +363,7 @@ pub fn createEmpty(gpa: Allocator, options: link.Options) !*MachO {
     const cpu_arch = options.target.cpu.arch;
     const page_size: u16 = if (cpu_arch == .aarch64) 0x4000 else 0x1000;
     const use_llvm = build_options.have_llvm and options.use_llvm;
-    const use_stage1 = build_options.is_stage1 and options.use_stage1;
+    const use_stage1 = build_options.have_stage1 and options.use_stage1;
 
     const self = try gpa.create(MachO);
     errdefer gpa.destroy(self);
@@ -5315,10 +5315,10 @@ fn writeFunctionStarts(self: *MachO, ncmds: *u32, lc_writer: anytype) !void {
 }
 
 fn filterDataInCode(
-    dices: []const macho.data_in_code_entry,
+    dices: []align(1) const macho.data_in_code_entry,
     start_addr: u64,
     end_addr: u64,
-) []const macho.data_in_code_entry {
+) []align(1) const macho.data_in_code_entry {
     const Predicate = struct {
         addr: u64,
 
@@ -5825,7 +5825,7 @@ pub fn getEntryPoint(self: MachO) error{MissingMainEntrypoint}!SymbolWithLoc {
     return global;
 }
 
-pub fn findFirst(comptime T: type, haystack: []const T, start: usize, predicate: anytype) usize {
+pub fn findFirst(comptime T: type, haystack: []align(1) const T, start: usize, predicate: anytype) usize {
     if (!@hasDecl(@TypeOf(predicate), "predicate"))
         @compileError("Predicate is required to define fn predicate(@This(), T) bool");
 
