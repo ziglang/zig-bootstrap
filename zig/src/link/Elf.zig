@@ -249,7 +249,7 @@ pub const Export = struct {
 };
 
 pub fn openPath(allocator: Allocator, sub_path: []const u8, options: link.Options) !*Elf {
-    assert(options.object_format == .elf);
+    assert(options.target.ofmt == .elf);
 
     if (build_options.have_llvm and options.use_llvm) {
         return createEmpty(allocator, options);
@@ -1671,6 +1671,12 @@ fn linkWithLLD(self: *Elf, comp: *Compilation, prog_node: *std.Progress.Node) !v
             if (comp.libc_static_lib) |lib| {
                 try argv.append(lib.full_object_path);
             }
+        }
+
+        // stack-protector.
+        // Related: https://github.com/ziglang/zig/issues/7265
+        if (comp.libssp_static_lib) |ssp| {
+            try argv.append(ssp.full_object_path);
         }
 
         // compiler-rt

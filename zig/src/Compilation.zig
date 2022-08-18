@@ -173,6 +173,7 @@ astgen_wait_group: WaitGroup = .{},
 /// TODO: Remove this when Stage2 becomes the default compiler as it will already have this information.
 export_symbol_names: std.ArrayListUnmanaged([]const u8) = .{},
 
+pub const default_stack_protector_buffer_size = 4;
 pub const SemaError = Module.SemaError;
 
 pub const CRTFile = struct {
@@ -810,7 +811,6 @@ pub const InitOptions = struct {
     /// this flag would be set to disable this machinery to avoid false positives.
     disable_lld_caching: bool = false,
     cache_mode: CacheMode = .incremental,
-    object_format: ?std.Target.ObjectFormat = null,
     optimize_mode: std.builtin.Mode = .Debug,
     keep_source_files_loaded: bool = false,
     clang_argv: []const []const u8 = &[0][]const u8{},
@@ -838,6 +838,10 @@ pub const InitOptions = struct {
     want_pie: ?bool = null,
     want_sanitize_c: ?bool = null,
     want_stack_check: ?bool = null,
+    /// null means default.
+    /// 0 means no stack protector.
+    /// other number means stack protection with that buffer size.
+    want_stack_protector: ?u32 = null,
     want_red_zone: ?bool = null,
     omit_frame_pointer: ?bool = null,
     want_valgrind: ?bool = null,
@@ -1015,6 +1019,15 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
         return error.ExportTableAndImportTableConflict;
     }
 
+    // The `have_llvm` condition is here only because native backends cannot yet build compiler-rt.
+    // Once they are capable this condition could be removed. When removing this condition,
+    // also test the use case of `build-obj -fcompiler-rt` with the native backends
+    // and make sure the compiler-rt symbols are emitted.
+    const capable_of_building_compiler_rt = build_options.have_llvm;
+
+    const capable_of_building_zig_libc = build_options.have_llvm;
+    const capable_of_building_ssp = build_options.have_llvm;
+
     const comp: *Compilation = comp: {
         // For allocations that have the same lifetime as Compilation. This arena is used only during this
         // initialization and then is freed in deinit().
@@ -1026,8 +1039,6 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
         // It's initialized later after we prepare the initialization options.
         const comp = try arena.create(Compilation);
         const root_name = try arena.dupeZ(u8, options.root_name);
-
-        const ofmt = options.object_format orelse options.target.getObjectFormat();
 
         const use_stage1 = options.use_stage1 orelse false;
 
@@ -1055,7 +1066,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
                 break :blk true;
 
             // If LLVM does not support the target, then we can't use it.
-            if (!target_util.hasLlvmSupport(options.target, ofmt))
+            if (!target_util.hasLlvmSupport(options.target, options.target.ofmt))
                 break :blk false;
 
             // Prefer LLVM for release builds.
@@ -1098,7 +1109,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             if (!build_options.have_llvm)
                 break :blk false;
 
-            if (ofmt == .c)
+            if (options.target.ofmt == .c)
                 break :blk false;
 
             if (options.want_lto) |lto| {
@@ -1220,7 +1231,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             break :blk lm;
         } else default_link_mode;
 
-        const dll_export_fns = if (options.dll_export_fns) |explicit| explicit else is_dyn_lib or options.rdynamic;
+        const dll_export_fns = options.dll_export_fns orelse (is_dyn_lib or options.rdynamic);
 
         const libc_dirs = try detectLibCIncludeDirs(
             arena,
@@ -1275,11 +1286,36 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
 
         const sanitize_c = options.want_sanitize_c orelse is_safe_mode;
 
-        const stack_check: bool = b: {
-            if (!target_util.supportsStackProbing(options.target))
-                break :b false;
-            break :b options.want_stack_check orelse is_safe_mode;
+        const stack_check: bool = options.want_stack_check orelse b: {
+            if (!target_util.supportsStackProbing(options.target)) break :b false;
+            break :b is_safe_mode;
         };
+        if (stack_check and !target_util.supportsStackProbing(options.target))
+            return error.StackCheckUnsupportedByTarget;
+
+        const stack_protector: u32 = options.want_stack_protector orelse b: {
+            if (!target_util.supportsStackProtector(options.target)) break :b @as(u32, 0);
+
+            // This logic is checking for linking libc because otherwise our start code
+            // which is trying to set up TLS (i.e. the fs/gs registers) but the stack
+            // protection code depends on fs/gs registers being already set up.
+            // If we were able to annotate start code, or perhaps the entire std lib,
+            // as being exempt from stack protection checks, we could change this logic
+            // to supporting stack protection even when not linking libc.
+            // TODO file issue about this
+            if (!link_libc) break :b 0;
+            if (!capable_of_building_ssp) break :b 0;
+            if (is_safe_mode) break :b default_stack_protector_buffer_size;
+            break :b 0;
+        };
+        if (stack_protector != 0) {
+            if (!target_util.supportsStackProtector(options.target))
+                return error.StackProtectorUnsupportedByTarget;
+            if (!capable_of_building_ssp)
+                return error.StackProtectorUnsupportedByBackend;
+            if (!link_libc)
+                return error.StackProtectorUnavailableWithoutLibC;
+        }
 
         const valgrind: bool = b: {
             if (!target_util.hasValgrindSupport(options.target))
@@ -1357,13 +1393,14 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
         cache.hash.add(options.target.os.getVersionRange());
         cache.hash.add(options.is_native_os);
         cache.hash.add(options.target.abi);
-        cache.hash.add(ofmt);
+        cache.hash.add(options.target.ofmt);
         cache.hash.add(pic);
         cache.hash.add(pie);
         cache.hash.add(lto);
         cache.hash.add(unwind_tables);
         cache.hash.add(tsan);
         cache.hash.add(stack_check);
+        cache.hash.add(stack_protector);
         cache.hash.add(red_zone);
         cache.hash.add(omit_frame_pointer);
         cache.hash.add(link_mode);
@@ -1665,7 +1702,6 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             .sysroot = sysroot,
             .output_mode = options.output_mode,
             .link_mode = link_mode,
-            .object_format = ofmt,
             .optimize_mode = options.optimize_mode,
             .use_lld = use_lld,
             .use_llvm = use_llvm,
@@ -1728,6 +1764,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             .valgrind = valgrind,
             .tsan = tsan,
             .stack_check = stack_check,
+            .stack_protector = stack_protector,
             .red_zone = red_zone,
             .omit_frame_pointer = omit_frame_pointer,
             .single_threaded = single_threaded,
@@ -1809,6 +1846,8 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
     };
     errdefer comp.destroy();
 
+    const target = comp.getTarget();
+
     // Add a `CObject` for each `c_source_files`.
     try comp.c_object_table.ensureTotalCapacity(gpa, options.c_source_files.len);
     for (options.c_source_files) |c_source_file| {
@@ -1824,9 +1863,9 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
 
     const have_bin_emit = comp.bin_file.options.emit != null or comp.whole_bin_sub_path != null;
 
-    if (have_bin_emit and !comp.bin_file.options.skip_linker_dependencies) {
-        if (comp.getTarget().isDarwin()) {
-            switch (comp.getTarget().abi) {
+    if (have_bin_emit and !comp.bin_file.options.skip_linker_dependencies and target.ofmt != .c) {
+        if (target.isDarwin()) {
+            switch (target.abi) {
                 .none,
                 .simulator,
                 .macabi,
@@ -1837,9 +1876,9 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
         // If we need to build glibc for the target, add work items for it.
         // We go through the work queue so that building can be done in parallel.
         if (comp.wantBuildGLibCFromSource()) {
-            if (!target_util.canBuildLibC(comp.getTarget())) return error.LibCUnavailable;
+            if (!target_util.canBuildLibC(target)) return error.LibCUnavailable;
 
-            if (glibc.needsCrtiCrtn(comp.getTarget())) {
+            if (glibc.needsCrtiCrtn(target)) {
                 try comp.work_queue.write(&[_]Job{
                     .{ .glibc_crt_file = .crti_o },
                     .{ .glibc_crt_file = .crtn_o },
@@ -1852,10 +1891,10 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             });
         }
         if (comp.wantBuildMuslFromSource()) {
-            if (!target_util.canBuildLibC(comp.getTarget())) return error.LibCUnavailable;
+            if (!target_util.canBuildLibC(target)) return error.LibCUnavailable;
 
             try comp.work_queue.ensureUnusedCapacity(6);
-            if (musl.needsCrtiCrtn(comp.getTarget())) {
+            if (musl.needsCrtiCrtn(target)) {
                 comp.work_queue.writeAssumeCapacity(&[_]Job{
                     .{ .musl_crt_file = .crti_o },
                     .{ .musl_crt_file = .crtn_o },
@@ -1872,7 +1911,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             });
         }
         if (comp.wantBuildWasiLibcFromSource()) {
-            if (!target_util.canBuildLibC(comp.getTarget())) return error.LibCUnavailable;
+            if (!target_util.canBuildLibC(target)) return error.LibCUnavailable;
 
             const wasi_emulated_libs = comp.bin_file.options.wasi_emulated_libs;
             try comp.work_queue.ensureUnusedCapacity(wasi_emulated_libs.len + 2); // worst-case we need all components
@@ -1887,7 +1926,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             });
         }
         if (comp.wantBuildMinGWFromSource()) {
-            if (!target_util.canBuildLibC(comp.getTarget())) return error.LibCUnavailable;
+            if (!target_util.canBuildLibC(target)) return error.LibCUnavailable;
 
             const static_lib_jobs = [_]Job{
                 .{ .mingw_crt_file = .mingw32_lib },
@@ -1906,7 +1945,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             }
         }
         // Generate Windows import libs.
-        if (comp.getTarget().os.tag == .windows) {
+        if (target.os.tag == .windows) {
             const count = comp.bin_file.options.system_libs.count();
             try comp.work_queue.ensureUnusedCapacity(count);
             var i: usize = 0;
@@ -1925,15 +1964,6 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             try comp.work_queue.writeItem(.libtsan);
         }
 
-        // The `have_llvm` condition is here only because native backends cannot yet build compiler-rt.
-        // Once they are capable this condition could be removed. When removing this condition,
-        // also test the use case of `build-obj -fcompiler-rt` with the native backends
-        // and make sure the compiler-rt symbols are emitted.
-        const capable_of_building_compiler_rt = build_options.have_llvm;
-
-        const capable_of_building_zig_libc = build_options.have_llvm;
-        const capable_of_building_ssp = comp.bin_file.options.use_stage1;
-
         if (comp.bin_file.options.include_compiler_rt and capable_of_building_compiler_rt) {
             if (is_exe_or_dyn_lib) {
                 log.debug("queuing a job to build compiler_rt_lib", .{});
@@ -1947,8 +1977,11 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             }
         }
         if (needs_c_symbols) {
-            // MinGW provides no libssp, use our own implementation.
-            if (comp.getTarget().isMinGW() and capable_of_building_ssp) {
+            // Related: https://github.com/ziglang/zig/issues/7265.
+            if (comp.bin_file.options.stack_protector != 0 and
+                (!comp.bin_file.options.link_libc or
+                !target_util.libcProvidesStackProtector(target)))
+            {
                 try comp.work_queue.writeItem(.{ .libssp = {} });
             }
 
@@ -3699,7 +3732,8 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: *std.P
     else
         c_source_basename[0 .. c_source_basename.len - std.fs.path.extension(c_source_basename).len];
 
-    const o_ext = comp.bin_file.options.object_format.fileExt(comp.bin_file.options.target.cpu.arch);
+    const target = comp.getTarget();
+    const o_ext = target.ofmt.fileExt(target.cpu.arch);
     const digest = if (!comp.disable_c_depfile and try man.hit()) man.final() else blk: {
         var argv = std.ArrayList([]const u8).init(comp.gpa);
         defer argv.deinit();
@@ -4052,7 +4086,7 @@ pub fn addCCArgs(
 
             if (!comp.bin_file.options.strip) {
                 try argv.append("-g");
-                switch (comp.bin_file.options.object_format) {
+                switch (target.ofmt) {
                     .coff => try argv.append("-gcodeview"),
                     else => {},
                 }
@@ -4084,6 +4118,17 @@ pub fn addCCArgs(
                 try argv.append("-fno-omit-frame-pointer");
             }
 
+            const ssp_buf_size = comp.bin_file.options.stack_protector;
+            if (ssp_buf_size != 0) {
+                try argv.appendSlice(&[_][]const u8{
+                    "-fstack-protector-strong",
+                    "--param",
+                    try std.fmt.allocPrint(arena, "ssp-buffer-size={d}", .{ssp_buf_size}),
+                });
+            } else {
+                try argv.append("-fno-stack-protector");
+            }
+
             switch (comp.bin_file.options.optimize_mode) {
                 .Debug => {
                     // windows c runtime requires -D_DEBUG if using debug libraries
@@ -4092,27 +4137,12 @@ pub fn addCCArgs(
                     // to -O1. Besides potentially impairing debugging, -O1/-Og significantly
                     // increases compile times.
                     try argv.append("-O0");
-
-                    if (comp.bin_file.options.link_libc and target.os.tag != .wasi) {
-                        try argv.append("-fstack-protector-strong");
-                        try argv.append("--param");
-                        try argv.append("ssp-buffer-size=4");
-                    } else {
-                        try argv.append("-fno-stack-protector");
-                    }
                 },
                 .ReleaseSafe => {
                     // See the comment in the BuildModeFastRelease case for why we pass -O2 rather
                     // than -O3 here.
                     try argv.append("-O2");
-                    if (comp.bin_file.options.link_libc and target.os.tag != .wasi) {
-                        try argv.append("-D_FORTIFY_SOURCE=2");
-                        try argv.append("-fstack-protector-strong");
-                        try argv.append("--param");
-                        try argv.append("ssp-buffer-size=4");
-                    } else {
-                        try argv.append("-fno-stack-protector");
-                    }
+                    try argv.append("-D_FORTIFY_SOURCE=2");
                 },
                 .ReleaseFast => {
                     try argv.append("-DNDEBUG");
@@ -4122,12 +4152,10 @@ pub fn addCCArgs(
                     // Zig code than it is for C code. Also, C programmers are used to their code
                     // running in -O2 and thus the -O3 path has been tested less.
                     try argv.append("-O2");
-                    try argv.append("-fno-stack-protector");
                 },
                 .ReleaseSmall => {
                     try argv.append("-DNDEBUG");
                     try argv.append("-Os");
-                    try argv.append("-fno-stack-protector");
                 },
             }
 
@@ -4620,7 +4648,7 @@ fn wantBuildLibCFromSource(comp: Compilation) bool {
     };
     return comp.bin_file.options.link_libc and is_exe_or_dyn_lib and
         comp.bin_file.options.libc_installation == null and
-        comp.bin_file.options.object_format != .c;
+        comp.bin_file.options.target.ofmt != .c;
 }
 
 fn wantBuildGLibCFromSource(comp: Compilation) bool {
@@ -4648,7 +4676,7 @@ fn wantBuildLibUnwindFromSource(comp: *Compilation) bool {
         .Exe => true,
     };
     return is_exe_or_dyn_lib and comp.bin_file.options.link_libunwind and
-        comp.bin_file.options.object_format != .c;
+        comp.bin_file.options.target.ofmt != .c;
 }
 
 fn setAllocFailure(comp: *Compilation) void {
@@ -4707,7 +4735,7 @@ pub fn generateBuiltinZigSource(comp: *Compilation, allocator: Allocator) Alloca
     const zig_backend: std.builtin.CompilerBackend = blk: {
         if (use_stage1) break :blk .stage1;
         if (build_options.have_llvm and comp.bin_file.options.use_llvm) break :blk .stage2_llvm;
-        if (comp.bin_file.options.object_format == .c) break :blk .stage2_c;
+        if (target.ofmt == .c) break :blk .stage2_c;
         break :blk switch (target.cpu.arch) {
             .wasm32, .wasm64 => std.builtin.CompilerBackend.stage2_wasm,
             .arm, .armeb, .thumb, .thumbeb => .stage2_arm,
@@ -4855,6 +4883,7 @@ pub fn generateBuiltinZigSource(comp: *Compilation, allocator: Allocator) Alloca
         \\    .cpu = cpu,
         \\    .os = os,
         \\    .abi = abi,
+        \\    .ofmt = object_format,
         \\}};
         \\pub const object_format = std.Target.ObjectFormat.{};
         \\pub const mode = std.builtin.Mode.{};
@@ -4869,7 +4898,7 @@ pub fn generateBuiltinZigSource(comp: *Compilation, allocator: Allocator) Alloca
         \\pub const code_model = std.builtin.CodeModel.{};
         \\
     , .{
-        std.zig.fmtId(@tagName(comp.bin_file.options.object_format)),
+        std.zig.fmtId(@tagName(target.ofmt)),
         std.zig.fmtId(@tagName(comp.bin_file.options.optimize_mode)),
         link_libc,
         comp.bin_file.options.link_libcpp,
@@ -4991,6 +5020,7 @@ fn buildOutputFromZig(
         .use_stage1 = build_options.have_stage1 and comp.bin_file.options.use_stage1,
         .want_sanitize_c = false,
         .want_stack_check = false,
+        .want_stack_protector = 0,
         .want_red_zone = comp.bin_file.options.red_zone,
         .omit_frame_pointer = comp.bin_file.options.omit_frame_pointer,
         .want_valgrind = false,
@@ -5271,6 +5301,7 @@ pub fn build_crt_file(
         .optimize_mode = comp.compilerRtOptMode(),
         .want_sanitize_c = false,
         .want_stack_check = false,
+        .want_stack_protector = 0,
         .want_red_zone = comp.bin_file.options.red_zone,
         .omit_frame_pointer = comp.bin_file.options.omit_frame_pointer,
         .want_valgrind = false,

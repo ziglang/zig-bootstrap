@@ -270,34 +270,26 @@ pub const Export = struct {
 };
 
 pub fn openPath(allocator: Allocator, options: link.Options) !*MachO {
-    assert(options.object_format == .macho);
+    assert(options.target.ofmt == .macho);
 
     const use_stage1 = build_options.have_stage1 and options.use_stage1;
     if (use_stage1 or options.emit == null) {
         return createEmpty(allocator, options);
     }
-    const emit = options.emit.?;
-    const file = try emit.directory.handle.createFile(emit.sub_path, .{
-        .truncate = false,
-        .read = true,
-        .mode = link.determineMode(options),
-    });
-    errdefer file.close();
 
+    const emit = options.emit.?;
     const self = try createEmpty(allocator, options);
     errdefer {
         self.base.file = null;
         self.base.destroy();
     }
 
-    self.base.file = file;
-
     if (build_options.have_llvm and options.use_llvm and options.module != null) {
         // TODO this intermediary_basename isn't enough; in the case of `zig build-exe`,
         // we also want to put the intermediary object file in the cache while the
         // main emit directory is the cwd.
         self.base.intermediary_basename = try std.fmt.allocPrint(allocator, "{s}{s}", .{
-            emit.sub_path, options.object_format.fileExt(options.target.cpu.arch),
+            emit.sub_path, options.target.ofmt.fileExt(options.target.cpu.arch),
         });
     }
 
@@ -306,6 +298,14 @@ pub fn openPath(allocator: Allocator, options: link.Options) !*MachO {
     {
         return self;
     }
+
+    const file = try emit.directory.handle.createFile(emit.sub_path, .{
+        .truncate = false,
+        .read = true,
+        .mode = link.determineMode(options),
+    });
+    errdefer file.close();
+    self.base.file = file;
 
     if (!options.strip and options.module != null) blk: {
         // TODO once I add support for converting (and relocating) DWARF info from relocatable
