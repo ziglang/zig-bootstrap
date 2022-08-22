@@ -866,7 +866,7 @@ var zigAnalysis;
       }
       case "compileError": {
         let compileError = expr.compileError;
-        return compileError;
+        return "@compileError(" + exprName(zigAnalysis.exprs[compileError], opts) + ")";
       }
       case "enumLiteral": {
         let literal = expr.enumLiteral;
@@ -1430,20 +1430,24 @@ var zigAnalysis;
         return lhs + "!" + rhs;
       }
       case "struct": {
-        const struct_name =
-          zigAnalysis.decls[expr.struct[0].val.typeRef.refPath[0].declRef].name;
+        // const struct_name =
+        //   zigAnalysis.decls[expr.struct[0].val.typeRef.refPath[0].declRef].name;
+        const struct_name = ".";
         let struct_body = "";
         struct_body += struct_name + "{ ";
         for (let i = 0; i < expr.struct.length; i++) {
-          const val = expr.struct[i].name;
-          const exprArg = zigAnalysis.exprs[expr.struct[i].val.expr.as.exprArg];
-          let value_field = exprArg[Object.keys(exprArg)[0]];
-          if (value_field instanceof Object) {
-            value_field =
-              zigAnalysis.decls[value_field[0].val.typeRef.refPath[0].declRef]
-                .name;
-          }
-          struct_body += "." + val + " = " + value_field;
+          const fv = expr.struct[i];
+          const field_name = fv.name;
+          const field_value = exprName(fv.val.expr, opts);
+          // TODO: commented out because it seems not needed. if it deals
+          //       with a corner case, please add a comment when re-enabling it.
+          // let field_value = exprArg[Object.keys(exprArg)[0]];
+          // if (field_value instanceof Object) {
+          //   value_field = exprName(value_field)
+          //     zigAnalysis.decls[value_field[0].val.typeRef.refPath[0].declRef]
+          //       .name;
+          // }
+          struct_body += "." + field_name + " = " + field_value;
           if (i !== expr.struct.length - 1) {
             struct_body += ", ";
           } else {
@@ -1770,7 +1774,9 @@ var zigAnalysis;
               return '<span class="tok-type">anyerror</span>';
             } else {
               // throw "TODO";
-              let html = "error{" + errSetObj.fields[0].name + "}";
+              let html = "error{" + errSetObj.fields[0].name;
+              for (let i = 1; i < errSetObj.fields.length; i++) html += ", " + errSetObj.fields[i].name;
+              html += "}";
               return html;
             }
           }
