@@ -78,6 +78,9 @@ post_hoc_blocks: std.AutoHashMapUnmanaged(Air.Inst.Index, *LabeledBlock) = .{},
 err: ?*Module.ErrorMsg = null,
 /// True when analyzing a generic instantiation. Used to suppress some errors.
 is_generic_instantiation: bool = false,
+/// Set to true when analyzing a func type instruction so that nested generic
+/// function types will emit generic poison instead of a partial type.
+no_partial_func_ty: bool = false,
 
 const std = @import("std");
 const math = std.math;
@@ -4068,6 +4071,19 @@ fn zirValidateArrayInit(
 
         // Determine whether the value stored to this pointer is comptime-known.
 
+        if (array_ty.isTuple()) {
+            if (array_ty.structFieldValueComptime(i)) |opv| {
+                element_vals[i] = opv;
+                continue;
+            }
+        } else {
+            // Array has one possible value, so value is always comptime-known
+            if (opt_opv) |opv| {
+                element_vals[i] = opv;
+                continue;
+            }
+        }
+
         const elem_ptr_air_ref = sema.inst_map.get(elem_ptr).?;
         const elem_ptr_air_inst = Air.refToIndex(elem_ptr_air_ref).?;
         // Find the block index of the elem_ptr so that we can look at the next
@@ -4083,19 +4099,6 @@ fn zirValidateArrayInit(
             block_index -= 1;
         }
         first_block_index = @minimum(first_block_index, block_index);
-
-        if (array_ty.isTuple()) {
-            if (array_ty.structFieldValueComptime(i)) |opv| {
-                element_vals[i] = opv;
-                continue;
-            }
-        } else {
-            // Array has one possible value, so value is always comptime-known
-            if (opt_opv) |opv| {
-                element_vals[i] = opv;
-                continue;
-            }
-        }
 
         // If the next instructon is a store with a comptime operand, this element
         // is comptime.
@@ -5938,10 +5941,9 @@ fn analyzeCall(
                 undefined,
             ) catch |err| switch (err) {
                 error.NeededSourceLocation => {
-                    sema.inst_map.clearRetainingCapacity();
+                    _ = sema.inst_map.remove(inst);
                     const decl = sema.mod.declPtr(block.src_decl);
                     child_block.src_decl = block.src_decl;
-                    arg_i = 0;
                     try sema.analyzeInlineCallArg(
                         block,
                         &child_block,
@@ -7917,6 +7919,7 @@ fn funcCommon(
         if (cc_workaround == .Inline and is_noinline) {
             return sema.fail(block, cc_src, "'noinline' function cannot have callconv 'Inline'", .{});
         }
+        if (is_generic and sema.no_partial_func_ty) return error.GenericPoison;
 
         break :fn_ty try Type.Tag.function.create(sema.arena, .{
             .param_types = param_types,
@@ -8097,25 +8100,19 @@ fn zirParam(
             // Make sure any nested param instructions don't clobber our work.
             const prev_params = block.params;
             const prev_preallocated_new_func = sema.preallocated_new_func;
+            const prev_no_partial_func_type = sema.no_partial_func_ty;
             block.params = .{};
             sema.preallocated_new_func = null;
+            sema.no_partial_func_ty = true;
             defer {
                 block.params.deinit(sema.gpa);
                 block.params = prev_params;
                 sema.preallocated_new_func = prev_preallocated_new_func;
+                sema.no_partial_func_ty = prev_no_partial_func_type;
             }
 
             if (sema.resolveBody(block, body, inst)) |param_ty_inst| {
                 if (sema.analyzeAsType(block, src, param_ty_inst)) |param_ty| {
-                    if (param_ty.zigTypeTag() == .Fn and param_ty.fnInfo().is_generic) {
-                        // zirFunc will not emit error.GenericPoison to build a
-                        // partial type for generic functions but we still need to
-                        // detect if a function parameter is a generic function
-                        // to force the parent function to also be generic.
-                        if (!sema.inst_map.contains(inst)) {
-                            break :err error.GenericPoison;
-                        }
-                    }
                     break :param_ty param_ty;
                 } else |err| break :err err;
             } else |err| break :err err;
@@ -13043,7 +13040,7 @@ fn analyzePtrArithmetic(
         // The resulting pointer is aligned to the lcd between the offset (an
         // arbitrary number) and the alignment factor (always a power of two,
         // non zero).
-        const new_align = @as(u32, 1) << @intCast(u5, @ctz(u64, addend | ptr_info.@"align"));
+        const new_align = @as(u32, 1) << @intCast(u5, @ctz(addend | ptr_info.@"align"));
 
         break :t try Type.ptr(sema.arena, sema.mod, .{
             .pointee_type = ptr_info.pointee_type,
@@ -17792,7 +17789,7 @@ fn zirBitCount(
 ) CompileError!Air.Inst.Ref {
     const inst_data = sema.code.instructions.items(.data)[inst].un_node;
     const src = inst_data.src();
-    const operand_src: LazySrcLoc = .{ .node_offset_builtin_call_arg1 = inst_data.src_node };
+    const operand_src: LazySrcLoc = .{ .node_offset_builtin_call_arg0 = inst_data.src_node };
     const operand = try sema.resolveInst(inst_data.operand);
     const operand_ty = sema.typeOf(operand);
     _ = try checkIntOrVector(sema, block, operand, operand_src);
@@ -17844,17 +17841,16 @@ fn zirBitCount(
 fn zirByteSwap(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Inst.Ref {
     const inst_data = sema.code.instructions.items(.data)[inst].un_node;
     const src = inst_data.src();
-    const ty_src: LazySrcLoc = .{ .node_offset_builtin_call_arg0 = inst_data.src_node };
-    const operand_src: LazySrcLoc = .{ .node_offset_builtin_call_arg1 = inst_data.src_node };
+    const operand_src: LazySrcLoc = .{ .node_offset_builtin_call_arg0 = inst_data.src_node };
     const operand = try sema.resolveInst(inst_data.operand);
     const operand_ty = sema.typeOf(operand);
-    const scalar_ty = try sema.checkIntOrVectorAllowComptime(block, operand_ty, operand_src);
+    const scalar_ty = try sema.checkIntOrVector(block, operand, operand_src);
     const target = sema.mod.getTarget();
     const bits = scalar_ty.intInfo(target).bits;
     if (bits % 8 != 0) {
         return sema.fail(
             block,
-            ty_src,
+            operand_src,
             "@byteSwap requires the number of bits to be evenly divisible by 8, but {} has {} bits",
             .{ scalar_ty.fmt(sema.mod), bits },
         );
@@ -17865,7 +17861,7 @@ fn zirByteSwap(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
     }
 
     switch (operand_ty.zigTypeTag()) {
-        .Int, .ComptimeInt => {
+        .Int => {
             const runtime_src = if (try sema.resolveMaybeUndefVal(block, operand_src, operand)) |val| {
                 if (val.isUndef()) return sema.addConstUndef(operand_ty);
                 const result_val = try val.byteSwap(operand_ty, target, sema.arena);
@@ -17903,7 +17899,7 @@ fn zirByteSwap(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Ai
 fn zirBitReverse(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.Inst.Ref {
     const inst_data = sema.code.instructions.items(.data)[inst].un_node;
     const src = inst_data.src();
-    const operand_src: LazySrcLoc = .{ .node_offset_builtin_call_arg1 = inst_data.src_node };
+    const operand_src: LazySrcLoc = .{ .node_offset_builtin_call_arg0 = inst_data.src_node };
     const operand = try sema.resolveInst(inst_data.operand);
     const operand_ty = sema.typeOf(operand);
     _ = try sema.checkIntOrVectorAllowComptime(block, operand_ty, operand_src);
@@ -21683,7 +21679,7 @@ fn structFieldPtrByIndex(
             const elem_size_bits = ptr_ty_data.pointee_type.bitSize(target);
             if (elem_size_bytes * 8 == elem_size_bits) {
                 const byte_offset = ptr_ty_data.bit_offset / 8;
-                const new_align = @as(u32, 1) << @intCast(u5, @ctz(u64, byte_offset | parent_align));
+                const new_align = @as(u32, 1) << @intCast(u5, @ctz(byte_offset | parent_align));
                 ptr_ty_data.bit_offset = 0;
                 ptr_ty_data.host_size = 0;
                 ptr_ty_data.@"align" = new_align;
@@ -26141,11 +26137,12 @@ fn analyzeSlice(
     var array_ty = ptr_ptr_child_ty;
     var slice_ty = ptr_ptr_ty;
     var ptr_or_slice = ptr_ptr;
-    var elem_ty = ptr_ptr_child_ty.childType();
+    var elem_ty: Type = undefined;
     var ptr_sentinel: ?Value = null;
     switch (ptr_ptr_child_ty.zigTypeTag()) {
         .Array => {
             ptr_sentinel = ptr_ptr_child_ty.sentinel();
+            elem_ty = ptr_ptr_child_ty.childType();
         },
         .Pointer => switch (ptr_ptr_child_ty.ptrSize()) {
             .One => {
@@ -30455,7 +30452,7 @@ fn elemPtrType(sema: *Sema, ptr_ty: Type, offset: ?usize) !Type {
         // The resulting pointer is aligned to the lcd between the offset (an
         // arbitrary number) and the alignment factor (always a power of two,
         // non zero).
-        const new_align = @as(u32, 1) << @intCast(u5, @ctz(u64, addend | ptr_info.@"align"));
+        const new_align = @as(u32, 1) << @intCast(u5, @ctz(addend | ptr_info.@"align"));
         break :a new_align;
     };
     return try Type.ptr(sema.arena, sema.mod, .{

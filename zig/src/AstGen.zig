@@ -4265,10 +4265,13 @@ fn structDeclInner(
     // are in scope, so that field types, alignments, and default value expressions
     // can refer to decls within the struct itself.
     astgen.advanceSourceCursorToNode(node);
+    // If `node == 0` then this is the root struct and all the declarations should
+    // be relative to the beginning of the file.
+    const decl_line = if (node == 0) 0 else astgen.source_line;
     var block_scope: GenZir = .{
         .parent = &namespace.base,
         .decl_node_index = node,
-        .decl_line = astgen.source_line,
+        .decl_line = decl_line,
         .astgen = astgen,
         .force_comptime = true,
         .in_defer = false,
@@ -7733,11 +7736,11 @@ fn builtinCall(
         .has_decl  => return hasDeclOrField(gz, scope, rl, node, params[0], params[1], .has_decl),
         .has_field => return hasDeclOrField(gz, scope, rl, node, params[0], params[1], .has_field),
 
-        .clz         => return bitBuiltin(gz, scope, rl, node, params[0], params[1], .clz),
-        .ctz         => return bitBuiltin(gz, scope, rl, node, params[0], params[1], .ctz),
-        .pop_count   => return bitBuiltin(gz, scope, rl, node, params[0], params[1], .pop_count),
-        .byte_swap   => return bitBuiltin(gz, scope, rl, node, params[0], params[1], .byte_swap),
-        .bit_reverse => return bitBuiltin(gz, scope, rl, node, params[0], params[1], .bit_reverse),
+        .clz         => return bitBuiltin(gz, scope, rl, node, params[0], .clz),
+        .ctz         => return bitBuiltin(gz, scope, rl, node, params[0], .ctz),
+        .pop_count   => return bitBuiltin(gz, scope, rl, node, params[0], .pop_count),
+        .byte_swap   => return bitBuiltin(gz, scope, rl, node, params[0], .byte_swap),
+        .bit_reverse => return bitBuiltin(gz, scope, rl, node, params[0], .bit_reverse),
 
         .div_exact => return divBuiltin(gz, scope, rl, node, params[0], params[1], .div_exact),
         .div_floor => return divBuiltin(gz, scope, rl, node, params[0], params[1], .div_floor),
@@ -8100,17 +8103,9 @@ fn bitBuiltin(
     scope: *Scope,
     rl: ResultLoc,
     node: Ast.Node.Index,
-    int_type_node: Ast.Node.Index,
     operand_node: Ast.Node.Index,
     tag: Zir.Inst.Tag,
 ) InnerError!Zir.Inst.Ref {
-    // The accepted proposal https://github.com/ziglang/zig/issues/6835
-    // tells us to remove the type parameter from these builtins. To stay
-    // source-compatible with stage1, we still observe the parameter here,
-    // but we do not encode it into the ZIR. To implement this proposal in
-    // stage2, only AstGen code will need to be changed.
-    _ = try typeExpr(gz, scope, int_type_node);
-
     const operand = try expr(gz, scope, .none, operand_node);
     const result = try gz.addUnNode(tag, operand, node);
     return rvalue(gz, rl, result, node);
@@ -11764,7 +11759,6 @@ fn scanDecls(astgen: *AstGen, namespace: *Scope.Namespace, members: []const Ast.
             }
         }
 
-        // const index_name = try astgen.identAsString(index_token);
         var s = namespace.parent;
         while (true) switch (s.tag) {
             .local_val => {
