@@ -1165,9 +1165,6 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
                 break :blk false;
             } else if (options.c_source_files.len == 0) {
                 break :blk false;
-            } else if (options.target.os.tag == .windows and link_libcpp) {
-                // https://github.com/ziglang/zig/issues/8531
-                break :blk false;
             } else if (options.target.cpu.arch.isRISCV()) {
                 // Clang and LLVM currently don't support RISC-V target-abi for LTO.
                 // Compiling with LTO may fail or produce undesired results.
@@ -1793,6 +1790,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             .headerpad_size = options.headerpad_size,
             .headerpad_max_install_names = options.headerpad_max_install_names,
             .dead_strip_dylibs = options.dead_strip_dylibs,
+            .force_undefined_symbols = .{},
         });
         errdefer bin_file.destroy();
         comp.* = .{
@@ -1943,6 +1941,10 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             for (mingw.always_link_libs) |name| {
                 try comp.bin_file.options.system_libs.put(comp.gpa, name, .{});
             }
+
+            // LLD might drop some symbols as unused during LTO and GCing, therefore,
+            // we force mark them for resolution here.
+            try comp.bin_file.options.force_undefined_symbols.put(comp.gpa, "_tls_index", {});
         }
         // Generate Windows import libs.
         if (target.os.tag == .windows) {
@@ -3758,7 +3760,6 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: *std.P
             "clang",
             c_object.src.src_path,
         });
-        try argv.appendSlice(c_object.src.extra_flags);
 
         const ext = classifyFileExt(c_object.src.src_path);
 
@@ -3771,6 +3772,7 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: *std.P
             comp.disable_c_depfile and comp.clang_passthrough_mode)
         {
             try comp.addCCArgs(arena, &argv, ext, null);
+            try argv.appendSlice(c_object.src.extra_flags);
 
             const out_obj_path = if (comp.bin_file.options.emit) |emit|
                 try emit.directory.join(arena, &.{emit.sub_path})
@@ -3811,6 +3813,7 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: *std.P
         else
             try std.fmt.allocPrint(arena, "{s}.d", .{out_obj_path});
         try comp.addCCArgs(arena, &argv, ext, out_dep_path);
+        try argv.appendSlice(c_object.src.extra_flags);
 
         try argv.ensureUnusedCapacity(5);
         switch (comp.clang_preprocessor_mode) {

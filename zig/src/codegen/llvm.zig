@@ -1860,7 +1860,7 @@ pub const Object = struct {
                 var offset: u64 = 0;
 
                 for (fields.values()) |field, i| {
-                    if (field.is_comptime or !field.ty.hasRuntimeBitsIgnoreComptime()) continue;
+                    if (field.is_comptime or !field.ty.hasRuntimeBits()) continue;
 
                     const field_size = field.ty.abiSize(target);
                     const field_align = field.alignment(target, layout);
@@ -2764,7 +2764,7 @@ pub const DeclGen = struct {
                 var any_underaligned_fields = false;
 
                 for (struct_obj.fields.values()) |field| {
-                    if (field.is_comptime or !field.ty.hasRuntimeBitsIgnoreComptime()) continue;
+                    if (field.is_comptime or !field.ty.hasRuntimeBits()) continue;
 
                     const field_align = field.alignment(target, struct_obj.layout);
                     const field_ty_align = field.ty.abiAlignment(target);
@@ -3443,7 +3443,7 @@ pub const DeclGen = struct {
                 var need_unnamed = false;
 
                 for (struct_obj.fields.values()) |field, i| {
-                    if (field.is_comptime or !field.ty.hasRuntimeBitsIgnoreComptime()) continue;
+                    if (field.is_comptime or !field.ty.hasRuntimeBits()) continue;
 
                     const field_align = field.alignment(target, struct_obj.layout);
                     big_align = @maximum(big_align, field_align);
@@ -6188,7 +6188,9 @@ pub const FuncGen = struct {
         }
         const llvm_optional_ty = try self.dg.lowerType(optional_ty);
         if (isByRef(optional_ty)) {
+            const target = self.dg.module.getTarget();
             const optional_ptr = self.buildAlloca(llvm_optional_ty);
+            optional_ptr.setAlignment(optional_ty.abiAlignment(target));
             const payload_ptr = self.builder.buildStructGEP(optional_ptr, 0, "");
             var ptr_ty_payload: Type.Payload.ElemType = .{
                 .base = .{ .tag = .single_mut_pointer },
@@ -6208,20 +6210,21 @@ pub const FuncGen = struct {
         if (self.liveness.isUnused(inst)) return null;
 
         const ty_op = self.air.instructions.items(.data)[inst].ty_op;
-        const inst_ty = self.air.typeOfIndex(inst);
+        const err_un_ty = self.air.typeOfIndex(inst);
         const operand = try self.resolveInst(ty_op.operand);
         const payload_ty = self.air.typeOf(ty_op.operand);
         if (!payload_ty.hasRuntimeBitsIgnoreComptime()) {
             return operand;
         }
         const ok_err_code = (try self.dg.lowerType(Type.anyerror)).constNull();
-        const err_un_llvm_ty = try self.dg.lowerType(inst_ty);
+        const err_un_llvm_ty = try self.dg.lowerType(err_un_ty);
 
         const target = self.dg.module.getTarget();
         const payload_offset = errUnionPayloadOffset(payload_ty, target);
         const error_offset = errUnionErrorOffset(payload_ty, target);
-        if (isByRef(inst_ty)) {
+        if (isByRef(err_un_ty)) {
             const result_ptr = self.buildAlloca(err_un_llvm_ty);
+            result_ptr.setAlignment(err_un_ty.abiAlignment(target));
             const err_ptr = self.builder.buildStructGEP(result_ptr, error_offset, "");
             const store_inst = self.builder.buildStore(ok_err_code, err_ptr);
             store_inst.setAlignment(Type.anyerror.abiAlignment(target));
@@ -6256,6 +6259,7 @@ pub const FuncGen = struct {
         const error_offset = errUnionErrorOffset(payload_ty, target);
         if (isByRef(err_un_ty)) {
             const result_ptr = self.buildAlloca(err_un_llvm_ty);
+            result_ptr.setAlignment(err_un_ty.abiAlignment(target));
             const err_ptr = self.builder.buildStructGEP(result_ptr, error_offset, "");
             const store_inst = self.builder.buildStore(operand, err_ptr);
             store_inst.setAlignment(Type.anyerror.abiAlignment(target));
@@ -9477,7 +9481,7 @@ fn llvmFieldIndex(
 
     var llvm_field_index: c_uint = 0;
     for (ty.structFields().values()) |field, i| {
-        if (field.is_comptime or !field.ty.hasRuntimeBitsIgnoreComptime()) continue;
+        if (field.is_comptime or !field.ty.hasRuntimeBits()) continue;
 
         const field_align = field.alignment(target, layout);
         big_align = @maximum(big_align, field_align);
