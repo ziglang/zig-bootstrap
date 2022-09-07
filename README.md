@@ -8,7 +8,7 @@ end with a fully operational Zig compiler for any target.
 This repository copies sources from upstream. Patches listed below. Use git
 to find and inspect the patch diffs.
 
- * LLVM, LLD, Clang 14.0.6
+ * LLVM, LLD, Clang 15.0.0
  * zlib 1.2.12
  * zig 0.10.0-dev.3742+d2ad8afff
 
