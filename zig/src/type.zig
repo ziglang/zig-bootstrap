@@ -2042,6 +2042,9 @@ pub const Type = extern union {
                 try writer.writeAll("fn(");
                 for (fn_info.param_types) |param_ty, i| {
                     if (i != 0) try writer.writeAll(", ");
+                    if (std.math.cast(u5, i)) |index| if (@truncate(u1, fn_info.noalias_bits >> index) != 0) {
+                        try writer.writeAll("noalias ");
+                    };
                     if (param_ty.tag() == .generic_poison) {
                         try writer.writeAll("anytype");
                     } else {
@@ -2398,7 +2401,7 @@ pub const Type = extern union {
                 } else if (ty.childType().zigTypeTag() == .Fn) {
                     return !ty.childType().fnInfo().is_generic;
                 } else if (sema_kit) |sk| {
-                    return !(try sk.sema.typeRequiresComptime(sk.block, sk.src, ty));
+                    return !(try sk.sema.typeRequiresComptime(ty));
                 } else {
                     return !comptimeOnly(ty);
                 }
@@ -2437,7 +2440,7 @@ pub const Type = extern union {
                 if (ignore_comptime_only) {
                     return true;
                 } else if (sema_kit) |sk| {
-                    return !(try sk.sema.typeRequiresComptime(sk.block, sk.src, child_ty));
+                    return !(try sk.sema.typeRequiresComptime(child_ty));
                 } else {
                     return !comptimeOnly(child_ty);
                 }
@@ -4979,19 +4982,20 @@ pub const Type = extern union {
                 const s = ty.castTag(.@"struct").?.data;
                 assert(s.haveFieldTypes());
                 for (s.fields.values()) |field| {
-                    if (field.ty.onePossibleValue() == null) {
-                        return null;
-                    }
+                    if (field.is_comptime) continue;
+                    if (field.ty.onePossibleValue() != null) continue;
+                    return null;
                 }
                 return Value.initTag(.empty_struct_value);
             },
 
             .tuple, .anon_struct => {
                 const tuple = ty.tupleFields();
-                for (tuple.values) |val| {
-                    if (val.tag() == .unreachable_value) {
-                        return null; // non-comptime field
-                    }
+                for (tuple.values) |val, i| {
+                    const is_comptime = val.tag() != .unreachable_value;
+                    if (is_comptime) continue;
+                    if (tuple.types[i].onePossibleValue() != null) continue;
+                    return null;
                 }
                 return Value.initTag(.empty_struct_value);
             },
@@ -6262,6 +6266,11 @@ pub const Type = extern union {
                 mutable: bool = true, // TODO rename this to const, not mutable
                 @"volatile": bool = false,
                 size: std.builtin.Type.Pointer.Size = .One,
+
+                pub fn alignment(data: Data, target: Target) u32 {
+                    if (data.@"align" != 0) return data.@"align";
+                    return abiAlignment(data.pointee_type, target);
+                }
             };
         };
 
@@ -6592,6 +6601,8 @@ pub const CType = enum {
                         .powerpcle,
                         .powerpc64,
                         .powerpc64le,
+                        .wasm32,
+                        .wasm64,
                         => return 128,
 
                         else => return 64,
@@ -6640,6 +6651,8 @@ pub const CType = enum {
                         .powerpcle,
                         .powerpc64,
                         .powerpc64le,
+                        .wasm32,
+                        .wasm64,
                         => return 128,
 
                         else => return 64,
@@ -6674,6 +6687,7 @@ pub const CType = enum {
             .nvcl,
             .amdhsa,
             .ps4,
+            .ps5,
             .elfiamcu,
             .mesa3d,
             .contiki,
@@ -6683,6 +6697,8 @@ pub const CType = enum {
             .opencl,
             .glsl450,
             .vulkan,
+            .driverkit,
+            .shadermodel,
             => @panic("TODO specify the C integer and float type sizes for this OS"),
         }
     }

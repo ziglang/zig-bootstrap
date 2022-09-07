@@ -1349,6 +1349,7 @@ fn linkWithLLD(self: *Elf, comp: *Compilation, prog_node: *std.Progress.Node) !v
         man.hash.addOptionalBytes(self.base.options.soname);
         man.hash.addOptional(self.base.options.version);
         link.hashAddSystemLibs(&man.hash, self.base.options.system_libs);
+        man.hash.addListOfBytes(self.base.options.force_undefined_symbols.keys());
         man.hash.add(allow_shlib_undefined);
         man.hash.add(self.base.options.bind_global_refs_locally);
         man.hash.add(self.base.options.compress_debug_sections);
@@ -1426,7 +1427,7 @@ fn linkWithLLD(self: *Elf, comp: *Compilation, prog_node: *std.Progress.Node) !v
             try argv.append("-r");
         }
 
-        try argv.append("-error-limit=0");
+        try argv.append("--error-limit=0");
 
         if (self.base.options.sysroot) |sysroot| {
             try argv.append(try std.fmt.allocPrint(arena, "--sysroot={s}", .{sysroot}));

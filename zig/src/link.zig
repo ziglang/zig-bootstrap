@@ -245,8 +245,8 @@ pub const File = struct {
 
     pub const LinkBlock = union {
         elf: Elf.TextBlock,
-        coff: Coff.TextBlock,
-        macho: MachO.TextBlock,
+        coff: Coff.Atom,
+        macho: MachO.Atom,
         plan9: Plan9.DeclBlock,
         c: void,
         wasm: Wasm.DeclBlock,
@@ -267,7 +267,7 @@ pub const File = struct {
 
     pub const Export = union {
         elf: Elf.Export,
-        coff: void,
+        coff: Coff.Export,
         macho: MachO.Export,
         plan9: Plan9.Export,
         c: void,
@@ -298,6 +298,7 @@ pub const File = struct {
                 .nvptx => &(try NvPtx.createEmpty(allocator, options)).base,
                 .hex => return error.HexObjectFormatUnimplemented,
                 .raw => return error.RawObjectFormatUnimplemented,
+                .dxcontainer => return error.DirectXContainerObjectFormatUnimplemented,
             };
         }
         const emit = options.emit.?;
@@ -317,6 +318,7 @@ pub const File = struct {
                     .nvptx => &(try NvPtx.createEmpty(allocator, options)).base,
                     .hex => return error.HexObjectFormatUnimplemented,
                     .raw => return error.RawObjectFormatUnimplemented,
+                    .dxcontainer => return error.DirectXContainerObjectFormatUnimplemented,
                 };
             }
             // Open a temporary object file, not the final output file because we
@@ -338,6 +340,7 @@ pub const File = struct {
             .nvptx => &(try NvPtx.openPath(allocator, sub_path, options)).base,
             .hex => return error.HexObjectFormatUnimplemented,
             .raw => return error.RawObjectFormatUnimplemented,
+            .dxcontainer => return error.DirectXContainerObjectFormatUnimplemented,
         };
 
         if (use_lld) {
@@ -426,7 +429,7 @@ pub const File = struct {
         NoSpaceLeft,
         Unseekable,
         PermissionDenied,
-        FileBusy,
+        SwapFile,
         SystemResources,
         OperationAborted,
         BrokenPipe,
@@ -931,9 +934,10 @@ pub const File = struct {
             std.debug.print("\n", .{});
         }
 
-        const llvm = @import("codegen/llvm/bindings.zig");
-        const os_type = @import("target.zig").osToLLVM(base.options.target.os.tag);
-        const bad = llvm.WriteArchive(full_out_path_z, object_files.items.ptr, object_files.items.len, os_type);
+        const llvm_bindings = @import("codegen/llvm/bindings.zig");
+        const llvm = @import("codegen/llvm.zig");
+        const os_tag = llvm.targetOs(base.options.target.os.tag);
+        const bad = llvm_bindings.WriteArchive(full_out_path_z, object_files.items.ptr, object_files.items.len, os_tag);
         if (bad) return error.UnableToWriteArchive;
 
         if (!base.options.disable_lld_caching) {

@@ -1170,3 +1170,15 @@ test "switch on an extern enum with negative value" {
         Foo.Bar => return,
     }
 }
+
+test "Non-exhaustive enum with nonstandard int size behaves correctly" {
+    const E = enum(u15) { _ };
+    try expect(@sizeOf(E) == @sizeOf(u15));
+}
+
+test "Non-exhaustive enum backed by comptime_int" {
+    const E = enum(comptime_int) { a, b, c, _ };
+    comptime var e: E = .a;
+    e = @intToEnum(E, 378089457309184723749);
+    try expect(@enumToInt(e) == 378089457309184723749);
+}

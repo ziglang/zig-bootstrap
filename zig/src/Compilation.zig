@@ -1127,7 +1127,6 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
                 link_eh_frame_hdr or
                 options.link_emit_relocs or
                 options.output_mode == .Lib or
-                options.image_base_override != null or
                 options.linker_script != null or options.version_script != null or
                 options.emit_implib != null or
                 build_id)
@@ -2516,6 +2515,7 @@ fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifes
     man.hash.addOptionalBytes(comp.bin_file.options.soname);
     man.hash.addOptional(comp.bin_file.options.version);
     link.hashAddSystemLibs(&man.hash, comp.bin_file.options.system_libs);
+    man.hash.addListOfBytes(comp.bin_file.options.force_undefined_symbols.keys());
     man.hash.addOptional(comp.bin_file.options.allow_shlib_undefined);
     man.hash.add(comp.bin_file.options.bind_global_refs_locally);
     man.hash.add(comp.bin_file.options.tsan);
@@ -4766,6 +4766,24 @@ pub fn dump_argv(argv: []const []const u8) void {
     std.debug.print("{s}\n", .{argv[argv.len - 1]});
 }
 
+pub fn getZigBackend(comp: Compilation) std.builtin.CompilerBackend {
+    const use_stage1 = build_options.have_stage1 and comp.bin_file.options.use_stage1;
+    if (use_stage1) return .stage1;
+    if (build_options.have_llvm and comp.bin_file.options.use_llvm) return .stage2_llvm;
+    const target = comp.bin_file.options.target;
+    if (target.ofmt == .c) return .stage2_c;
+    return switch (target.cpu.arch) {
+        .wasm32, .wasm64 => std.builtin.CompilerBackend.stage2_wasm,
+        .arm, .armeb, .thumb, .thumbeb => .stage2_arm,
+        .x86_64 => .stage2_x86_64,
+        .i386 => .stage2_x86,
+        .aarch64, .aarch64_be, .aarch64_32 => .stage2_aarch64,
+        .riscv64 => .stage2_riscv64,
+        .sparc64 => .stage2_sparc64,
+        else => .other,
+    };
+}
+
 pub fn generateBuiltinZigSource(comp: *Compilation, allocator: Allocator) Allocator.Error![:0]u8 {
     const tracy_trace = trace(@src());
     defer tracy_trace.end();
@@ -4775,23 +4793,7 @@ pub fn generateBuiltinZigSource(comp: *Compilation, allocator: Allocator) Alloca
 
     const target = comp.getTarget();
     const generic_arch_name = target.cpu.arch.genericName();
-    const use_stage1 = build_options.have_stage1 and comp.bin_file.options.use_stage1;
-
-    const zig_backend: std.builtin.CompilerBackend = blk: {
-        if (use_stage1) break :blk .stage1;
-        if (build_options.have_llvm and comp.bin_file.options.use_llvm) break :blk .stage2_llvm;
-        if (target.ofmt == .c) break :blk .stage2_c;
-        break :blk switch (target.cpu.arch) {
-            .wasm32, .wasm64 => std.builtin.CompilerBackend.stage2_wasm,
-            .arm, .armeb, .thumb, .thumbeb => .stage2_arm,
-            .x86_64 => .stage2_x86_64,
-            .i386 => .stage2_x86,
-            .aarch64, .aarch64_be, .aarch64_32 => .stage2_aarch64,
-            .riscv64 => .stage2_riscv64,
-            .sparc64 => .stage2_sparc64,
-            else => .other,
-        };
-    };
+    const zig_backend = comp.getZigBackend();
 
     @setEvalBranchQuota(4000);
     try buffer.writer().print(

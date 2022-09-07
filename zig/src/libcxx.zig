@@ -54,6 +54,7 @@ const libcxx_files = [_][]const u8{
     "src/ios.cpp",
     "src/ios.instantiations.cpp",
     "src/iostream.cpp",
+    "src/legacy_debug_handler.cpp",
     "src/legacy_pointer_safety.cpp",
     "src/locale.cpp",
     "src/memory.cpp",
@@ -85,6 +86,7 @@ const libcxx_files = [_][]const u8{
     "src/valarray.cpp",
     "src/variant.cpp",
     "src/vector.cpp",
+    "src/verbose_abort.cpp",
 };
 
 pub fn buildLibCXX(comp: *Compilation) !void {
@@ -326,7 +328,7 @@ pub fn buildLibCXXABI(comp: *Compilation) !void {
         try cflags.append("-nostdinc++");
         try cflags.append("-fstrict-aliasing");
         try cflags.append("-funwind-tables");
-        try cflags.append("-std=c++11");
+        try cflags.append("-std=c++20");
 
         c_source_files.appendAssumeCapacity(.{
             .src_path = try comp.zig_lib_directory.join(arena, &[_][]const u8{ "libcxxabi", cxxabi_src }),

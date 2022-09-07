@@ -607,6 +607,24 @@ fn resolveSymbolsInArchives(self: *Wasm) !void {
     }
 }
 
+fn checkUndefinedSymbols(self: *const Wasm) !void {
+    var found_undefined_symbols = false;
+    for (self.undefs.values()) |undef| {
+        const symbol = undef.getSymbol(self);
+        if (symbol.tag == .data) {
+            found_undefined_symbols = true;
+            const file_name = if (undef.file) |file_index| name: {
+                break :name self.objects.items[file_index].name;
+            } else self.name;
+            log.err("could not resolve undefined symbol '{s}'", .{undef.getName(self)});
+            log.err("  defined in '{s}'", .{file_name});
+        }
+    }
+    if (found_undefined_symbols) {
+        return error.UndefinedSymbol;
+    }
+}
+
 pub fn deinit(self: *Wasm) void {
     const gpa = self.base.allocator;
     if (build_options.have_llvm) {
@@ -783,14 +801,16 @@ pub fn updateDecl(self: *Wasm, mod: *Module, decl_index: Module.Decl.Index) !voi
 
     decl.link.wasm.clear();
 
-    if (decl.isExtern()) {
-        return;
-    }
-
     if (decl.val.castTag(.function)) |_| {
         return;
     } else if (decl.val.castTag(.extern_fn)) |_| {
         return;
+    }
+
+    if (decl.isExtern()) {
+        const variable = decl.getVariable().?;
+        const name = mem.sliceTo(decl.name, 0);
+        return self.addOrUpdateImport(name, decl.link.wasm.sym_index, variable.lib_name, null);
     }
     const val = if (decl.val.castTag(.variable)) |payload| payload.data.init else decl.val;
 
@@ -834,19 +854,18 @@ pub fn updateDeclLineNumber(self: *Wasm, mod: *Module, decl: *const Module.Decl)
 }
 
 fn finishUpdateDecl(self: *Wasm, decl: *Module.Decl, code: []const u8) !void {
-    if (code.len == 0) return;
     const mod = self.base.options.module.?;
     const atom: *Atom = &decl.link.wasm;
-    atom.size = @intCast(u32, code.len);
-    atom.alignment = decl.ty.abiAlignment(self.base.options.target);
     const symbol = &self.symbols.items[atom.sym_index];
-
     const full_name = try decl.getFullyQualifiedName(mod);
     defer self.base.allocator.free(full_name);
     symbol.name = try self.string_table.put(self.base.allocator, full_name);
     try atom.code.appendSlice(self.base.allocator, code);
-
     try self.resolved_symbols.put(self.base.allocator, atom.symbolLoc(), {});
+
+    if (code.len == 0) return;
+    atom.size = @intCast(u32, code.len);
+    atom.alignment = decl.ty.abiAlignment(self.base.options.target);
 }
 
 /// From a given symbol location, returns its `wasm.GlobalType`.
@@ -1235,7 +1254,10 @@ pub fn addOrUpdateImport(
                 .kind = .{ .function = ty_index },
             };
         }
-    } else @panic("TODO: Implement undefined symbols for non-function declarations");
+    } else {
+        symbol.tag = .data;
+        return; // non-functions will not be imported from the runtime, but only resolved during link-time
+    }
 }
 
 /// Kind represents the type of an Atom, which is only
@@ -1438,7 +1460,7 @@ fn setupImports(self: *Wasm) !void {
         if (std.mem.eql(u8, symbol_loc.getName(self), "__indirect_function_table")) {
             continue;
         }
-        if (symbol.tag == .data or !symbol.requiresImport()) {
+        if (!symbol.requiresImport()) {
             continue;
         }
 
@@ -2007,6 +2029,7 @@ pub fn flushModule(self: *Wasm, comp: *Compilation, prog_node: *std.Progress.Nod
     }
 
     try self.resolveSymbolsInArchives();
+    try self.checkUndefinedSymbols();
 
     // When we finish/error we reset the state of the linker
     // So we can rebuild the binary file on each incremental update
@@ -2736,7 +2759,7 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation, prog_node: *std.Progress.Node) !
         // This is necessary because LLD does not behave properly as a library -
         // it calls exit() and does not reset all global data between invocations.
         try argv.appendSlice(&[_][]const u8{ comp.self_exe_path.?, "wasm-ld" });
-        try argv.append("-error-limit=0");
+        try argv.append("--error-limit=0");
 
         if (self.base.options.lto) {
             switch (self.base.options.optimize_mode) {
@@ -2836,24 +2859,19 @@ fn linkWithLLD(self: *Wasm, comp: *Compilation, prog_node: *std.Progress.Node) !
             try argv.append(entry);
         }
 
-        if (self.base.options.output_mode == .Exe) {
-            // Increase the default stack size to a more reasonable value of 1MB instead of
-            // the default of 1 Wasm page being 64KB, unless overridden by the user.
-            try argv.append("-z");
-            const stack_size = self.base.options.stack_size_override orelse 1048576;
-            const arg = try std.fmt.allocPrint(arena, "stack-size={d}", .{stack_size});
-            try argv.append(arg);
+        // Increase the default stack size to a more reasonable value of 1MB instead of
+        // the default of 1 Wasm page being 64KB, unless overridden by the user.
+        try argv.append("-z");
+        const stack_size = self.base.options.stack_size_override orelse wasm.page_size * 16;
+        const arg = try std.fmt.allocPrint(arena, "stack-size={d}", .{stack_size});
+        try argv.append(arg);
 
+        if (self.base.options.output_mode == .Exe) {
             if (self.base.options.wasi_exec_model == .reactor) {
                 // Reactor execution model does not have _start so lld doesn't look for it.
                 try argv.append("--no-entry");
             }
-        } else {
-            if (self.base.options.stack_size_override) |stack_size| {
-                try argv.append("-z");
-                const arg = try std.fmt.allocPrint(arena, "stack-size={d}", .{stack_size});
-                try argv.append(arg);
-            }
+        } else if (self.base.options.entry == null) {
             try argv.append("--no-entry"); // So lld doesn't look for _start.
         }
         try argv.appendSlice(&[_][]const u8{

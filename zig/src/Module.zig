@@ -1496,6 +1496,22 @@ pub const Fn = struct {
     /// active Sema context. Importantly, this value is also updated when an existing
     /// generic function instantiation is found and called.
     branch_quota: u32,
+
+    /// If this is not none, this function is a generic function instantiation, and
+    /// this is the generic function decl from which the instance was derived.
+    /// This information is redundant with a combination of checking if comptime_args is
+    /// not null and looking at the first decl dependency of owner_decl. This redundant
+    /// information is useful for three reasons:
+    /// 1. Improved perf of monomorphed_funcs when checking the eql() function because it
+    ///    can do two fewer pointer chases by grabbing the info from this field directly
+    ///    instead of accessing the decl and then the dependencies set.
+    /// 2. While a generic function instantiation is being initialized, we need hash()
+    ///    and eql() to work before the initialization is complete. Completing the
+    ///    insertion into the decl dependency set has more fallible operations than simply
+    ///    setting this field.
+    /// 3. I forgot what the third thing was while typing up the other two.
+    generic_owner_decl: Decl.OptionalIndex,
+
     state: Analysis,
     is_cold: bool = false,
     is_noinline: bool,
@@ -4619,7 +4635,7 @@ fn semaDecl(mod: *Module, decl_index: Decl.Index) !bool {
             decl.analysis = .complete;
             decl.generation = mod.generation;
 
-            const has_runtime_bits = try sema.fnHasRuntimeBits(&block_scope, ty_src, decl.ty);
+            const has_runtime_bits = try sema.fnHasRuntimeBits(decl.ty);
 
             if (has_runtime_bits) {
                 // We don't fully codegen the decl until later, but we do need to reserve a global
@@ -5259,9 +5275,9 @@ pub fn clearDecl(
             // TODO instead of a union, put this memory trailing Decl objects,
             // and allow it to be variably sized.
             decl.link = switch (mod.comp.bin_file.tag) {
-                .coff => .{ .coff = link.File.Coff.TextBlock.empty },
+                .coff => .{ .coff = link.File.Coff.Atom.empty },
                 .elf => .{ .elf = link.File.Elf.TextBlock.empty },
-                .macho => .{ .macho = link.File.MachO.TextBlock.empty },
+                .macho => .{ .macho = link.File.MachO.Atom.empty },
                 .plan9 => .{ .plan9 = link.File.Plan9.DeclBlock.empty },
                 .c => .{ .c = {} },
                 .wasm => .{ .wasm = link.File.Wasm.DeclBlock.empty },
@@ -5390,6 +5406,9 @@ fn deleteDeclExports(mod: *Module, decl_index: Decl.Index) void {
         }
         if (mod.comp.bin_file.cast(link.File.Wasm)) |wasm| {
             wasm.deleteExport(exp.link.wasm);
+        }
+        if (mod.comp.bin_file.cast(link.File.Coff)) |coff| {
+            coff.deleteExport(exp.link.coff);
         }
         if (mod.failed_exports.fetchSwapRemove(exp)) |failed_kv| {
             failed_kv.value.destroy(mod.gpa);
@@ -5680,9 +5699,9 @@ pub fn allocateNewDecl(
         .zir_decl_index = 0,
         .src_scope = src_scope,
         .link = switch (mod.comp.bin_file.tag) {
-            .coff => .{ .coff = link.File.Coff.TextBlock.empty },
+            .coff => .{ .coff = link.File.Coff.Atom.empty },
             .elf => .{ .elf = link.File.Elf.TextBlock.empty },
-            .macho => .{ .macho = link.File.MachO.TextBlock.empty },
+            .macho => .{ .macho = link.File.MachO.Atom.empty },
             .plan9 => .{ .plan9 = link.File.Plan9.DeclBlock.empty },
             .c => .{ .c = {} },
             .wasm => .{ .wasm = link.File.Wasm.DeclBlock.empty },

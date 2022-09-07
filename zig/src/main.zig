@@ -2750,8 +2750,22 @@ fn buildOutputType(
 
     // Transfer packages added with --pkg-begin/--pkg-end to the root package
     if (main_pkg) |pkg| {
+        var it = pkg_tree_root.table.valueIterator();
+        while (it.next()) |p| {
+            if (p.*.parent == &pkg_tree_root) {
+                p.*.parent = pkg;
+            }
+        }
         pkg.table = pkg_tree_root.table;
         pkg_tree_root.table = .{};
+    } else {
+        // Remove any dangling pointers just in case.
+        var it = pkg_tree_root.table.valueIterator();
+        while (it.next()) |p| {
+            if (p.*.parent == &pkg_tree_root) {
+                p.*.parent = null;
+            }
+        }
     }
 
     const self_exe_path = try introspect.findZigExePath(arena);
@@ -3734,9 +3748,9 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
         const self_exe_path = try introspect.findZigExePath(arena);
 
         var build_file: ?[]const u8 = null;
-        var override_lib_dir: ?[]const u8 = null;
-        var override_global_cache_dir: ?[]const u8 = null;
-        var override_local_cache_dir: ?[]const u8 = null;
+        var override_lib_dir: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_LIB_DIR");
+        var override_global_cache_dir: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_GLOBAL_CACHE_DIR");
+        var override_local_cache_dir: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_LOCAL_CACHE_DIR");
         var child_argv = std.ArrayList([]const u8).init(arena);
 
         const argv_index_exe = child_argv.items.len;

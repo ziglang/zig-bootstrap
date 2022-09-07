@@ -13,6 +13,8 @@ var zigAnalysis;
   const domListTypes = document.getElementById("listTypes");
   const domSectTests = document.getElementById("sectTests");
   const domListTests = document.getElementById("listTests");
+  const domSectDocTests = document.getElementById("sectDocTests");
+  const domDocTestsCode = document.getElementById("docTestsCode");
   const domSectNamespaces = document.getElementById("sectNamespaces");
   const domListNamespaces = document.getElementById("listNamespaces");
   const domSectErrSets = document.getElementById("sectErrSets");
@@ -54,7 +56,6 @@ var zigAnalysis;
   const sourceFileUrlTemplate = "src/{{file}}#L{{line}}"
   const domLangRefLink = document.getElementById("langRefLink");
 
-  let lineCounter = 1;
   let searchTimer = null;
   let searchTrimResults = true;
 
@@ -242,7 +243,8 @@ var zigAnalysis;
     return (
       typeKind === typeKinds.Struct ||
       typeKind === typeKinds.Union ||
-      typeKind === typeKinds.Enum
+      typeKind === typeKinds.Enum ||
+      typeKind === typeKinds.Opaque
     );
   }
 
@@ -385,6 +387,7 @@ var zigAnalysis;
     domSectPkgs.classList.add("hidden");
     domSectTypes.classList.add("hidden");
     domSectTests.classList.add("hidden");
+    domSectDocTests.classList.add("hidden");
     domSectNamespaces.classList.add("hidden");
     domSectErrSets.classList.add("hidden");
     domSectFns.classList.add("hidden");
@@ -413,8 +416,7 @@ var zigAnalysis;
     if (curNavSearch !== "") {
       return renderSearch();
     }
-    
-    lineCounter = 1;
+
 
     let rootPkg = zigAnalysis.packages[zigAnalysis.rootPkg];
     let pkg = rootPkg;
@@ -445,10 +447,6 @@ var zigAnalysis;
       }
 
       currentType = childDecl;
-      if ("src" in currentType) {
-        const ast_node = zigAnalysis.astNodes[currentType.src];
-        lineCounter += ast_node.line; 
-      }
       curNav.declObjs.push(currentType);
     }
 
@@ -458,6 +456,10 @@ var zigAnalysis;
     let lastIsDecl = isDecl(last);
     let lastIsType = isType(last);
     let lastIsContainerType = isContainerType(last);
+      
+    if (lastIsDecl){
+       renderDocTest(last);  
+    }
 
     if (lastIsContainerType) {
       return renderContainer(last);
@@ -483,6 +485,14 @@ var zigAnalysis;
 
       return renderValue(last);
     }
+    
+  }
+    
+  function renderDocTest(decl) {
+    if (!("decltest" in decl)) return;
+    const astNode = zigAnalysis.astNodes[decl.decltest];
+    domSectDocTests.classList.remove("hidden");
+    domDocTestsCode.innerHTML = astNode.code;
   }
 
   function renderUnknownDecl(decl) {
@@ -1411,6 +1421,30 @@ var zigAnalysis;
             operator += "**";
             break;
           }
+          case "cmp_eq": {
+            operator += "==";
+            break;
+          }
+          case "cmp_neq": {
+            operator += "!=";
+            break;
+          }
+          case "cmp_gt": {
+            operator += ">";
+            break;
+          }
+          case "cmp_gte": {
+            operator += ">=";
+            break;
+          }
+          case "cmp_lt": {
+            operator += "<";
+            break;
+          }
+          case "cmp_lte": {
+            operator += "<=";
+            break;
+          }
           default:
             console.log("operator not handled yet or doesn't exist!");
         }
@@ -1561,6 +1595,10 @@ var zigAnalysis;
         return '"' + escapeHtml(expr.string) + '"';
       }
 
+      case "int_big": {
+        return (expr.int_big.negated ? "-" : "") + expr.int_big.value;
+      }
+
       case "anytype": {
         return "anytype";
       }
@@ -1587,8 +1625,7 @@ var zigAnalysis;
           }
           case typeKinds.Opaque: {
             let opaqueObj = typeObj;
-
-            return opaqueObj.name;
+            return opaqueObj;
           }
           case typeKinds.ComptimeExpr: {
             return "anyopaque";
@@ -1772,11 +1809,15 @@ var zigAnalysis;
             let errSetObj = typeObj;
             if (errSetObj.fields == null) {
               return '<span class="tok-type">anyerror</span>';
+            } else if (errSetObj.fields.length == 0) {
+              return "error{}";
+            } else if (errSetObj.fields.length == 1) {
+              return "error{" + errSetObj.fields[0].name + "}";
             } else {
               // throw "TODO";
-              let html = "error{" + errSetObj.fields[0].name;
+              let html = "error{ " + errSetObj.fields[0].name;
               for (let i = 1; i < errSetObj.fields.length; i++) html += ", " + errSetObj.fields[i].name;
-              html += "}";
+              html += " }";
               return html;
             }
           }
@@ -2285,9 +2326,9 @@ var zigAnalysis;
   function renderSourceFileLink(decl) {
     let srcNode = zigAnalysis.astNodes[decl.src];
 
-    return  "<a style=\"float: right;\" href=\"" + 
-      sourceFileUrlTemplate.replace("{{file}}", 
-        zigAnalysis.files[srcNode.file]).replace("{{line}}", lineCounter + srcNode.line) + "\">[src]</a>";
+    return  "<a style=\"float: right;\" href=\"" +
+      sourceFileUrlTemplate.replace("{{file}}",
+        zigAnalysis.files[srcNode.file]).replace("{{line}}", srcNode.line + 1) + "\">[src]</a>";
   }
 
   function renderContainer(container) {
@@ -2395,24 +2436,26 @@ var zigAnalysis;
       resizeDomList(
         domListFns,
         fnsList.length,
-        "<div><dt></dt><dd></dd></div>"
+        "<div><dt><div class=\"fnSignature\"></div><div></div></dt><dd></dd></div>"
       );
 
       for (let i = 0; i < fnsList.length; i += 1) {
         let decl = fnsList[i];
         let trDom = domListFns.children[i];
 
-        let tdFnCode = trDom.children[0];
+        let tdFnSignature = trDom.children[0].children[0];
+        let tdFnSrc = trDom.children[0].children[1];
         let tdDesc = trDom.children[1];
 
         let declType = resolveValue(decl.value);
         console.assert("type" in declType.expr);
-        tdFnCode.innerHTML = exprName(declType.expr, {
+        tdFnSignature.innerHTML = exprName(declType.expr, {
           wantHtml: true,
           wantLink: true,
           fnDecl: decl,
           linkFnNameDecl: navLinkDecl(decl.name),
-        }) + renderSourceFileLink(decl);
+        });
+        tdFnSrc.innerHTML = renderSourceFileLink(decl);
 
         let docs = zigAnalysis.astNodes[decl.src].docs;
         if (docs != null) {
@@ -2839,16 +2882,20 @@ var zigAnalysis;
 
   function shortDescMarkdown(docs) {
     const trimmed_docs = docs.trim();
-    let index = trimmed_docs.indexOf(".");
-    if (index < 0) {
-      index = trimmed_docs.indexOf("\n");
-      if (index < 0) {
-        index = trimmed_docs.length;
-      }
-    } else {
-      index += 1; // include the period
+    let index = trimmed_docs.indexOf("\n\n");
+    let cut = false;
+
+    if (index < 0 || index > 80) {
+        if (trimmed_docs.length > 80) {
+            index = 80;
+            cut = true;
+        } else {
+            index = trimmed_docs.length;
+        }
     }
-    const slice = trimmed_docs.slice(0, index);
+
+    let slice = trimmed_docs.slice(0, index);
+    if (cut) slice += "...";
     return markdown(slice);
   }
 
@@ -3282,6 +3329,8 @@ var zigAnalysis;
         break;
       case "s":
         if (domHelpModal.classList.contains("hidden")) {
+          if (ev.target == domSearch) break;
+
           domSearch.focus();
           domSearch.select();
           domDocs.scrollTo(0, 0);
