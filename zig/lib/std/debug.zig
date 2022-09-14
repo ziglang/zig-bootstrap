@@ -284,7 +284,7 @@ pub fn assert(ok: bool) void {
 pub fn panic(comptime format: []const u8, args: anytype) noreturn {
     @setCold(true);
 
-    panicExtra(null, format, args);
+    @call(.{ .modifier = .always_inline }, panicExtra, .{ null, format, args });
 }
 
 /// `panicExtra` is useful when you want to print out an `@errorReturnTrace`
@@ -308,7 +308,7 @@ pub fn panicExtra(
             break :blk &buf;
         },
     };
-    std.builtin.panic(msg, trace);
+    @call(.{ .modifier = .always_inline }, std.builtin.panic, .{ msg, trace });
 }
 
 /// Non-zero whenever the program triggered a panic.

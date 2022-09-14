@@ -886,33 +886,6 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: Ast.Node.Index) InnerEr
                 catch_token + 2
             else
                 null;
-
-            var rhs = node_datas[node].rhs;
-            while (true) switch (node_tags[rhs]) {
-                .grouped_expression => rhs = node_datas[rhs].lhs,
-                .unreachable_literal => {
-                    if (payload_token != null and mem.eql(u8, tree.tokenSlice(payload_token.?), "_")) {
-                        return astgen.failTok(payload_token.?, "discard of error capture; omit it instead", .{});
-                    } else if (payload_token != null) {
-                        return astgen.failTok(payload_token.?, "unused capture", .{});
-                    }
-                    const lhs = node_datas[node].lhs;
-
-                    const operand = try reachableExpr(gz, scope, switch (rl) {
-                        .ref => .ref,
-                        else => .none,
-                    }, lhs, lhs);
-                    const result = try gz.addUnNode(switch (rl) {
-                        .ref => .err_union_payload_safe_ptr,
-                        else => .err_union_payload_safe,
-                    }, operand, node);
-                    switch (rl) {
-                        .none, .coerced_ty, .discard, .ref => return result,
-                        else => return rvalue(gz, rl, result, lhs),
-                    }
-                },
-                else => break,
-            };
             switch (rl) {
                 .ref => return orelseCatchExpr(
                     gz,
@@ -2377,9 +2350,7 @@ fn addEnsureResult(gz: *GenZir, maybe_unused_result: Zir.Inst.Ref, statement: As
             .optional_payload_unsafe,
             .optional_payload_safe_ptr,
             .optional_payload_unsafe_ptr,
-            .err_union_payload_safe,
             .err_union_payload_unsafe,
-            .err_union_payload_safe_ptr,
             .err_union_payload_unsafe_ptr,
             .err_union_code,
             .err_union_code_ptr,
@@ -2685,11 +2656,7 @@ fn genDefers(
     }
 }
 
-fn checkUsed(
-    gz: *GenZir,
-    outer_scope: *Scope,
-    inner_scope: *Scope,
-) InnerError!void {
+fn checkUsed(gz: *GenZir, outer_scope: *Scope, inner_scope: *Scope) InnerError!void {
     const astgen = gz.astgen;
 
     var scope = inner_scope;
@@ -2698,15 +2665,23 @@ fn checkUsed(
             .gen_zir => scope = scope.cast(GenZir).?.parent,
             .local_val => {
                 const s = scope.cast(Scope.LocalVal).?;
-                if (!s.used) {
+                if (s.used == 0 and s.discarded == 0) {
                     try astgen.appendErrorTok(s.token_src, "unused {s}", .{@tagName(s.id_cat)});
+                } else if (s.used != 0 and s.discarded != 0) {
+                    try astgen.appendErrorTokNotes(s.discarded, "pointless discard of {s}", .{@tagName(s.id_cat)}, &[_]u32{
+                        try gz.astgen.errNoteTok(s.used, "used here", .{}),
+                    });
                 }
                 scope = s.parent;
             },
             .local_ptr => {
                 const s = scope.cast(Scope.LocalPtr).?;
-                if (!s.used) {
+                if (s.used == 0 and s.discarded == 0) {
                     try astgen.appendErrorTok(s.token_src, "unused {s}", .{@tagName(s.id_cat)});
+                } else if (s.used != 0 and s.discarded != 0) {
+                    try astgen.appendErrorTokNotes(s.discarded, "pointless discard of {s}", .{@tagName(s.id_cat)}, &[_]u32{
+                        try gz.astgen.errNoteTok(s.used, "used here", .{}),
+                    });
                 }
                 scope = s.parent;
             },
@@ -6848,11 +6823,10 @@ fn localVarRef(
     scope: *Scope,
     rl: ResultLoc,
     ident: Ast.Node.Index,
-    ident_token: Ast.Node.Index,
+    ident_token: Ast.TokenIndex,
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const gpa = astgen.gpa;
-
     const name_str_index = try astgen.identAsString(ident_token);
     var s = scope;
     var found_already: ?Ast.Node.Index = null; // we have found a decl with the same name already
@@ -6865,7 +6839,11 @@ fn localVarRef(
             if (local_val.name == name_str_index) {
                 // Locals cannot shadow anything, so we do not need to look for ambiguous
                 // references in this case.
-                local_val.used = true;
+                if (rl == .discard) {
+                    local_val.discarded = ident_token;
+                } else {
+                    local_val.used = ident_token;
+                }
 
                 const value_inst = try tunnelThroughClosure(
                     gz,
@@ -6884,7 +6862,11 @@ fn localVarRef(
         .local_ptr => {
             const local_ptr = s.cast(Scope.LocalPtr).?;
             if (local_ptr.name == name_str_index) {
-                local_ptr.used = true;
+                if (rl == .discard) {
+                    local_ptr.discarded = ident_token;
+                } else {
+                    local_ptr.used = ident_token;
+                }
 
                 // Can't close over a runtime variable
                 if (num_namespaces_out != 0 and !local_ptr.maybe_comptime) {
@@ -7519,7 +7501,7 @@ fn builtinCall(
                         .local_val => {
                             const local_val = s.cast(Scope.LocalVal).?;
                             if (local_val.name == decl_name) {
-                                local_val.used = true;
+                                local_val.used = ident_token;
                                 _ = try gz.addPlNode(.export_value, node, Zir.Inst.ExportValue{
                                     .operand = local_val.inst,
                                     .options = try comptimeExpr(gz, scope, .{ .coerced_ty = .export_options_type }, params[1]),
@@ -7533,7 +7515,7 @@ fn builtinCall(
                             if (local_ptr.name == decl_name) {
                                 if (!local_ptr.maybe_comptime)
                                     return astgen.failNode(params[0], "unable to export runtime-known value", .{});
-                                local_ptr.used = true;
+                                local_ptr.used = ident_token;
                                 const loaded = try gz.addUnNode(.load, local_ptr.ptr, node);
                                 _ = try gz.addPlNode(.export_value, node, Zir.Inst.ExportValue{
                                     .operand = loaded,
@@ -10065,11 +10047,15 @@ const Scope = struct {
         inst: Zir.Inst.Ref,
         /// Source location of the corresponding variable declaration.
         token_src: Ast.TokenIndex,
+        /// Track the first identifer where it is referenced.
+        /// 0 means never referenced.
+        used: Ast.TokenIndex = 0,
+        /// Track the identifier where it is discarded, like this `_ = foo;`.
+        /// 0 means never discarded.
+        discarded: Ast.TokenIndex = 0,
         /// String table index.
         name: u32,
         id_cat: IdCat,
-        /// Track whether the name has been referenced.
-        used: bool = false,
     };
 
     /// This could be a `const` or `var` local. It has a pointer instead of a value.
@@ -10084,14 +10070,18 @@ const Scope = struct {
         ptr: Zir.Inst.Ref,
         /// Source location of the corresponding variable declaration.
         token_src: Ast.TokenIndex,
+        /// Track the first identifer where it is referenced.
+        /// 0 means never referenced.
+        used: Ast.TokenIndex = 0,
+        /// Track the identifier where it is discarded, like this `_ = foo;`.
+        /// 0 means never discarded.
+        discarded: Ast.TokenIndex = 0,
         /// String table index.
         name: u32,
         id_cat: IdCat,
         /// true means we find out during Sema whether the value is comptime.
         /// false means it is already known at AstGen the value is runtime-known.
         maybe_comptime: bool,
-        /// Track whether the name has been referenced.
-        used: bool = false,
     };
 
     const Defer = struct {
