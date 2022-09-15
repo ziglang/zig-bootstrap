@@ -2825,13 +2825,28 @@ fn buildOutputType(
             break :l global_cache_directory;
         }
         if (main_pkg) |pkg| {
-            const cache_dir_path = try pkg.root_src_directory.join(arena, &[_][]const u8{"zig-cache"});
-            const dir = try pkg.root_src_directory.handle.makeOpenPath("zig-cache", .{});
-            cleanup_local_cache_dir = dir;
-            break :l .{
-                .handle = dir,
-                .path = cache_dir_path,
-            };
+            // search upwards from cwd until we find directory with build.zig
+            const cwd_path = try process.getCwdAlloc(arena);
+            const build_zig = "build.zig";
+            const zig_cache = "zig-cache";
+            var dirname: []const u8 = cwd_path;
+            while (true) {
+                const joined_path = try fs.path.join(arena, &[_][]const u8{ dirname, build_zig });
+                if (fs.cwd().access(joined_path, .{})) |_| {
+                    const cache_dir_path = try fs.path.join(arena, &[_][]const u8{ dirname, zig_cache });
+                    const dir = try pkg.root_src_directory.handle.makeOpenPath(cache_dir_path, .{});
+                    cleanup_local_cache_dir = dir;
+                    break :l .{ .handle = dir, .path = cache_dir_path };
+                } else |err| switch (err) {
+                    error.FileNotFound => {
+                        dirname = fs.path.dirname(dirname) orelse {
+                            break :l global_cache_directory;
+                        };
+                        continue;
+                    },
+                    else => break :l global_cache_directory,
+                }
+            }
         }
         // Otherwise we really don't have a reasonable place to put the local cache directory,
         // so we utilize the global one.
@@ -3253,40 +3268,29 @@ fn runOrTest(
     defer argv.deinit();
 
     if (test_exec_args.len == 0) {
-        // when testing pass the zig_exe_path to argv
-        if (arg_mode == .zig_test)
-            try argv.appendSlice(&[_][]const u8{
-                exe_path, self_exe_path,
-            })
-            // when running just pass the current exe
-        else
-            try argv.appendSlice(&[_][]const u8{
-                exe_path,
-            });
+        try argv.append(exe_path);
     } else {
         for (test_exec_args) |arg| {
-            if (arg) |a| {
-                try argv.append(a);
-            } else {
-                try argv.appendSlice(&[_][]const u8{
-                    exe_path, self_exe_path,
-                });
-            }
+            try argv.append(arg orelse exe_path);
         }
     }
     if (runtime_args_start) |i| {
         try argv.appendSlice(all_args[i..]);
     }
+    var env_map = try std.process.getEnvMap(arena);
+    try env_map.put("ZIG_EXE", self_exe_path);
+
     // We do not execve for tests because if the test fails we want to print
     // the error message and invocation below.
     if (std.process.can_execv and arg_mode == .run and !watch) {
         // execv releases the locks; no need to destroy the Compilation here.
-        const err = std.process.execv(gpa, argv.items);
+        const err = std.process.execve(gpa, argv.items, &env_map);
         try warnAboutForeignBinaries(arena, arg_mode, target_info, link_libc);
         const cmd = try std.mem.join(arena, " ", argv.items);
         fatal("the following command failed to execve with '{s}':\n{s}", .{ @errorName(err), cmd });
     } else if (std.process.can_spawn) {
         var child = std.ChildProcess.init(argv.items, gpa);
+        child.env_map = &env_map;
         child.stdin_behavior = .Inherit;
         child.stdout_behavior = .Inherit;
         child.stderr_behavior = .Inherit;

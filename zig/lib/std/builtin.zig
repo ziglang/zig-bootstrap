@@ -850,23 +850,23 @@ pub fn default_panic(msg: []const u8, error_return_trace: ?*StackTrace) noreturn
 
 pub fn checkNonScalarSentinel(expected: anytype, actual: @TypeOf(expected)) void {
     if (!std.meta.eql(expected, actual)) {
-        @call(.{ .modifier = .always_inline }, panicSentinelMismatch, .{ expected, actual });
+        panicSentinelMismatch(expected, actual);
     }
 }
 
 pub fn panicSentinelMismatch(expected: anytype, actual: @TypeOf(expected)) noreturn {
     @setCold(true);
-    @call(.{ .modifier = .always_inline }, std.debug.panic, .{ "sentinel mismatch: expected {any}, found {any}", .{ expected, actual } });
+    std.debug.panic("sentinel mismatch: expected {any}, found {any}", .{ expected, actual });
 }
 
 pub fn panicUnwrapError(st: ?*StackTrace, err: anyerror) noreturn {
     @setCold(true);
-    @call(.{ .modifier = .always_inline }, std.debug.panicExtra, .{ st, "attempt to unwrap error: {s}", .{@errorName(err)} });
+    std.debug.panicExtra(st, "attempt to unwrap error: {s}", .{@errorName(err)});
 }
 
 pub fn panicOutOfBounds(index: usize, len: usize) noreturn {
     @setCold(true);
-    @call(.{ .modifier = .always_inline }, std.debug.panic, .{ "index out of bounds: index {d}, len {d}", .{ index, len } });
+    std.debug.panic("index out of bounds: index {d}, len {d}", .{ index, len });
 }
 
 pub noinline fn returnError(st: *StackTrace) void {
