@@ -1,6 +1,5 @@
 const std = @import("std");
 const Builder = std.build.Builder;
-const LibExeObjectStep = std.build.LibExeObjStep;
 
 pub fn build(b: *Builder) void {
     const mode = b.standardReleaseOptions();
@@ -16,7 +15,7 @@ pub fn build(b: *Builder) void {
     exe.setTarget(target);
     exe.linkLibC();
 
-    const run_cmd = exe.run();
+    const run_cmd = std.build.EmulatableRunStep.create(b, "run", exe);
     run_cmd.expectStdOutEqual("Hello!\n");
     test_step.dependOn(&run_cmd.step);
 }
