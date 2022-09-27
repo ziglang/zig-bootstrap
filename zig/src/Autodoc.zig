@@ -301,7 +301,7 @@ pub fn generateZirData(self: *Autodoc) !void {
         var files_iterator = self.files.iterator();
 
         while (files_iterator.next()) |entry| {
-            const new_html_path = entry.key_ptr.*.sub_file_path;
+            const new_html_path = try std.mem.concat(self.arena, u8, &.{ entry.key_ptr.*.sub_file_path, ".html" });
 
             const html_file = try createFromPath(html_dir, new_html_path);
             defer html_file.close();
@@ -997,72 +997,6 @@ fn walkInstruction(
         .closure_capture => {
             const un_tok = data[inst_index].un_tok;
             return try self.walkRef(file, parent_scope, parent_src, un_tok.operand, need_type);
-        },
-        .cmpxchg_strong, .cmpxchg_weak => {
-            const pl_node = data[inst_index].pl_node;
-            const extra = file.zir.extraData(Zir.Inst.Cmpxchg, pl_node.payload_index);
-
-            const last_type_index = self.exprs.items.len;
-            const last_type = self.exprs.items[last_type_index - 1];
-            const type_index = self.exprs.items.len;
-            try self.exprs.append(self.arena, last_type);
-
-            const ptr_index = self.exprs.items.len;
-            var ptr: DocData.WalkResult = try self.walkRef(
-                file,
-                parent_scope,
-                parent_src,
-                extra.data.ptr,
-                false,
-            );
-            try self.exprs.append(self.arena, ptr.expr);
-
-            const expected_value_index = self.exprs.items.len;
-            var expected_value: DocData.WalkResult = try self.walkRef(
-                file,
-                parent_scope,
-                parent_src,
-                extra.data.expected_value,
-                false,
-            );
-            try self.exprs.append(self.arena, expected_value.expr);
-
-            const new_value_index = self.exprs.items.len;
-            var new_value: DocData.WalkResult = try self.walkRef(
-                file,
-                parent_scope,
-                parent_src,
-                extra.data.new_value,
-                false,
-            );
-            try self.exprs.append(self.arena, new_value.expr);
-
-            const success_order_index = self.exprs.items.len;
-            var success_order: DocData.WalkResult = try self.walkRef(
-                file,
-                parent_scope,
-                parent_src,
-                extra.data.success_order,
-                false,
-            );
-            try self.exprs.append(self.arena, success_order.expr);
-
-            const failure_order_index = self.exprs.items.len;
-            var failure_order: DocData.WalkResult = try self.walkRef(
-                file,
-                parent_scope,
-                parent_src,
-                extra.data.failure_order,
-                false,
-            );
-            try self.exprs.append(self.arena, failure_order.expr);
-
-            const cmpxchg_index = self.exprs.items.len;
-            try self.exprs.append(self.arena, .{ .cmpxchg = .{ .name = @tagName(tags[inst_index]), .type = type_index, .ptr = ptr_index, .expected_value = expected_value_index, .new_value = new_value_index, .success_order = success_order_index, .failure_order = failure_order_index } });
-            return DocData.WalkResult{
-                .typeRef = .{ .type = @enumToInt(Ref.type_type) },
-                .expr = .{ .cmpxchgIndex = cmpxchg_index },
-            };
         },
         .str => {
             const str = data[inst_index].str.get(file.zir);
@@ -3045,6 +2979,79 @@ fn walkInstruction(
                     return DocData.WalkResult{
                         .typeRef = param.typeRef orelse .{ .type = @enumToInt(Ref.type_type) },
                         .expr = .{ .builtinIndex = bin_index },
+                    };
+                },
+                .cmpxchg => {
+                    const extra = file.zir.extraData(Zir.Inst.Cmpxchg, extended.operand).data;
+
+                    const last_type_index = self.exprs.items.len;
+                    const last_type = self.exprs.items[last_type_index - 1];
+                    const type_index = self.exprs.items.len;
+                    try self.exprs.append(self.arena, last_type);
+
+                    const ptr_index = self.exprs.items.len;
+                    var ptr: DocData.WalkResult = try self.walkRef(
+                        file,
+                        parent_scope,
+                        parent_src,
+                        extra.ptr,
+                        false,
+                    );
+                    try self.exprs.append(self.arena, ptr.expr);
+
+                    const expected_value_index = self.exprs.items.len;
+                    var expected_value: DocData.WalkResult = try self.walkRef(
+                        file,
+                        parent_scope,
+                        parent_src,
+                        extra.expected_value,
+                        false,
+                    );
+                    try self.exprs.append(self.arena, expected_value.expr);
+
+                    const new_value_index = self.exprs.items.len;
+                    var new_value: DocData.WalkResult = try self.walkRef(
+                        file,
+                        parent_scope,
+                        parent_src,
+                        extra.new_value,
+                        false,
+                    );
+                    try self.exprs.append(self.arena, new_value.expr);
+
+                    const success_order_index = self.exprs.items.len;
+                    var success_order: DocData.WalkResult = try self.walkRef(
+                        file,
+                        parent_scope,
+                        parent_src,
+                        extra.success_order,
+                        false,
+                    );
+                    try self.exprs.append(self.arena, success_order.expr);
+
+                    const failure_order_index = self.exprs.items.len;
+                    var failure_order: DocData.WalkResult = try self.walkRef(
+                        file,
+                        parent_scope,
+                        parent_src,
+                        extra.failure_order,
+                        false,
+                    );
+                    try self.exprs.append(self.arena, failure_order.expr);
+
+                    const cmpxchg_index = self.exprs.items.len;
+                    try self.exprs.append(self.arena, .{ .cmpxchg = .{
+                        .name = @tagName(tags[inst_index]),
+                        .type = type_index,
+                        .ptr = ptr_index,
+                        .expected_value = expected_value_index,
+                        .new_value = new_value_index,
+                        .success_order = success_order_index,
+                        .failure_order = failure_order_index,
+                    } });
+                    return DocData.WalkResult{
+                        .typeRef = .{ .type = @enumToInt(Ref.type_type) },
+                        .expr = .{ .cmpxchgIndex = cmpxchg_index },
                     };
                 },
             }

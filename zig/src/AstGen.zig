@@ -577,6 +577,12 @@ fn expr(gz: *GenZir, scope: *Scope, rl: ResultLoc, node: Ast.Node.Index) InnerEr
     const node_datas = tree.nodes.items(.data);
     const node_tags = tree.nodes.items(.tag);
 
+    const prev_anon_name_strategy = gz.anon_name_strategy;
+    defer gz.anon_name_strategy = prev_anon_name_strategy;
+    if (!nodeUsesAnonNameStrategy(tree, node)) {
+        gz.anon_name_strategy = .anon;
+    }
+
     switch (node_tags[node]) {
         .root => unreachable, // Top-level declaration.
         .@"usingnamespace" => unreachable, // Top-level declaration.
@@ -1864,15 +1870,8 @@ fn breakExpr(parent_gz: *GenZir, parent_scope: *Scope, node: Ast.Node.Index) Inn
                 }
                 block_gz.break_count += 1;
 
-                // The loop scope has a mechanism to prevent rvalue() from emitting a
-                // store to the result location for the loop body (since it is continues
-                // rather than returning a result from the loop) but here is a `break`
-                // which needs to override this behavior.
-                const prev_rvalue_noresult = parent_gz.rvalue_noresult;
-                parent_gz.rvalue_noresult = .none;
                 const operand = try reachableExpr(parent_gz, parent_scope, block_gz.break_result_loc, rhs, node);
                 const search_index = @intCast(Zir.Inst.Index, astgen.instructions.len);
-                parent_gz.rvalue_noresult = prev_rvalue_noresult;
 
                 try genDefers(parent_gz, scope, parent_scope, .normal_only);
 
@@ -2193,7 +2192,7 @@ fn blockExprStmts(gz: *GenZir, parent_scope: *Scope, statements: []const Ast.Nod
             .assign_add_wrap => try assignOp(gz, scope, statement, .addwrap),
             .assign_mul      => try assignOp(gz, scope, statement, .mul),
             .assign_mul_wrap => try assignOp(gz, scope, statement, .mulwrap),
-            
+
             .grouped_expression => {
                 inner_node = node_data[statement].lhs;
                 continue;
@@ -2439,8 +2438,6 @@ fn addEnsureResult(gz: *GenZir, maybe_unused_result: Zir.Inst.Ref, statement: As
             .shr_exact,
             .bit_offset_of,
             .offset_of,
-            .cmpxchg_strong,
-            .cmpxchg_weak,
             .splat,
             .reduce,
             .shuffle,
@@ -5579,7 +5576,11 @@ fn ifExpr(
         };
     } else .{
         .src = if_full.ast.then_expr,
-        .result = .none,
+        .result = switch (rl) {
+            // Explicitly store void to ptr result loc if there is no else branch
+            .ptr, .block_ptr => try rvalue(&else_scope, rl, .void_value, node),
+            else => .none,
+        },
     };
 
     const break_tag: Zir.Inst.Tag = if (parent_gz.force_comptime) .break_inline else .@"break";
@@ -5791,7 +5792,6 @@ fn whileExpr(
     // make scope now but don't stack on parent_gz until loop_scope
     // gets unstacked after cont_expr is emitted and added below
     var then_scope = parent_gz.makeSubBlock(&continue_scope.base);
-    then_scope.markAsLoopBody(loop_scope);
     then_scope.instructions_top = GenZir.unstacked_top;
     defer then_scope.unstack();
 
@@ -5891,7 +5891,7 @@ fn whileExpr(
     if (dbg_var_name) |some| {
         try then_scope.addDbgVar(.dbg_var_val, some, dbg_var_inst);
     }
-    const then_result = try expr(&then_scope, then_sub_scope, loop_scope.break_result_loc, while_full.ast.then_expr);
+    const then_result = try expr(&then_scope, then_sub_scope, .none, while_full.ast.then_expr);
     _ = try addEnsureResult(&then_scope, then_result, while_full.ast.then_expr);
 
     try checkUsed(parent_gz, &then_scope.base, then_sub_scope);
@@ -6069,7 +6069,6 @@ fn forExpr(
     }
 
     var then_scope = parent_gz.makeSubBlock(&cond_scope.base);
-    then_scope.markAsLoopBody(loop_scope);
     defer then_scope.unstack();
 
     try then_scope.addDbgBlockBegin();
@@ -6131,7 +6130,7 @@ fn forExpr(
         break :blk &index_scope.base;
     };
 
-    const then_result = try expr(&then_scope, then_sub_scope, loop_scope.break_result_loc, for_full.ast.then_expr);
+    const then_result = try expr(&then_scope, then_sub_scope, .none, for_full.ast.then_expr);
     _ = try addEnsureResult(&then_scope, then_result, for_full.ast.then_expr);
 
     try checkUsed(parent_gz, &then_scope.base, then_sub_scope);
@@ -7753,8 +7752,8 @@ fn builtinCall(
         .c_undef   => return simpleCBuiltin(gz, scope, rl, node, params[0], .c_undef),
         .c_include => return simpleCBuiltin(gz, scope, rl, node, params[0], .c_include),
 
-        .cmpxchg_strong => return cmpxchg(gz, scope, rl, node, params, .cmpxchg_strong),
-        .cmpxchg_weak   => return cmpxchg(gz, scope, rl, node, params, .cmpxchg_weak),
+        .cmpxchg_strong => return cmpxchg(gz, scope, rl, node, params, 1),
+        .cmpxchg_weak   => return cmpxchg(gz, scope, rl, node, params, 0),
         // zig fmt: on
 
         .wasm_memory_size => {
@@ -8080,11 +8079,12 @@ fn cmpxchg(
     rl: ResultLoc,
     node: Ast.Node.Index,
     params: []const Ast.Node.Index,
-    tag: Zir.Inst.Tag,
+    small: u16,
 ) InnerError!Zir.Inst.Ref {
     const int_type = try typeExpr(gz, scope, params[0]);
-    const result = try gz.addPlNode(tag, node, Zir.Inst.Cmpxchg{
+    const result = try gz.addExtendedPayloadSmall(.cmpxchg, small, Zir.Inst.Cmpxchg{
         // zig fmt: off
+        .node           = gz.nodeIndexToRelative(node),
         .ptr            = try expr(gz, scope, .none,                                 params[1]),
         .expected_value = try expr(gz, scope, .{ .ty = int_type },                   params[2]),
         .new_value      = try expr(gz, scope, .{ .coerced_ty = int_type },           params[3]),
@@ -9350,6 +9350,32 @@ fn nodeImpliesComptimeOnly(tree: *const Ast, start_node: Ast.Node.Index) bool {
     }
 }
 
+/// Returns `true` if the node uses `gz.anon_name_strategy`.
+fn nodeUsesAnonNameStrategy(tree: *const Ast, node: Ast.Node.Index) bool {
+    const node_tags = tree.nodes.items(.tag);
+    switch (node_tags[node]) {
+        .container_decl,
+        .container_decl_trailing,
+        .container_decl_two,
+        .container_decl_two_trailing,
+        .container_decl_arg,
+        .container_decl_arg_trailing,
+        .tagged_union,
+        .tagged_union_trailing,
+        .tagged_union_two,
+        .tagged_union_two_trailing,
+        .tagged_union_enum_tag,
+        .tagged_union_enum_tag_trailing,
+        => return true,
+        .builtin_call_two, .builtin_call_two_comma, .builtin_call, .builtin_call_comma => {
+            const builtin_token = tree.nodes.items(.main_token)[node];
+            const builtin_name = tree.tokenSlice(builtin_token);
+            return std.mem.eql(u8, builtin_name, "@Type");
+        },
+        else => return false,
+    }
+}
+
 /// Applies `rl` semantics to `result`. Expressions which do not do their own handling of
 /// result locations must call this function on their result.
 /// As an example, if the `ResultLoc` is `ptr`, it will write the result to the pointer.
@@ -9466,25 +9492,19 @@ fn rvalue(
             }
         },
         .ptr => |ptr_inst| {
-            if (gz.rvalue_noresult != ptr_inst) {
-                _ = try gz.addPlNode(.store_node, src_node, Zir.Inst.Bin{
-                    .lhs = ptr_inst,
-                    .rhs = result,
-                });
-            }
+            _ = try gz.addPlNode(.store_node, src_node, Zir.Inst.Bin{
+                .lhs = ptr_inst,
+                .rhs = result,
+            });
             return result;
         },
         .inferred_ptr => |alloc| {
-            if (gz.rvalue_noresult != alloc) {
-                _ = try gz.addBin(.store_to_inferred_ptr, alloc, result);
-            }
+            _ = try gz.addBin(.store_to_inferred_ptr, alloc, result);
             return result;
         },
         .block_ptr => |block_scope| {
-            if (gz.rvalue_noresult != block_scope.rl_ptr) {
-                block_scope.rvalue_rl_count += 1;
-                _ = try gz.addBin(.store_to_block_ptr, block_scope.rl_ptr, result);
-            }
+            block_scope.rvalue_rl_count += 1;
+            _ = try gz.addBin(.store_to_block_ptr, block_scope.rl_ptr, result);
             return result;
         },
     }
@@ -10164,7 +10184,6 @@ const GenZir = struct {
     rl_ptr: Zir.Inst.Ref = .none,
     /// When a block has a type result location, here it is.
     rl_ty_inst: Zir.Inst.Ref = .none,
-    rvalue_noresult: Zir.Inst.Ref = .none,
     /// Keeps track of how many branches of a block did not actually
     /// consume the result location. astgen uses this to figure out
     /// whether to rely on break instructions or writing to the result
@@ -10904,9 +10923,14 @@ const GenZir = struct {
         return new_index;
     }
 
-    fn addExtendedPayload(
+    fn addExtendedPayload(gz: *GenZir, opcode: Zir.Inst.Extended, extra: anytype) !Zir.Inst.Ref {
+        return addExtendedPayloadSmall(gz, opcode, undefined, extra);
+    }
+
+    fn addExtendedPayloadSmall(
         gz: *GenZir,
         opcode: Zir.Inst.Extended,
+        small: u16,
         extra: anytype,
     ) !Zir.Inst.Ref {
         const gpa = gz.astgen.gpa;
@@ -10920,7 +10944,7 @@ const GenZir = struct {
             .tag = .extended,
             .data = .{ .extended = .{
                 .opcode = opcode,
-                .small = undefined,
+                .small = small,
                 .operand = payload_index,
             } },
         });
@@ -11553,17 +11577,6 @@ const GenZir = struct {
         const new_index = @intCast(Zir.Inst.Index, gz.astgen.instructions.len);
         try gz.astgen.instructions.append(gpa, .{ .tag = .dbg_block_end, .data = undefined });
         try gz.instructions.insert(gpa, gz.instructions.items.len - 1, new_index);
-    }
-
-    /// Control flow does not fall through the "then" block of a loop; it continues
-    /// back to the while condition. This prevents `rvalue` from
-    /// adding an invalid store to the result location of `then_scope`.
-    fn markAsLoopBody(gz: *GenZir, loop_scope: GenZir) void {
-        gz.rvalue_noresult = switch (loop_scope.break_result_loc) {
-            .ptr, .inferred_ptr => |ptr| ptr,
-            .block_ptr => |block| block.rl_ptr,
-            else => .none,
-        };
     }
 };
 
