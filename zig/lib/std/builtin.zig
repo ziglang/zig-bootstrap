@@ -544,7 +544,7 @@ test "Version.parse" {
     comptime (try testVersionParse());
 }
 
-pub fn testVersionParse() !void {
+fn testVersionParse() !void {
     const f = struct {
         fn eql(text: []const u8, v1: u32, v2: u32, v3: u32) !void {
             const v = try Version.parse(text);
@@ -736,14 +736,8 @@ pub const CompilerBackend = enum(u64) {
 /// therefore must be kept in sync with the compiler implementation.
 pub const TestFn = struct {
     name: []const u8,
-    func: testFnProto,
+    func: std.meta.FnPtr(fn () anyerror!void),
     async_frame_size: ?usize,
-};
-
-/// stage1 is *wrong*. It is not yet updated to support the new function type semantics.
-const testFnProto = switch (builtin.zig_backend) {
-    .stage1 => fn () anyerror!void, // wrong!
-    else => *const fn () anyerror!void,
 };
 
 /// This function type is used by the Zig language code generation and

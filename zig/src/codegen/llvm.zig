@@ -1035,10 +1035,11 @@ pub const Object = struct {
                     }
                     const ints_llvm_ty = dg.context.structType(field_types.ptr, @intCast(c_uint, field_types.len), .False);
                     const casted_ptr = builder.buildBitCast(arg_ptr, ints_llvm_ty.pointerType(0), "");
-                    for (llvm_ints) |_, i_usize| {
-                        const i = @intCast(c_uint, i_usize);
-                        const param = llvm_func.getParam(i);
-                        const field_ptr = builder.buildStructGEP(ints_llvm_ty, casted_ptr, i, "");
+                    for (llvm_ints) |_, field_i_usize| {
+                        const field_i = @intCast(c_uint, field_i_usize);
+                        const param = llvm_func.getParam(llvm_arg_i);
+                        llvm_arg_i += 1;
+                        const field_ptr = builder.buildStructGEP(ints_llvm_ty, casted_ptr, field_i, "");
                         const store_inst = builder.buildStore(param, field_ptr);
                         store_inst.setAlignment(target.cpu.arch.ptrBitWidth() / 8);
                     }
@@ -1070,10 +1071,11 @@ pub const Object = struct {
                     }
                     const floats_llvm_ty = dg.context.structType(field_types.ptr, @intCast(c_uint, field_types.len), .False);
                     const casted_ptr = builder.buildBitCast(arg_ptr, floats_llvm_ty.pointerType(0), "");
-                    for (llvm_floats) |_, i_usize| {
-                        const i = @intCast(c_uint, i_usize);
-                        const param = llvm_func.getParam(i);
-                        const field_ptr = builder.buildStructGEP(floats_llvm_ty, casted_ptr, i, "");
+                    for (llvm_floats) |_, field_i_usize| {
+                        const field_i = @intCast(c_uint, field_i_usize);
+                        const param = llvm_func.getParam(llvm_arg_i);
+                        llvm_arg_i += 1;
+                        const field_ptr = builder.buildStructGEP(floats_llvm_ty, casted_ptr, field_i, "");
                         const store_inst = builder.buildStore(param, field_ptr);
                         store_inst.setAlignment(target.cpu.arch.ptrBitWidth() / 8);
                     }
@@ -2330,10 +2332,13 @@ pub const Object = struct {
         // buffer is only used for int_type, `builtin` is a struct.
         const builtin_ty = mod.declPtr(builtin_decl).val.toType(undefined);
         const builtin_namespace = builtin_ty.getNamespace().?;
-        const stack_trace_decl = builtin_namespace.decls
+        const stack_trace_decl_index = builtin_namespace.decls
             .getKeyAdapted(stack_trace_str, Module.DeclAdapter{ .mod = mod }).?;
+        const stack_trace_decl = mod.declPtr(stack_trace_decl_index);
 
-        return mod.declPtr(stack_trace_decl).val.toType(undefined);
+        // Sema should have ensured that StackTrace was analyzed.
+        assert(stack_trace_decl.has_tv);
+        return stack_trace_decl.val.toType(undefined);
     }
 };
 
@@ -10275,6 +10280,7 @@ fn ccAbiPromoteInt(
         else => {},
     }
     const int_info = switch (ty.zigTypeTag()) {
+        .Bool => Type.@"u1".intInfo(target),
         .Int, .Enum, .ErrorSet => ty.intInfo(target),
         else => return null,
     };
