@@ -7,7 +7,7 @@ const mem = std.mem;
 /// A more basic implementation of std.testing.expectError which
 /// does not require formatter/printing support
 fn expectError(expected_err: anyerror, observed_err_union: anytype) !void {
-    if (observed_err_union) {
+    if (observed_err_union) |_| {
         return error.TestExpectedError;
     } else |err| if (err == expected_err) {
         return; // Success
@@ -808,4 +808,25 @@ test "alignment of wrapping an error union payload" {
         }
     };
     try expect((S.foo() catch unreachable).x == 1234);
+}
+
+test "compare error union and error set" {
+    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+
+    var a: anyerror = error.Foo;
+    var b: anyerror!u32 = error.Bar;
+
+    try expect(a != b);
+    try expect(b != a);
+
+    b = error.Foo;
+
+    try expect(a == b);
+    try expect(b == a);
+
+    b = 2;
+
+    try expect(a != b);
+    try expect(b != a);
 }
