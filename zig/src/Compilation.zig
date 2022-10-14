@@ -916,8 +916,8 @@ pub const InitOptions = struct {
     use_clang: ?bool = null,
     use_stage1: ?bool = null,
     single_threaded: ?bool = null,
+    strip: ?bool = null,
     rdynamic: bool = false,
-    strip: bool = false,
     function_sections: bool = false,
     no_builtin: bool = false,
     is_native_os: bool,
@@ -1422,7 +1422,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             break :blk buf.items[0 .. buf.items.len - 1 :0].ptr;
         } else null;
 
-        const strip = options.strip or !target_util.hasDebugInfo(options.target);
+        const strip = options.strip orelse !target_util.hasDebugInfo(options.target);
         const red_zone = options.want_red_zone orelse target_util.hasRedZone(options.target);
         const omit_frame_pointer = options.omit_frame_pointer orelse (options.optimize_mode != .Debug);
         const linker_optimization: u8 = options.linker_optimization orelse switch (options.optimize_mode) {
@@ -1588,10 +1588,10 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             try main_pkg.add(gpa, "root", root_pkg);
             try main_pkg.addAndAdopt(gpa, "std", std_pkg);
 
-            const main_pkg_in_std = m: {
+            const main_pkg_is_std = m: {
                 const std_path = try std.fs.path.resolve(arena, &[_][]const u8{
                     std_pkg.root_src_directory.path orelse ".",
-                    std.fs.path.dirname(std_pkg.root_src_path) orelse ".",
+                    std_pkg.root_src_path,
                 });
                 defer arena.free(std_path);
                 const main_path = try std.fs.path.resolve(arena, &[_][]const u8{
@@ -1599,7 +1599,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
                     main_pkg.root_src_path,
                 });
                 defer arena.free(main_path);
-                break :m mem.startsWith(u8, main_path, std_path);
+                break :m mem.eql(u8, main_path, std_path);
             };
 
             // Pre-open the directory handles for cached ZIR code so that it does not need
@@ -1638,7 +1638,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
                 .gpa = gpa,
                 .comp = comp,
                 .main_pkg = main_pkg,
-                .main_pkg_in_std = main_pkg_in_std,
+                .main_pkg_is_std = main_pkg_is_std,
                 .root_pkg = root_pkg,
                 .zig_cache_artifact_directory = zig_cache_artifact_directory,
                 .global_zir_cache = global_zir_cache,
@@ -4207,14 +4207,6 @@ pub fn addCCArgs(
                 else => {},
             }
 
-            if (!comp.bin_file.options.strip) {
-                switch (target.ofmt) {
-                    .coff => try argv.append("-gcodeview"),
-                    .elf, .macho => try argv.append("-gdwarf-4"),
-                    else => try argv.append("-g"),
-                }
-            }
-
             if (target.cpu.arch.isThumb()) {
                 try argv.append("-mthumb");
             }
@@ -4354,6 +4346,14 @@ pub fn addCCArgs(
                 }
             }
         },
+    }
+
+    if (!comp.bin_file.options.strip) {
+        switch (target.ofmt) {
+            .coff => try argv.append("-gcodeview"),
+            .elf, .macho => try argv.append("-gdwarf-4"),
+            else => try argv.append("-g"),
+        }
     }
 
     if (target_util.llvmMachineAbi(target)) |mabi| {

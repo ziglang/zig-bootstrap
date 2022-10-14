@@ -436,7 +436,7 @@ pub fn translate(
         }
     }
 
-    return ast.render(gpa, context.global_scope.nodes.items);
+    return ast.render(gpa, zig_is_stage1, context.global_scope.nodes.items);
 }
 
 /// Determines whether macro is of the form: `#define FOO FOO` (Possibly with trailing tokens)
@@ -878,7 +878,7 @@ fn visitVarDecl(c: *Context, var_decl: *const clang.VarDecl, mangled_name: ?[]co
         .is_export = is_export,
         .is_threadlocal = is_threadlocal,
         .linksection_string = linksection_string,
-        .alignment = zigAlignment(var_decl.getAlignedAttribute(c.clang_context)),
+        .alignment = ClangAlignment.forVar(c, var_decl).zigAlignment(),
         .name = var_name,
         .type = type_node,
         .init = init_node,
@@ -1096,7 +1096,6 @@ fn transRecordDecl(c: *Context, scope: *Scope, record_decl: *const clang.RecordD
             break :blk Tag.opaque_literal.init();
         };
 
-        const is_packed = record_decl.getPackedAttribute();
         var fields = std.ArrayList(ast.Payload.Record.Field).init(c.gpa);
         defer fields.deinit();
 
@@ -1153,7 +1152,7 @@ fn transRecordDecl(c: *Context, scope: *Scope, record_decl: *const clang.RecordD
             const alignment = if (has_flexible_array and field_decl.getFieldIndex() == 0)
                 @intCast(c_uint, record_alignment)
             else
-                zigAlignment(field_decl.getAlignedAttribute(c.clang_context));
+                ClangAlignment.forField(c, field_decl, record_def).zigAlignment();
 
             if (is_anon) {
                 try c.decl_table.putNoClobber(c.gpa, @ptrToInt(field_decl.getCanonicalDecl()), field_name);
@@ -1166,15 +1165,11 @@ fn transRecordDecl(c: *Context, scope: *Scope, record_decl: *const clang.RecordD
             });
         }
 
-        if (!c.zig_is_stage1 and is_packed) {
-            return failDecl(c, record_loc, name, "cannot translate packed record union", .{});
-        }
-
         const record_payload = try c.arena.create(ast.Payload.Record);
         record_payload.* = .{
             .base = .{ .tag = ([2]Tag{ .@"struct", .@"union" })[@boolToInt(is_union)] },
             .data = .{
-                .layout = if (is_packed) .@"packed" else .@"extern",
+                .layout = .@"extern",
                 .fields = try c.arena.dupe(ast.Payload.Record.Field, fields.items),
                 .functions = try c.arena.dupe(Node, functions.items),
                 .variables = &.{},
@@ -1851,12 +1846,62 @@ fn transCStyleCastExprClass(
     return maybeSuppressResult(c, scope, result_used, cast_node);
 }
 
-/// Clang reports the alignment in bits, we use bytes
-/// Clang uses 0 for "no alignment specified", we use null
-fn zigAlignment(bit_alignment: c_uint) ?c_uint {
-    if (bit_alignment == 0) return null;
-    return bit_alignment / 8;
-}
+/// The alignment of a variable or field
+const ClangAlignment = struct {
+    /// Clang reports the alignment in bits, we use bytes
+    /// Clang uses 0 for "no alignment specified", we use null
+    bit_alignment: c_uint,
+    /// If the field or variable is marked as 'packed'
+    ///
+    /// According to the GCC variable attribute docs, this impacts alignment
+    /// https://gcc.gnu.org/onlinedocs/gcc/Common-Variable-Attributes.html
+    ///
+    /// > The packed attribute specifies that a structure member
+    /// > should have the smallest possible alignment
+    ///
+    /// Note also that specifying the 'packed' attribute on a structure
+    /// implicitly packs all its fields (making their alignment 1).
+    ///
+    /// This will be null if the AST node doesn't support packing (functions)
+    is_packed: ?bool,
+
+    /// Get the alignment for a field, optionally taking into account the parent record
+    pub fn forField(c: *const Context, field: *const clang.FieldDecl, parent: ?*const clang.RecordDecl) ClangAlignment {
+        const parent_packed = if (parent) |record| record.getPackedAttribute() else false;
+        // NOTE: According to GCC docs, parent attribute packed implies child attribute packed
+        return ClangAlignment{
+            .bit_alignment = field.getAlignedAttribute(c.clang_context),
+            .is_packed = field.getPackedAttribute() or parent_packed,
+        };
+    }
+
+    pub fn forVar(c: *const Context, var_decl: *const clang.VarDecl) ClangAlignment {
+        return ClangAlignment{
+            .bit_alignment = var_decl.getAlignedAttribute(c.clang_context),
+            .is_packed = var_decl.getPackedAttribute(),
+        };
+    }
+
+    pub fn forFunc(c: *const Context, fun: *const clang.FunctionDecl) ClangAlignment {
+        return ClangAlignment{
+            .bit_alignment = fun.getAlignedAttribute(c.clang_context),
+            .is_packed = null, // not supported by GCC/clang (or meaningful),
+        };
+    }
+
+    /// Translate the clang alignment info into a zig alignment
+    ///
+    /// Returns null if there is no special alignment info
+    pub fn zigAlignment(self: ClangAlignment) ?c_uint {
+        if (self.bit_alignment != 0) {
+            return self.bit_alignment / 8;
+        } else if (self.is_packed orelse false) {
+            return 1;
+        } else {
+            return null;
+        }
+    }
+};
 
 fn transDeclStmtOne(
     c: *Context,
@@ -1910,7 +1955,7 @@ fn transDeclStmtOne(
                 .is_export = false,
                 .is_threadlocal = var_decl.getTLSKind() != .None,
                 .linksection_string = null,
-                .alignment = zigAlignment(var_decl.getAlignedAttribute(c.clang_context)),
+                .alignment = ClangAlignment.forVar(c, var_decl).zigAlignment(),
                 .name = var_name,
                 .type = type_node,
                 .init = init_node,
@@ -2027,10 +2072,7 @@ fn transImplicitCastExpr(
         },
         .PointerToBoolean => {
             // @ptrToInt(val) != 0
-            var ptr_node = try transExpr(c, scope, sub_expr, .used);
-            if (ptr_node.tag() == .fn_identifier) {
-                ptr_node = try Tag.address_of.create(c.arena, ptr_node);
-            }
+            const ptr_node = try transExpr(c, scope, sub_expr, .used);
             const ptr_to_int = try Tag.ptr_to_int.create(c.arena, ptr_node);
 
             const ne = try Tag.not_equal.create(c.arena, .{ .lhs = ptr_to_int, .rhs = Tag.zero_literal.init() });
@@ -2479,10 +2521,7 @@ fn transCCast(
     }
     if (cIsInteger(dst_type) and qualTypeIsPtr(src_type)) {
         // @intCast(dest_type, @ptrToInt(val))
-        const ptr_to_int = if (expr.tag() == .fn_identifier)
-            try Tag.ptr_to_int.create(c.arena, try Tag.address_of.create(c.arena, expr))
-        else
-            try Tag.ptr_to_int.create(c.arena, expr);
+        const ptr_to_int = try Tag.ptr_to_int.create(c.arena, expr);
         return Tag.int_cast.create(c.arena, .{ .lhs = dst_node, .rhs = ptr_to_int });
     }
     if (cIsInteger(src_type) and qualTypeIsPtr(dst_type)) {
@@ -3521,7 +3560,8 @@ fn transArrayAccess(c: *Context, scope: *Scope, stmt: *const clang.ArraySubscrip
 
     // Special case: actual pointer (not decayed array) and signed integer subscript
     // See discussion at https://github.com/ziglang/zig/pull/8589
-    if (is_signed and (base_stmt == unwrapped_base) and !is_vector and !is_nonnegative_int_literal) return transSignedArrayAccess(c, scope, base_stmt, subscr_expr, result_used);
+    if (is_signed and (base_stmt == unwrapped_base) and !is_vector and !is_nonnegative_int_literal)
+        return transSignedArrayAccess(c, scope, base_stmt, subscr_expr, result_used);
 
     const container_node = try transExpr(c, scope, unwrapped_base, .used);
     const rhs = if (is_longlong or is_signed) blk: {
@@ -3716,9 +3756,6 @@ fn transUnaryOperator(c: *Context, scope: *Scope, stmt: *const clang.UnaryOperat
         else
             return transCreatePreCrement(c, scope, stmt, .sub_assign, used),
         .AddrOf => {
-            if (c.zig_is_stage1 and cIsFunctionDeclRef(op_expr)) {
-                return transExpr(c, scope, op_expr, used);
-            }
             return Tag.address_of.create(c.arena, try transExpr(c, scope, op_expr, used));
         },
         .Deref => {
@@ -5054,7 +5091,7 @@ fn finishTransFnProto(
         break :blk null;
     };
 
-    const alignment = if (fn_decl) |decl| zigAlignment(decl.getAlignedAttribute(c.clang_context)) else null;
+    const alignment = if (fn_decl) |decl| ClangAlignment.forFunc(c, decl).zigAlignment() else null;
 
     const explicit_callconv = if ((is_inline or is_export or is_extern) and cc == .C) null else cc;
 
@@ -6459,7 +6496,11 @@ fn parseCPostfixExpr(c: *Context, m: *MacroCtx, scope: *Scope, type_name: ?Node)
                 node = try Tag.field_access.create(c.arena, .{ .lhs = deref, .field_name = m.slice() });
             },
             .LBracket => {
-                const index = try macroBoolToInt(c, try parseCExpr(c, m, scope));
+                const index_val = try macroBoolToInt(c, try parseCExpr(c, m, scope));
+                const index = try Tag.int_cast.create(c.arena, .{
+                    .lhs = try Tag.type.create(c.arena, "usize"),
+                    .rhs = index_val,
+                });
                 node = try Tag.array_access.create(c.arena, .{ .lhs = node, .rhs = index });
                 try m.skip(c, .RBracket);
             },

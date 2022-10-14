@@ -404,7 +404,8 @@ const usage_build_generic =
     \\  -fno-builtin              Disable implicit builtin knowledge of functions
     \\  -ffunction-sections       Places each function in a separate section
     \\  -fno-function-sections    All functions go into same section
-    \\  --strip                   Omit debug symbols
+    \\  -fstrip                   Omit debug symbols
+    \\  -fno-strip                Keep debug symbols
     \\  -ofmt=[mode]              Override target object format
     \\    elf                     Executable and Linking Format
     \\    c                       C source code
@@ -630,7 +631,7 @@ fn buildOutputType(
     var version: std.builtin.Version = .{ .major = 0, .minor = 0, .patch = 0 };
     var have_version = false;
     var compatibility_version: ?std.builtin.Version = null;
-    var strip = false;
+    var strip: ?bool = null;
     var function_sections = false;
     var no_builtin = false;
     var watch = false;
@@ -1296,8 +1297,10 @@ fn buildOutputType(
                     } else if (mem.eql(u8, arg, "--show-builtin")) {
                         show_builtin = true;
                         emit_bin = .no;
-                    } else if (mem.eql(u8, arg, "--strip")) {
+                    } else if (mem.eql(u8, arg, "-fstrip")) {
                         strip = true;
+                    } else if (mem.eql(u8, arg, "-fno-strip")) {
+                        strip = false;
                     } else if (mem.eql(u8, arg, "-fsingle-threaded")) {
                         single_threaded = true;
                     } else if (mem.eql(u8, arg, "-fno-single-threaded")) {
@@ -1432,7 +1435,6 @@ fn buildOutputType(
         .cc, .cpp => {
             emit_h = .no;
             soname = .no;
-            strip = false;
             ensure_libc_on_non_freestanding = true;
             ensure_libcpp_on_non_freestanding = arg_mode == .cpp;
             want_native_include_dirs = true;
@@ -2186,6 +2188,9 @@ fn buildOutputType(
         },
     }
 
+    if (arg_mode == .build and optimize_mode == .ReleaseSmall and strip == null)
+        strip = true;
+
     if (arg_mode == .translate_c and c_source_files.items.len != 1) {
         fatal("translate-c expects exactly 1 source file (found {d})", .{c_source_files.items.len});
     }
@@ -2613,7 +2618,7 @@ fn buildOutputType(
             }
         },
         .yes_a_out => Compilation.EmitLoc{
-            .directory = null,
+            .directory = .{ .path = null, .handle = fs.cwd() },
             .basename = a_out_basename,
         },
     };
@@ -2763,7 +2768,14 @@ fn buildOutputType(
             defer gpa.free(rel_src_path);
             break :blk try Package.create(gpa, p, rel_src_path);
         } else {
-            break :blk try Package.create(gpa, fs.path.dirname(src_path), fs.path.basename(src_path));
+            const root_src_dir_path = fs.path.dirname(src_path);
+            break :blk Package.create(gpa, root_src_dir_path, fs.path.basename(src_path)) catch |err| {
+                if (root_src_dir_path) |p| {
+                    fatal("unable to open '{s}': {s}", .{ p, @errorName(err) });
+                } else {
+                    return err;
+                }
+            };
         }
     } else null;
     defer if (main_pkg) |p| p.destroy(gpa);
@@ -2792,7 +2804,7 @@ fn buildOutputType(
     var zig_lib_directory: Compilation.Directory = if (override_lib_dir) |lib_dir| .{
         .path = lib_dir,
         .handle = fs.cwd().openDir(lib_dir, .{}) catch |err| {
-            fatal("unable to open zig lib directory from 'zig-lib-dir' argument or env, '{s}': {s}", .{ lib_dir, @errorName(err) });
+            fatal("unable to open zig lib directory '{s}': {s}", .{ lib_dir, @errorName(err) });
         },
     } else introspect.findZigLibDirFromSelfExe(arena, self_exe_path) catch |err| {
         fatal("unable to find zig installation directory: {s}\n", .{@errorName(err)});
@@ -4317,7 +4329,7 @@ fn fmtPathDir(
 
         if (is_dir and (mem.eql(u8, entry.name, "zig-cache") or mem.eql(u8, entry.name, "zig-out"))) continue;
 
-        if (is_dir or mem.endsWith(u8, entry.name, ".zig")) {
+        if (is_dir or entry.kind == .File and mem.endsWith(u8, entry.name, ".zig")) {
             const full_path = try fs.path.join(fmt.gpa, &[_][]const u8{ file_path, entry.name });
             defer fmt.gpa.free(full_path);
 

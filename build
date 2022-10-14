@@ -7,7 +7,7 @@ TARGET="$2" # Example: riscv64-linux-gnu
 MCPU="$3" # Examples: `baseline`, `native`, `generic+v7a`, or `arm1176jzf_s`
 
 ROOTDIR="$(pwd)"
-ZIG_VERSION="0.10.0-dev.4111+5206832a8"
+ZIG_VERSION="0.10.0-dev.4300+1f196b9e2"
 
 TARGET_OS_AND_ABI=${TARGET#*-} # Example: linux-gnu
 
@@ -70,6 +70,7 @@ cmake "$ROOTDIR/zlib" \
   -DCMAKE_C_COMPILER="$ZIG;cc;-fno-sanitize=all;-s;-target;$TARGET;-mcpu=$MCPU" \
   -DCMAKE_CXX_COMPILER="$ZIG;c++;-fno-sanitize=all;-s;-target;$TARGET;-mcpu=$MCPU" \
   -DCMAKE_ASM_COMPILER="$ZIG;cc;-fno-sanitize=all;-s;-target;$TARGET;-mcpu=$MCPU" \
+  -DCMAKE_RC_COMPILER="$ROOTDIR/out/host/bin/llvm-rc" \
   -DCMAKE_AR="$ROOTDIR/out/host/bin/llvm-ar" \
   -DCMAKE_RANLIB="$ROOTDIR/out/host/bin/llvm-ranlib"
 make "$JOBS" install
@@ -84,6 +85,7 @@ cmake "$ROOTDIR/llvm" \
   -DLLVM_ENABLE_ZLIB=FORCE_ON \
   -DLLVM_ENABLE_BACKTRACES=OFF \
   -DLLVM_ENABLE_PLUGINS=OFF \
+  -DLLVM_ENABLE_ZSTD=OFF \
   -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/$TARGET-$MCPU" \
   -DCMAKE_PREFIX_PATH="$ROOTDIR/out/$TARGET-$MCPU" \
   -DCMAKE_BUILD_TYPE=Release \
@@ -92,6 +94,7 @@ cmake "$ROOTDIR/llvm" \
   -DCMAKE_C_COMPILER="$ZIG;cc;-fno-sanitize=all;-s;-target;$TARGET;-mcpu=$MCPU" \
   -DCMAKE_CXX_COMPILER="$ZIG;c++;-fno-sanitize=all;-s;-target;$TARGET;-mcpu=$MCPU" \
   -DCMAKE_ASM_COMPILER="$ZIG;cc;-fno-sanitize=all;-s;-target;$TARGET;-mcpu=$MCPU" \
+  -DCMAKE_RC_COMPILER="$ROOTDIR/out/host/bin/llvm-rc" \
   -DCMAKE_AR="$ROOTDIR/out/host/bin/llvm-ar" \
   -DCMAKE_RANLIB="$ROOTDIR/out/host/bin/llvm-ranlib" \
   -DLLVM_TABLEGEN="$ROOTDIR/out/host/bin/llvm-tblgen" \

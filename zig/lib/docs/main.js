@@ -53,7 +53,7 @@ var zigAnalysis;
   const domHdrName = document.getElementById("hdrName");
   const domHelpModal = document.getElementById("helpModal");
   const domSearchPlaceholder = document.getElementById("searchPlaceholder");
-  const sourceFileUrlTemplate = "src/{{file}}#L{{line}}"
+  const sourceFileUrlTemplate = "src/{{file}}.html#L{{line}}"
   const domLangRefLink = document.getElementById("langRefLink");
 
   let searchTimer = null;
@@ -2271,10 +2271,10 @@ var zigAnalysis;
       let decl = getDecl(decls[i]);
       let declValue = resolveValue(decl.value);
 
-      if (decl.isTest) {
-        testsList.push(decl);
-        continue;
-      }
+      // if (decl.isTest) {
+      //   testsList.push(decl);
+      //   continue;
+      // }
 
       if (decl.kind === "var") {
         varsList.push(decl);
@@ -3522,10 +3522,9 @@ var zigAnalysis;
     return {
       name: decl[0],
       kind: decl[1],
-      isTest: decl[2],
-      src: decl[3],
-      value: decl[4],
-      decltest: decl[5],
+      src: decl[2],
+      value: decl[3],
+      decltest: decl[4],
     };
   }
   

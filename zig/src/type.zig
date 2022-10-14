@@ -3458,12 +3458,21 @@ pub const Type = extern union {
                     else => {},
                 }
 
+                const payload_size = switch (try child_type.abiSizeAdvanced(target, strat)) {
+                    .scalar => |elem_size| elem_size,
+                    .val => switch (strat) {
+                        .sema_kit => unreachable,
+                        .eager => unreachable,
+                        .lazy => |arena| return AbiSizeAdvanced{ .val = try Value.Tag.lazy_size.create(arena, ty) },
+                    },
+                };
+
                 // Optional types are represented as a struct with the child type as the first
                 // field and a boolean as the second. Since the child type's abi alignment is
                 // guaranteed to be >= that of bool's (1 byte) the added size is exactly equal
                 // to the child type's ABI alignment.
                 return AbiSizeAdvanced{
-                    .scalar = child_type.abiAlignment(target) + child_type.abiSize(target),
+                    .scalar = child_type.abiAlignment(target) + payload_size,
                 };
             },
 
@@ -3478,7 +3487,14 @@ pub const Type = extern union {
                 }
                 const code_align = abiAlignment(Type.anyerror, target);
                 const payload_align = abiAlignment(data.payload, target);
-                const payload_size = abiSize(data.payload, target);
+                const payload_size = switch (try data.payload.abiSizeAdvanced(target, strat)) {
+                    .scalar => |elem_size| elem_size,
+                    .val => switch (strat) {
+                        .sema_kit => unreachable,
+                        .eager => unreachable,
+                        .lazy => |arena| return AbiSizeAdvanced{ .val = try Value.Tag.lazy_size.create(arena, ty) },
+                    },
+                };
 
                 var size: u64 = 0;
                 if (code_align > payload_align) {
@@ -5643,6 +5659,28 @@ pub const Type = extern union {
                 } else {
                     return val;
                 }
+            },
+            else => unreachable,
+        }
+    }
+
+    pub fn structFieldIsComptime(ty: Type, index: usize) bool {
+        switch (ty.tag()) {
+            .@"struct" => {
+                const struct_obj = ty.castTag(.@"struct").?.data;
+                if (struct_obj.layout == .Packed) return false;
+                const field = struct_obj.fields.values()[index];
+                return field.is_comptime;
+            },
+            .tuple => {
+                const tuple = ty.castTag(.tuple).?.data;
+                const val = tuple.values[index];
+                return val.tag() != .unreachable_value;
+            },
+            .anon_struct => {
+                const anon_struct = ty.castTag(.anon_struct).?.data;
+                const val = anon_struct.values[index];
+                return val.tag() != .unreachable_value;
             },
             else => unreachable,
         }

@@ -4064,7 +4064,7 @@ test "labeled break from labeled block expression" {
 
       {#header_open|Shadowing#}
       <p>{#link|Identifiers#} are never allowed to "hide" other identifiers by using the same name:</p>
-      {#code_begin|test_err|local shadows declaration#}
+      {#code_begin|test_err|local variable shadows declaration#}
 const pi = 3.14;
 
 test "inside test block" {
@@ -4254,6 +4254,134 @@ test "enum literals with switch" {
     try expect(result);
 }
       {#code_end#}
+      {#header_close#}
+
+      {#header_open|Inline switch#}
+      <p>
+      Switch prongs can be marked as {#syntax#}inline{#endsyntax#} to generate
+      the prong's body for each possible value it could have:
+      </p>
+      {#code_begin|test|test_inline_switch#}
+const std = @import("std");
+const expect = std.testing.expect;
+const expectError = std.testing.expectError;
+
+fn isFieldOptional(comptime T: type, field_index: usize) !bool {
+    const fields = @typeInfo(T).Struct.fields;
+    return switch (field_index) {
+        // This prong is analyzed `fields.len - 1` times with `idx` being an
+        // unique comptime known value each time.
+        inline 0...fields.len - 1 => |idx| @typeInfo(fields[idx].field_type) == .Optional,
+        else => return error.IndexOutOfBounds,
+    };
+}
+
+const Struct1 = struct { a: u32, b: ?u32 };
+
+test "using @typeInfo with runtime values" {
+    var index: usize = 0;
+    try expect(!try isFieldOptional(Struct1, index));
+    index += 1;
+    try expect(try isFieldOptional(Struct1, index));
+    index += 1;
+    try expectError(error.IndexOutOfBounds, isFieldOptional(Struct1, index));
+}
+
+// Calls to `isFieldOptional` on `Struct1` get unrolled to an equivalent
+// of this function: 
+fn isFieldOptionalUnrolled(field_index: usize) !bool {
+    return switch (field_index) {
+        0 => false,
+        1 => true,
+        else => return error.IndexOutOfBounds,
+    };
+}
+      {#code_end#}
+      <p>
+      {#syntax#}inline else{#endsyntax#} prongs can be used as a type safe
+      alternative to {#syntax#}inline for{#endsyntax#} loops:
+      </p>
+      {#code_begin|test|test_inline_else#}
+const std = @import("std");
+const expect = std.testing.expect;
+
+const SliceTypeA = extern struct {
+    len: usize,
+    ptr: [*]u32,
+};
+const SliceTypeB = extern struct {
+    ptr: [*]SliceTypeA,
+    len: usize,
+};
+const AnySlice = union(enum) {
+    a: SliceTypeA,
+    b: SliceTypeB,
+    c: []const u8,
+    d: []AnySlice,
+};
+
+fn withFor(any: AnySlice) usize {
+    const Tag = @typeInfo(AnySlice).Union.tag_type.?;
+    inline for (@typeInfo(Tag).Enum.fields) |field| {
+        // With `inline for` the function gets generated as
+        // a series of `if` statements relying on the optimizer
+        // to convert it to a switch.
+        if (field.value == @enumToInt(any)) {
+            return @field(any, field.name).len;
+        }
+    }
+    // When using `inline for` the compiler doesn't know that every
+    // possible case has been handled requiring an explicit `unreachable`.
+    unreachable;
+}
+
+fn withSwitch(any: AnySlice) usize {
+    return switch (any) {
+        // With `inline else` the function is explicitly generated
+        // as the desired switch and the compiler can check that
+        // every possible case is handled.
+        inline else => |slice| slice.len,
+    };
+}
+
+test "inline for and inline else similarity" {
+    var any = AnySlice{ .c = "hello" };
+    try expect(withFor(any) == 5);
+    try expect(withSwitch(any) == 5);
+}
+      {#code_end#}
+      <p>
+      When using an inline prong switching on an union an additional
+      capture can be used to obtain the union's enum tag value.
+      </p>
+      {#code_begin|test|test_inline_switch_union_tag#}
+const std = @import("std");
+const expect = std.testing.expect;
+
+const U = union(enum) {
+    a: u32,
+    b: f32,
+};
+
+fn getNum(u: U) u32 {
+    switch (u) {
+        // Here `num` is a runtime known value that is either
+        // `u.a` or `u.b` and `tag` is `u`'s comptime known tag value.
+        inline else => |num, tag| {
+            if (tag == .b) {
+                return @floatToInt(u32, num);
+            }
+            return num;
+        }
+    }
+}
+
+test "test" {
+    var u = U{ .b = 42 };
+    try expect(getNum(u) == 42);
+}
+      {#code_end#}
+      {#see_also|inline while|inline for#}
       {#header_close#}
       {#header_close#}
 
@@ -4903,13 +5031,12 @@ test "errdefer unwinding" {
       {#header_close#}
       {#header_open|unreachable#}
       <p>
-      In {#syntax#}Debug{#endsyntax#} and {#syntax#}ReleaseSafe{#endsyntax#} mode, and when using <kbd>zig test</kbd>,
+      In {#link|Debug#} and {#link|ReleaseSafe#} mode
       {#syntax#}unreachable{#endsyntax#} emits a call to {#syntax#}panic{#endsyntax#} with the message <code>reached unreachable code</code>.
       </p>
       <p>
-      In {#syntax#}ReleaseFast{#endsyntax#} mode, the optimizer uses the assumption that {#syntax#}unreachable{#endsyntax#} code
-      will never be hit to perform optimizations. However, <kbd>zig test</kbd> even in {#syntax#}ReleaseFast{#endsyntax#} mode
-                  still emits {#syntax#}unreachable{#endsyntax#} as calls to {#syntax#}panic{#endsyntax#}.
+      In {#link|ReleaseFast#} and {#link|ReleaseSmall#} mode, the optimizer uses the assumption that {#syntax#}unreachable{#endsyntax#} code
+      will never be hit to perform optimizations.
       </p>
       {#header_open|Basics#}
       {#code_begin|test|test_unreachable#}
@@ -6499,7 +6626,7 @@ export fn entry() void {
   14:	5d                   	pop    %rbp
   15:	c3                   	retq   </code></pre>
       <p>These assembly instructions do not have any code associated with the void values -
-      they only perform the function call prologue and epilog.</p>
+      they only perform the function call prologue and epilogue.</p>
 
       {#header_open|void#}
       <p>
@@ -7840,9 +7967,8 @@ fn readFile(allocator: Allocator, filename: []const u8) ![]u8 {
       {#header_open|@alignCast#}
       <pre>{#syntax#}@alignCast(comptime alignment: u29, ptr: anytype) anytype{#endsyntax#}</pre>
       <p>
-      {#syntax#}ptr{#endsyntax#} can be {#syntax#}*T{#endsyntax#}, {#syntax#}fn(){#endsyntax#}, {#syntax#}?*T{#endsyntax#},
-                      {#syntax#}?fn(){#endsyntax#}, or {#syntax#}[]T{#endsyntax#}. It returns the same type as {#syntax#}ptr{#endsyntax#}
-      except with the alignment adjusted to the new value.
+      {#syntax#}ptr{#endsyntax#} can be {#syntax#}*T{#endsyntax#}, {#syntax#}?*T{#endsyntax#}, or {#syntax#}[]T{#endsyntax#}.
+      It returns the same type as {#syntax#}ptr{#endsyntax#} except with the alignment adjusted to the new value.
       </p>
       <p>A {#link|pointer alignment safety check|Incorrect Pointer Alignment#} is added
       to the generated code to make sure the pointer is aligned as promised.</p>
@@ -8335,9 +8461,6 @@ test "main" {
 }
       {#code_end#}
       <p>
-      will output:
-      </p>
-      <p>
       If all {#syntax#}@compileLog{#endsyntax#} calls are removed or
       not encountered by analysis, the
       program compiles successfully and the generated executable prints:
@@ -8680,7 +8803,7 @@ fn func() void {
       This function returns the base pointer of the current stack frame.
       </p>
       <p>
-      The implications of this are target specific and not consistent across all
+      The implications of this are target-specific and not consistent across all
       platforms. The frame address may not be available in release mode due to
       aggressive optimizations.
       </p>
@@ -8769,11 +8892,11 @@ test "@hasDecl" {
       </p>
       <ul>
           <li>{#syntax#}@import("std"){#endsyntax#} - Zig Standard Library</li>
-          <li>{#syntax#}@import("builtin"){#endsyntax#} - Target-specific information
+          <li>{#syntax#}@import("builtin"){#endsyntax#} - Target-specific information.
               The command <code>zig build-exe --show-builtin</code> outputs the source to stdout for reference.
           </li>
-          <li>{#syntax#}@import("root"){#endsyntax#} - Points to the root source file
-              This is usually `src/main.zig` but it depends on what file is chosen to be built.
+          <li>{#syntax#}@import("root"){#endsyntax#} - Points to the root source file.
+              This is usually <code>src/main.zig</code> but it depends on what file is chosen to be built.
           </li>
       </ul>
       {#see_also|Compile Variables|@embedFile#}
@@ -9013,7 +9136,7 @@ test "@wasmMemoryGrow" {
       <p>
       This builtin tells the compiler to emit a prefetch instruction if supported by the
       target CPU. If the target CPU does not support the requested prefetch instruction,
-      this builtin is a noop. This function has no effect on the behavior of the program,
+      this builtin is a no-op. This function has no effect on the behavior of the program,
       only on the performance characteristics.
       </p>
       <p>
@@ -9066,14 +9189,9 @@ pub const PrefetchOptions = struct {
       {#header_open|@ptrToInt#}
       <pre>{#syntax#}@ptrToInt(value: anytype) usize{#endsyntax#}</pre>
       <p>
-      Converts {#syntax#}value{#endsyntax#} to a {#syntax#}usize{#endsyntax#} which is the address of the pointer. {#syntax#}value{#endsyntax#} can be one of these types:
+      Converts {#syntax#}value{#endsyntax#} to a {#syntax#}usize{#endsyntax#} which is the address of the pointer.
+      {#syntax#}value{#endsyntax#} can be {#syntax#}*T{#endsyntax#} or {#syntax#}?*T{#endsyntax#}.
       </p>
-      <ul>
-          <li>{#syntax#}*T{#endsyntax#}</li>
-          <li>{#syntax#}?*T{#endsyntax#}</li>
-          <li>{#syntax#}fn(){#endsyntax#}</li>
-          <li>{#syntax#}?fn(){#endsyntax#}</li>
-      </ul>
       <p>To convert the other way, use {#link|@intToPtr#}</p>
 
       {#header_close#}
@@ -9100,7 +9218,7 @@ pub const PrefetchOptions = struct {
       when the current function returns.
       </p>
       <p>
-      The implications of this are target specific and not consistent across
+      The implications of this are target-specific and not consistent across
       all platforms.
       </p>
       <p>
@@ -9287,7 +9405,7 @@ test "@setRuntimeSafety" {
       Each element in {#syntax#}mask{#endsyntax#} selects an element from either {#syntax#}a{#endsyntax#} or
       {#syntax#}b{#endsyntax#}. Positive numbers select from {#syntax#}a{#endsyntax#} starting at 0.
       Negative values select from {#syntax#}b{#endsyntax#}, starting at {#syntax#}-1{#endsyntax#} and going down.
-      It is recommended to use the {#syntax#}~{#endsyntax#} operator from indexes from {#syntax#}b{#endsyntax#}
+      It is recommended to use the {#syntax#}~{#endsyntax#} operator for indexes from {#syntax#}b{#endsyntax#}
       so that both indexes can start from {#syntax#}0{#endsyntax#} (i.e. {#syntax#}~@as(i32, 0){#endsyntax#} is
       {#syntax#}-1{#endsyntax#}).
       </p>
@@ -9727,7 +9845,7 @@ test "integer truncation" {
       </p>
       <p>
       Type information of {#link|structs|struct#}, {#link|unions|union#}, {#link|enums|enum#}, and
-      {#link|error sets|Error Set Type#} has fields which are are guaranteed to be in the same
+      {#link|error sets|Error Set Type#} has fields which are guaranteed to be in the same
       order as appearance in the source file.
       </p>
       <p>
@@ -10551,7 +10669,7 @@ fn concat(allocator: Allocator, a: []const u8, b: []const u8) ![]u8 {
       {#syntax#}FixedBufferAllocator{#endsyntax#}, which is then passed to a function.
       As a convenience there is a global {#syntax#}FixedBufferAllocator{#endsyntax#}
       available for quick tests at {#syntax#}std.testing.allocator{#endsyntax#},
-      which will also do perform basic leak detection.
+      which will also perform basic leak detection.
       </p>
       <p>
       Zig has a general purpose allocator available to be imported
@@ -10778,7 +10896,7 @@ test "string literal to constant slice" {
       </p>
       {#code_begin|syntax#}
 const builtin = @import("builtin");
-const separator = if (builtin.os.tag == builtin.Os.windows) '\\' else '/';
+const separator = if (builtin.os.tag == .windows) '\\' else '/';
       {#code_end#}
       <p>
       Example of what is imported with {#syntax#}@import("builtin"){#endsyntax#}:
@@ -11085,7 +11203,7 @@ pub fn main() void {
       <p>
         C Translation makes a best-effort attempt to translate function-like macros into equivalent
         Zig functions. Since C macros operate at the level of lexical tokens, not all C macros
-        can be translated to Zig. Macros that cannot be translated will be be demoted to
+        can be translated to Zig. Macros that cannot be translated will be demoted to
         {#syntax#}@compileError{#endsyntax#}. Note that C code which <em>uses</em> macros will be
         translated without any additional issues (since Zig operates on the pre-processed source
         with macros expanded). It is merely the macros themselves which may not be translatable to
@@ -11144,7 +11262,7 @@ pub const MAKELOCAL = @compileError("unable to translate C expr: unexpected toke
         please!</li>
       </ul>
       <p>When a C pointer is pointing to a single struct (not an array), dereference the C pointer to
-        access to the struct's fields or member data. That syntax looks like
+        access the struct's fields or member data. That syntax looks like
         this: </p>
         <p>{#syntax#}ptr_to_struct.*.struct_member{#endsyntax#}</p>
         <p>This is comparable to doing {#syntax#}->{#endsyntax#} in C.</p>

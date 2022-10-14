@@ -1004,8 +1004,7 @@ pub fn formatAsciiChar(
     options: FormatOptions,
     writer: anytype,
 ) !void {
-    _ = options;
-    return writer.writeAll(@as(*const [1]u8, &c));
+    return formatBuf(@as(*const [1]u8, &c), options, writer);
 }
 
 pub fn formatUnicodeCodepoint(
@@ -2174,18 +2173,18 @@ test "escape non-printable" {
 }
 
 test "pointer" {
-    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
     {
         const value = @intToPtr(*align(1) i32, 0xdeadbeef);
         try expectFmt("pointer: i32@deadbeef\n", "pointer: {}\n", .{value});
         try expectFmt("pointer: i32@deadbeef\n", "pointer: {*}\n", .{value});
     }
+    const FnPtr = if (builtin.zig_backend == .stage1) fn () void else *align(1) const fn () void;
     {
-        const value = @intToPtr(*align(1) const fn () void, 0xdeadbeef);
+        const value = @intToPtr(FnPtr, 0xdeadbeef);
         try expectFmt("pointer: fn() void@deadbeef\n", "pointer: {}\n", .{value});
     }
     {
-        const value = @intToPtr(*align(1) const fn () void, 0xdeadbeef);
+        const value = @intToPtr(FnPtr, 0xdeadbeef);
         try expectFmt("pointer: fn() void@deadbeef\n", "pointer: {}\n", .{value});
     }
 }
@@ -2724,6 +2723,9 @@ test "padding" {
     try expectFmt("==crêpe===", "{s:=^10}", .{"crêpe"});
     try expectFmt("=====crêpe", "{s:=>10}", .{"crêpe"});
     try expectFmt("crêpe=====", "{s:=<10}", .{"crêpe"});
+    try expectFmt("====a", "{c:=>5}", .{'a'});
+    try expectFmt("==a==", "{c:=^5}", .{'a'});
+    try expectFmt("a====", "{c:=<5}", .{'a'});
 }
 
 test "decimal float padding" {

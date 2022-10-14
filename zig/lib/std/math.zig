@@ -262,6 +262,7 @@ pub const atanh = @import("math/atanh.zig").atanh;
 pub const sinh = @import("math/sinh.zig").sinh;
 pub const cosh = @import("math/cosh.zig").cosh;
 pub const tanh = @import("math/tanh.zig").tanh;
+pub const gcd = @import("math/gcd.zig").gcd;
 
 /// Sine trigonometric function on a floating point number.
 /// Uses a dedicated hardware instruction when available.
@@ -284,10 +285,10 @@ pub inline fn tan(value: anytype) @TypeOf(value) {
     return @tan(value);
 }
 
-// Convert an angle in radians to degrees. T must be a float type.
+/// Converts an angle in radians to degrees. T must be a float type.
 pub fn radiansToDegrees(comptime T: type, angle_in_radians: T) T {
-    if (@typeInfo(T) != .Float)
-        @compileError("T must be a float type.");
+    if (@typeInfo(T) != .Float and @typeInfo(T) != .ComptimeFloat)
+        @compileError("T must be a float type");
     return angle_in_radians * 180.0 / pi;
 }
 
@@ -299,10 +300,10 @@ test "radiansToDegrees" {
     try std.testing.expectApproxEqAbs(@as(f32, 360), radiansToDegrees(f32, 2.0 * pi), 1e-6);
 }
 
-// Convert an angle in degrees to radians. T must be a float type.
+/// Converts an angle in degrees to radians. T must be a float type.
 pub fn degreesToRadians(comptime T: type, angle_in_degrees: T) T {
-    if (@typeInfo(T) != .Float)
-        @compileError("T must be a float type.");
+    if (@typeInfo(T) != .Float and @typeInfo(T) != .ComptimeFloat)
+        @compileError("T must be a float type");
     return angle_in_degrees * pi / 180.0;
 }
 
@@ -597,6 +598,8 @@ test "shr" {
 pub fn rotr(comptime T: type, x: T, r: anytype) T {
     if (@typeInfo(T) == .Vector) {
         const C = @typeInfo(T).Vector.child;
+        if (C == u0) return 0;
+
         if (@typeInfo(C).Int.signedness == .signed) {
             @compileError("cannot rotate signed integers");
         }
@@ -605,8 +608,15 @@ pub fn rotr(comptime T: type, x: T, r: anytype) T {
     } else if (@typeInfo(T).Int.signedness == .signed) {
         @compileError("cannot rotate signed integer");
     } else {
-        const ar = @intCast(Log2Int(T), @mod(r, @typeInfo(T).Int.bits));
-        return x >> ar | x << (1 +% ~ar);
+        if (T == u0) return 0;
+
+        if (isPowerOfTwo(@typeInfo(T).Int.bits)) {
+            const ar = @intCast(Log2Int(T), @mod(r, @typeInfo(T).Int.bits));
+            return x >> ar | x << (1 +% ~ar);
+        } else {
+            const ar = @mod(r, @typeInfo(T).Int.bits);
+            return shr(T, x, ar) | shl(T, x, @typeInfo(T).Int.bits - ar);
+        }
     }
 }
 
@@ -617,6 +627,9 @@ test "rotr" {
         // https://github.com/ziglang/zig/issues/12012
         return error.SkipZigTest;
     }
+    try testing.expect(rotr(u0, 0b0, @as(usize, 3)) == 0b0);
+    try testing.expect(rotr(u5, 0b00001, @as(usize, 0)) == 0b00001);
+    try testing.expect(rotr(u6, 0b000001, @as(usize, 7)) == 0b100000);
     try testing.expect(rotr(u8, 0b00000001, @as(usize, 0)) == 0b00000001);
     try testing.expect(rotr(u8, 0b00000001, @as(usize, 9)) == 0b10000000);
     try testing.expect(rotr(u8, 0b00000001, @as(usize, 8)) == 0b00000001);
@@ -631,6 +644,8 @@ test "rotr" {
 pub fn rotl(comptime T: type, x: T, r: anytype) T {
     if (@typeInfo(T) == .Vector) {
         const C = @typeInfo(T).Vector.child;
+        if (C == u0) return 0;
+
         if (@typeInfo(C).Int.signedness == .signed) {
             @compileError("cannot rotate signed integers");
         }
@@ -639,8 +654,15 @@ pub fn rotl(comptime T: type, x: T, r: anytype) T {
     } else if (@typeInfo(T).Int.signedness == .signed) {
         @compileError("cannot rotate signed integer");
     } else {
-        const ar = @intCast(Log2Int(T), @mod(r, @typeInfo(T).Int.bits));
-        return x << ar | x >> 1 +% ~ar;
+        if (T == u0) return 0;
+
+        if (isPowerOfTwo(@typeInfo(T).Int.bits)) {
+            const ar = @intCast(Log2Int(T), @mod(r, @typeInfo(T).Int.bits));
+            return x << ar | x >> 1 +% ~ar;
+        } else {
+            const ar = @mod(r, @typeInfo(T).Int.bits);
+            return shl(T, x, ar) | shr(T, x, @typeInfo(T).Int.bits - ar);
+        }
     }
 }
 
@@ -651,6 +673,9 @@ test "rotl" {
         // https://github.com/ziglang/zig/issues/12012
         return error.SkipZigTest;
     }
+    try testing.expect(rotl(u0, 0b0, @as(usize, 3)) == 0b0);
+    try testing.expect(rotl(u5, 0b00001, @as(usize, 0)) == 0b00001);
+    try testing.expect(rotl(u6, 0b000001, @as(usize, 7)) == 0b000010);
     try testing.expect(rotl(u8, 0b00000001, @as(usize, 0)) == 0b00000001);
     try testing.expect(rotl(u8, 0b00000001, @as(usize, 9)) == 0b00000010);
     try testing.expect(rotl(u8, 0b00000001, @as(usize, 8)) == 0b00000001);

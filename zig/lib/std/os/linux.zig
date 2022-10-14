@@ -888,7 +888,7 @@ else
 const vdso_clock_gettime_ty = if (builtin.zig_backend == .stage1)
     fn (i32, *timespec) callconv(.C) usize
 else
-    *const fn (i32, *timespec) callconv(.C) usize;
+    *align(1) const fn (i32, *timespec) callconv(.C) usize;
 
 pub fn clock_gettime(clk_id: i32, tp: *timespec) usize {
     if (@hasDecl(VDSO, "CGT_SYM")) {
@@ -3010,31 +3010,31 @@ pub const S = struct {
     pub const IXOTH = 0o001;
     pub const IRWXO = 0o007;
 
-    pub fn ISREG(m: u32) bool {
+    pub fn ISREG(m: mode_t) bool {
         return m & IFMT == IFREG;
     }
 
-    pub fn ISDIR(m: u32) bool {
+    pub fn ISDIR(m: mode_t) bool {
         return m & IFMT == IFDIR;
     }
 
-    pub fn ISCHR(m: u32) bool {
+    pub fn ISCHR(m: mode_t) bool {
         return m & IFMT == IFCHR;
     }
 
-    pub fn ISBLK(m: u32) bool {
+    pub fn ISBLK(m: mode_t) bool {
         return m & IFMT == IFBLK;
     }
 
-    pub fn ISFIFO(m: u32) bool {
+    pub fn ISFIFO(m: mode_t) bool {
         return m & IFMT == IFIFO;
     }
 
-    pub fn ISLNK(m: u32) bool {
+    pub fn ISLNK(m: mode_t) bool {
         return m & IFMT == IFLNK;
     }
 
-    pub fn ISSOCK(m: u32) bool {
+    pub fn ISSOCK(m: mode_t) bool {
         return m & IFMT == IFSOCK;
     }
 };
@@ -3068,12 +3068,9 @@ pub const sigset_t = [1024 / 32]u32;
 pub const all_mask: sigset_t = [_]u32{0xffffffff} ** @typeInfo(sigset_t).Array.len;
 pub const app_mask: sigset_t = [2]u32{ 0xfffffffc, 0x7fffffff } ++ [_]u32{0xffffffff} ** 30;
 
-const k_sigaction_funcs = if (builtin.zig_backend == .stage1) struct {
-    const handler = ?fn (c_int) callconv(.C) void;
-    const restorer = fn () callconv(.C) void;
-} else struct {
-    const handler = ?*const fn (c_int) callconv(.C) void;
-    const restorer = *const fn () callconv(.C) void;
+const k_sigaction_funcs = struct {
+    const handler = ?std.meta.FnPtr(fn (c_int) callconv(.C) void);
+    const restorer = std.meta.FnPtr(fn () callconv(.C) void);
 };
 
 pub const k_sigaction = switch (native_arch) {
@@ -3099,24 +3096,16 @@ pub const k_sigaction = switch (native_arch) {
 
 /// Renamed from `sigaction` to `Sigaction` to avoid conflict with the syscall.
 pub const Sigaction = extern struct {
-    pub usingnamespace if (builtin.zig_backend == .stage1) struct {
-        pub const handler_fn = fn (c_int) callconv(.C) void;
-        pub const sigaction_fn = fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void;
-    } else struct {
-        pub const handler_fn = *const fn (c_int) callconv(.C) void;
-        pub const sigaction_fn = *const fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void;
-    };
+    pub const handler_fn = std.meta.FnPtr(fn (c_int) callconv(.C) void);
+    pub const sigaction_fn = std.meta.FnPtr(fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void);
 
     handler: extern union {
-        handler: ?Sigaction.handler_fn,
-        sigaction: ?Sigaction.sigaction_fn,
+        handler: ?handler_fn,
+        sigaction: ?sigaction_fn,
     },
     mask: sigset_t,
     flags: c_uint,
-    restorer: ?if (builtin.zig_backend == .stage1)
-        fn () callconv(.C) void
-    else
-        *const fn () callconv(.C) void = null,
+    restorer: ?std.meta.FnPtr(fn () callconv(.C) void) = null,
 };
 
 pub const empty_sigset = [_]u32{0} ** @typeInfo(sigset_t).Array.len;
@@ -3183,6 +3172,17 @@ pub const sockaddr = extern struct {
     pub const un = extern struct {
         family: sa_family_t = AF.UNIX,
         path: [108]u8,
+    };
+
+    /// Packet socket address
+    pub const ll = extern struct {
+        family: sa_family_t = AF.PACKET,
+        protocol: u16,
+        ifindex: i32,
+        hatype: u16,
+        pkttype: u8,
+        halen: u8,
+        addr: [8]u8,
     };
 
     /// Netlink socket address

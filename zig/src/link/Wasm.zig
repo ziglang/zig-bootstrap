@@ -1080,7 +1080,7 @@ pub fn getDeclVAddr(
             .index = target_symbol_index,
             .offset = @intCast(u32, reloc_info.offset),
             .relocation_type = if (is_wasm32) .R_WASM_MEMORY_ADDR_I32 else .R_WASM_MEMORY_ADDR_I64,
-            .addend = reloc_info.addend,
+            .addend = @intCast(i32, reloc_info.addend),
         });
     }
     // we do not know the final address at this point,
@@ -2001,7 +2001,7 @@ fn populateErrorNameTable(wasm: *Wasm) !void {
             .index = names_symbol_index,
             .relocation_type = .R_WASM_MEMORY_ADDR_I32,
             .offset = offset,
-            .addend = addend,
+            .addend = @intCast(i32, addend),
         });
         atom.size += @intCast(u32, slice_ty.abiSize(wasm.base.options.target));
         addend += len;
@@ -2556,6 +2556,10 @@ pub fn flushModule(wasm: *Wasm, comp: *Compilation, prog_node: *std.Progress.Nod
             try wasm.emitDataRelocations(&binary_bytes, data_index, symbol_table);
         }
     } else if (!wasm.base.options.strip) {
+        try wasm.emitNameSection(&binary_bytes, arena);
+    }
+
+    if (!wasm.base.options.strip) {
         if (wasm.dwarf) |*dwarf| {
             const mod = wasm.base.options.module.?;
             try dwarf.writeDbgAbbrev(&wasm.base);
@@ -2597,7 +2601,8 @@ pub fn flushModule(wasm: *Wasm, comp: *Compilation, prog_node: *std.Progress.Nod
                 debug_bytes.clearRetainingCapacity();
             }
         }
-        try wasm.emitNameSection(&binary_bytes, arena);
+
+        try emitProducerSection(&binary_bytes);
     }
 
     // Only when writing all sections executed properly we write the magic
@@ -2623,6 +2628,65 @@ fn emitDebugSection(binary_bytes: *std.ArrayList(u8), data: []const u8, name: []
     const start = binary_bytes.items.len - header_offset;
     log.debug("Emit debug section: '{s}' start=0x{x:0>8} end=0x{x:0>8}", .{ name, start, start + data.len });
     try writer.writeAll(data);
+
+    try writeCustomSectionHeader(
+        binary_bytes.items,
+        header_offset,
+        @intCast(u32, binary_bytes.items.len - header_offset - 6),
+    );
+}
+
+fn emitProducerSection(binary_bytes: *std.ArrayList(u8)) !void {
+    const header_offset = try reserveCustomSectionHeader(binary_bytes);
+
+    const writer = binary_bytes.writer();
+    const producers = "producers";
+    try leb.writeULEB128(writer, @intCast(u32, producers.len));
+    try writer.writeAll(producers);
+
+    try leb.writeULEB128(writer, @as(u32, 2)); // 2 fields: Language + processed-by
+
+    // used for the Zig version
+    var version_buf: [100]u8 = undefined;
+    const version = try std.fmt.bufPrint(&version_buf, "{}", .{build_options.semver});
+
+    // language field
+    {
+        const language = "language";
+        try leb.writeULEB128(writer, @intCast(u32, language.len));
+        try writer.writeAll(language);
+
+        // field_value_count (TODO: Parse object files for producer sections to detect their language)
+        try leb.writeULEB128(writer, @as(u32, 1));
+
+        // versioned name
+        {
+            try leb.writeULEB128(writer, @as(u32, 3)); // len of "Zig"
+            try writer.writeAll("Zig");
+
+            try leb.writeULEB128(writer, @intCast(u32, version.len));
+            try writer.writeAll(version);
+        }
+    }
+
+    // processed-by field
+    {
+        const processed_by = "processed-by";
+        try leb.writeULEB128(writer, @intCast(u32, processed_by.len));
+        try writer.writeAll(processed_by);
+
+        // field_value_count (TODO: Parse object files for producer sections to detect other used tools)
+        try leb.writeULEB128(writer, @as(u32, 1));
+
+        // versioned name
+        {
+            try leb.writeULEB128(writer, @as(u32, 3)); // len of "Zig"
+            try writer.writeAll("Zig");
+
+            try leb.writeULEB128(writer, @intCast(u32, version.len));
+            try writer.writeAll(version);
+        }
+    }
 
     try writeCustomSectionHeader(
         binary_bytes.items,
@@ -3369,7 +3433,7 @@ fn emitCodeRelocations(
             try leb.writeULEB128(writer, offset);
             try leb.writeULEB128(writer, symbol_index);
             if (relocation.relocation_type.addendIsPresent()) {
-                try leb.writeULEB128(writer, relocation.addend orelse 0);
+                try leb.writeILEB128(writer, relocation.addend);
             }
             log.debug("Emit relocation: {}", .{relocation});
         }
@@ -3419,7 +3483,7 @@ fn emitDataRelocations(
                 try leb.writeULEB128(writer, offset);
                 try leb.writeULEB128(writer, symbol_index);
                 if (relocation.relocation_type.addendIsPresent()) {
-                    try leb.writeULEB128(writer, relocation.addend orelse 0);
+                    try leb.writeILEB128(writer, relocation.addend);
                 }
                 log.debug("Emit relocation: {}", .{relocation});
             }

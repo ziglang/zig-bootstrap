@@ -544,7 +544,7 @@ test "Version.parse" {
     comptime (try testVersionParse());
 }
 
-pub fn testVersionParse() !void {
+fn testVersionParse() !void {
     const f = struct {
         fn eql(text: []const u8, v1: u32, v2: u32, v3: u32) !void {
             const v = try Version.parse(text);
@@ -736,19 +736,13 @@ pub const CompilerBackend = enum(u64) {
 /// therefore must be kept in sync with the compiler implementation.
 pub const TestFn = struct {
     name: []const u8,
-    func: testFnProto,
+    func: std.meta.FnPtr(fn () anyerror!void),
     async_frame_size: ?usize,
-};
-
-/// stage1 is *wrong*. It is not yet updated to support the new function type semantics.
-const testFnProto = switch (builtin.zig_backend) {
-    .stage1 => fn () anyerror!void, // wrong!
-    else => *const fn () anyerror!void,
 };
 
 /// This function type is used by the Zig language code generation and
 /// therefore must be kept in sync with the compiler implementation.
-pub const PanicFn = fn ([]const u8, ?*StackTrace) noreturn;
+pub const PanicFn = fn ([]const u8, ?*StackTrace, ?usize) noreturn;
 
 /// This function is used by the Zig language code generation and
 /// therefore must be kept in sync with the compiler implementation.
@@ -761,7 +755,7 @@ else
 
 /// This function is used by the Zig language code generation and
 /// therefore must be kept in sync with the compiler implementation.
-pub fn default_panic(msg: []const u8, error_return_trace: ?*StackTrace) noreturn {
+pub fn default_panic(msg: []const u8, error_return_trace: ?*StackTrace, ret_addr: ?usize) noreturn {
     @setCold(true);
 
     // Until self-hosted catches up with stage1 language features, we have a simpler
@@ -839,7 +833,7 @@ pub fn default_panic(msg: []const u8, error_return_trace: ?*StackTrace) noreturn
             std.os.abort();
         },
         else => {
-            const first_trace_addr = @returnAddress();
+            const first_trace_addr = ret_addr orelse @returnAddress();
             std.debug.panicImpl(error_return_trace, first_trace_addr, msg);
         },
     }
@@ -853,17 +847,17 @@ pub fn checkNonScalarSentinel(expected: anytype, actual: @TypeOf(expected)) void
 
 pub fn panicSentinelMismatch(expected: anytype, actual: @TypeOf(expected)) noreturn {
     @setCold(true);
-    std.debug.panic("sentinel mismatch: expected {any}, found {any}", .{ expected, actual });
+    std.debug.panicExtra(null, @returnAddress(), "sentinel mismatch: expected {any}, found {any}", .{ expected, actual });
 }
 
 pub fn panicUnwrapError(st: ?*StackTrace, err: anyerror) noreturn {
     @setCold(true);
-    std.debug.panicExtra(st, "attempt to unwrap error: {s}", .{@errorName(err)});
+    std.debug.panicExtra(st, @returnAddress(), "attempt to unwrap error: {s}", .{@errorName(err)});
 }
 
 pub fn panicOutOfBounds(index: usize, len: usize) noreturn {
     @setCold(true);
-    std.debug.panic("index out of bounds: index {d}, len {d}", .{ index, len });
+    std.debug.panicExtra(null, @returnAddress(), "index out of bounds: index {d}, len {d}", .{ index, len });
 }
 
 pub noinline fn returnError(st: *StackTrace) void {
