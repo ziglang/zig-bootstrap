@@ -25,7 +25,7 @@ For other versions, check the git tags of this repository.
 
  * C++ compiler capable of building LLVM, Clang, and LLD from source (GCC 5.1+
    or Clang)
- * cmake 3.13.4 or later
+ * cmake 3.19 or later
  * make
  * POSIX system (bash, mkdir, cd)
  * Python 3
