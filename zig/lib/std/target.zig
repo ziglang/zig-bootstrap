@@ -951,6 +951,13 @@ pub const Target = struct {
                 };
             }
 
+            pub fn isNvptx(arch: Arch) bool {
+                return switch (arch) {
+                    .nvptx, .nvptx64 => true,
+                    else => false,
+                };
+            }
+
             pub fn parseCpuModel(arch: Arch, cpu_name: []const u8) !*const Cpu.Model {
                 for (arch.allCpuModels()) |cpu| {
                     if (mem.eql(u8, cpu_name, cpu.name)) {
@@ -1154,6 +1161,17 @@ pub const Target = struct {
                     .lanai,
                     .s390x,
                     => .Big,
+                };
+            }
+
+            /// Returns whether this architecture supports the address space
+            pub fn supportsAddressSpace(arch: Arch, address_space: std.builtin.AddressSpace) bool {
+                const is_nvptx = arch == .nvptx or arch == .nvptx64;
+                return switch (address_space) {
+                    .generic => true,
+                    .fs, .gs, .ss => arch == .x86_64 or arch == .i386,
+                    .global, .constant, .local, .shared => arch == .amdgcn or is_nvptx,
+                    .param => is_nvptx,
                 };
             }
 
@@ -1761,7 +1779,7 @@ pub const Target = struct {
     }
 
     pub inline fn longDoubleIs(target: Target, comptime F: type) bool {
-        if (target.abi == .msvc) {
+        if (target.abi == .msvc or (target.abi == .android and target.cpu.arch == .i386)) {
             return F == f64;
         }
         return switch (F) {
@@ -1789,6 +1807,8 @@ pub const Target = struct {
                 .powerpcle,
                 .powerpc64,
                 .powerpc64le,
+                .wasm32,
+                .wasm64,
                 => true,
 
                 else => false,

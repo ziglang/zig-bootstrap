@@ -187,7 +187,13 @@ pub fn dumpStackTraceFromBase(bp: usize, ip: usize) void {
         printSourceAtAddress(debug_info, stderr, ip, tty_config) catch return;
         var it = StackIterator.init(null, bp);
         while (it.next()) |return_address| {
-            printSourceAtAddress(debug_info, stderr, return_address - 1, tty_config) catch return;
+            // On arm64 macOS, the address of the last frame is 0x0 rather than 0x1 as on x86_64 macOS,
+            // therefore, we do a check for `return_address == 0` before subtracting 1 from it to avoid
+            // an overflow. We do not need to signal `StackIterator` as it will correctly detect this
+            // condition on the subsequent iteration and return `null` thus terminating the loop.
+            // same behaviour for i386-windows-msvc
+            const address = if (return_address == 0) return_address else return_address - 1;
+            printSourceAtAddress(debug_info, stderr, address, tty_config) catch return;
         }
     }
 }
@@ -563,6 +569,7 @@ pub fn writeCurrentStackTrace(
         // therefore, we do a check for `return_address == 0` before subtracting 1 from it to avoid
         // an overflow. We do not need to signal `StackIterator` as it will correctly detect this
         // condition on the subsequent iteration and return `null` thus terminating the loop.
+        // same behaviour for i386-windows-msvc
         const address = if (return_address == 0) return_address else return_address - 1;
         try printSourceAtAddress(debug_info, out_stream, address, tty_config);
     }
@@ -1375,7 +1382,7 @@ pub const DebugInfo = struct {
         } = .{ .address = address };
         const CtxTy = @TypeOf(ctx);
 
-        if (os.dl_iterate_phdr(&ctx, anyerror, struct {
+        if (os.dl_iterate_phdr(&ctx, error{Found}, struct {
             fn callback(info: *os.dl_phdr_info, size: usize, context: *CtxTy) !void {
                 _ = size;
                 // The base address is too high
@@ -1403,7 +1410,6 @@ pub const DebugInfo = struct {
             return error.MissingDebugInfo;
         } else |err| switch (err) {
             error.Found => {},
-            else => return error.MissingDebugInfo,
         }
 
         if (self.address_map.get(ctx.base_address)) |obj_di| {

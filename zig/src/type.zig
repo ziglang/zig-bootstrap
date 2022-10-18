@@ -2318,7 +2318,7 @@ pub const Type = extern union {
     /// * the type has only one possible value, making its ABI size 0.
     ///   - an enum with an explicit tag type has the ABI size of the integer tag type,
     ///     making it one-possible-value only if the integer tag type has 0 bits.
-    /// When `ignore_comptime_only` is true, then types that are comptime only
+    /// When `ignore_comptime_only` is true, then types that are comptime-only
     /// may return false positives.
     pub fn hasRuntimeBitsAdvanced(
         ty: Type,
@@ -2786,6 +2786,12 @@ pub const Type = extern union {
 
             .pointer => self.castTag(.pointer).?.data.@"addrspace",
 
+            .optional => {
+                var buf: Payload.ElemType = undefined;
+                const child_type = self.optionalChild(&buf);
+                return child_type.ptrAddressSpace();
+            },
+
             else => unreachable,
         };
     }
@@ -2892,12 +2898,30 @@ pub const Type = extern union {
             .c_uint => return AbiAlignmentAdvanced{ .scalar = @divExact(CType.uint.sizeInBits(target), 8) },
             .c_long => return AbiAlignmentAdvanced{ .scalar = @divExact(CType.long.sizeInBits(target), 8) },
             .c_ulong => return AbiAlignmentAdvanced{ .scalar = @divExact(CType.ulong.sizeInBits(target), 8) },
-            .c_longlong => return AbiAlignmentAdvanced{ .scalar = @divExact(CType.longlong.sizeInBits(target), 8) },
-            .c_ulonglong => return AbiAlignmentAdvanced{ .scalar = @divExact(CType.ulonglong.sizeInBits(target), 8) },
+            .c_longlong => switch (target.cpu.arch) {
+                .i386 => switch (target.os.tag) {
+                    .windows, .uefi => return AbiAlignmentAdvanced{ .scalar = 8 },
+                    else => return AbiAlignmentAdvanced{ .scalar = 4 },
+                },
+                else => return AbiAlignmentAdvanced{ .scalar = @divExact(CType.longlong.sizeInBits(target), 8) },
+            },
+            .c_ulonglong => switch (target.cpu.arch) {
+                .i386 => switch (target.os.tag) {
+                    .windows, .uefi => return AbiAlignmentAdvanced{ .scalar = 8 },
+                    else => return AbiAlignmentAdvanced{ .scalar = 4 },
+                },
+                else => return AbiAlignmentAdvanced{ .scalar = @divExact(CType.ulonglong.sizeInBits(target), 8) },
+            },
 
             .f16 => return AbiAlignmentAdvanced{ .scalar = 2 },
             .f32 => return AbiAlignmentAdvanced{ .scalar = 4 },
-            .f64 => return AbiAlignmentAdvanced{ .scalar = 8 },
+            .f64 => switch (target.cpu.arch) {
+                .i386 => switch (target.os.tag) {
+                    .windows, .uefi => return AbiAlignmentAdvanced{ .scalar = 8 },
+                    else => return AbiAlignmentAdvanced{ .scalar = 4 },
+                },
+                else => return AbiAlignmentAdvanced{ .scalar = 8 },
+            },
             .f128 => return AbiAlignmentAdvanced{ .scalar = 16 },
 
             .f80 => switch (target.cpu.arch) {
@@ -2916,7 +2940,10 @@ pub const Type = extern union {
                 16 => return AbiAlignmentAdvanced{ .scalar = abiAlignment(Type.f16, target) },
                 32 => return AbiAlignmentAdvanced{ .scalar = abiAlignment(Type.f32, target) },
                 64 => return AbiAlignmentAdvanced{ .scalar = abiAlignment(Type.f64, target) },
-                80 => return AbiAlignmentAdvanced{ .scalar = abiAlignment(Type.f80, target) },
+                80 => if (target.cpu.arch == .i386 and target.isMinGW())
+                    return AbiAlignmentAdvanced{ .scalar = 4 }
+                else
+                    return AbiAlignmentAdvanced{ .scalar = abiAlignment(Type.f80, target) },
                 128 => return AbiAlignmentAdvanced{ .scalar = abiAlignment(Type.f128, target) },
                 else => unreachable,
             },
@@ -6035,7 +6062,7 @@ pub const Type = extern union {
         pub const no_payload_count = @enumToInt(last_no_payload_tag) + 1;
 
         pub fn Type(comptime t: Tag) type {
-            // Keep in sync with tools/zig-gdb.py
+            // Keep in sync with tools/stage2_pretty_printers_common.py
             return switch (t) {
                 .u1,
                 .u8,
@@ -6637,7 +6664,11 @@ pub const CType = enum {
                     .long, .ulong => return target.cpu.arch.ptrBitWidth(),
                     .longlong, .ulonglong => return 64,
                     .longdouble => switch (target.cpu.arch) {
-                        .i386, .x86_64 => return 80,
+                        .i386 => switch (target.abi) {
+                            .android => return 64,
+                            else => return 80,
+                        },
+                        .x86_64 => return 80,
 
                         .riscv64,
                         .aarch64,
@@ -6687,7 +6718,11 @@ pub const CType = enum {
                     .long, .ulong => return target.cpu.arch.ptrBitWidth(),
                     .longlong, .ulonglong => return 64,
                     .longdouble => switch (target.cpu.arch) {
-                        .i386, .x86_64 => return 80,
+                        .i386 => switch (target.abi) {
+                            .android => return 64,
+                            else => return 80,
+                        },
+                        .x86_64 => return 80,
 
                         .riscv64,
                         .aarch64,
@@ -6715,7 +6750,18 @@ pub const CType = enum {
             .windows, .uefi => switch (self) {
                 .short, .ushort => return 16,
                 .int, .uint, .long, .ulong => return 32,
-                .longlong, .ulonglong, .longdouble => return 64,
+                .longlong, .ulonglong => return 64,
+                .longdouble => switch (target.cpu.arch) {
+                    .i386 => switch (target.abi) {
+                        .gnu => return 80,
+                        else => return 64,
+                    },
+                    .x86_64 => switch (target.abi) {
+                        .gnu => return 80,
+                        else => return 64,
+                    },
+                    else => return 64,
+                },
             },
 
             .macos, .ios, .tvos, .watchos => switch (self) {
@@ -6728,6 +6774,13 @@ pub const CType = enum {
                 },
             },
 
+            .amdhsa, .amdpal => switch (self) {
+                .short, .ushort => return 16,
+                .int, .uint => return 32,
+                .long, .ulong, .longlong, .ulonglong => return 64,
+                .longdouble => return 128,
+            },
+
             .cloudabi,
             .kfreebsd,
             .lv2,
@@ -6737,13 +6790,11 @@ pub const CType = enum {
             .aix,
             .cuda,
             .nvcl,
-            .amdhsa,
             .ps4,
             .ps5,
             .elfiamcu,
             .mesa3d,
             .contiki,
-            .amdpal,
             .hermit,
             .hurd,
             .opencl,

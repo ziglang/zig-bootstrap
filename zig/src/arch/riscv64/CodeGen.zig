@@ -604,6 +604,7 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .union_init      => try self.airUnionInit(inst),
             .prefetch        => try self.airPrefetch(inst),
             .mul_add         => try self.airMulAdd(inst),
+            .addrspace_cast  => @panic("TODO"),
 
             .@"try"          => @panic("TODO"),
             .try_ptr         => @panic("TODO"),
@@ -1769,7 +1770,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallOptions.
                 return self.fail("TODO implement calling bitcasted functions", .{});
             }
         } else {
-            return self.fail("TODO implement calling runtime known function pointer", .{});
+            return self.fail("TODO implement calling runtime-known function pointer", .{});
         }
     } else if (self.bin_file.cast(link.File.Coff)) |_| {
         return self.fail("TODO implement calling in COFF for {}", .{self.target.cpu.arch});

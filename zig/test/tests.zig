@@ -83,7 +83,7 @@ const test_targets = blk: {
                 .cpu_arch = .arm,
                 .os_tag = .linux,
             },
-            .backend = .stage2_wasm,
+            .backend = .stage2_arm,
         },
         .{
             .target = CrossTarget.parse(.{
@@ -314,6 +314,30 @@ const test_targets = blk: {
         //    },
         //    .link_libc = true,
         //},
+
+        .{
+            .target = .{
+                .cpu_arch = .powerpc64le,
+                .os_tag = .linux,
+                .abi = .none,
+            },
+        },
+        .{
+            .target = .{
+                .cpu_arch = .powerpc64le,
+                .os_tag = .linux,
+                .abi = .musl,
+            },
+            .link_libc = true,
+        },
+        .{
+            .target = .{
+                .cpu_arch = .powerpc64le,
+                .os_tag = .linux,
+                .abi = .gnu,
+            },
+            .link_libc = true,
+        },
 
         .{
             .target = .{

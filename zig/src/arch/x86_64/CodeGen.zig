@@ -695,6 +695,7 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .union_init      => try self.airUnionInit(inst),
             .prefetch        => try self.airPrefetch(inst),
             .mul_add         => try self.airMulAdd(inst),
+            .addrspace_cast  => return self.fail("TODO implement addrspace_cast", .{}),
 
             .@"try"          => try self.airTry(inst),
             .try_ptr         => try self.airTryPtr(inst),
@@ -7272,7 +7273,7 @@ fn parseRegName(name: []const u8) ?Register {
 /// Returns register wide enough to hold at least `size_bytes`.
 fn registerAlias(reg: Register, size_bytes: u32) Register {
     if (size_bytes == 0) {
-        unreachable; // should be comptime known
+        unreachable; // should be comptime-known
     } else if (size_bytes <= 1) {
         return reg.to8();
     } else if (size_bytes <= 2) {

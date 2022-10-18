@@ -339,7 +339,10 @@ pub fn build(b: *Builder) !void {
             // That means we also have to rely on stage1 compiled c++ files. We parse config.h to find
             // the information passed on to us from cmake.
             if (cfg.cmake_prefix_path.len > 0) {
-                b.addSearchPrefix(cfg.cmake_prefix_path);
+                var it = mem.tokenize(u8, cfg.cmake_prefix_path, ";");
+                while (it.next()) |path| {
+                    b.addSearchPrefix(path);
+                }
             }
 
             try addCmakeCfgOptionsToExe(b, cfg, exe, use_zig_libcxx);
@@ -554,6 +557,8 @@ fn addCmakeCfgOptionsToExe(
     }) catch unreachable);
     assert(cfg.lld_include_dir.len != 0);
     exe.addIncludePath(cfg.lld_include_dir);
+    exe.addIncludePath(cfg.llvm_include_dir);
+    exe.addLibraryPath(cfg.llvm_lib_dir);
     addCMakeLibraryList(exe, cfg.clang_libraries);
     addCMakeLibraryList(exe, cfg.lld_libraries);
     addCMakeLibraryList(exe, cfg.llvm_libraries);
@@ -684,6 +689,8 @@ const CMakeConfig = struct {
     lld_include_dir: []const u8,
     lld_libraries: []const u8,
     clang_libraries: []const u8,
+    llvm_lib_dir: []const u8,
+    llvm_include_dir: []const u8,
     llvm_libraries: []const u8,
     dia_guids_lib: []const u8,
 };
@@ -745,6 +752,8 @@ fn parseConfigH(b: *Builder, config_h_text: []const u8) ?CMakeConfig {
         .lld_include_dir = undefined,
         .lld_libraries = undefined,
         .clang_libraries = undefined,
+        .llvm_lib_dir = undefined,
+        .llvm_include_dir = undefined,
         .llvm_libraries = undefined,
         .dia_guids_lib = undefined,
     };
@@ -781,6 +790,14 @@ fn parseConfigH(b: *Builder, config_h_text: []const u8) ?CMakeConfig {
         .{
             .prefix = "#define ZIG_DIA_GUIDS_LIB ",
             .field = "dia_guids_lib",
+        },
+        .{
+            .prefix = "#define ZIG_LLVM_INCLUDE_PATH ",
+            .field = "llvm_include_dir",
+        },
+        .{
+            .prefix = "#define ZIG_LLVM_LIB_PATH ",
+            .field = "llvm_lib_dir",
         },
         // .prefix = ZIG_LLVM_LINK_MODE parsed manually below
     };

@@ -500,9 +500,15 @@ pub fn abort() noreturn {
         @breakpoint();
         exit(1);
     }
+    if (builtin.os.tag == .cuda) {
+        // TODO: introduce `@trap` instead of abusing https://github.com/ziglang/zig/issues/2291
+        @"llvm.trap"();
+    }
 
     system.abort();
 }
+
+extern fn @"llvm.trap"() noreturn;
 
 pub const RaiseError = UnexpectedError;
 
@@ -1747,8 +1753,6 @@ pub const ExecveError = error{
     NameTooLong,
 } || UnexpectedError;
 
-/// Like `execve` except the parameters are null-terminated,
-/// matching the syscall API on all targets. This removes the need for an allocator.
 /// This function ignores PATH environment variable. See `execvpeZ` for that.
 pub fn execveZ(
     path: [*:0]const u8,
@@ -1846,8 +1850,6 @@ pub fn execvpeZ_expandArg0(
     return err;
 }
 
-/// Like `execvpe` except the parameters are null-terminated,
-/// matching the syscall API on all targets. This removes the need for an allocator.
 /// This function also uses the PATH environment variable to get the full path to the executable.
 /// If `file` is an absolute path, this is the same as `execveZ`.
 pub fn execvpeZ(
@@ -5781,7 +5783,10 @@ pub fn sendmsg(
     }
 }
 
-pub const SendToError = SendMsgError;
+pub const SendToError = SendMsgError || error{
+    /// The destination address is not reachable by the bound address.
+    UnreachableAddress,
+};
 
 /// Transmit a message to another socket.
 ///
@@ -5858,7 +5863,7 @@ pub fn sendto(
                 .DESTADDRREQ => unreachable, // The socket is not connection-mode, and no peer address is set.
                 .FAULT => unreachable, // An invalid user space address was specified for an argument.
                 .INTR => continue,
-                .INVAL => unreachable, // Invalid argument passed.
+                .INVAL => return error.UnreachableAddress,
                 .ISCONN => unreachable, // connection-mode socket was connected already but a recipient was specified
                 .MSGSIZE => return error.MessageTooBig,
                 .NOBUFS => return error.SystemResources,
@@ -5915,6 +5920,7 @@ pub fn send(
         error.NetworkUnreachable => unreachable,
         error.AddressNotAvailable => unreachable,
         error.SocketNotConnected => unreachable,
+        error.UnreachableAddress => unreachable,
         else => |e| return e,
     };
 }
@@ -6542,6 +6548,7 @@ pub const SetSockOptError = error{
     NetworkSubsystemFailed,
     FileDescriptorNotASocket,
     SocketNotBound,
+    NoDevice,
 } || UnexpectedError;
 
 /// Set a socket's options.
@@ -6572,6 +6579,7 @@ pub fn setsockopt(fd: socket_t, level: u32, optname: u32, opt: []const u8) SetSo
             .NOMEM => return error.SystemResources,
             .NOBUFS => return error.SystemResources,
             .PERM => return error.PermissionDenied,
+            .NODEV => return error.NoDevice,
             else => |err| return unexpectedErrno(err),
         }
     }

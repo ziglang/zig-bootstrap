@@ -1514,6 +1514,10 @@ pub fn tcsetattr(fd: fd_t, optional_action: TCSA, termios_p: *const termios) usi
     return syscall3(.ioctl, @bitCast(usize, @as(isize, fd)), T.CSETS + @enumToInt(optional_action), @ptrToInt(termios_p));
 }
 
+pub fn tcdrain(fd: fd_t) usize {
+    return syscall3(.ioctl, @bitCast(usize, @as(isize, fd)), T.CSBRK, 1);
+}
+
 pub fn ioctl(fd: fd_t, request: u32, arg: usize) usize {
     return syscall3(.ioctl, @bitCast(usize, @as(isize, fd)), request, arg);
 }
@@ -3761,6 +3765,8 @@ pub const IORING_CQE_F_BUFFER = 1 << 0;
 pub const IORING_CQE_F_MORE = 1 << 1;
 /// If set, more data to read after socket recv
 pub const IORING_CQE_F_SOCK_NONEMPTY = 1 << 2;
+/// Set for notification CQEs. Can be used to distinct them from sends.
+pub const IORING_CQE_F_NOTIF = 1 << 3;
 
 /// Magic offsets for the application to mmap the data it needs
 pub const IORING_OFF_SQ_RING = 0;

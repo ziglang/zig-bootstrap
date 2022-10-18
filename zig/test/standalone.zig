@@ -53,6 +53,9 @@ pub fn addCases(cases: *tests.StandaloneContext) void {
     if (builtin.cpu.arch.isAARCH64() and builtin.zig_backend == .stage2_llvm) {
         cases.addBuildFile("test/c_abi/build.zig", .{});
     }
+    if (builtin.cpu.arch == .i386 and builtin.zig_backend == .stage2_llvm) {
+        cases.addBuildFile("test/c_abi/build.zig", .{});
+    }
     // C ABI tests only pass for the Wasm target when using stage2
     cases.addBuildFile("test/c_abi/build_wasm.zig", .{
         .requires_stage2 = true,
@@ -99,4 +102,6 @@ pub fn addCases(cases: *tests.StandaloneContext) void {
     //cases.add("tools/update_spirv_features.zig");
 
     cases.addBuildFile("test/standalone/issue_13030/build.zig", .{ .build_modes = true });
+    cases.addBuildFile("test/standalone/emit_asm_and_bin/build.zig", .{});
+    cases.addBuildFile("test/standalone/issue_12588/build.zig", .{});
 }

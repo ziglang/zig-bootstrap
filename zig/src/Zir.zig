@@ -1883,6 +1883,11 @@ pub const Inst = struct {
         ///  * 0bX0000000_00000000 - is volatile
         /// `operand` is payload index to `Asm`.
         @"asm",
+        /// Same as `asm` except the assembly template is not a string literal but a comptime
+        /// expression.
+        /// The `asm_source` field of the Asm is not a null-terminated string
+        /// but instead a Ref.
+        asm_expr,
         /// Log compile time variables and emit an error message.
         /// `operand` is payload index to `NodeMultiOp`.
         /// `small` is `operands_len`.
@@ -1969,6 +1974,9 @@ pub const Inst = struct {
         /// `small` 0=>weak 1=>strong
         /// `operand` is payload index to `Cmpxchg`.
         cmpxchg,
+        /// Implement the builtin `@addrSpaceCast`
+        /// `Operand` is payload index to `BinNode`. `lhs` is dest type, `rhs` is operand.
+        addrspace_cast,
 
         pub const InstData = struct {
             opcode: Extended,
