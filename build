@@ -75,6 +75,50 @@ cmake "$ROOTDIR/zlib" \
   -DCMAKE_RANLIB="$ROOTDIR/out/host/bin/llvm-ranlib"
 make "$JOBS" install
 
+# Same deal for zstd.
+# The build system for zstd is whack so I just put all the files here.
+mkdir -p "$ROOTDIR/out/$TARGET-$MCPU/lib"
+cp "$ROOTDIR/zstd/lib/zstd.h" "$ROOTDIR/out/$TARGET-$MCPU/include/zstd.h"
+cd "$ROOTDIR/out/$TARGET-$MCPU/lib"
+$ZIG build-lib \
+  --name zstd \
+  -target $TARGET \
+  -mcpu=$MCPU \
+  -fstrip -OReleaseFast \
+  -lc \
+  "$ROOTDIR/zstd/lib/decompress/zstd_ddict.c" \
+  "$ROOTDIR/zstd/lib/decompress/zstd_decompress.c" \
+  "$ROOTDIR/zstd/lib/decompress/huf_decompress.c" \
+  "$ROOTDIR/zstd/lib/decompress/zstd_decompress_block.c" \
+  "$ROOTDIR/zstd/lib/compress/zstdmt_compress.c" \
+  "$ROOTDIR/zstd/lib/compress/zstd_opt.c" \
+  "$ROOTDIR/zstd/lib/compress/hist.c" \
+  "$ROOTDIR/zstd/lib/compress/zstd_ldm.c" \
+  "$ROOTDIR/zstd/lib/compress/zstd_fast.c" \
+  "$ROOTDIR/zstd/lib/compress/zstd_compress_literals.c" \
+  "$ROOTDIR/zstd/lib/compress/zstd_double_fast.c" \
+  "$ROOTDIR/zstd/lib/compress/huf_compress.c" \
+  "$ROOTDIR/zstd/lib/compress/fse_compress.c" \
+  "$ROOTDIR/zstd/lib/compress/zstd_lazy.c" \
+  "$ROOTDIR/zstd/lib/compress/zstd_compress.c" \
+  "$ROOTDIR/zstd/lib/compress/zstd_compress_sequences.c" \
+  "$ROOTDIR/zstd/lib/compress/zstd_compress_superblock.c" \
+  "$ROOTDIR/zstd/lib/deprecated/zbuff_compress.c" \
+  "$ROOTDIR/zstd/lib/deprecated/zbuff_decompress.c" \
+  "$ROOTDIR/zstd/lib/deprecated/zbuff_common.c" \
+  "$ROOTDIR/zstd/lib/common/entropy_common.c" \
+  "$ROOTDIR/zstd/lib/common/pool.c" \
+  "$ROOTDIR/zstd/lib/common/threading.c" \
+  "$ROOTDIR/zstd/lib/common/zstd_common.c" \
+  "$ROOTDIR/zstd/lib/common/xxhash.c" \
+  "$ROOTDIR/zstd/lib/common/debug.c" \
+  "$ROOTDIR/zstd/lib/common/fse_decompress.c" \
+  "$ROOTDIR/zstd/lib/common/error_private.c" \
+  "$ROOTDIR/zstd/lib/dictBuilder/zdict.c" \
+  "$ROOTDIR/zstd/lib/dictBuilder/divsufsort.c" \
+  "$ROOTDIR/zstd/lib/dictBuilder/fastcover.c" \
+  "$ROOTDIR/zstd/lib/dictBuilder/cover.c"
+
 # Rebuild LLVM with Zig.
 mkdir -p "$ROOTDIR/out/build-llvm-$TARGET-$MCPU"
 cd "$ROOTDIR/out/build-llvm-$TARGET-$MCPU"
@@ -83,9 +127,9 @@ cmake "$ROOTDIR/llvm" \
   -DLLVM_ENABLE_LIBXML2=OFF \
   -DLLVM_ENABLE_TERMINFO=OFF \
   -DLLVM_ENABLE_ZLIB=FORCE_ON \
+  -DLLVM_ENABLE_ZSTD=FORCE_ON \
   -DLLVM_ENABLE_BACKTRACES=OFF \
   -DLLVM_ENABLE_PLUGINS=OFF \
-  -DLLVM_ENABLE_ZSTD=OFF \
   -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/$TARGET-$MCPU" \
   -DCMAKE_PREFIX_PATH="$ROOTDIR/out/$TARGET-$MCPU" \
   -DCMAKE_BUILD_TYPE=Release \
