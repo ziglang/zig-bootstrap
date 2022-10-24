@@ -1,8 +1,8 @@
-#include <inttypes.h>
-#include <stdlib.h>
-#include <stdbool.h>
-#include <string.h>
 #include <complex.h>
+#include <inttypes.h>
+#include <stdbool.h>
+#include <stdlib.h>
+#include <string.h>
 
 void zig_panic();
 
@@ -12,6 +12,55 @@ static void assert_or_panic(bool ok) {
     }
 }
 
+#if defined __powerpc__ && !defined _ARCH_PPC64
+#  define ZIG_PPC32
+#endif
+
+#if defined __riscv && defined _ILP32
+#  define ZIG_RISCV32
+#endif
+
+#ifdef __i386__
+#  define ZIG_NO_I128
+#endif
+
+#ifdef __arm__
+#  define ZIG_NO_I128
+#endif
+
+#ifdef __mips__
+#  define ZIG_NO_I128
+#endif
+
+#ifdef ZIG_PPC32
+#  define ZIG_NO_I128
+#endif
+
+#ifdef ZIG_RISCV32
+#  define ZIG_NO_I128
+#endif
+
+#ifdef __i386__
+#  define ZIG_NO_COMPLEX
+#endif
+
+#ifdef __mips__
+#  define ZIG_NO_COMPLEX
+#endif
+
+#ifdef __arm__
+#  define ZIG_NO_COMPLEX
+#endif
+
+#ifdef __powerpc__
+#  define ZIG_NO_COMPLEX
+#endif
+
+#ifdef __riscv
+#  define ZIG_NO_COMPLEX
+#endif
+
+#ifndef ZIG_NO_I128
 struct i128 {
     __int128 value;
 };
@@ -19,17 +68,22 @@ struct i128 {
 struct u128 {
     unsigned __int128 value;
 };
+#endif
 
 void zig_u8(uint8_t);
 void zig_u16(uint16_t);
 void zig_u32(uint32_t);
 void zig_u64(uint64_t);
+#ifndef ZIG_NO_I128
 void zig_struct_u128(struct u128);
+#endif
 void zig_i8(int8_t);
 void zig_i16(int16_t);
 void zig_i32(int32_t);
 void zig_i64(int64_t);
+#ifndef ZIG_NO_I128
 void zig_struct_i128(struct i128);
+#endif
 void zig_five_integers(int32_t, int32_t, int32_t, int32_t, int32_t);
 
 void zig_f32(float);
@@ -95,7 +149,9 @@ void zig_med_struct_mixed(struct MedStructMixed);
 struct MedStructMixed zig_ret_med_struct_mixed();
 
 void zig_small_packed_struct(uint8_t);
+#ifndef ZIG_NO_I128
 void zig_big_packed_struct(__int128);
+#endif
 
 struct SplitStructInts {
     uint64_t a;
@@ -151,19 +207,26 @@ void run_c_tests(void) {
     zig_u16(0xfffe);
     zig_u32(0xfffffffd);
     zig_u64(0xfffffffffffffffc);
+
+#ifndef ZIG_NO_I128
     {
         struct u128 s = {0xfffffffffffffffc};
         zig_struct_u128(s);
     }
+#endif
 
     zig_i8(-1);
     zig_i16(-2);
     zig_i32(-3);
     zig_i64(-4);
+
+#ifndef ZIG_NO_I128
     {
         struct i128 s = {-6};
         zig_struct_i128(s);
     }
+#endif
+
     zig_five_integers(12, 34, 56, 78, 90);
 
     zig_f32(12.34f);
@@ -171,10 +234,11 @@ void run_c_tests(void) {
     zig_longdouble(12.34l);
     zig_five_floats(1.0f, 2.0f, 3.0f, 4.0f, 5.0f);
 
-    zig_ptr((void*)0xdeadbeefL);
+    zig_ptr((void *)0xdeadbeefL);
 
     zig_bool(true);
 
+#ifndef ZIG_NO_COMPLEX
     // TODO: Resolve https://github.com/ziglang/zig/issues/8465
     //{
     //    float complex a = 1.25f + I * 2.6f;
@@ -211,23 +275,31 @@ void run_c_tests(void) {
         assert_or_panic(creal(z) == 1.5);
         assert_or_panic(cimag(z) == 13.5);
     }
+#endif
 
+#if !defined __mips__ && !defined ZIG_PPC32
     {
         struct BigStruct s = {1, 2, 3, 4, 5};
         zig_big_struct(s);
     }
+#endif
 
+#if !defined __i386__ && !defined __arm__ && !defined __mips__ && \
+    !defined ZIG_PPC32 && !defined _ARCH_PPC64
     {
         struct SmallStructInts s = {1, 2, 3, 4};
         zig_small_struct_ints(s);
     }
+#endif
 
+#ifndef ZIG_NO_I128
     {
         __int128 s = 0;
         s |= 1 << 0;
         s |= (__int128)2 << 64;
         zig_big_packed_struct(s);
     }
+#endif
 
     {
         uint8_t s = 0;
@@ -238,21 +310,30 @@ void run_c_tests(void) {
         zig_small_packed_struct(s);
     }
 
+#if !defined __i386__ && !defined __arm__ && !defined __mips__ && \
+    !defined ZIG_PPC32 && !defined _ARCH_PPC64
     {
         struct SplitStructInts s = {1234, 100, 1337};
         zig_split_struct_ints(s);
     }
+#endif
 
+#if !defined __arm__ && !defined ZIG_PPC32 && !defined _ARCH_PPC64
     {
         struct MedStructMixed s = {1234, 100.0f, 1337.0f};
         zig_med_struct_mixed(s);
     }
+#endif
 
+#if !defined __i386__ && !defined __arm__ && !defined __mips__ && \
+    !defined ZIG_PPC32 && !defined _ARCH_PPC64
     {
         struct SplitStructMixed s = {1234, 100, 1337.0f};
         zig_split_struct_mixed(s);
     }
+#endif
 
+#if !defined __mips__ && !defined ZIG_PPC32
     {
         struct BigStruct s = {30, 31, 32, 33, 34};
         struct BigStruct res = zig_big_struct_both(s);
@@ -262,18 +343,23 @@ void run_c_tests(void) {
         assert_or_panic(res.d == 23);
         assert_or_panic(res.e == 24);
     }
+#endif
 
+#if !defined ZIG_PPC32 && !defined _ARCH_PPC64
     {
         struct Rect r1 = {1, 21, 16, 4};
         struct Rect r2 = {178, 189, 21, 15};
         zig_multiple_struct_ints(r1, r2);
     }
+#endif
 
+#if !defined __mips__ && !defined ZIG_PPC32
     {
         struct FloatRect r1 = {1, 21, 16, 4};
         struct FloatRect r2 = {178, 189, 21, 15};
         zig_multiple_struct_floats(r1, r2);
     }
+#endif
 
     {
         assert_or_panic(zig_ret_bool() == 1);
@@ -306,9 +392,11 @@ void c_u64(uint64_t x) {
     assert_or_panic(x == 0xfffffffffffffffcULL);
 }
 
+#ifndef ZIG_NO_I128
 void c_struct_u128(struct u128 x) {
     assert_or_panic(x.value == 0xfffffffffffffffcULL);
 }
+#endif
 
 void c_i8(int8_t x) {
     assert_or_panic(x == -1);
@@ -326,9 +414,11 @@ void c_i64(int64_t x) {
     assert_or_panic(x == -4);
 }
 
+#ifndef ZIG_NO_I128
 void c_struct_i128(struct i128 x) {
     assert_or_panic(x.value == -6);
 }
+#endif
 
 void c_f32(float x) {
     assert_or_panic(x == 12.34f);
@@ -343,7 +433,7 @@ void c_long_double(long double x) {
 }
 
 void c_ptr(void *x) {
-    assert_or_panic(x == (void*)0xdeadbeefL);
+    assert_or_panic(x == (void *)0xdeadbeefL);
 }
 
 void c_bool(bool x) {
@@ -495,6 +585,7 @@ void c_small_packed_struct(uint8_t x) {
     assert_or_panic(((x >> 6) & 0x3) == 3);
 }
 
+#ifndef ZIG_NO_I128
 __int128 c_ret_big_packed_struct() {
     __int128 s = 0;
     s |= 1 << 0;
@@ -506,6 +597,7 @@ void c_big_packed_struct(__int128 x) {
     assert_or_panic(((x >> 0) & 0xFFFFFFFFFFFFFFFF) == 1);
     assert_or_panic(((x >> 64) & 0xFFFFFFFFFFFFFFFF) == 2);
 }
+#endif
 
 struct SplitStructMixed c_ret_split_struct_mixed() {
     struct SplitStructMixed s = {
@@ -595,4 +687,86 @@ int32_t c_ret_i32() {
 }
 int64_t c_ret_i64() {
     return -1;
+}
+
+typedef struct {
+    uint32_t a;
+    uint8_t padding[4];
+    uint64_t b;
+} StructWithArray;
+
+void c_struct_with_array(StructWithArray x) {
+    assert_or_panic(x.a == 1);
+    assert_or_panic(x.b == 2);
+}
+
+StructWithArray c_ret_struct_with_array() {
+    return (StructWithArray){4, {}, 155};
+}
+
+typedef struct {
+    struct Point {
+        double x;
+        double y;
+    } origin;
+    struct Size {
+        double width;
+        double height;
+    } size;
+} FloatArrayStruct;
+
+void c_float_array_struct(FloatArrayStruct x) {
+    assert_or_panic(x.origin.x == 5);
+    assert_or_panic(x.origin.y == 6);
+    assert_or_panic(x.size.width == 7);
+    assert_or_panic(x.size.height == 8);
+}
+
+FloatArrayStruct c_ret_float_array_struct() {
+    FloatArrayStruct x;
+    x.origin.x = 1;
+    x.origin.y = 2;
+    x.size.width = 3;
+    x.size.height = 4;
+    return x;
+}
+
+typedef uint32_t SmallVec __attribute__((vector_size(2 * sizeof(uint32_t))));
+
+void c_small_vec(SmallVec vec) {
+    assert_or_panic(vec[0] == 1);
+    assert_or_panic(vec[1] == 2);
+}
+
+SmallVec c_ret_small_vec(void) {
+    return (SmallVec){3, 4};
+}
+
+typedef size_t BigVec __attribute__((vector_size(8 * sizeof(size_t))));
+
+void c_big_vec(BigVec vec) {
+    assert_or_panic(vec[0] == 1);
+    assert_or_panic(vec[1] == 2);
+    assert_or_panic(vec[2] == 3);
+    assert_or_panic(vec[3] == 4);
+    assert_or_panic(vec[4] == 5);
+    assert_or_panic(vec[5] == 6);
+    assert_or_panic(vec[6] == 7);
+    assert_or_panic(vec[7] == 8);
+}
+
+BigVec c_ret_big_vec(void) {
+    return (BigVec){9, 10, 11, 12, 13, 14, 15, 16};
+}
+
+typedef struct {
+    float x, y;
+} Vector2;
+
+void c_ptr_size_float_struct(Vector2 vec) {
+    assert_or_panic(vec.x == 1);
+    assert_or_panic(vec.y == 2);
+}
+Vector2 c_ret_ptr_size_float_struct(void) {
+    return (Vector2){3, 4};
 }

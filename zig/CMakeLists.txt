@@ -16,6 +16,22 @@ if(NOT CMAKE_INSTALL_PREFIX)
       "Directory to install zig to" FORCE)
 endif()
 
+# CMake recognizes the CMAKE_PREFIX_PATH environment variable for some things,
+# and also the CMAKE_PREFIX_PATH cache variable for other things. However, it
+# does not relate these two things, i.e. if the environment variable is set,
+# CMake does not populate the cache variable in a corresponding manner. Some
+# package systems, such as Homebrew, set the environment variable but not the
+# cache variable. Furthermore, the environment variable follows the system path
+# separator, such as ':' on POSIX and ';' on Windows, but the cache variable
+# follows CMake's array behavior, i.e. always ';' for a separator.
+list(APPEND ZIG_CMAKE_PREFIX_PATH "${CMAKE_PREFIX_PATH}")
+if(WIN32)
+  list(APPEND ZIG_CMAKE_PREFIX_PATH $ENV{CMAKE_PREFIX_PATH})
+else()
+  string(REGEX REPLACE ":" ";" ZIG_CMAKE_PREFIX_PATH_STRING "$ENV{CMAKE_PREFIX_PATH}")
+  list(APPEND ZIG_CMAKE_PREFIX_PATH "${ZIG_CMAKE_PREFIX_PATH_STRING}")
+endif()
+
 set(CMAKE_USER_MAKE_RULES_OVERRIDE
    ${CMAKE_CURRENT_SOURCE_DIR}/cmake/c_flag_overrides.cmake)
 set(CMAKE_USER_MAKE_RULES_OVERRIDE_CXX
@@ -768,11 +784,15 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/link/MachO/Atom.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/CodeSignature.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/DebugSymbols.zig"
+    "${CMAKE_SOURCE_DIR}/src/link/MachO/DwarfInfo.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/Dylib.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/Object.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/Trie.zig"
+    "${CMAKE_SOURCE_DIR}/src/link/MachO/ZldAtom.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/bind.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/dead_strip.zig"
+    "${CMAKE_SOURCE_DIR}/src/link/MachO/thunks.zig"
+    "${CMAKE_SOURCE_DIR}/src/link/MachO/zld.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Plan9.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Plan9/aout.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Wasm.zig"
@@ -1017,9 +1037,9 @@ if("${ZIG_EXECUTABLE}" STREQUAL "")
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
   )
   if (WIN32)
-    set(ZIG_EXECUTABLE "${zig2_BINARY_DIR}/zig2.exe")
+    set(ZIG_EXECUTABLE "${CMAKE_BINARY_DIR}/zig2.exe")
   else()
-    set(ZIG_EXECUTABLE "${zig2_BINARY_DIR}/zig2")
+    set(ZIG_EXECUTABLE "${CMAKE_BINARY_DIR}/zig2")
   endif()
 else()
   add_custom_command(
@@ -1045,15 +1065,8 @@ elseif(MINGW)
   target_link_libraries(zig2 ntdll)
 endif()
 
-# Dummy install command so that the "install" target is not missing.
-# This is redundant from the "stage3" custom target below.
-if(NOT ZIG_SKIP_INSTALL_LIB_FILES)
-  install(FILES "lib/compiler_rt.zig" DESTINATION "lib/zig")
-endif()
-
-set(ZIG_INSTALL_ARGS "build"
+set(ZIG_BUILD_ARGS
     --zig-lib-dir "${CMAKE_SOURCE_DIR}/lib"
-    --prefix "${CMAKE_INSTALL_PREFIX}"
     "-Dconfig_h=${ZIG_CONFIG_H_OUT}"
     "-Denable-llvm"
     "-Denable-stage1"
@@ -1067,8 +1080,14 @@ set(ZIG_INSTALL_ARGS "build"
 )
 
 add_custom_target(stage3 ALL
-    COMMAND zig2 ${ZIG_INSTALL_ARGS}
+    COMMAND zig2 build compile ${ZIG_BUILD_ARGS}
     DEPENDS zig2
     COMMENT STATUS "Building stage3"
     WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
 )
+
+install(CODE "set(ZIG_EXECUTABLE \"${ZIG_EXECUTABLE}\")")
+install(CODE "set(ZIG_BUILD_ARGS \"${ZIG_BUILD_ARGS}\")")
+install(CODE "set(CMAKE_INSTALL_PREFIX \"${CMAKE_INSTALL_PREFIX}\")")
+install(CODE "set(CMAKE_SOURCE_DIR \"${CMAKE_SOURCE_DIR}\")")
+install(SCRIPT "${CMAKE_SOURCE_DIR}/cmake/install.cmake")

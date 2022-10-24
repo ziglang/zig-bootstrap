@@ -756,6 +756,7 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .errunion_payload_ptr_set   => try self.airErrUnionPayloadPtrSet(inst),
             .err_return_trace           => try self.airErrReturnTrace(inst),
             .set_err_return_trace       => try self.airSetErrReturnTrace(inst),
+            .save_err_return_trace_index=> try self.airSaveErrReturnTraceIndex(inst),
 
             .wrap_optional         => try self.airWrapOptional(inst),
             .wrap_errunion_payload => try self.airWrapErrUnionPayload(inst),
@@ -1971,6 +1972,11 @@ fn airErrReturnTrace(self: *Self, inst: Air.Inst.Index) !void {
 fn airSetErrReturnTrace(self: *Self, inst: Air.Inst.Index) !void {
     _ = inst;
     return self.fail("TODO implement airSetErrReturnTrace for {}", .{self.target.cpu.arch});
+}
+
+fn airSaveErrReturnTraceIndex(self: *Self, inst: Air.Inst.Index) !void {
+    _ = inst;
+    return self.fail("TODO implement airSaveErrReturnTraceIndex for {}", .{self.target.cpu.arch});
 }
 
 fn airWrapOptional(self: *Self, inst: Air.Inst.Index) !void {
@@ -7143,7 +7149,7 @@ fn resolveCallingConventionValues(self: *Self, fn_ty: Type) !CallMCValues {
 
                 const classes: []const abi.Class = switch (self.target.os.tag) {
                     .windows => &[1]abi.Class{abi.classifyWindows(ty, self.target.*)},
-                    else => mem.sliceTo(&abi.classifySystemV(ty, self.target.*), .none),
+                    else => mem.sliceTo(&abi.classifySystemV(ty, self.target.*, .arg), .none),
                 };
                 if (classes.len > 1) {
                     return self.fail("TODO handle multiple classes per type", .{});
