@@ -89,6 +89,7 @@ $ZIG build-lib \
   "$ROOTDIR/zstd/lib/decompress/zstd_ddict.c" \
   "$ROOTDIR/zstd/lib/decompress/zstd_decompress.c" \
   "$ROOTDIR/zstd/lib/decompress/huf_decompress.c" \
+  "$ROOTDIR/zstd/lib/decompress/huf_decompress_amd64.S" \
   "$ROOTDIR/zstd/lib/decompress/zstd_decompress_block.c" \
   "$ROOTDIR/zstd/lib/compress/zstdmt_compress.c" \
   "$ROOTDIR/zstd/lib/compress/zstd_opt.c" \
