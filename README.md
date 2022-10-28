@@ -33,7 +33,7 @@ For other versions, check the git tags of this repository.
 ## Build Instructions
 
 ```
-build -j1 <arch>-<os>-<abi> baseline
+./build -j1 <arch>-<os>-<abi> baseline
 ```
 
 All parameters are required:
