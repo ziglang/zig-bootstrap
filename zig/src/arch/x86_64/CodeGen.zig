@@ -6953,14 +6953,22 @@ fn lowerUnnamedConst(self: *Self, tv: TypedValue) InnerError!MCValue {
             .@"type" = .direct,
             .sym_index = local_sym_index,
         } };
-    } else if (self.bin_file.cast(link.File.Plan9)) |_| {
-        return self.fail("TODO lower unnamed const in Plan9", .{});
+    } else if (self.bin_file.cast(link.File.Plan9)) |p9| {
+        const ptr_bits = self.target.cpu.arch.ptrBitWidth();
+        const ptr_bytes: u64 = @divExact(ptr_bits, 8);
+        const got_index = local_sym_index; // the plan9 backend returns the got_index
+        const got_addr = p9.bases.data + got_index * ptr_bytes;
+        return MCValue{ .memory = got_addr };
     } else {
         return self.fail("TODO lower unnamed const", .{});
     }
 }
 
-fn genTypedValue(self: *Self, typed_value: TypedValue) InnerError!MCValue {
+fn genTypedValue(self: *Self, arg_tv: TypedValue) InnerError!MCValue {
+    var typed_value = arg_tv;
+    if (typed_value.val.castTag(.runtime_value)) |rt| {
+        typed_value.val = rt.data;
+    }
     log.debug("genTypedValue: ty = {}, val = {}", .{ typed_value.ty.fmtDebug(), typed_value.val.fmtDebug() });
     if (typed_value.val.isUndef())
         return MCValue{ .undef = {} };

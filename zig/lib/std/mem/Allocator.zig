@@ -286,17 +286,18 @@ pub fn allocAdvancedWithRetAddr(
     } else @alignOf(T);
 
     if (n == 0) {
-        return @as([*]align(a) T, undefined)[0..0];
+        const ptr = comptime std.mem.alignBackward(std.math.maxInt(usize), a);
+        return @intToPtr([*]align(a) T, ptr)[0..0];
     }
 
     const byte_count = math.mul(usize, @sizeOf(T), n) catch return Error.OutOfMemory;
     // TODO The `if (alignment == null)` blocks are workarounds for zig not being able to
     // access certain type information about T without creating a circular dependency in async
     // functions that heap-allocate their own frame with @Frame(func).
-    const size_of_T = if (alignment == null) @intCast(u29, @divExact(byte_count, n)) else @sizeOf(T);
+    const size_of_T: usize = if (alignment == null) @divExact(byte_count, n) else @sizeOf(T);
     const len_align: u29 = switch (exact) {
         .exact => 0,
-        .at_least => size_of_T,
+        .at_least => math.cast(u29, size_of_T) orelse 0,
     };
     const byte_slice = try self.rawAlloc(byte_count, a, len_align, return_address);
     switch (exact) {
@@ -383,7 +384,8 @@ pub fn reallocAdvancedWithRetAddr(
     }
     if (new_n == 0) {
         self.free(old_mem);
-        return @as([*]align(new_alignment) T, undefined)[0..0];
+        const ptr = comptime std.mem.alignBackward(std.math.maxInt(usize), new_alignment);
+        return @intToPtr([*]align(new_alignment) T, ptr)[0..0];
     }
 
     const old_byte_slice = mem.sliceAsBytes(old_mem);
@@ -391,7 +393,7 @@ pub fn reallocAdvancedWithRetAddr(
     // Note: can't set shrunk memory to undefined as memory shouldn't be modified on realloc failure
     const len_align: u29 = switch (exact) {
         .exact => 0,
-        .at_least => @sizeOf(T),
+        .at_least => math.cast(u29, @as(usize, @sizeOf(T))) orelse 0,
     };
 
     if (mem.isAligned(@ptrToInt(old_byte_slice.ptr), new_alignment)) {
@@ -462,7 +464,8 @@ pub fn alignedShrinkWithRetAddr(
         return old_mem;
     if (new_n == 0) {
         self.free(old_mem);
-        return @as([*]align(new_alignment) T, undefined)[0..0];
+        const ptr = comptime std.mem.alignBackward(std.math.maxInt(usize), new_alignment);
+        return @intToPtr([*]align(new_alignment) T, ptr)[0..0];
     }
 
     assert(new_n < old_mem.len);

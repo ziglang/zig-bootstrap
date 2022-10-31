@@ -966,10 +966,9 @@ pub const Zld = struct {
 
             const global_index = resolver.table.get(sym_name) orelse {
                 const gpa = self.gpa;
-                const name = try resolver.arena.dupe(u8, sym_name);
                 const global_index = @intCast(u32, self.globals.items.len);
                 try self.globals.append(gpa, sym_loc);
-                try resolver.table.putNoClobber(name, global_index);
+                try resolver.table.putNoClobber(sym_name, global_index);
                 if (sym.undf() and !sym.tentative()) {
                     try resolver.unresolved.putNoClobber(global_index, {});
                 }
@@ -1517,11 +1516,6 @@ pub const Zld = struct {
         }
     }
 
-    inline fn calcInstallNameLen(cmd_size: u64, name: []const u8, assume_max_path_len: bool) u64 {
-        const name_len = if (assume_max_path_len) std.os.PATH_MAX else std.mem.len(name) + 1;
-        return mem.alignForwardGeneric(u64, cmd_size + name_len, @alignOf(u64));
-    }
-
     fn calcLCsSize(self: *Zld, assume_max_path_len: bool) !u32 {
         const gpa = self.gpa;
 
@@ -1543,7 +1537,7 @@ pub const Zld = struct {
         // LC_DYSYMTAB
         sizeofcmds += @sizeOf(macho.dysymtab_command);
         // LC_LOAD_DYLINKER
-        sizeofcmds += calcInstallNameLen(
+        sizeofcmds += MachO.calcInstallNameLen(
             @sizeOf(macho.dylinker_command),
             mem.sliceTo(MachO.default_dyld_path, 0),
             false,
@@ -1556,7 +1550,7 @@ pub const Zld = struct {
         if (self.options.output_mode == .Lib) {
             sizeofcmds += blk: {
                 const install_name = self.options.install_name orelse self.options.emit.?.sub_path;
-                break :blk calcInstallNameLen(
+                break :blk MachO.calcInstallNameLen(
                     @sizeOf(macho.dylib_command),
                     install_name,
                     assume_max_path_len,
@@ -1568,7 +1562,7 @@ pub const Zld = struct {
             var it = RpathIterator.init(gpa, self.options.rpath_list);
             defer it.deinit();
             while (try it.next()) |rpath| {
-                sizeofcmds += calcInstallNameLen(
+                sizeofcmds += MachO.calcInstallNameLen(
                     @sizeOf(macho.rpath_command),
                     rpath,
                     assume_max_path_len,
@@ -1585,7 +1579,7 @@ pub const Zld = struct {
         for (self.referenced_dylibs.keys()) |id| {
             const dylib = self.dylibs.items[id];
             const dylib_id = dylib.id orelse unreachable;
-            sizeofcmds += calcInstallNameLen(
+            sizeofcmds += MachO.calcInstallNameLen(
                 @sizeOf(macho.dylib_command),
                 dylib_id.name,
                 assume_max_path_len,

@@ -204,7 +204,6 @@ fn foo2(arg: anytype) bool {
 }
 
 test "generic struct" {
-    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
     var a1 = GenNode(i32){
         .value = 13,
         .next = null,
@@ -361,13 +360,14 @@ test "nested generic function" {
 
 test "extern function used as generic parameter" {
     const S = struct {
-        extern fn foo() void;
-        extern fn bar() void;
-        inline fn baz(comptime _: anytype) type {
+        extern fn usedAsGenericParameterFoo() void;
+        extern fn usedAsGenericParameterBar() void;
+        inline fn usedAsGenericParameterBaz(comptime _: anytype) type {
             return struct {};
         }
     };
-    try expect(S.baz(S.foo) != S.baz(S.bar));
+    try expect(S.usedAsGenericParameterBaz(S.usedAsGenericParameterFoo) !=
+        S.usedAsGenericParameterBaz(S.usedAsGenericParameterBar));
 }
 
 test "generic struct as parameter type" {
@@ -395,4 +395,13 @@ test "slice as parameter type" {
     const source_a = "this is a string";
     try expect(S.internComptimeString(source_a[1..2]) == S.internComptimeString(source_a[1..2]));
     try expect(S.internComptimeString(source_a[2..4]) != S.internComptimeString(source_a[5..7]));
+}
+
+test "null sentinel pointer passed as generic argument" {
+    const S = struct {
+        fn doTheTest(a: anytype) !void {
+            try std.testing.expect(@ptrToInt(a) == 8);
+        }
+    };
+    try S.doTheTest((@intToPtr([*:null]const [*c]const u8, 8)));
 }

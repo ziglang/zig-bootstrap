@@ -317,6 +317,7 @@
           <a href="https://ziglang.org/documentation/0.7.1/">0.7.1</a> |
           <a href="https://ziglang.org/documentation/0.8.1/">0.8.1</a> |
           <a href="https://ziglang.org/documentation/0.9.1/">0.9.1</a> |
+          <a href="https://ziglang.org/documentation/0.10.0/">0.10.0</a> |
           master
         </nav>
         <nav aria-labelledby="table-of-contents">
@@ -760,7 +761,7 @@ pub fn main() void {
         <tr>
             <th scope="row">{#syntax#}void{#endsyntax#}</th>
           <td>(none)</td>
-          <td>0 bit type</td>
+          <td>Always the value {#syntax#}void{}{#endsyntax#}</td>
         </tr>
         <tr>
             <th scope="row">{#syntax#}noreturn{#endsyntax#}</th>
@@ -999,7 +1000,8 @@ pub fn main() void {
       </p>
       <p>
       In {#link|Debug#} mode, Zig writes {#syntax#}0xaa{#endsyntax#} bytes to undefined memory. This is to catch
-      bugs early, and to help detect use of undefined memory in a debugger.
+      bugs early, and to help detect use of undefined memory in a debugger. However, this behavior is only an
+      implementation feature, not a language semantic, so it is not guaranteed to be observable to code.
       </p>
       {#header_close#}
       {#header_close#}
@@ -1060,7 +1062,7 @@ fn addOne(number: i32) i32 {
       <p>
         Test declarations contain the {#link|keyword|Keyword Reference#} {#syntax#}test{#endsyntax#}, followed by an
         optional name written as a {#link|string literal|String Literals and Unicode Code Point Literals#}, followed
-        by a {#link|block|blocks#} containing any valid Zig code that is allowed in a {#link|function|Functions#}.
+        by a {#link|block|Blocks#} containing any valid Zig code that is allowed in a {#link|function|Functions#}.
       </p>
       <aside>
         By convention, non-named tests should only be used to {#link|make other tests run|Nested Container Tests#}.
@@ -4023,7 +4025,7 @@ test "call foo" {
       {#code_end#}
       {#header_close#}
 
-      {#header_open|blocks#}
+      {#header_open|Blocks#}
       <p>
       Blocks are used to limit the scope of variable declarations:
       </p>
@@ -4084,6 +4086,22 @@ test "separate scopes" {
         var pi: bool = true;
         _ = pi;
     }
+}
+      {#code_end#}
+      {#header_close#}
+
+      {#header_open|Empty Blocks#}
+      <p>An empty block is equivalent to {#syntax#}void{}{#endsyntax#}:</p>
+      {#code_begin|test|empty_block#}
+const std = @import("std");
+const expect = std.testing.expect;
+
+test {
+    const a = {};
+    const b = void{};
+    try expect(@TypeOf(a) == void);
+    try expect(@TypeOf(b) == void);
+    try expect(a == b);
 }
       {#code_end#}
       {#header_close#}
@@ -11986,7 +12004,7 @@ fn readU32Be() u32 {}
             {#syntax#}break{#endsyntax#} can be used with a block label to return a value from the block.
             It can also be used to exit a loop before iteration completes naturally.
             <ul>
-              <li>See also {#link|blocks#}, {#link|while#}, {#link|for#}</li>
+              <li>See also {#link|Blocks#}, {#link|while#}, {#link|for#}</li>
             </ul>
           </td>
         </tr>

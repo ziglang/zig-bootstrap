@@ -50,7 +50,9 @@ comptime {
 test {
     _ = darwin;
     _ = linux;
-    _ = uefi;
+    if (builtin.os.tag == .uefi) {
+        _ = uefi;
+    }
     _ = wasi;
     _ = windows;
     _ = posix_spawn;
@@ -363,6 +365,56 @@ pub fn fchown(fd: fd_t, owner: ?uid_t, group: ?gid_t) FChownError!void {
             .ROFS => return error.ReadOnlyFileSystem,
             else => |err| return unexpectedErrno(err),
         }
+    }
+}
+
+pub const RebootError = error{
+    PermissionDenied,
+} || UnexpectedError;
+
+pub const RebootCommand = switch (builtin.os.tag) {
+    .linux => union(linux.LINUX_REBOOT.CMD) {
+        RESTART: void,
+        HALT: void,
+        CAD_ON: void,
+        CAD_OFF: void,
+        POWER_OFF: void,
+        RESTART2: [*:0]const u8,
+        SW_SUSPEND: void,
+        KEXEC: void,
+    },
+    else => @compileError("Unsupported OS"),
+};
+
+pub fn reboot(cmd: RebootCommand) RebootError!void {
+    switch (builtin.os.tag) {
+        .linux => {
+            switch (system.getErrno(linux.reboot(
+                .MAGIC1,
+                .MAGIC2,
+                @as(linux.LINUX_REBOOT.CMD, cmd),
+                switch (cmd) {
+                    .RESTART2 => |s| s,
+                    else => null,
+                },
+            ))) {
+                .SUCCESS => {},
+                .PERM => return error.PermissionDenied,
+                else => |err| return std.os.unexpectedErrno(err),
+            }
+            switch (cmd) {
+                .CAD_OFF => {},
+                .CAD_ON => {},
+                .SW_SUSPEND => {},
+
+                .HALT => unreachable,
+                .KEXEC => unreachable,
+                .POWER_OFF => unreachable,
+                .RESTART => unreachable,
+                .RESTART2 => unreachable,
+            }
+        },
+        else => @compileError("Unsupported OS"),
     }
 }
 

@@ -7,6 +7,9 @@ const Allocator = std.mem.Allocator;
 const assert = std.debug.assert;
 const log = std.log.scoped(.compilation);
 const Target = std.Target;
+const ArrayList = std.ArrayList;
+const Sha256 = std.crypto.hash.sha2.Sha256;
+const fs = std.fs;
 
 const Value = @import("value.zig").Value;
 const Type = @import("type.zig").Type;
@@ -45,6 +48,7 @@ bin_file: *link.File,
 c_object_table: std.AutoArrayHashMapUnmanaged(*CObject, void) = .{},
 /// This is a pointer to a local variable inside `update()`.
 whole_cache_manifest: ?*Cache.Manifest = null,
+whole_cache_manifest_mutex: std.Thread.Mutex = .{},
 
 link_error_flags: link.File.ErrorFlags = .{},
 
@@ -1088,10 +1092,10 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
     // Once they are capable this condition could be removed. When removing this condition,
     // also test the use case of `build-obj -fcompiler-rt` with the native backends
     // and make sure the compiler-rt symbols are emitted.
-    const capable_of_building_compiler_rt = build_options.have_llvm;
+    const capable_of_building_compiler_rt = build_options.have_llvm and options.target.os.tag != .plan9;
 
-    const capable_of_building_zig_libc = build_options.have_llvm;
-    const capable_of_building_ssp = build_options.have_llvm;
+    const capable_of_building_zig_libc = build_options.have_llvm and options.target.os.tag != .plan9;
+    const capable_of_building_ssp = build_options.have_llvm and options.target.os.tag != .plan9;
 
     const comp: *Compilation = comp: {
         // For allocations that have the same lifetime as Compilation. This arena is used only during this
@@ -1106,6 +1110,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
         const root_name = try arena.dupeZ(u8, options.root_name);
 
         const use_stage1 = options.use_stage1 orelse false;
+        if (use_stage1 and !build_options.have_stage1) return error.ZigCompilerBuiltWithoutStage1;
 
         // Make a decision on whether to use LLVM or our own backend.
         const use_llvm = build_options.have_llvm and blk: {
@@ -2195,8 +2200,8 @@ pub fn update(comp: *Compilation) !void {
         // We are about to obtain this lock, so here we give other processes a chance first.
         comp.bin_file.releaseLock();
 
-        comp.whole_cache_manifest = &man;
         man = comp.cache_parent.obtain();
+        comp.whole_cache_manifest = &man;
         try comp.addNonIncrementalStuffToCacheManifest(&man);
 
         const is_hit = man.hit() catch |err| {
@@ -3099,13 +3104,16 @@ fn processOneJob(comp: *Compilation, job: Job) !void {
                         .decl_index = decl_index,
                         .decl = decl,
                         .fwd_decl = fwd_decl.toManaged(gpa),
-                        .typedefs = c_codegen.TypedefMap.initContext(gpa, .{
-                            .mod = module,
-                        }),
+                        .typedefs = c_codegen.TypedefMap.initContext(gpa, .{ .mod = module }),
                         .typedefs_arena = typedefs_arena.allocator(),
                     };
-                    defer dg.fwd_decl.deinit();
-                    defer dg.typedefs.deinit();
+                    defer {
+                        for (dg.typedefs.values()) |typedef| {
+                            module.gpa.free(typedef.rendered);
+                        }
+                        dg.typedefs.deinit();
+                        dg.fwd_decl.deinit();
+                    }
 
                     c_codegen.genHeader(&dg) catch |err| switch (err) {
                         error.AnalysisFail => {
@@ -3591,6 +3599,8 @@ pub fn cImport(comp: *Compilation, c_src: []const u8) !CImportResult {
         const dep_basename = std.fs.path.basename(out_dep_path);
         try man.addDepFilePost(zig_cache_tmp_dir, dep_basename);
         if (comp.whole_cache_manifest) |whole_cache_manifest| {
+            comp.whole_cache_manifest_mutex.lock();
+            defer comp.whole_cache_manifest_mutex.unlock();
             try whole_cache_manifest.addDepFilePost(zig_cache_tmp_dir, dep_basename);
         }
 
@@ -3915,6 +3925,70 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: *std.P
             }
         }
 
+        // Windows has an argument length limit of 32,766 characters, macOS 262,144 and Linux
+        // 2,097,152. If our args exceed 30 KiB, we instead write them to a "response file" and
+        // pass that to zig, e.g. via 'zig build-lib @args.rsp'
+        // See @file syntax here: https://gcc.gnu.org/onlinedocs/gcc/Overall-Options.html
+        var args_length: usize = 0;
+        for (argv.items) |arg| {
+            args_length += arg.len + 1; // +1 to account for null terminator
+        }
+        if (args_length >= 30 * 1024) {
+            const allocator = comp.gpa;
+            const input_args = argv.items[2..];
+            const output_dir = comp.local_cache_directory;
+
+            var args_arena = std.heap.ArenaAllocator.init(allocator);
+            defer args_arena.deinit();
+
+            const args_to_escape = input_args;
+            var escaped_args = try ArrayList([]const u8).initCapacity(args_arena.allocator(), args_to_escape.len);
+
+            arg_blk: for (args_to_escape) |arg| {
+                for (arg) |c, arg_idx| {
+                    if (c == '\\' or c == '"') {
+                        // Slow path for arguments that need to be escaped. We'll need to allocate and copy
+                        var escaped = try ArrayList(u8).initCapacity(args_arena.allocator(), arg.len + 1);
+                        const writer = escaped.writer();
+                        writer.writeAll(arg[0..arg_idx]) catch unreachable;
+                        for (arg[arg_idx..]) |to_escape| {
+                            if (to_escape == '\\' or to_escape == '"') try writer.writeByte('\\');
+                            try writer.writeByte(to_escape);
+                        }
+                        escaped_args.appendAssumeCapacity(escaped.items);
+                        continue :arg_blk;
+                    }
+                }
+                escaped_args.appendAssumeCapacity(arg); // no escaping needed so just use original argument
+            }
+
+            const partially_quoted = try std.mem.join(allocator, "\" \"", escaped_args.items);
+            const args = try std.mem.concat(allocator, u8, &[_][]const u8{ "\"", partially_quoted, "\"" });
+
+            // Write the args to zig-cache/args/<SHA256 hash of args> to avoid conflicts with
+            // other zig build commands running in parallel.
+
+            var args_hash: [Sha256.digest_length]u8 = undefined;
+            Sha256.hash(args, &args_hash, .{});
+            var args_hex_hash: [Sha256.digest_length * 2]u8 = undefined;
+            _ = try std.fmt.bufPrint(
+                &args_hex_hash,
+                "{s}",
+                .{std.fmt.fmtSliceHexLower(&args_hash)},
+            );
+
+            const args_dir = "args";
+            try output_dir.handle.makePath(args_dir);
+            const args_file = try fs.path.join(allocator, &[_][]const u8{
+                args_dir, args_hex_hash[0..],
+            });
+            try output_dir.handle.writeFile(args_file, args);
+            const args_file_path = try output_dir.handle.realpathAlloc(allocator, args_file);
+
+            argv.shrinkRetainingCapacity(2);
+            try argv.append(try std.mem.concat(allocator, u8, &[_][]const u8{ "@", args_file_path }));
+        }
+
         if (comp.verbose_cc) {
             dump_argv(argv.items);
         }
@@ -3989,6 +4063,11 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: *std.P
             const dep_basename = std.fs.path.basename(dep_file_path);
             // Add the files depended on to the cache system.
             try man.addDepFilePost(zig_cache_tmp_dir, dep_basename);
+            if (comp.whole_cache_manifest) |whole_cache_manifest| {
+                comp.whole_cache_manifest_mutex.lock();
+                defer comp.whole_cache_manifest_mutex.unlock();
+                try whole_cache_manifest.addDepFilePost(zig_cache_tmp_dir, dep_basename);
+            }
             // Just to save disk space, we delete the file because it is never needed again.
             zig_cache_tmp_dir.deleteFile(dep_basename) catch |err| {
                 log.warn("failed to delete '{s}': {s}", .{ dep_file_path, @errorName(err) });

@@ -260,6 +260,9 @@ const PageAllocator = struct {
     fn alloc(_: *anyopaque, n: usize, alignment: u29, len_align: u29, ra: usize) error{OutOfMemory}![]u8 {
         _ = ra;
         assert(n > 0);
+        if (n > maxInt(usize) - (mem.page_size - 1)) {
+            return error.OutOfMemory;
+        }
         const aligned_len = mem.alignForward(n, mem.page_size);
 
         if (builtin.os.tag == .windows) {
@@ -520,6 +523,9 @@ const WasmPageAllocator = struct {
 
     fn alloc(_: *anyopaque, len: usize, alignment: u29, len_align: u29, ra: usize) error{OutOfMemory}![]u8 {
         _ = ra;
+        if (len > maxInt(usize) - (mem.page_size - 1)) {
+            return error.OutOfMemory;
+        }
         const page_count = nPages(len);
         const page_idx = try allocPages(page_count, alignment);
         return @intToPtr([*]u8, page_idx * mem.page_size)[0..alignPageAllocLen(page_count * mem.page_size, len, len_align)];

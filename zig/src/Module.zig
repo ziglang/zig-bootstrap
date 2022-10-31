@@ -3367,6 +3367,8 @@ pub fn deinit(mod: *Module) void {
     for (mod.import_table.keys()) |key| {
         gpa.free(key);
     }
+    var failed_decls = mod.failed_decls;
+    mod.failed_decls = .{};
     for (mod.import_table.values()) |value| {
         value.destroy(mod);
     }
@@ -3406,10 +3408,10 @@ pub fn deinit(mod: *Module) void {
     mod.local_zir_cache.handle.close();
     mod.global_zir_cache.handle.close();
 
-    for (mod.failed_decls.values()) |value| {
+    for (failed_decls.values()) |value| {
         value.destroy(gpa);
     }
-    mod.failed_decls.deinit(gpa);
+    failed_decls.deinit(gpa);
 
     if (mod.emit_h) |emit_h| {
         for (emit_h.failed_decls.values()) |value| {
@@ -3482,6 +3484,14 @@ pub fn deinit(mod: *Module) void {
 pub fn destroyDecl(mod: *Module, decl_index: Decl.Index) void {
     const gpa = mod.gpa;
     {
+        if (mod.failed_decls.contains(decl_index)) {
+            blk: {
+                const errs = mod.comp.getAllErrorsAlloc() catch break :blk;
+                for (errs.list) |err| Compilation.AllErrors.Message.renderToStdErr(err, .no_color);
+            }
+            // TODO restore test case triggering this panic
+            @panic("Zig compiler bug: attempted to destroy declaration with an attached error");
+        }
         const decl = mod.declPtr(decl_index);
         log.debug("destroy {*} ({s})", .{ decl, decl.name });
         _ = mod.test_functions.swapRemove(decl_index);
@@ -4513,7 +4523,7 @@ pub fn semaFile(mod: *Module, file: *File) SemaError!void {
             error.AnalysisFail => {},
         }
 
-        if (mod.comp.whole_cache_manifest) |man| {
+        if (mod.comp.whole_cache_manifest) |whole_cache_manifest| {
             const source = file.getSource(gpa) catch |err| {
                 try reportRetryableFileError(mod, file, "unable to load source: {s}", .{@errorName(err)});
                 return error.AnalysisFail;
@@ -4531,7 +4541,9 @@ pub fn semaFile(mod: *Module, file: *File) SemaError!void {
             };
             errdefer gpa.free(resolved_path);
 
-            try man.addFilePostContents(resolved_path, source.bytes, source.stat);
+            mod.comp.whole_cache_manifest_mutex.lock();
+            defer mod.comp.whole_cache_manifest_mutex.unlock();
+            try whole_cache_manifest.addFilePostContents(resolved_path, source.bytes, source.stat);
         }
     } else {
         new_decl.analysis = .file_failure;
@@ -5026,10 +5038,12 @@ pub fn embedFile(mod: *Module, cur_file: *File, rel_file_path: []const u8) !*Emb
         resolved_root_path, resolved_path, sub_file_path, rel_file_path,
     });
 
-    if (mod.comp.whole_cache_manifest) |man| {
+    if (mod.comp.whole_cache_manifest) |whole_cache_manifest| {
         const copied_resolved_path = try gpa.dupe(u8, resolved_path);
         errdefer gpa.free(copied_resolved_path);
-        try man.addFilePostContents(copied_resolved_path, bytes, stat);
+        mod.comp.whole_cache_manifest_mutex.lock();
+        defer mod.comp.whole_cache_manifest_mutex.unlock();
+        try whole_cache_manifest.addFilePostContents(copied_resolved_path, bytes, stat);
     }
 
     keep_resolved_path = true; // It's now owned by embed_table.
