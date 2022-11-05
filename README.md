@@ -26,7 +26,7 @@ For other versions, check the git tags of this repository.
  * C++ compiler capable of building LLVM, Clang, and LLD from source (GCC 5.1+
    or Clang)
  * cmake 3.19 or later
- * make
+ * make, ninja, or any other build system supported by cmake
  * POSIX system (bash, mkdir, cd)
  * Python 3
 
@@ -38,13 +38,15 @@ For other versions, check the git tags of this repository.
 
 All parameters are required:
 
- * `-j1`: Replace with your jobs parameter to make.
+ * `-j1`: Replace with your jobs parameter to cmake.
  * `<arch>-<os>-<abi>`: Replace with one of the Supported Triples below, or use
    `native` for the `<arch>` value (e.g. `native-linux-gnu`) to use the native
     architecture.
  * `baseline`: Replace with a `-mcpu` parameter of Zig. `baseline` means
    it will target a generic CPU for the target. `native` means it will target
    the native CPU. See the Zig documentation for more details.
+
+To use a non-default cmake generator, export the `CMAKE_GENERATOR` environment variable before calling `build`.
 
 If it succeeds, the output will be in `out/zig-triple-mcpu/`.
 

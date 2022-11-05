@@ -21,8 +21,6 @@ case $TARGET_OS_CMAKE in
   native) TARGET_OS_CMAKE="";;
 esac
 
-export CMAKE_GENERATOR="Unix Makefiles"
-
 # First build the libraries for Zig to link against, as well as native `llvm-tblgen`.
 mkdir -p "$ROOTDIR/out/build-llvm-host"
 cd "$ROOTDIR/out/build-llvm-host"
@@ -43,7 +41,7 @@ cmake "$ROOTDIR/llvm" \
   -DCLANG_INCLUDE_DOCS=OFF \
   -DLLVM_INCLUDE_DOCS=OFF \
   -DCMAKE_BUILD_TYPE=Release
-make "$JOBS" install
+cmake --build . "$JOBS" --target install
 
 # Now we build Zig, still with system C/C++ compiler, linking against LLVM,
 # Clang, LLD we just built from source.
@@ -54,7 +52,7 @@ cmake "$ROOTDIR/zig" \
   -DCMAKE_PREFIX_PATH="$ROOTDIR/out/host" \
   -DCMAKE_BUILD_TYPE=Release \
   -DZIG_VERSION="$ZIG_VERSION"
-make "$JOBS" install
+cmake --build . "$JOBS" --target install
 
 # Now we have Zig as a cross compiler.
 ZIG="$ROOTDIR/out/host/bin/zig"
@@ -75,7 +73,7 @@ cmake "$ROOTDIR/zlib" \
   -DCMAKE_RC_COMPILER="$ROOTDIR/out/host/bin/llvm-rc" \
   -DCMAKE_AR="$ROOTDIR/out/host/bin/llvm-ar" \
   -DCMAKE_RANLIB="$ROOTDIR/out/host/bin/llvm-ranlib"
-make "$JOBS" install
+cmake --build . "$JOBS" --target install
 
 # Same deal for zstd.
 # The build system for zstd is whack so I just put all the files here.
@@ -163,13 +161,13 @@ cmake "$ROOTDIR/llvm" \
   -DLIBCLANG_BUILD_STATIC=ON \
   -DLLVM_DEFAULT_TARGET_TRIPLE="$TARGET"
 cd "$ROOTDIR/out/build-llvm-$TARGET-$MCPU/tools/lld"
-make "$JOBS" install
+cmake --build . "$JOBS" --target install
 cd "$ROOTDIR/out/build-llvm-$TARGET-$MCPU/tools/clang/lib"
-make "$JOBS" install
+cmake --build . "$JOBS" --target install
 cd "$ROOTDIR/out/build-llvm-$TARGET-$MCPU/lib"
-make "$JOBS" install
+cmake --build . "$JOBS" --target install
 cd "$ROOTDIR/out/build-llvm-$TARGET-$MCPU"
-make "$JOBS" install-llvm-headers install-clang-headers install-LLVMSupport install-LLVMDemangle
+cmake --build . "$JOBS" --target install-llvm-headers install-clang-headers install-LLVMSupport install-LLVMDemangle
 
 # Finally, we can cross compile Zig itself, with Zig.
 cd "$ROOTDIR/zig"
