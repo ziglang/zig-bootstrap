@@ -21,6 +21,8 @@ case $TARGET_OS_CMAKE in
   native) TARGET_OS_CMAKE="";;
 esac
 
+export CMAKE_GENERATOR="Unix Makefiles"
+
 # First build the libraries for Zig to link against, as well as native `llvm-tblgen`.
 mkdir -p "$ROOTDIR/out/build-llvm-host"
 cd "$ROOTDIR/out/build-llvm-host"
