@@ -150,9 +150,9 @@ test "extern struct with stdcallcc fn pointer" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
 
     const S = extern struct {
-        ptr: *const fn () callconv(if (builtin.target.cpu.arch == .i386) .Stdcall else .C) i32,
+        ptr: *const fn () callconv(if (builtin.target.cpu.arch == .x86) .Stdcall else .C) i32,
 
-        fn foo() callconv(if (builtin.target.cpu.arch == .i386) .Stdcall else .C) i32 {
+        fn foo() callconv(if (builtin.target.cpu.arch == .x86) .Stdcall else .C) i32 {
             return 1234;
         }
     };
@@ -355,7 +355,6 @@ test "function call with anon list literal" {
 }
 
 test "function call with anon list literal - 2D" {
-    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO

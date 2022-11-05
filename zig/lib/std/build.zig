@@ -1622,7 +1622,6 @@ pub const LibExeObjStep = struct {
     use_stage1: ?bool = null,
     use_llvm: ?bool = null,
     use_lld: ?bool = null,
-    ofmt: ?std.Target.ObjectFormat = null,
 
     output_path_source: GeneratedFile,
     output_lib_path_source: GeneratedFile,
@@ -2490,7 +2489,7 @@ pub const LibExeObjStep = struct {
             }
         }
 
-        if (self.ofmt) |ofmt| {
+        if (self.target.ofmt) |ofmt| {
             try zig_args.append(try std.fmt.allocPrint(builder.allocator, "-ofmt={s}", .{@tagName(ofmt)}));
         }
 
@@ -2979,12 +2978,12 @@ pub const LibExeObjStep = struct {
                             if (glibc_dir_arg) |dir| {
                                 // TODO look into making this a call to `linuxTriple`. This
                                 // needs the directory to be called "i686" rather than
-                                // "i386" which is why we do it manually here.
+                                // "x86" which is why we do it manually here.
                                 const fmt_str = "{s}" ++ fs.path.sep_str ++ "{s}-{s}-{s}";
                                 const cpu_arch = self.target.getCpuArch();
                                 const os_tag = self.target.getOsTag();
                                 const abi = self.target.getAbi();
-                                const cpu_arch_name: []const u8 = if (cpu_arch == .i386)
+                                const cpu_arch_name: []const u8 = if (cpu_arch == .x86)
                                     "i686"
                                 else
                                     @tagName(cpu_arch);

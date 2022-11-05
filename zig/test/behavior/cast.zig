@@ -1178,7 +1178,6 @@ fn cast128Float(x: u128) f128 {
 
 test "implicit cast from *[N]T to ?[*]T" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
 
@@ -1411,4 +1410,12 @@ test "peer type resolution of const and non-const pointer to array" {
     const b = @intToPtr(*const [1024]u8, 42);
     try std.testing.expect(@TypeOf(a, b) == *const [1024]u8);
     try std.testing.expect(a == b);
+}
+
+test "floatToInt to zero-bit int" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+
+    var a: f32 = 0.0;
+    comptime try std.testing.expect(@floatToInt(u0, a) == 0);
 }

@@ -80,7 +80,7 @@ fn detectIntelProcessor(cpu: *Target.Cpu, family: u32, model: u32, brand_id: u32
     }
     switch (family) {
         3 => {
-            cpu.model = &Target.x86.cpu.i386;
+            cpu.model = &Target.x86.cpu.x86;
             return;
         },
         4 => {
@@ -528,26 +528,20 @@ const CpuidLeaf = packed struct {
 };
 
 fn cpuid(leaf_id: u32, subid: u32) CpuidLeaf {
-    // Workaround for https://github.com/ziglang/zig/issues/215
-    // Inline assembly in zig only supports one output,
-    // so we pass a pointer to the struct.
-    var cpuid_leaf: CpuidLeaf = undefined;
-
     // valid for both x86 and x86_64
-    asm volatile (
-        \\ cpuid
-        \\ movl %%eax, 0(%[leaf_ptr])
-        \\ movl %%ebx, 4(%[leaf_ptr])
-        \\ movl %%ecx, 8(%[leaf_ptr])
-        \\ movl %%edx, 12(%[leaf_ptr])
-        :
-        : [leaf_id] "{eax}" (leaf_id),
-          [subid] "{ecx}" (subid),
-          [leaf_ptr] "r" (&cpuid_leaf),
-        : "eax", "ebx", "ecx", "edx"
+    var eax: u32 = undefined;
+    var ebx: u32 = undefined;
+    var ecx: u32 = undefined;
+    var edx: u32 = undefined;
+    asm volatile ("cpuid"
+        : [_] "={eax}" (eax),
+          [_] "={ebx}" (ebx),
+          [_] "={ecx}" (ecx),
+          [_] "={edx}" (edx),
+        : [_] "{eax}" (leaf_id),
+          [_] "{ecx}" (subid),
     );
-
-    return cpuid_leaf;
+    return .{ .eax = eax, .ebx = ebx, .ecx = ecx, .edx = edx };
 }
 
 // Read control register 0 (XCR0). Used to detect features such as AVX.
@@ -555,8 +549,8 @@ fn getXCR0() u32 {
     return asm volatile (
         \\ xor %%ecx, %%ecx
         \\ xgetbv
-        : [ret] "={eax}" (-> u32),
+        : [_] "={eax}" (-> u32),
         :
-        : "eax", "edx", "ecx"
+        : "edx", "ecx"
     );
 }

@@ -70,7 +70,7 @@ pub fn targetTriple(allocator: Allocator, target: std.Target) ![:0]u8 {
         .tcele => "tcele",
         .thumb => "thumb",
         .thumbeb => "thumbeb",
-        .i386 => "i386",
+        .x86 => "i386",
         .x86_64 => "x86_64",
         .xcore => "xcore",
         .nvptx => "nvptx",
@@ -282,7 +282,7 @@ pub fn targetArch(arch_tag: std.Target.Cpu.Arch) llvm.ArchType {
         .tcele => .tcele,
         .thumb => .thumb,
         .thumbeb => .thumbeb,
-        .i386 => .x86,
+        .x86 => .x86,
         .x86_64 => .x86_64,
         .xcore => .xcore,
         .nvptx => .nvptx,
@@ -1279,8 +1279,18 @@ pub const Object = struct {
         const llvm_global = self.decl_map.get(decl_index) orelse return;
         const decl = module.declPtr(decl_index);
         if (decl.isExtern()) {
-            llvm_global.setValueName(decl.name);
-            if (self.getLlvmGlobal(decl.name)) |other_global| {
+            const is_wasm_fn = module.getTarget().isWasm() and try decl.isFunction();
+            const mangle_name = is_wasm_fn and
+                decl.getExternFn().?.lib_name != null and
+                !std.mem.eql(u8, std.mem.sliceTo(decl.getExternFn().?.lib_name.?, 0), "c");
+            const decl_name = if (mangle_name) name: {
+                const tmp = try std.fmt.allocPrintZ(module.gpa, "{s}|{s}", .{ decl.name, decl.getExternFn().?.lib_name.? });
+                break :name tmp.ptr;
+            } else decl.name;
+            defer if (mangle_name) module.gpa.free(std.mem.sliceTo(decl_name, 0));
+
+            llvm_global.setValueName(decl_name);
+            if (self.getLlvmGlobal(decl_name)) |other_global| {
                 if (other_global != llvm_global) {
                     log.debug("updateDeclExports isExtern()=true setValueName({s}) conflict", .{decl.name});
                     try self.extern_collisions.put(module.gpa, decl_index, {});
@@ -6185,7 +6195,7 @@ pub const FuncGen = struct {
         // here then we may risk tripping LLVM bugs since anything not used by Clang tends
         // to be buggy and regress often.
         switch (target.cpu.arch) {
-            .x86_64, .i386 => {
+            .x86_64, .x86 => {
                 if (total_i != 0) try llvm_constraints.append(self.gpa, ',');
                 try llvm_constraints.appendSlice(self.gpa, "~{dirflag},~{fpsr},~{flags}");
                 total_i += 3;
@@ -9150,7 +9160,7 @@ pub const FuncGen = struct {
         // necessarily match the format that we need, depending on which tag is active. We
         // must construct the correct unnamed struct type here and bitcast, in order to
         // then set the fields appropriately.
-        const result_ptr = self.buildAlloca(union_llvm_ty, null);
+        const result_ptr = self.buildAlloca(union_llvm_ty, layout.abi_align);
         const llvm_payload = try self.resolveInst(extra.init);
         assert(union_obj.haveFieldTypes());
         const field = union_obj.fields.values()[extra.field_index];
@@ -9265,7 +9275,7 @@ pub const FuncGen = struct {
         switch (prefetch.cache) {
             .instruction => switch (target.cpu.arch) {
                 .x86_64,
-                .i386,
+                .x86,
                 .powerpc,
                 .powerpcle,
                 .powerpc64,
@@ -9846,7 +9856,7 @@ fn initializeLLVMTarget(arch: std.Target.Cpu.Arch) void {
             llvm.LLVMInitializeWebAssemblyAsmPrinter();
             llvm.LLVMInitializeWebAssemblyAsmParser();
         },
-        .i386, .x86_64 => {
+        .x86, .x86_64 => {
             llvm.LLVMInitializeX86Target();
             llvm.LLVMInitializeX86TargetInfo();
             llvm.LLVMInitializeX86TargetMC();
@@ -9958,7 +9968,7 @@ fn toLlvmCallConv(cc: std.builtin.CallingConvention, target: std.Target) llvm.Ca
         .Stdcall => .X86_StdCall,
         .Fastcall => .X86_FastCall,
         .Vectorcall => return switch (target.cpu.arch) {
-            .i386, .x86_64 => .X86_VectorCall,
+            .x86, .x86_64 => .X86_VectorCall,
             .aarch64, .aarch64_be, .aarch64_32 => .AArch64_VectorCall,
             else => unreachable,
         },
@@ -9967,7 +9977,7 @@ fn toLlvmCallConv(cc: std.builtin.CallingConvention, target: std.Target) llvm.Ca
         .AAPCS => .ARM_AAPCS,
         .AAPCSVFP => .ARM_AAPCS_VFP,
         .Interrupt => return switch (target.cpu.arch) {
-            .i386, .x86_64 => .X86_INTR,
+            .x86, .x86_64 => .X86_INTR,
             .avr => .AVR_INTR,
             .msp430 => .MSP430_INTR,
             else => unreachable,
@@ -9989,7 +9999,7 @@ fn toLlvmCallConv(cc: std.builtin.CallingConvention, target: std.Target) llvm.Ca
 /// Convert a zig-address space to an llvm address space.
 fn toLlvmAddressSpace(address_space: std.builtin.AddressSpace, target: std.Target) c_uint {
     return switch (target.cpu.arch) {
-        .i386, .x86_64 => switch (address_space) {
+        .x86, .x86_64 => switch (address_space) {
             .generic => llvm.address_space.default,
             .gs => llvm.address_space.x86.gs,
             .fs => llvm.address_space.x86.fs,
@@ -10704,7 +10714,7 @@ fn isScalar(ty: Type) bool {
 /// and false if we expect LLVM to crash if it counters an x86_fp80 type.
 fn backendSupportsF80(target: std.Target) bool {
     return switch (target.cpu.arch) {
-        .x86_64, .i386 => !std.Target.x86.featureSetHas(target.cpu.features, .soft_float),
+        .x86_64, .x86 => !std.Target.x86.featureSetHas(target.cpu.features, .soft_float),
         else => false,
     };
 }

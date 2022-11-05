@@ -52,6 +52,9 @@ const test_targets = blk: {
         },
 
         .{
+            .target = .{
+                .ofmt = .c,
+            },
             .link_libc = true,
             .backend = .stage2_c,
         },
@@ -160,14 +163,14 @@ const test_targets = blk: {
 
         .{
             .target = .{
-                .cpu_arch = .i386,
+                .cpu_arch = .x86,
                 .os_tag = .linux,
                 .abi = .none,
             },
         },
         .{
             .target = .{
-                .cpu_arch = .i386,
+                .cpu_arch = .x86,
                 .os_tag = .linux,
                 .abi = .musl,
             },
@@ -175,7 +178,7 @@ const test_targets = blk: {
         },
         .{
             .target = .{
-                .cpu_arch = .i386,
+                .cpu_arch = .x86,
                 .os_tag = .linux,
                 .abi = .gnu,
             },
@@ -384,7 +387,7 @@ const test_targets = blk: {
 
         .{
             .target = .{
-                .cpu_arch = .i386,
+                .cpu_arch = .x86,
                 .os_tag = .windows,
                 .abi = .msvc,
             },
@@ -400,7 +403,7 @@ const test_targets = blk: {
 
         .{
             .target = .{
-                .cpu_arch = .i386,
+                .cpu_arch = .x86,
                 .os_tag = .windows,
                 .abi = .gnu,
             },
@@ -678,10 +681,6 @@ pub fn addPkgTests(
                 // https://github.com/ziglang/zig/issues/12415
                 continue;
             }
-            if (backend == .stage2_c and builtin.cpu.arch == .aarch64) {
-                // https://github.com/ziglang/zig/issues/13357
-                continue;
-            }
         }
 
         const libc_prefix = if (test_target.target.getOs().requiresLibC())
@@ -724,7 +723,6 @@ pub fn addPkgTests(
             .stage2_c => {
                 these_tests.use_stage1 = false;
                 these_tests.use_llvm = false;
-                these_tests.ofmt = .c;
             },
             else => {
                 these_tests.use_stage1 = false;
@@ -1281,7 +1279,7 @@ const c_abi_targets = [_]CrossTarget{
         .abi = .musl,
     },
     .{
-        .cpu_arch = .i386,
+        .cpu_arch = .x86,
         .os_tag = .linux,
         .abi = .musl,
     },

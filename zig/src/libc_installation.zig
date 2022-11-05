@@ -408,9 +408,10 @@ pub const LibCInstallation = struct {
         defer result_buf.deinit();
 
         const arch_sub_dir = switch (builtin.target.cpu.arch) {
-            .i386 => "x86",
+            .x86 => "x86",
             .x86_64 => "x64",
             .arm, .armeb => "arm",
+            .aarch64 => "arm64",
             else => return error.UnsupportedArchitecture,
         };
 
@@ -471,9 +472,10 @@ pub const LibCInstallation = struct {
         defer result_buf.deinit();
 
         const arch_sub_dir = switch (builtin.target.cpu.arch) {
-            .i386 => "x86",
+            .x86 => "x86",
             .x86_64 => "x64",
             .arm, .armeb => "arm",
+            .aarch64 => "arm64",
             else => return error.UnsupportedArchitecture,
         };
 
