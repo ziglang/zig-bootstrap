@@ -33,12 +33,11 @@ For other versions, check the git tags of this repository.
 ## Build Instructions
 
 ```
-./build -j1 <arch>-<os>-<abi> baseline
+./build <arch>-<os>-<abi> baseline
 ```
 
 All parameters are required:
 
- * `-j1`: Replace with your jobs parameter to cmake.
  * `<arch>-<os>-<abi>`: Replace with one of the Supported Triples below, or use
    `native` for the `<arch>` value (e.g. `native-linux-gnu`) to use the native
     architecture.
@@ -46,7 +45,11 @@ All parameters are required:
    it will target a generic CPU for the target. `native` means it will target
    the native CPU. See the Zig documentation for more details.
 
-To use a non-default cmake generator, export the `CMAKE_GENERATOR` environment variable before calling `build`.
+To use a non-default cmake generator, export the `CMAKE_GENERATOR` environment
+variable before calling `build`.
+
+If you aren't using a build system that builds in parallel by default (ie. make),
+export `CMAKE_BUILD_PARALLEL_LEVEL` to parallelize the build.
 
 If it succeeds, the output will be in `out/zig-triple-mcpu/`.
 
