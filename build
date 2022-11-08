@@ -123,13 +123,6 @@ $ZIG build-lib \
 mkdir -p "$ROOTDIR/out/build-llvm-$TARGET-$MCPU"
 cd "$ROOTDIR/out/build-llvm-$TARGET-$MCPU"
 cmake "$ROOTDIR/llvm" \
-  -DLLVM_ENABLE_PROJECTS="lld;clang" \
-  -DLLVM_ENABLE_LIBXML2=OFF \
-  -DLLVM_ENABLE_TERMINFO=OFF \
-  -DLLVM_ENABLE_ZLIB=FORCE_ON \
-  -DLLVM_ENABLE_ZSTD=FORCE_ON \
-  -DLLVM_ENABLE_BACKTRACES=OFF \
-  -DLLVM_ENABLE_PLUGINS=OFF \
   -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/$TARGET-$MCPU" \
   -DCMAKE_PREFIX_PATH="$ROOTDIR/out/$TARGET-$MCPU" \
   -DCMAKE_BUILD_TYPE=Release \
@@ -141,32 +134,37 @@ cmake "$ROOTDIR/llvm" \
   -DCMAKE_RC_COMPILER="$ROOTDIR/out/host/bin/llvm-rc" \
   -DCMAKE_AR="$ROOTDIR/out/host/bin/llvm-ar" \
   -DCMAKE_RANLIB="$ROOTDIR/out/host/bin/llvm-ranlib" \
+  -DLLVM_ENABLE_BACKTRACES=OFF \
+  -DLLVM_ENABLE_BINDINGS=OFF \
+  -DLLVM_ENABLE_CRASH_OVERRIDES=OFF \
+  -DLLVM_ENABLE_LIBEDIT=OFF \
+  -DLLVM_ENABLE_LIBPFM=OFF \
+  -DLLVM_ENABLE_LIBXML2=OFF \
+  -DLLVM_ENABLE_OCAMLDOC=OFF \
+  -DLLVM_ENABLE_PLUGINS=OFF \
+  -DLLVM_ENABLE_PROJECTS="lld;clang" \
+  -DLLVM_ENABLE_TERMINFO=OFF \
+  -DLLVM_ENABLE_Z3_SOLVER=OFF \
+  -DLLVM_ENABLE_ZLIB=FORCE_ON \
+  -DLLVM_ENABLE_ZSTD=FORCE_ON \
+  -DLLVM_USE_STATIC_ZSTD=ON \
   -DLLVM_TABLEGEN="$ROOTDIR/out/host/bin/llvm-tblgen" \
-  -DCLANG_TABLEGEN="$ROOTDIR/out/build-llvm-host/bin/clang-tblgen" \
   -DLLVM_BUILD_TOOLS=OFF \
+  -DLLVM_BUILD_STATIC=ON \
   -DLLVM_INCLUDE_UTILS=OFF \
   -DLLVM_INCLUDE_TESTS=OFF \
   -DLLVM_INCLUDE_GO_TESTS=OFF \
   -DLLVM_INCLUDE_EXAMPLES=OFF \
   -DLLVM_INCLUDE_BENCHMARKS=OFF \
-  -DLLVM_ENABLE_BINDINGS=OFF \
-  -DLLVM_ENABLE_OCAMLDOC=OFF \
-  -DLLVM_ENABLE_Z3_SOLVER=OFF \
+  -DLLVM_INCLUDE_DOCS=OFF \
+  -DLLVM_DEFAULT_TARGET_TRIPLE="$TARGET" \
+  -DCLANG_TABLEGEN="$ROOTDIR/out/build-llvm-host/bin/clang-tblgen" \
   -DCLANG_BUILD_TOOLS=OFF \
   -DCLANG_INCLUDE_DOCS=OFF \
-  -DLLVM_INCLUDE_DOCS=OFF \
+  -DCLANG_INCLUDE_TESTS=OFF \
   -DCLANG_ENABLE_ARCMT=ON \
-  -DLLVM_BUILD_STATIC=ON \
-  -DLIBCLANG_BUILD_STATIC=ON \
-  -DLLVM_DEFAULT_TARGET_TRIPLE="$TARGET"
-cd "$ROOTDIR/out/build-llvm-$TARGET-$MCPU/tools/lld"
+  -DLIBCLANG_BUILD_STATIC=ON
 cmake --build . --target install
-cd "$ROOTDIR/out/build-llvm-$TARGET-$MCPU/tools/clang/lib"
-cmake --build . --target install
-cd "$ROOTDIR/out/build-llvm-$TARGET-$MCPU/lib"
-cmake --build . --target install
-cd "$ROOTDIR/out/build-llvm-$TARGET-$MCPU"
-cmake --build . --target install-llvm-headers install-clang-headers install-LLVMSupport install-LLVMDemangle
 
 # Finally, we can cross compile Zig itself, with Zig.
 cd "$ROOTDIR/zig"

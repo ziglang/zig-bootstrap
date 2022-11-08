@@ -17,42 +17,47 @@ For other versions, check the git tags of this repository.
 
 ### Patches
 
- * Remove unused test/ files in order to make tarball less bloated.
- * LLD: add additional include directory to Zig's libunwind.
- * zlib: delete unused files
- * zlib: CMakeLists.txt: delete the ability to build a shared library
+ * all: Deleted unused files.
+ * LLVM: Support .lib extension for static zstd.
+ * LLVM: Copied CMake modules from out of tree.
+ * Clang: Disable building of libclang-cpp.so.
+ * LLD: Added additional include directory to Zig's libunwind.
+ * zlib: Delete the ability to build a shared library.
 
 ## Host System Dependencies
 
  * C++ compiler capable of building LLVM, Clang, and LLD from source (GCC 5.1+
    or Clang)
- * cmake 3.19 or later
- * make, ninja, or any other build system supported by cmake
+ * CMake 3.19 or later
+ * make, ninja, or any other build system supported by CMake
  * POSIX system (bash, mkdir, cd)
  * Python 3
 
 ## Build Instructions
 
 ```
-./build <arch>-<os>-<abi> baseline
+./build <arch>-<os>-<abi> <mcpu>
 ```
 
 All parameters are required:
 
  * `<arch>-<os>-<abi>`: Replace with one of the Supported Triples below, or use
    `native` for the `<arch>` value (e.g. `native-linux-gnu`) to use the native
-    architecture.
- * `baseline`: Replace with a `-mcpu` parameter of Zig. `baseline` means
-   it will target a generic CPU for the target. `native` means it will target
-   the native CPU. See the Zig documentation for more details.
+   architecture.
+ * `<mcpu>`: Replace with a `-mcpu` parameter of Zig. `baseline` is recommended
+   and means it will target a generic CPU for the target. `native` means it
+   will target the native CPU. See the Zig documentation for more details.
 
-To use a non-default cmake generator, export the `CMAKE_GENERATOR` environment
-variable before calling `build`.
+Please be aware of the following two CMake environment variables that can
+significantly affect how long it takes to build:
 
-If you aren't using a build system that builds in parallel by default (ie. make),
-export `CMAKE_BUILD_PARALLEL_LEVEL` to parallelize the build.
+ * `CMAKE_GENERATOR` can be used to select a different generator instead of the
+   default. For example, `CMAKE_GENERATOR=Ninja`.
+ * `CMAKE_BUILD_PARALLEL_LEVEL` can be used to introduce parallelism to build
+   systems (such as make) which do not default to parallel builds. This option
+   is irrelevant when using Ninja.
 
-If it succeeds, the output will be in `out/zig-triple-mcpu/`.
+When it succeeds, output can be found in `out/zig-<triple>-<cpu>/`.
 
 ### Supported Triples
 
