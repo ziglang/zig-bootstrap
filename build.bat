@@ -1,10 +1,13 @@
 @echo off
 
 SETLOCAL EnableDelayedExpansion
+if NOT DEFINED VSCMD_VER (
+   echo error: this script must be run within the visual studio developer command prompt
+   exit /b 1
+)
 
-rem TODO make these into args
-set TARGET="x86_64-windows-gnu"
-set MCPU="native"
+if "%1" == "" (set TARGET=x86_64-windows-gnu) ELSE (set TARGET=%1)
+if "%2" == "" (set MCPU=native) ELSE (set MCPU=%2)
 
 set TARGET_OS_CMAKE=""
 FOR /F "tokens=2 delims=-" %%i IN (%TARGET%) DO (
@@ -25,13 +28,13 @@ set BUILD_SYSTEM_ARGS=
 pushd %ROOTDIR%
 
 rem Build zlib for the host
-mkdir "%OUTDIR%\build-zlib-host"
-cd "%OUTDIR%\build-zlib-host"
+mkdir "%ROOTDIR%%OUTDIR%\build-zlib-host"
+cd "%ROOTDIR%%OUTDIR%\build-zlib-host"
 cmake "%ROOTDIR%/zlib" ^
   -DCMAKE_INSTALL_PREFIX="%ROOTDIR%/%OUTDIR%/host" ^
   -DCMAKE_PREFIX_PATH="%ROOTDIR%/%OUTDIR%/host" ^
   -DCMAKE_BUILD_TYPE=Release
-if %ERRORLEVEL% neq 0 exit /b %errorlevel%
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
 type CMakeCache.txt | findstr /C:"CMAKE_GENERATOR:INTERNAL=Visual Studio" >nul
 if %ERRORLEVEL% EQU 0 (
@@ -41,11 +44,11 @@ if %ERRORLEVEL% EQU 0 (
 )
 
 cmake --build . %JOBS_ARG% --target install %BUILD_SYSTEM_ARGS%
-if %ERRORLEVEL% neq 0 exit /b %errorlevel%
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
-rem Build the libraries for Zig to link against, as well as native `llvm-tblgen`.
-mkdir "%OUTDIR%\build-llvm-host"
-cd "%OUTDIR%\build-llvm-host"
+rem Build the libraries for Zig to link against, as well as native `llvm-tblgen` using msvc
+mkdir "%ROOTDIR%%OUTDIR%\build-llvm-host"
+cd "%ROOTDIR%%OUTDIR%\build-llvm-host"
 cmake "%ROOTDIR%/llvm" ^
   -DLLVM_ENABLE_PROJECTS="lld;clang" ^
   -DLLVM_ENABLE_LIBXML2=OFF ^
@@ -64,16 +67,14 @@ cmake "%ROOTDIR%/llvm" ^
   -DLLVM_INCLUDE_DOCS=OFF ^
   -DLLVM_USE_CRT_RELEASE=MT ^
   -DCMAKE_BUILD_TYPE=Release
-if %ERRORLEVEL% neq 0 exit /b %errorlevel%
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 cmake --build . %JOBS_ARG% --target install %BUILD_SYSTEM_ARGS%
-if %ERRORLEVEL% neq 0 exit /b %errorlevel%
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
-rem Now we build Zig, still with system C/C++ compiler, linking against LLVM,
-rem Clang, LLD we just built from source.
-mkdir "%OUTDIR%\build-zig-host"
-cd "%OUTDIR%\build-zig-host"
-rem cmake "%ROOTDIR%/zig" ^
-cmake "C:\cygwin64\home\kcbanner\kit\zig" ^
+rem Build an x86_64-windows-msvc zig using msvc, linking against LLVM/Clang/LLD built by msvc
+mkdir "%ROOTDIR%%OUTDIR%\build-zig-host"
+cd "%ROOTDIR%%OUTDIR%\build-zig-host"
+cmake "%ROOTDIR%/zig" ^
   -DCMAKE_INSTALL_PREFIX="%ROOTDIR%/%OUTDIR%/host" ^
   -DCMAKE_PREFIX_PATH="%ROOTDIR%/%OUTDIR%/host" ^
   -DCMAKE_BUILD_TYPE=Release ^
@@ -81,9 +82,9 @@ cmake "C:\cygwin64\home\kcbanner\kit\zig" ^
   -DZIG_ENABLE_ZSTD=OFF ^
   -DZIG_TARGET_TRIPLE=x86_64-windows-msvc ^
   -DZIG_VERSION="%ZIG_VERSION%"
-if %ERRORLEVEL% neq 0 exit /b %errorlevel%
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 cmake --build . %JOBS_ARG% --target install %BUILD_SYSTEM_ARGS%
-if %ERRORLEVEL% neq 0 exit /b %errorlevel%
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
 set ZIG=%ROOTDIR%%OUTDIR%\host\bin\zig.exe
 set "ZIG=%ZIG:\=/%"
@@ -104,7 +105,7 @@ cmake "%ROOTDIR%/zlib" ^
   -DCMAKE_AR="%ROOTDIR_CMAKE%%OUTDIR%/host/bin/llvm-ar" ^
   -DCMAKE_RANLIB="%ROOTDIR_CMAKE%%OUTDIR%/host/bin/llvm-ranlib"
 cmake --build . %JOBS_ARG% --target install %BUILD_SYSTEM_ARGS%
-if %ERRORLEVEL% neq 0 exit /b %errorlevel%
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
 rem Cross compile zstd for the target
 mkdir "%ROOTDIR%%OUTDIR%\%TARGET%-%MCPU%\lib"
@@ -150,10 +151,9 @@ cd "%ROOTDIR%%OUTDIR%\%TARGET%-%MCPU%\lib"
   "%ROOTDIR%\zstd\lib\dictBuilder\divsufsort.c" ^
   "%ROOTDIR%\zstd\lib\dictBuilder\fastcover.c" ^
   "%ROOTDIR%\zstd\lib\dictBuilder\cover.c"
-if %ERRORLEVEL% neq 0 exit /b %errorlevel%
-popd
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
-rem Rebuild LLVM with Zig.
+rem Cross compile LLVM for the target
 mkdir "%ROOTDIR%%OUTDIR%\build-llvm-%TARGET%-%MCPU%"
 cd "%ROOTDIR%%OUTDIR%\build-llvm-%TARGET%-%MCPU%"
 cmake "%ROOTDIR%/llvm" ^
@@ -197,15 +197,12 @@ cmake "%ROOTDIR%/llvm" ^
   -DCLANG_INCLUDE_DOCS=OFF ^
   -DCLANG_ENABLE_ARCMT=ON ^
   -DLIBCLANG_BUILD_STATIC=ON
-if %ERRORLEVEL% neq 0 exit /b %errorlevel%
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 cmake --build . %JOBS_ARG% --target install %BUILD_SYSTEM_ARGS%
-if %ERRORLEVEL% neq 0 exit /b %errorlevel%
-popd
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
 rem Finally, we can cross compile Zig itself, with Zig.
-
-rem cd "%ROOTDIR%\zig"
-cd C:\cygwin64\home\kcbanner\kit\zig
+cd "%ROOTDIR%\zig"
 %ZIG% build ^
   --prefix "%ROOTDIR%%OUTDIR%\zig-%TARGET%-%MCPU%" ^
   --search-prefix "%ROOTDIR%%OUTDIR%\%TARGET%-%MCPU%" ^
@@ -214,9 +211,8 @@ cd C:\cygwin64\home\kcbanner\kit\zig
   -Dstrip ^
   -Dtarget="%TARGET%" ^
   -Dcpu="%MCPU%" ^
-  -Dversion-string="%ZIG_VERSION%" ^
+  -Dversion-string=%ZIG_VERSION% ^
   -Denable-stage1
-if %ERRORLEVEL% neq 0 exit /b %errorlevel%
+if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
 popd
-ENDLOCAL
