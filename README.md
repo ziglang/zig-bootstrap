@@ -20,6 +20,7 @@ For other versions, check the git tags of this repository.
  * all: Deleted unused files.
  * LLVM: Support .lib extension for static zstd.
  * LLVM: Copied CMake modules from out of tree.
+ * LLVM: Portable handling of .def linker flag
  * Clang: Disable building of libclang-cpp.so.
  * LLD: Added additional include directory to Zig's libunwind.
  * zlib: Delete the ability to build a shared library.
@@ -64,7 +65,7 @@ When it succeeds, output can be found in `out/zig-<triple>-<cpu>/`.
 Bootstrapping on Windows with MSVC is also possible via `build.bat`, which
 takes the same arguments as `build` above.
 
-This script requires that their "C++ CMake tools for Windows" component be
+This script requires that the "C++ CMake tools for Windows" component be
 installed via the Visual Studio installer.
 
 The script must be run within the `Developer Command Prompt for VS 2019` shell:
