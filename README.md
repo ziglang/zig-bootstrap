@@ -59,6 +59,20 @@ significantly affect how long it takes to build:
 
 When it succeeds, output can be found in `out/zig-<triple>-<cpu>/`.
 
+## Windows Build Instructions
+
+Bootstrapping on Windows with MSVC is also possible via `build.bat`, which
+takes the same arguments as `build` above.
+
+This script requires that their "C++ CMake tools for Windows" component be
+installed via the Visual Studio installer.
+
+The script must be run within the `Developer Command Prompt for VS 2019` shell:
+
+```
+build.bat <arch>-<os>-<abi> <mcpu>
+```
+
 ### Supported Triples
 
 If you try a "not tested" one and find a problem please file an issue,
