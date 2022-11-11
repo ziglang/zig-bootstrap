@@ -1,4 +1,4 @@
-@echo off
+rem @echo off
 
 SETLOCAL EnableDelayedExpansion
 if NOT DEFINED VSCMD_VER (
@@ -6,21 +6,27 @@ if NOT DEFINED VSCMD_VER (
    exit /b 1
 )
 
-if "%1" == "" (set TARGET=x86_64-windows-gnu) ELSE (set TARGET=%1)
-if "%2" == "" (set MCPU=native) ELSE (set MCPU=%2)
+where ninja >nul 2>nul
+if %ERRORLEVEL% neq 0 (
+   echo error: this script requires ninja to be installed, as the Visual Studio cmake generator doesn't support alternate compilers
+   exit /b %ERRORLEVEL%
+)
 
-set TARGET_OS_CMAKE=""
-FOR /F "tokens=2 delims=-" %%i IN (%TARGET%) DO (
-  IF "%%i"=="macos" set TARGET_OS_CMAKE="Darwin"
-  IF "%%i"=="freebsd" set TARGET_OS_CMAKE="FreeBSD"
-  IF "%%i"=="windows" set TARGET_OS_CMAKE="Windows"
-  IF "%%i"=="linux" set TARGET_OS_CMAKE="Linux"
+if "%1" == "" (set "TARGET=x86_64-windows-gnu") ELSE (set TARGET=%~1)
+if "%2" == "" (set "MCPU=native") ELSE (set MCPU=%~2)
+
+set TARGET_OS_CMAKE=
+FOR /F "tokens=2 delims=-" %%i IN ("%TARGET%") DO (
+  IF "%%i"=="macos" set "TARGET_OS_CMAKE=Darwin"
+  IF "%%i"=="freebsd" set "TARGET_OS_CMAKE=FreeBSD"
+  IF "%%i"=="windows" set "TARGET_OS_CMAKE=Windows"
+  IF "%%i"=="linux" set "TARGET_OS_CMAKE=Linux"
 )
 
 set OUTDIR=out-win
 set ROOTDIR=%~dp0
 set "ROOTDIR_CMAKE=%ROOTDIR:\=/%"
-set ZIG_VERSION="0.11.0-dev.78+28288dcbb"
+set ZIG_VERSION=0.11.0-dev.78+28288dcbb
 
 set JOBS_ARG=
 set BUILD_SYSTEM_ARGS=
@@ -38,7 +44,8 @@ if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
 type CMakeCache.txt | findstr /C:"CMAKE_GENERATOR:INTERNAL=Visual Studio" >nul
 if %ERRORLEVEL% EQU 0 (
-   rem The cmake -j argument with visual studio will start multiple MSBuild instances, but only one cl.exe instance
+   rem The cmake -j argument with the visual studio generator will start multiple MSBuild instances,
+   rem but only one cl.exe per MSBuild instance. Instead, use the /p:CL_MPcount option.
    set JOBS_ARG=""
    set BUILD_SYSTEM_ARGS=-- /p:CL_MPcount=%NUMBER_OF_PROCESSORS%
 )
@@ -71,7 +78,7 @@ if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 cmake --build . %JOBS_ARG% --target install %BUILD_SYSTEM_ARGS%
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
-rem Build an x86_64-windows-msvc zig using msvc, linking against LLVM/Clang/LLD built by msvc
+rem Build an x86_64-windows-msvc zig using msvc, linking against LLVM/Clang/LLD/zlib built by msvc
 mkdir "%ROOTDIR%%OUTDIR%\build-zig-host"
 cd "%ROOTDIR%%OUTDIR%\build-zig-host"
 cmake "%ROOTDIR%/zig" ^
@@ -93,6 +100,7 @@ rem Cross compile zlib for the target
 mkdir "%ROOTDIR%%OUTDIR%\build-zlib-%TARGET%-%MCPU%"
 cd "%ROOTDIR%%OUTDIR%\build-zlib-%TARGET%-%MCPU%"
 cmake "%ROOTDIR%/zlib" ^
+  -G "Ninja" ^
   -DCMAKE_INSTALL_PREFIX="%ROOTDIR_CMAKE%%OUTDIR%/%TARGET%-%MCPU%" ^
   -DCMAKE_PREFIX_PATH="%ROOTDIR_CMAKE%%OUTDIR%/%TARGET%-%MCPU%" ^
   -DCMAKE_BUILD_TYPE=Release ^
@@ -157,6 +165,7 @@ rem Cross compile LLVM for the target
 mkdir "%ROOTDIR%%OUTDIR%\build-llvm-%TARGET%-%MCPU%"
 cd "%ROOTDIR%%OUTDIR%\build-llvm-%TARGET%-%MCPU%"
 cmake "%ROOTDIR%/llvm" ^
+  -G "Ninja" ^
   -DCMAKE_INSTALL_PREFIX="%ROOTDIR_CMAKE%%OUTDIR%/%TARGET%-%MCPU%" ^
   -DCMAKE_PREFIX_PATH="%ROOTDIR_CMAKE%%OUTDIR%/%TARGET%-%MCPU%" ^
   -DCMAKE_BUILD_TYPE=Release ^
@@ -211,7 +220,7 @@ cd "%ROOTDIR%\zig"
   -Dstrip ^
   -Dtarget="%TARGET%" ^
   -Dcpu="%MCPU%" ^
-  -Dversion-string=%ZIG_VERSION% ^
+  -Dversion-string="%ZIG_VERSION%" ^
   -Denable-stage1
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
