@@ -37,26 +37,20 @@ rem Build zlib for the host
 mkdir "%ROOTDIR%%OUTDIR%\build-zlib-host"
 cd "%ROOTDIR%%OUTDIR%\build-zlib-host"
 cmake "%ROOTDIR%/zlib" ^
+  -G "Ninja" ^
   -DCMAKE_INSTALL_PREFIX="%ROOTDIR%/%OUTDIR%/host" ^
   -DCMAKE_PREFIX_PATH="%ROOTDIR%/%OUTDIR%/host" ^
   -DCMAKE_BUILD_TYPE=Release
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
-type CMakeCache.txt | findstr /C:"CMAKE_GENERATOR:INTERNAL=Visual Studio" >nul
-if %ERRORLEVEL% EQU 0 (
-   rem The cmake -j argument with the visual studio generator will start multiple MSBuild instances,
-   rem but only one cl.exe per MSBuild instance. Instead, use the /p:CL_MPcount option.
-   set JOBS_ARG=""
-   set BUILD_SYSTEM_ARGS=-- /p:CL_MPcount=%NUMBER_OF_PROCESSORS%
-)
-
-cmake --build . %JOBS_ARG% --target install %BUILD_SYSTEM_ARGS%
+cmake --build . %JOBS_ARG% --target install
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
 rem Build the libraries for Zig to link against, as well as native `llvm-tblgen` using msvc
 mkdir "%ROOTDIR%%OUTDIR%\build-llvm-host"
 cd "%ROOTDIR%%OUTDIR%\build-llvm-host"
 cmake "%ROOTDIR%/llvm" ^
+  -G "Ninja" ^
   -DLLVM_ENABLE_PROJECTS="lld;clang" ^
   -DLLVM_ENABLE_LIBXML2=OFF ^
   -DLLVM_ENABLE_ZSTD=OFF ^
@@ -75,22 +69,23 @@ cmake "%ROOTDIR%/llvm" ^
   -DLLVM_USE_CRT_RELEASE=MT ^
   -DCMAKE_BUILD_TYPE=Release
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
-cmake --build . %JOBS_ARG% --target install %BUILD_SYSTEM_ARGS%
+cmake --build . %JOBS_ARG% --target install
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
 rem Build an x86_64-windows-msvc zig using msvc, linking against LLVM/Clang/LLD/zlib built by msvc
 mkdir "%ROOTDIR%%OUTDIR%\build-zig-host"
 cd "%ROOTDIR%%OUTDIR%\build-zig-host"
 cmake "%ROOTDIR%/zig" ^
-  -DCMAKE_INSTALL_PREFIX="%ROOTDIR%/%OUTDIR%/host" ^
-  -DCMAKE_PREFIX_PATH="%ROOTDIR%/%OUTDIR%/host" ^
+  -G "Ninja" ^
+  -DCMAKE_INSTALL_PREFIX="%ROOTDIR_CMAKE%%OUTDIR%/host" ^
+  -DCMAKE_PREFIX_PATH="%ROOTDIR_CMAKE%%OUTDIR%/host" ^
   -DCMAKE_BUILD_TYPE=Release ^
   -DZIG_STATIC=ON ^
   -DZIG_ENABLE_ZSTD=OFF ^
   -DZIG_TARGET_TRIPLE=x86_64-windows-msvc ^
   -DZIG_VERSION="%ZIG_VERSION%"
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
-cmake --build . %JOBS_ARG% --target install %BUILD_SYSTEM_ARGS%
+cmake --build . %JOBS_ARG% --target install
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
 set ZIG=%ROOTDIR%%OUTDIR%\host\bin\zig.exe
@@ -112,7 +107,7 @@ cmake "%ROOTDIR%/zlib" ^
   -DCMAKE_RC_COMPILER="%ROOTDIR_CMAKE%%OUTDIR%/host/bin/llvm-rc" ^
   -DCMAKE_AR="%ROOTDIR_CMAKE%%OUTDIR%/host/bin/llvm-ar" ^
   -DCMAKE_RANLIB="%ROOTDIR_CMAKE%%OUTDIR%/host/bin/llvm-ranlib"
-cmake --build . %JOBS_ARG% --target install %BUILD_SYSTEM_ARGS%
+cmake --build . %JOBS_ARG% --target install
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
 rem Cross compile zstd for the target
@@ -207,7 +202,7 @@ cmake "%ROOTDIR%/llvm" ^
   -DCLANG_ENABLE_ARCMT=ON ^
   -DLIBCLANG_BUILD_STATIC=ON
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
-cmake --build . %JOBS_ARG% --target install %BUILD_SYSTEM_ARGS%
+cmake --build . %JOBS_ARG% --target install
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
 rem Finally, we can cross compile Zig itself, with Zig.
