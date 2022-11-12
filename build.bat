@@ -1,4 +1,4 @@
-rem @echo off
+@echo off
 
 SETLOCAL EnableDelayedExpansion
 if NOT DEFINED VSCMD_VER (
