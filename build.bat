@@ -15,12 +15,14 @@ if %ERRORLEVEL% neq 0 (
 if "%1" == "" (set "TARGET=x86_64-windows-gnu") ELSE (set TARGET=%~1)
 if "%2" == "" (set "MCPU=native") ELSE (set MCPU=%~2)
 
+set TARGET_ABI=
 set TARGET_OS_CMAKE=
-FOR /F "tokens=2 delims=-" %%i IN ("%TARGET%") DO (
+FOR /F "tokens=2,3 delims=-" %%i IN ("%TARGET%") DO (
   IF "%%i"=="macos" set "TARGET_OS_CMAKE=Darwin"
   IF "%%i"=="freebsd" set "TARGET_OS_CMAKE=FreeBSD"
   IF "%%i"=="windows" set "TARGET_OS_CMAKE=Windows"
   IF "%%i"=="linux" set "TARGET_OS_CMAKE=Linux"
+  set TARGET_ABI=%%j
 )
 
 set OUTDIR=out-win
@@ -82,14 +84,23 @@ cmake "%ROOTDIR%/zig" ^
   -DCMAKE_BUILD_TYPE=Release ^
   -DZIG_STATIC=ON ^
   -DZIG_ENABLE_ZSTD=OFF ^
+  -DZIG_ENABLE_LIBCPP=OFF ^
   -DZIG_TARGET_TRIPLE=x86_64-windows-msvc ^
   -DZIG_VERSION="%ZIG_VERSION%"
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 cmake --build . %JOBS_ARG% --target install
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
+IF "%TARGET_ABI%"=="msvc" (
+   echo Building a target with the msvc ABI isn't supported yet
+   exit /b
+)
+
 set ZIG=%ROOTDIR%%OUTDIR%\host\bin\zig.exe
 set "ZIG=%ZIG:\=/%"
+
+rem CMP0091=NEW is required in order for the CMAKE_MSVC_RUNTIME_LIBRARY value to be respected,
+rem which we need to be set to MultiThreaded when building msvc ABI targets
 
 rem Cross compile zlib for the target
 mkdir "%ROOTDIR%%OUTDIR%\build-zlib-%TARGET%-%MCPU%"
@@ -104,9 +115,11 @@ cmake "%ROOTDIR%/zlib" ^
   -DCMAKE_C_COMPILER="%ZIG%;cc;-fno-sanitize=all;-s;-target;%TARGET%;-mcpu=%MCPU%" ^
   -DCMAKE_CXX_COMPILER="%ZIG%;c++;-fno-sanitize=all;-s;-target;%TARGET%;-mcpu=%MCPU%" ^
   -DCMAKE_ASM_COMPILER="%ZIG%;cc;-fno-sanitize=all;-s;-target;%TARGET%;-mcpu=%MCPU%" ^
-  -DCMAKE_RC_COMPILER="%ROOTDIR_CMAKE%%OUTDIR%/host/bin/llvm-rc" ^
-  -DCMAKE_AR="%ROOTDIR_CMAKE%%OUTDIR%/host/bin/llvm-ar" ^
-  -DCMAKE_RANLIB="%ROOTDIR_CMAKE%%OUTDIR%/host/bin/llvm-ranlib"
+  -DCMAKE_RC_COMPILER="%ROOTDIR_CMAKE%%OUTDIR%/host/bin/llvm-rc.exe" ^
+  -DCMAKE_AR="%ROOTDIR_CMAKE%%OUTDIR%/host/bin/llvm-ar.exe" ^
+  -DCMAKE_RANLIB="%ROOTDIR_CMAKE%%OUTDIR%/host/bin/llvm-ranlib.exe" ^
+  -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
+  -DCMAKE_POLICY_DEFAULT_CMP0091=NEW
 cmake --build . %JOBS_ARG% --target install
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
@@ -156,6 +169,15 @@ cd "%ROOTDIR%%OUTDIR%\%TARGET%-%MCPU%\lib"
   "%ROOTDIR%\zstd\lib\dictBuilder\cover.c"
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
+rem Ideally we could use ZLIB_USE_STATIC_LIBS here (which would detect zlib correctly),
+rem but this was added in 3.24 and the MSVC-bundled CMake is 3.20. Instead, for the msvc
+rem ABI the zlib path is specified explicitly.
+
+IF "%TARGET_ABI%"=="msvc" (
+  set ZLIB_LIBRARY=-DZLIB_LIBRARY="%ROOTDIR_CMAKE%%OUTDIR%/%TARGET%-%MCPU%/lib/z.lib"
+) else (
+  set ZLIB_LIBRARY=
+)
 rem Cross compile LLVM for the target
 mkdir "%ROOTDIR%%OUTDIR%\build-llvm-%TARGET%-%MCPU%"
 cd "%ROOTDIR%%OUTDIR%\build-llvm-%TARGET%-%MCPU%"
@@ -172,6 +194,8 @@ cmake "%ROOTDIR%/llvm" ^
   -DCMAKE_RC_COMPILER="%ROOTDIR_CMAKE%%OUTDIR%/host/bin/llvm-rc.exe" ^
   -DCMAKE_AR="%ROOTDIR_CMAKE%%OUTDIR%/host/bin/llvm-ar.exe" ^
   -DCMAKE_RANLIB="%ROOTDIR_CMAKE%%OUTDIR%/host/bin/llvm-ranlib.exe" ^
+  -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
+  -DCMAKE_POLICY_DEFAULT_CMP0091=NEW ^
   -DLLVM_ENABLE_BACKTRACES=OFF ^
   -DLLVM_ENABLE_BINDINGS=OFF ^
   -DLLVM_ENABLE_CRASH_OVERRIDES=OFF ^
@@ -195,12 +219,14 @@ cmake "%ROOTDIR%/llvm" ^
   -DLLVM_INCLUDE_EXAMPLES=OFF ^
   -DLLVM_INCLUDE_BENCHMARKS=OFF ^
   -DLLVM_INCLUDE_DOCS=OFF ^
-  -DLLVM_DEFAULT_TARGET_TRIPLE="%TARGET%" ^
+  -DLLVM_DEFAULT_TARGET_TRIPLE=%TARGET% ^
   -DCLANG_TABLEGEN="%ROOTDIR_CMAKE%%OUTDIR%/build-llvm-host/bin/clang-tblgen.exe" ^
   -DCLANG_BUILD_TOOLS=OFF ^
   -DCLANG_INCLUDE_DOCS=OFF ^
   -DCLANG_ENABLE_ARCMT=ON ^
-  -DLIBCLANG_BUILD_STATIC=ON
+  -DLIBCLANG_BUILD_STATIC=ON ^
+  -DZLIB_USE_STATIC_LIBS=ON ^
+  %ZLIB_LIBRARY%
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 cmake --build . %JOBS_ARG% --target install
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
