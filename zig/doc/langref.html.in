@@ -536,7 +536,7 @@ const Timestamp = struct {
       {#header_close#}
       {#header_open|Top-Level Doc Comments#}
       <p>User documentation that doesn't belong to whatever
-      immediately follows it, like container-level documentation, goes
+      immediately follows it, like {#link|container|Containers#}-level documentation, goes
       in top-level doc comments. A top-level doc comment is one that
       begins with two slashes and an exclamation point:
       {#syntax#}//!{#endsyntax#}.</p>
@@ -575,32 +575,27 @@ pub fn main() void {
     var optional_value: ?[]const u8 = null;
     assert(optional_value == null);
 
-    print("\noptional 1\ntype: {s}\nvalue: {?s}\n", .{
-        @typeName(@TypeOf(optional_value)),
-        optional_value,
+    print("\noptional 1\ntype: {}\nvalue: {?s}\n", .{
+        @TypeOf(optional_value), optional_value,
     });
 
     optional_value = "hi";
     assert(optional_value != null);
 
-    print("\noptional 2\ntype: {s}\nvalue: {?s}\n", .{
-        @typeName(@TypeOf(optional_value)),
-        optional_value,
+    print("\noptional 2\ntype: {}\nvalue: {?s}\n", .{
+        @TypeOf(optional_value), optional_value,
     });
 
     // error union
     var number_or_error: anyerror!i32 = error.ArgNotFound;
 
-    print("\nerror union 1\ntype: {s}\nvalue: {!}\n", .{
-        @typeName(@TypeOf(number_or_error)),
-        number_or_error,
-    });
+    print("\nerror union 1\ntype: {}\nvalue: {!}\n", .{
+        @TypeOf(number_or_error), number_or_error, });
 
     number_or_error = 1234;
 
-    print("\nerror union 2\ntype: {s}\nvalue: {!}\n", .{
-        @typeName(@TypeOf(number_or_error)),
-        number_or_error,
+    print("\nerror union 2\ntype: {}\nvalue: {!}\n", .{
+        @TypeOf(number_or_error), number_or_error,
     });
 }
       {#code_end#}
@@ -859,7 +854,7 @@ const mem = @import("std").mem; // will be used to compare bytes
 
 pub fn main() void {
     const bytes = "hello";
-    print("{s}\n", .{@typeName(@TypeOf(bytes))});       // *const [5:0]u8
+    print("{}\n", .{@TypeOf(bytes)});                   // *const [5:0]u8
     print("{d}\n", .{bytes.len});                       // 5
     print("{c}\n", .{bytes[1]});                        // 'e'
     print("{d}\n", .{bytes[5]});                        // 0
@@ -1085,7 +1080,7 @@ fn addOne(number: i32) i32 {
       <p>
         When the <kbd>zig test</kbd> tool is building a test runner, only resolved {#syntax#}test{#endsyntax#}
         declarations are included in the build. Initially, only the given Zig source file's top-level
-        declarations are resolved. Unless nested containers are referenced from a top-level test declaration,
+        declarations are resolved. Unless nested {#link|containers|Containers#} are referenced from a top-level test declaration,
         nested container tests will not be resolved.
       </p>
       <p>
@@ -1333,7 +1328,7 @@ const color: Color = .@"really red";
 
       {#header_open|Container Level Variables#}
       <p>
-      Container level variables have static lifetime and are order-independent and lazily analyzed.
+      {#link|Container|Containers#} level variables have static lifetime and are order-independent and lazily analyzed.
       The initialization value of container level variables is implicitly
       {#link|comptime#}. If a container level variable is {#syntax#}const{#endsyntax#} then its value is
       {#syntax#}comptime{#endsyntax#}-known, otherwise it is runtime-known.
@@ -1355,7 +1350,7 @@ const std = @import("std");
 const expect = std.testing.expect;
       {#code_end#}
       <p>
-      Container level variables may be declared inside a {#link|struct#}, {#link|union#}, or {#link|enum#}:
+      Container level variables may be declared inside a {#link|struct#}, {#link|union#}, {#link|enum#}, or {#link|opaque#}:
       </p>
       {#code_begin|test|namespaced_container_level_variable#}
 const std = @import("std");
@@ -3282,7 +3277,7 @@ test "default struct initialization fields" {
       Unlike normal structs, {#syntax#}packed{#endsyntax#} structs have guaranteed in-memory layout:
       </p>
       <ul>
-        <li>Fields remain in the order declared.</li>
+        <li>Fields remain in the order declared, least to most significant.</li>
         <li>There is no padding between fields.</li>
         <li>Zig supports arbitrary width {#link|Integers#} and although normally, integers with fewer
         than 8 bits will still use 1 byte of memory, in packed structs, they use
@@ -3325,16 +3320,19 @@ fn doTheTest() !void {
     try expect(@sizeOf(Divided) == 2);
     var full = Full{ .number = 0x1234 };
     var divided = @bitCast(Divided, full);
+    try expect(divided.half1 == 0x34);
+    try expect(divided.quarter3 == 0x2);
+    try expect(divided.quarter4 == 0x1);
+
+    var ordered = @bitCast([2]u8, full);
     switch (native_endian) {
         .Big => {
-            try expect(divided.half1 == 0x12);
-            try expect(divided.quarter3 == 0x3);
-            try expect(divided.quarter4 == 0x4);
+            try expect(ordered[0] == 0x12);
+            try expect(ordered[1] == 0x34);
         },
         .Little => {
-            try expect(divided.half1 == 0x34);
-            try expect(divided.quarter3 == 0x2);
-            try expect(divided.quarter4 == 0x1);
+            try expect(ordered[0] == 0x34);
+            try expect(ordered[1] == 0x12);
         },
     }
 }
@@ -7071,7 +7069,7 @@ test "fibonacci" {
       {#code_end#}
 
       <p>
-      At container level (outside of any function), all expressions are implicitly
+      At {#link|container|Containers#} level (outside of any function), all expressions are implicitly
       {#syntax#}comptime{#endsyntax#} expressions. This means that we can use functions to
       initialize complex static data. For example:
       </p>
@@ -7543,7 +7541,7 @@ volatile (
 
       {#header_open|Global Assembly#}
       <p>
-      When an assembly expression occurs in a container level {#link|comptime#} block, this is
+      When an assembly expression occurs in a {#link|container|Containers#} level {#link|comptime#} block, this is
       <strong>global assembly</strong>.
       </p>
       <p>
@@ -8848,7 +8846,7 @@ fn func() void {
       {#header_open|@hasDecl#}
       <pre>{#syntax#}@hasDecl(comptime Container: type, comptime name: []const u8) bool{#endsyntax#}</pre>
       <p>
-      Returns whether or not a {#link|struct#}, {#link|enum#}, or {#link|union#} has a declaration
+      Returns whether or not a {#link|container|Containers#} has a declaration
       matching {#syntax#}name{#endsyntax#}.
       </p>
       {#code_begin|test|hasDecl#}
@@ -12441,6 +12439,19 @@ fn readU32Be() u32 {}
       </div>
       {#header_close#}
 
+      {#header_open|Appendix#}
+      {#header_open|Containers#}
+      <p>
+      A <em>container</em> in Zig is any syntactical construct that acts as a namespace to hold {#link|variable|Container Level Variables#} and {#link|function|Functions#} declarations.
+      Containers are also type definitions which can be instantiated.
+      {#link|Structs|struct#}, {#link|enums|enum#}, {#link|unions|union#}, {#link|opaques|opaque#}, and even Zig source files themselves are containers.
+      </p>
+      <p>
+      Although containers (except Zig source files) use curly braces to surround their definition, they should not be confused with {#link|blocks|Blocks#} or functions.
+      Containers do not contain statements.
+      </p>
+      {#header_close#}
+
       {#header_open|Grammar#}
       {#syntax_block|peg|grammar.y#}Root <- skip container_doc_comment? ContainerMembers eof
 
@@ -13005,6 +13016,7 @@ keyword <- KEYWORD_align / KEYWORD_allowzero / KEYWORD_and / KEYWORD_anyframe
         <li>Memory is a resource.</li>
         <li>Together we serve the users.</li>
       </ul>
+      {#header_close#}
       {#header_close#}
       </main></div>
     </div>

@@ -444,6 +444,15 @@ LLVMValueRef ZigLLVMBuildCall(LLVMBuilderRef B, LLVMTypeRef Ty, LLVMValueRef Fn,
     return wrap(call_inst);
 }
 
+void ZigLLVMAddAttributeAtIndex(LLVMValueRef Val, unsigned Idx, LLVMAttributeRef A) {
+    if (isa<Function>(unwrap(Val))) {
+        unwrap<Function>(Val)->addAttributeAtIndex(Idx, unwrap(A));
+    } else {
+        unwrap<CallInst>(Val)->addAttributeAtIndex(Idx, unwrap(A));
+    }
+}
+
+
 LLVMValueRef ZigLLVMBuildMemCpy(LLVMBuilderRef B, LLVMValueRef Dst, unsigned DstAlign,
         LLVMValueRef Src, unsigned SrcAlign, LLVMValueRef Size, bool isVolatile)
 {
@@ -594,8 +603,16 @@ ZigLLVMDIType *ZigLLVMCreateDebugArrayType(ZigLLVMDIBuilder *dibuilder, uint64_t
     return reinterpret_cast<ZigLLVMDIType*>(di_type);
 }
 
-ZigLLVMDIEnumerator *ZigLLVMCreateDebugEnumerator(ZigLLVMDIBuilder *dibuilder, const char *name, int64_t val) {
-    DIEnumerator *di_enumerator = reinterpret_cast<DIBuilder*>(dibuilder)->createEnumerator(name, val);
+ZigLLVMDIEnumerator *ZigLLVMCreateDebugEnumerator(ZigLLVMDIBuilder *dibuilder, const char *name, uint64_t val, bool isUnsigned) {
+    DIEnumerator *di_enumerator = reinterpret_cast<DIBuilder*>(dibuilder)->createEnumerator(name, val, isUnsigned);
+    return reinterpret_cast<ZigLLVMDIEnumerator*>(di_enumerator);
+}
+
+ZigLLVMDIEnumerator *ZigLLVMCreateDebugEnumeratorOfArbitraryPrecision(ZigLLVMDIBuilder *dibuilder,
+    const char *name, unsigned NumWords, const uint64_t Words[], unsigned int bits, bool isUnsigned)
+{
+    DIEnumerator *di_enumerator = reinterpret_cast<DIBuilder*>(dibuilder)->createEnumerator(name,
+        APSInt(APInt(bits, makeArrayRef(Words, NumWords)), isUnsigned));
     return reinterpret_cast<ZigLLVMDIEnumerator*>(di_enumerator);
 }
 
@@ -1057,12 +1074,21 @@ void ZigLLVMSetFastMath(LLVMBuilderRef builder_wrapped, bool on_state) {
     }
 }
 
-void ZigLLVMAddByValAttr(LLVMValueRef fn_ref, unsigned ArgNo, LLVMTypeRef type_val) {
-    Function *func = unwrap<Function>(fn_ref);
-    AttrBuilder attr_builder(func->getContext());
-    Type *llvm_type = unwrap<Type>(type_val);
-    attr_builder.addByValAttr(llvm_type);
-    func->addParamAttrs(ArgNo, attr_builder);
+void ZigLLVMAddByValAttr(LLVMValueRef Val, unsigned ArgNo, LLVMTypeRef type_val) {
+    if (isa<Function>(unwrap(Val))) {
+        Function *func = unwrap<Function>(Val);
+        AttrBuilder attr_builder(func->getContext());
+        Type *llvm_type = unwrap<Type>(type_val);
+        attr_builder.addByValAttr(llvm_type);
+        func->addParamAttrs(ArgNo, attr_builder);
+    } else {
+        CallInst *call = unwrap<CallInst>(Val);
+        AttrBuilder attr_builder(call->getContext());
+        Type *llvm_type = unwrap<Type>(type_val);
+        attr_builder.addByValAttr(llvm_type);
+        // NOTE: +1 here since index 0 refers to the return value
+        call->addAttributeAtIndex(ArgNo + 1, attr_builder.getAttribute(Attribute::ByVal));
+    }
 }
 
 void ZigLLVMAddSretAttr(LLVMValueRef fn_ref, LLVMTypeRef type_val) {

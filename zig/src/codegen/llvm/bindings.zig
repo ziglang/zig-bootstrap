@@ -88,8 +88,8 @@ pub const Context = opaque {
 };
 
 pub const Value = opaque {
-    pub const addAttributeAtIndex = LLVMAddAttributeAtIndex;
-    extern fn LLVMAddAttributeAtIndex(*Value, Idx: AttributeIndex, A: *Attribute) void;
+    pub const addAttributeAtIndex = ZigLLVMAddAttributeAtIndex;
+    extern fn ZigLLVMAddAttributeAtIndex(*Value, Idx: AttributeIndex, A: *Attribute) void;
 
     pub const removeEnumAttributeAtIndex = LLVMRemoveEnumAttributeAtIndex;
     extern fn LLVMRemoveEnumAttributeAtIndex(F: *Value, Idx: AttributeIndex, KindID: c_uint) void;
@@ -1662,7 +1662,18 @@ pub const DIBuilder = opaque {
     extern fn ZigLLVMCreateDebugEnumerator(
         dib: *DIBuilder,
         name: [*:0]const u8,
-        val: i64,
+        val: u64,
+        is_unsigned: bool,
+    ) *DIEnumerator;
+
+    pub const createEnumerator2 = ZigLLVMCreateDebugEnumeratorOfArbitraryPrecision;
+    extern fn ZigLLVMCreateDebugEnumeratorOfArbitraryPrecision(
+        dib: *DIBuilder,
+        name: [*:0]const u8,
+        num_words: c_uint,
+        words: [*]const u64,
+        bits: c_uint,
+        is_unsigned: bool,
     ) *DIEnumerator;
 
     pub const createEnumerationType = ZigLLVMCreateDebugEnumerationType;

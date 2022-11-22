@@ -261,7 +261,7 @@ pub const Flock = extern struct {
     /// Lock owner.
     pid: pid_t,
     /// Lock type.
-    @"type": i16,
+    type: i16,
     /// Type of the start member.
     whence: i16,
     /// Remote system id or zero for local.
@@ -438,7 +438,7 @@ pub const kinfo_file = extern struct {
     /// A zero value is for the sentinel record at the end of an array.
     structsize: c_int,
     /// Descriptor type.
-    @"type": c_int,
+    type: c_int,
     /// Array index.
     fd: fd_t,
     /// Reference count.
@@ -456,7 +456,7 @@ pub const kinfo_file = extern struct {
             /// Socket domain.
             domain: c_int,
             /// Socket type.
-            @"type": c_int,
+            type: c_int,
             /// Socket protocol.
             protocol: c_int,
             /// Socket address.
@@ -478,7 +478,7 @@ pub const kinfo_file = extern struct {
         },
         file: extern struct {
             /// Vnode type.
-            @"type": i32,
+            type: i32,
             // Reserved for future use
             _spare1: [3]i32,
             _spare2: [30]u64,
@@ -1197,7 +1197,7 @@ const NSIG = 32;
 
 /// Renamed from `sigaction` to `Sigaction` to avoid conflict with the syscall.
 pub const Sigaction = extern struct {
-    pub const handler_fn = std.meta.FnPtr(fn (c_int) callconv(.C) void);
+    pub const handler_fn = std.meta.FnPtr(fn (c_int) align(1) callconv(.C) void);
     pub const sigaction_fn = std.meta.FnPtr(fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void);
 
     /// signal handler
@@ -1440,6 +1440,7 @@ pub const E = enum(u16) {
     CAPMODE = 94, // Not permitted in capability mode
     NOTRECOVERABLE = 95, // State not recoverable
     OWNERDEAD = 96, // Previous owner died
+    INTEGRITY = 97, // Integrity check failed
     _,
 };
 
@@ -1875,3 +1876,4 @@ pub const MFD = struct {
 };
 
 pub extern "c" fn memfd_create(name: [*:0]const u8, flags: c_uint) c_int;
+pub extern "c" fn copy_file_range(fd_in: fd_t, off_in: ?*off_t, fd_out: fd_t, off_out: ?*off_t, len: usize, flags: u32) usize;

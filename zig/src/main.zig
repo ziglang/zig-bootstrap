@@ -503,6 +503,7 @@ const usage_build_generic =
     \\  --test-cmd-bin                 Appends test binary path to test cmd args
     \\  --test-evented-io              Runs the test in evented I/O mode
     \\  --test-no-exec                 Compiles test binary without running it
+    \\  --test-runner [path]           Specify a custom test runner
     \\
     \\Debug Options (Zig Compiler Development):
     \\  -ftime-report                Print timing diagnostics
@@ -726,6 +727,7 @@ fn buildOutputType(
     var runtime_args_start: ?usize = null;
     var test_filter: ?[]const u8 = null;
     var test_name_prefix: ?[]const u8 = null;
+    var test_runner_path: ?[]const u8 = null;
     var override_local_cache_dir: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_LOCAL_CACHE_DIR");
     var override_global_cache_dir: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_GLOBAL_CACHE_DIR");
     var override_lib_dir: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_LIB_DIR");
@@ -1043,6 +1045,8 @@ fn buildOutputType(
                         test_filter = args_iter.nextOrFatal();
                     } else if (mem.eql(u8, arg, "--test-name-prefix")) {
                         test_name_prefix = args_iter.nextOrFatal();
+                    } else if (mem.eql(u8, arg, "--test-runner")) {
+                        test_runner_path = args_iter.nextOrFatal();
                     } else if (mem.eql(u8, arg, "--test-cmd")) {
                         try test_exec_args.append(args_iter.nextOrFatal());
                     } else if (mem.eql(u8, arg, "--cache-dir")) {
@@ -1300,7 +1304,11 @@ fn buildOutputType(
                     } else if (mem.eql(u8, arg, "--no-gc-sections")) {
                         linker_gc_sections = false;
                     } else if (mem.eql(u8, arg, "--debug-compile-errors")) {
-                        debug_compile_errors = true;
+                        if (!crash_report.is_enabled) {
+                            std.log.warn("Zig was compiled in a release mode. --debug-compile-errors has no effect.", .{});
+                        } else {
+                            debug_compile_errors = true;
+                        }
                     } else if (mem.eql(u8, arg, "--verbose-link")) {
                         verbose_link = true;
                     } else if (mem.eql(u8, arg, "--verbose-cc")) {
@@ -2943,6 +2951,7 @@ fn buildOutputType(
         .test_evented_io = test_evented_io,
         .test_filter = test_filter,
         .test_name_prefix = test_name_prefix,
+        .test_runner_path = test_runner_path,
         .disable_lld_caching = !have_enable_cache,
         .subsystem = subsystem,
         .wasi_exec_model = wasi_exec_model,
@@ -3021,6 +3030,10 @@ fn buildOutputType(
         });
         try test_exec_args.append(self_exe_path);
         try test_exec_args.append("run");
+        if (zig_lib_directory.path) |p| {
+            try test_exec_args.appendSlice(&.{ "-I", p });
+        }
+
         if (link_libc) try test_exec_args.append("-lc");
         if (!mem.eql(u8, target_arch_os_abi, "native")) {
             try test_exec_args.append("-target");
@@ -3744,6 +3757,7 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
         var override_global_cache_dir: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_GLOBAL_CACHE_DIR");
         var override_local_cache_dir: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_LOCAL_CACHE_DIR");
         var child_argv = std.ArrayList([]const u8).init(arena);
+        var reference_trace: ?u32 = null;
 
         const argv_index_exe = child_argv.items.len;
         _ = try child_argv.addOne();
@@ -3795,10 +3809,16 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
                         try child_argv.append(arg);
                     } else if (mem.eql(u8, arg, "-freference-trace")) {
                         try child_argv.append(arg);
+                        reference_trace = 256;
                     } else if (mem.startsWith(u8, arg, "-freference-trace=")) {
                         try child_argv.append(arg);
+                        const num = arg["-freference-trace=".len..];
+                        reference_trace = std.fmt.parseUnsigned(u32, num, 10) catch |err| {
+                            fatal("unable to parse reference_trace count '{s}': {s}", .{ num, @errorName(err) });
+                        };
                     } else if (mem.eql(u8, arg, "-fno-reference-trace")) {
                         try child_argv.append(arg);
+                        reference_trace = null;
                     }
                 }
                 try child_argv.append(arg);
@@ -3932,6 +3952,7 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
             .thread_pool = &thread_pool,
             .use_stage1 = use_stage1,
             .cache_mode = .whole,
+            .reference_trace = reference_trace,
         }) catch |err| {
             fatal("unable to create compilation: {s}", .{@errorName(err)});
         };

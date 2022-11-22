@@ -1488,3 +1488,37 @@ test "x or true is comptime-known true" {
     }
     try expect(T.x == 3);
 }
+
+test "non-optional and optional array elements concatenated" {
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+
+    const array = [1]u8{'A'} ++ [1]?u8{null};
+    var index: usize = 0;
+    try expect(array[index].? == 'A');
+}
+
+test "inline call in @TypeOf inherits is_inline property" {
+    const S = struct {
+        inline fn doNothing() void {}
+        const T = @TypeOf(doNothing());
+    };
+    try expect(S.T == void);
+}
+
+test "comptime function turns function value to function pointer" {
+    const S = struct {
+        fn fnPtr(function: anytype) *const @TypeOf(function) {
+            return &function;
+        }
+        fn Nil() u8 {
+            return 0;
+        }
+        const foo = &[_]*const fn () u8{
+            fnPtr(Nil),
+        };
+    };
+    comptime try expect(S.foo[0] == &S.Nil);
+}

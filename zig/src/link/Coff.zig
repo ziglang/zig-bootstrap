@@ -9,11 +9,9 @@ const fmt = std.fmt;
 const log = std.log.scoped(.link);
 const math = std.math;
 const mem = std.mem;
-const meta = std.meta;
 
 const Allocator = std.mem.Allocator;
 
-const aarch64 = @import("../arch/aarch64/bits.zig");
 const codegen = @import("../codegen.zig");
 const link = @import("../link.zig");
 const lld = @import("Coff/lld.zig");
@@ -26,6 +24,7 @@ const Liveness = @import("../Liveness.zig");
 const LlvmObject = @import("../codegen/llvm.zig").Object;
 const Module = @import("../Module.zig");
 const Object = @import("Coff/Object.zig");
+const Relocation = @import("Coff/Relocation.zig");
 const StringTable = @import("strtab.zig").StringTable;
 const TypedValue = @import("../TypedValue.zig");
 
@@ -125,61 +124,7 @@ const Entry = struct {
     sym_index: u32,
 };
 
-pub const Reloc = struct {
-    @"type": enum {
-        // x86, x86_64
-        /// RIP-relative displacement to a GOT pointer
-        got,
-        /// RIP-relative displacement to an import pointer
-        import,
-
-        // aarch64
-        /// PC-relative distance to target page in GOT section
-        got_page,
-        /// Offset to a GOT pointer relative to the start of a page in GOT section
-        got_pageoff,
-        /// PC-relative distance to target page in a section (e.g., .rdata)
-        page,
-        /// Offset to a pointer relative to the start of a page in a section (e.g., .rdata)
-        pageoff,
-        /// PC-relative distance to target page in a import section
-        import_page,
-        /// Offset to a pointer relative to the start of a page in an import section (e.g., .rdata)
-        import_pageoff,
-
-        // common
-        /// Absolute pointer value
-        direct,
-    },
-    target: SymbolWithLoc,
-    offset: u32,
-    addend: u32,
-    pcrel: bool,
-    length: u2,
-    dirty: bool = true,
-
-    /// Returns an Atom which is the target node of this relocation edge (if any).
-    fn getTargetAtom(self: Reloc, coff_file: *Coff) ?*Atom {
-        switch (self.@"type") {
-            .got,
-            .got_page,
-            .got_pageoff,
-            => return coff_file.getGotAtomForSymbol(self.target),
-
-            .direct,
-            .page,
-            .pageoff,
-            => return coff_file.getAtomForSymbol(self.target),
-
-            .import,
-            .import_page,
-            .import_pageoff,
-            => return coff_file.getImportAtomForSymbol(self.target),
-        }
-    }
-};
-
-const RelocTable = std.AutoHashMapUnmanaged(*Atom, std.ArrayListUnmanaged(Reloc));
+const RelocTable = std.AutoHashMapUnmanaged(*Atom, std.ArrayListUnmanaged(Relocation));
 const BaseRelocationTable = std.AutoHashMapUnmanaged(*Atom, std.ArrayListUnmanaged(u32));
 const UnnamedConstTable = std.AutoHashMapUnmanaged(Module.Decl.Index, std.ArrayListUnmanaged(*Atom));
 
@@ -392,7 +337,7 @@ fn populateMissingMetadata(self: *Coff) !void {
         .name = [_]u8{0} ** 8,
         .value = 0,
         .section_number = .UNDEFINED,
-        .@"type" = .{ .base_type = .NULL, .complex_type = .NULL },
+        .type = .{ .base_type = .NULL, .complex_type = .NULL },
         .storage_class = .NULL,
         .number_of_aux_symbols = 0,
     });
@@ -690,7 +635,7 @@ fn allocateSymbol(self: *Coff) !u32 {
         .name = [_]u8{0} ** 8,
         .value = 0,
         .section_number = .UNDEFINED,
-        .@"type" = .{ .base_type = .NULL, .complex_type = .NULL },
+        .type = .{ .base_type = .NULL, .complex_type = .NULL },
         .storage_class = .NULL,
         .number_of_aux_symbols = 0,
     };
@@ -785,7 +730,7 @@ fn createGotAtom(self: *Coff, target: SymbolWithLoc) !*Atom {
     log.debug("allocated GOT atom at 0x{x}", .{sym.value});
 
     try atom.addRelocation(self, .{
-        .@"type" = .direct,
+        .type = .direct,
         .target = target,
         .offset = 0,
         .addend = 0,
@@ -888,163 +833,12 @@ fn markRelocsDirtyByAddress(self: *Coff, addr: u32) void {
 
 fn resolveRelocs(self: *Coff, atom: *Atom) !void {
     const relocs = self.relocs.get(atom) orelse return;
-    const source_sym = atom.getSymbol(self);
-    const source_section = self.sections.get(@enumToInt(source_sym.section_number) - 1).header;
-    const file_offset = source_section.pointer_to_raw_data + source_sym.value - source_section.virtual_address;
 
     log.debug("relocating '{s}'", .{atom.getName(self)});
 
     for (relocs.items) |*reloc| {
         if (!reloc.dirty) continue;
-
-        const source_vaddr = source_sym.value + reloc.offset;
-        const target_atom = reloc.getTargetAtom(self) orelse continue;
-        const target_vaddr = target_atom.getSymbol(self).value;
-        const target_vaddr_with_addend = target_vaddr + reloc.addend;
-        const image_base = self.getImageBase();
-
-        log.debug("  ({x}: [() => 0x{x} ({s})) ({s}) (in file at 0x{x})", .{
-            source_vaddr,
-            target_vaddr_with_addend,
-            self.getSymbolName(reloc.target),
-            @tagName(reloc.@"type"),
-            file_offset + reloc.offset,
-        });
-
-        reloc.dirty = false;
-
-        switch (self.base.options.target.cpu.arch) {
-            .aarch64 => {
-                var buffer: [@sizeOf(u64)]u8 = undefined;
-                switch (reloc.length) {
-                    2 => {
-                        const amt = try self.base.file.?.preadAll(buffer[0..4], file_offset + reloc.offset);
-                        if (amt != 4) return error.InputOutput;
-                    },
-                    3 => {
-                        const amt = try self.base.file.?.preadAll(&buffer, file_offset + reloc.offset);
-                        if (amt != 8) return error.InputOutput;
-                    },
-                    else => unreachable,
-                }
-
-                switch (reloc.@"type") {
-                    .got_page, .import_page, .page => {
-                        const source_page = @intCast(i32, source_vaddr >> 12);
-                        const target_page = @intCast(i32, target_vaddr_with_addend >> 12);
-                        const pages = @bitCast(u21, @intCast(i21, target_page - source_page));
-                        var inst = aarch64.Instruction{
-                            .pc_relative_address = mem.bytesToValue(meta.TagPayload(
-                                aarch64.Instruction,
-                                aarch64.Instruction.pc_relative_address,
-                            ), buffer[0..4]),
-                        };
-                        inst.pc_relative_address.immhi = @truncate(u19, pages >> 2);
-                        inst.pc_relative_address.immlo = @truncate(u2, pages);
-                        mem.writeIntLittle(u32, buffer[0..4], inst.toU32());
-                    },
-                    .got_pageoff, .import_pageoff, .pageoff => {
-                        assert(!reloc.pcrel);
-
-                        const narrowed = @truncate(u12, @intCast(u64, target_vaddr_with_addend));
-                        if (isArithmeticOp(buffer[0..4])) {
-                            var inst = aarch64.Instruction{
-                                .add_subtract_immediate = mem.bytesToValue(meta.TagPayload(
-                                    aarch64.Instruction,
-                                    aarch64.Instruction.add_subtract_immediate,
-                                ), buffer[0..4]),
-                            };
-                            inst.add_subtract_immediate.imm12 = narrowed;
-                            mem.writeIntLittle(u32, buffer[0..4], inst.toU32());
-                        } else {
-                            var inst = aarch64.Instruction{
-                                .load_store_register = mem.bytesToValue(meta.TagPayload(
-                                    aarch64.Instruction,
-                                    aarch64.Instruction.load_store_register,
-                                ), buffer[0..4]),
-                            };
-                            const offset: u12 = blk: {
-                                if (inst.load_store_register.size == 0) {
-                                    if (inst.load_store_register.v == 1) {
-                                        // 128-bit SIMD is scaled by 16.
-                                        break :blk @divExact(narrowed, 16);
-                                    }
-                                    // Otherwise, 8-bit SIMD or ldrb.
-                                    break :blk narrowed;
-                                } else {
-                                    const denom: u4 = math.powi(u4, 2, inst.load_store_register.size) catch unreachable;
-                                    break :blk @divExact(narrowed, denom);
-                                }
-                            };
-                            inst.load_store_register.offset = offset;
-                            mem.writeIntLittle(u32, buffer[0..4], inst.toU32());
-                        }
-                    },
-                    .direct => {
-                        assert(!reloc.pcrel);
-                        switch (reloc.length) {
-                            2 => mem.writeIntLittle(
-                                u32,
-                                buffer[0..4],
-                                @truncate(u32, target_vaddr_with_addend + image_base),
-                            ),
-                            3 => mem.writeIntLittle(u64, &buffer, target_vaddr_with_addend + image_base),
-                            else => unreachable,
-                        }
-                    },
-
-                    .got => unreachable,
-                    .import => unreachable,
-                }
-
-                switch (reloc.length) {
-                    2 => try self.base.file.?.pwriteAll(buffer[0..4], file_offset + reloc.offset),
-                    3 => try self.base.file.?.pwriteAll(&buffer, file_offset + reloc.offset),
-                    else => unreachable,
-                }
-            },
-
-            .x86_64, .x86 => {
-                switch (reloc.@"type") {
-                    .got_page => unreachable,
-                    .got_pageoff => unreachable,
-                    .page => unreachable,
-                    .pageoff => unreachable,
-                    .import_page => unreachable,
-                    .import_pageoff => unreachable,
-
-                    .got, .import => {
-                        assert(reloc.pcrel);
-                        const disp = @intCast(i32, target_vaddr_with_addend) - @intCast(i32, source_vaddr) - 4;
-                        try self.base.file.?.pwriteAll(mem.asBytes(&disp), file_offset + reloc.offset);
-                    },
-                    .direct => {
-                        if (reloc.pcrel) {
-                            const disp = @intCast(i32, target_vaddr_with_addend) - @intCast(i32, source_vaddr) - 4;
-                            try self.base.file.?.pwriteAll(mem.asBytes(&disp), file_offset + reloc.offset);
-                        } else switch (self.ptr_width) {
-                            .p32 => try self.base.file.?.pwriteAll(
-                                mem.asBytes(&@intCast(u32, target_vaddr_with_addend + image_base)),
-                                file_offset + reloc.offset,
-                            ),
-                            .p64 => switch (reloc.length) {
-                                2 => try self.base.file.?.pwriteAll(
-                                    mem.asBytes(&@truncate(u32, target_vaddr_with_addend + image_base)),
-                                    file_offset + reloc.offset,
-                                ),
-                                3 => try self.base.file.?.pwriteAll(
-                                    mem.asBytes(&(target_vaddr_with_addend + image_base)),
-                                    file_offset + reloc.offset,
-                                ),
-                                else => unreachable,
-                            },
-                        }
-                    },
-                }
-            },
-
-            else => unreachable, // unhandled target architecture
-        }
+        try reloc.resolve(atom, self);
     }
 }
 
@@ -1312,7 +1106,7 @@ fn updateDeclCode(self: *Coff, decl_index: Module.Decl.Index, code: []const u8, 
         const sym = atom.getSymbolPtr(self);
         try self.setSymbolName(sym, decl_name);
         sym.section_number = @intToEnum(coff.SectionNumber, sect_index + 1);
-        sym.@"type" = .{ .complex_type = complex_type, .base_type = .NULL };
+        sym.type = .{ .complex_type = complex_type, .base_type = .NULL };
 
         const capacity = atom.capacity(self);
         const need_realloc = code.len > capacity or !mem.isAlignedGeneric(u64, sym.value, required_alignment);
@@ -1337,7 +1131,7 @@ fn updateDeclCode(self: *Coff, decl_index: Module.Decl.Index, code: []const u8, 
         const sym = atom.getSymbolPtr(self);
         try self.setSymbolName(sym, decl_name);
         sym.section_number = @intToEnum(coff.SectionNumber, sect_index + 1);
-        sym.@"type" = .{ .complex_type = complex_type, .base_type = .NULL };
+        sym.type = .{ .complex_type = complex_type, .base_type = .NULL };
 
         const vaddr = try self.allocateAtom(atom, code_len, required_alignment);
         errdefer self.freeAtom(atom);
@@ -1513,7 +1307,7 @@ pub fn updateDeclExports(
         try self.setSymbolName(sym, exp.options.name);
         sym.value = decl_sym.value;
         sym.section_number = @intToEnum(coff.SectionNumber, self.text_section_index.? + 1);
-        sym.@"type" = .{ .complex_type = .FUNCTION, .base_type = .NULL };
+        sym.type = .{ .complex_type = .FUNCTION, .base_type = .NULL };
 
         switch (exp.options.linkage) {
             .Strong => {
@@ -1543,7 +1337,7 @@ pub fn deleteExport(self: *Coff, exp: Export) void {
         .name = [_]u8{0} ** 8,
         .value = 0,
         .section_number = .UNDEFINED,
-        .@"type" = .{ .base_type = .NULL, .complex_type = .NULL },
+        .type = .{ .base_type = .NULL, .complex_type = .NULL },
         .storage_class = .NULL,
         .number_of_aux_symbols = 0,
     };
@@ -1671,7 +1465,7 @@ pub fn getDeclVAddr(
     const atom = self.getAtomForSymbol(.{ .sym_index = reloc_info.parent_atom_index, .file = null }).?;
     const target = SymbolWithLoc{ .sym_index = decl.link.coff.sym_index, .file = null };
     try atom.addRelocation(self, .{
-        .@"type" = .direct,
+        .type = .direct,
         .target = target,
         .offset = @intCast(u32, reloc_info.offset),
         .addend = reloc_info.addend,
@@ -1743,7 +1537,7 @@ fn writeBaseRelocations(self: *Coff) !void {
             }
             try gop.value_ptr.append(.{
                 .offset = @intCast(u12, rva - page),
-                .@"type" = .DIR64,
+                .type = .DIR64,
             });
         }
     }
@@ -1761,7 +1555,7 @@ fn writeBaseRelocations(self: *Coff) !void {
         )) {
             try entry.value_ptr.append(.{
                 .offset = 0,
-                .@"type" = .ABSOLUTE,
+                .type = .ABSOLUTE,
             });
         }
 
@@ -2396,9 +2190,4 @@ fn logSections(self: *Coff) void {
             header.pointer_to_raw_data + header.size_of_raw_data,
         });
     }
-}
-
-inline fn isArithmeticOp(inst: *const [4]u8) bool {
-    const group_decode = @truncate(u5, inst[3]);
-    return ((group_decode >> 2) == 4);
 }

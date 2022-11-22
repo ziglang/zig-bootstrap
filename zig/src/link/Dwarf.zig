@@ -104,7 +104,7 @@ pub const DeclState = struct {
     pub fn addExprlocReloc(self: *DeclState, target: u32, offset: u32, is_ptr: bool) !void {
         log.debug("{x}: target sym %{d}, via GOT {}", .{ offset, target, is_ptr });
         try self.exprloc_relocs.append(self.gpa, .{
-            .@"type" = if (is_ptr) .got_load else .direct_load,
+            .type = if (is_ptr) .got_load else .direct_load,
             .target = target,
             .offset = offset,
         });
@@ -132,7 +132,7 @@ pub const DeclState = struct {
             const sym_index = @intCast(u32, self.abbrev_table.items.len);
             try self.abbrev_table.append(self.gpa, .{
                 .atom = atom,
-                .@"type" = ty,
+                .type = ty,
                 .offset = undefined,
             });
             log.debug("%{d}: {}", .{ sym_index, ty.fmtDebug() });
@@ -405,8 +405,11 @@ pub const DeclState = struct {
                     const value: u64 = if (values) |vals| value: {
                         if (vals.count() == 0) break :value @intCast(u64, field_i); // auto-numbered
                         const value = vals.keys()[field_i];
+                        // TODO do not assume a 64bit enum value - could be bigger.
+                        // See https://github.com/ziglang/zig/issues/645
                         var int_buffer: Value.Payload.U64 = undefined;
-                        break :value value.enumToInt(ty, &int_buffer).toUnsignedInt(target);
+                        const field_int_val = value.enumToInt(ty, &int_buffer);
+                        break :value @bitCast(u64, field_int_val.toSignedInt());
                     } else @intCast(u64, field_i);
                     mem.writeInt(u64, dbg_info_buffer.addManyAsArrayAssumeCapacity(8), value, target_endian);
                 }
@@ -561,7 +564,7 @@ pub const DeclState = struct {
 
 pub const AbbrevEntry = struct {
     atom: *const Atom,
-    @"type": Type,
+    type: Type,
     offset: u32,
 };
 
@@ -576,7 +579,7 @@ pub const AbbrevRelocation = struct {
 
 pub const ExprlocRelocation = struct {
     /// Type of the relocation: direct load ref, or GOT load ref (via GOT table)
-    @"type": enum {
+    type: enum {
         direct_load,
         got_load,
     },
@@ -1019,7 +1022,7 @@ pub fn commitDeclState(
         var sym_index: usize = 0;
         while (sym_index < decl_state.abbrev_table.items.len) : (sym_index += 1) {
             const symbol = &decl_state.abbrev_table.items[sym_index];
-            const ty = symbol.@"type";
+            const ty = symbol.type;
             const deferred: bool = blk: {
                 if (ty.isAnyError()) break :blk true;
                 switch (ty.tag()) {
@@ -1043,7 +1046,7 @@ pub fn commitDeclState(
     while (decl_state.abbrev_relocs.popOrNull()) |reloc| {
         if (reloc.target) |target| {
             const symbol = decl_state.abbrev_table.items[target];
-            const ty = symbol.@"type";
+            const ty = symbol.type;
             const deferred: bool = blk: {
                 if (ty.isAnyError()) break :blk true;
                 switch (ty.tag()) {
@@ -1088,7 +1091,7 @@ pub fn commitDeclState(
                 const macho_file = file.cast(File.MachO).?;
                 const d_sym = &macho_file.d_sym.?;
                 try d_sym.relocs.append(d_sym.base.base.allocator, .{
-                    .@"type" = switch (reloc.@"type") {
+                    .type = switch (reloc.type) {
                         .direct_load => .direct_load,
                         .got_load => .got_load,
                     },

@@ -175,12 +175,24 @@ pub fn linkWithLLD(self: *Coff, comp: *Compilation, prog_node: *std.Progress.Nod
         // We will invoke ourselves as a child process to gain access to LLD.
         // This is necessary because LLD does not behave properly as a library -
         // it calls exit() and does not reset all global data between invocations.
-        try argv.appendSlice(&[_][]const u8{ comp.self_exe_path.?, "lld-link" });
+        const linker_command = "lld-link";
+        try argv.appendSlice(&[_][]const u8{ comp.self_exe_path.?, linker_command });
 
         try argv.append("-ERRORLIMIT:0");
         try argv.append("-NOLOGO");
         if (!self.base.options.strip) {
             try argv.append("-DEBUG");
+
+            const out_ext = std.fs.path.extension(full_out_path);
+            const out_pdb = try allocPrint(arena, "{s}.pdb", .{
+                full_out_path[0 .. full_out_path.len - out_ext.len],
+            });
+            try argv.append(try allocPrint(arena, "-PDB:{s}", .{out_pdb}));
+            try argv.append(try allocPrint(arena, "-PDBALTPATH:{s}", .{out_pdb}));
+
+            if (self.base.options.pdb_source_path) |path| {
+                try argv.append(try std.fmt.allocPrint(arena, "-PDBSOURCEPATH:{s}", .{path}));
+            }
         }
         if (self.base.options.lto) {
             switch (self.base.options.optimize_mode) {
@@ -371,7 +383,6 @@ pub fn linkWithLLD(self: *Coff, comp: *Compilation, prog_node: *std.Progress.Nod
                 "-OPT:REF",
                 "-SAFESEH:NO",
                 "-MERGE:.rdata=.data",
-                "-ALIGN:32",
                 "-NODEFAULTLIB",
                 "-SECTION:.xdata,D",
             }),
@@ -545,9 +556,7 @@ pub fn linkWithLLD(self: *Coff, comp: *Compilation, prog_node: *std.Progress.Nod
                 switch (term) {
                     .Exited => |code| {
                         if (code != 0) {
-                            // TODO parse this output and surface with the Compilation API rather than
-                            // directly outputting to stderr here.
-                            std.debug.print("{s}", .{stderr});
+                            comp.lockAndParseLldStderr(linker_command, stderr);
                             return error.LLDReportedFailure;
                         }
                     },

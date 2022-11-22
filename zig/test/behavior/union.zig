@@ -1366,3 +1366,47 @@ test "union field ptr - zero sized field" {
     var u: U = .{ .foo = {} };
     U.bar(&u.foo);
 }
+
+test "packed union in packed struct" {
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+
+    const S = packed struct {
+        nested: packed union {
+            val: usize,
+            foo: u32,
+        },
+        bar: u32,
+
+        fn unpack(self: @This()) usize {
+            return self.nested.foo;
+        }
+    };
+    const a: S = .{ .nested = .{ .foo = 123 }, .bar = 5 };
+    try expect(a.unpack() == 123);
+}
+
+test "Namespace-like union" {
+    const DepType = enum {
+        git,
+        http,
+        const DepType = @This();
+        const Version = union(DepType) {
+            git: Git,
+            http: void,
+            const Git = enum {
+                branch,
+                tag,
+                commit,
+                fn frozen(self: Git) bool {
+                    return self == .tag;
+                }
+            };
+        };
+    };
+    var a: DepType.Version.Git = .tag;
+    try expect(a.frozen());
+}

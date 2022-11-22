@@ -827,7 +827,7 @@ const Context = struct {
     }
 
     fn addIdentifier(c: *Context, bytes: []const u8) Allocator.Error!TokenIndex {
-        if (@import("../AstGen.zig").isPrimitive(bytes))
+        if (std.zig.primitives.isPrimitive(bytes))
             return c.addTokenFmt(.identifier, "@\"{s}\"", .{bytes});
         return c.addTokenFmt(.identifier, "{s}", .{std.zig.fmtId(bytes)});
     }
@@ -1139,7 +1139,7 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
         .string_literal => {
             const payload = node.castTag(.string_literal).?.data;
             return c.addNode(.{
-                .tag = .identifier,
+                .tag = .string_literal,
                 .main_token = try c.addToken(.string_literal, payload),
                 .data = undefined,
             });
@@ -1147,7 +1147,7 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
         .char_literal => {
             const payload = node.castTag(.char_literal).?.data;
             return c.addNode(.{
-                .tag = .identifier,
+                .tag = .char_literal,
                 .main_token = try c.addToken(.char_literal, payload),
                 .data = undefined,
             });

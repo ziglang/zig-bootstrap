@@ -941,8 +941,8 @@ pub const Value = extern union {
             .comptime_int_type => Type.initTag(.comptime_int),
             .comptime_float_type => Type.initTag(.comptime_float),
             .noreturn_type => Type.initTag(.noreturn),
-            .null_type => Type.initTag(.@"null"),
-            .undefined_type => Type.initTag(.@"undefined"),
+            .null_type => Type.initTag(.null),
+            .undefined_type => Type.initTag(.undefined),
             .fn_noreturn_no_args_type => Type.initTag(.fn_noreturn_no_args),
             .fn_void_no_args_type => Type.initTag(.fn_void_no_args),
             .fn_naked_noreturn_no_args_type => Type.initTag(.fn_naked_noreturn_no_args),
@@ -1055,6 +1055,40 @@ pub const Value = extern union {
         }
     }
 
+    pub fn tagName(val: Value, ty: Type, mod: *Module) []const u8 {
+        if (ty.zigTypeTag() == .Union) return val.unionTag().tagName(ty.unionTagTypeHypothetical(), mod);
+
+        const field_index = switch (val.tag()) {
+            .enum_field_index => val.castTag(.enum_field_index).?.data,
+            .the_only_possible_value => blk: {
+                assert(ty.enumFieldCount() == 1);
+                break :blk 0;
+            },
+            .enum_literal => return val.castTag(.enum_literal).?.data,
+            else => field_index: {
+                const values = switch (ty.tag()) {
+                    .enum_full, .enum_nonexhaustive => ty.cast(Type.Payload.EnumFull).?.data.values,
+                    .enum_numbered => ty.castTag(.enum_numbered).?.data.values,
+                    .enum_simple => Module.EnumFull.ValueMap{},
+                    else => unreachable,
+                };
+                break :field_index if (values.entries.len == 0)
+                    // auto-numbered enum
+                    @intCast(u32, val.toUnsignedInt(mod.getTarget()))
+                else
+                    @intCast(u32, values.getIndexContext(val, .{ .ty = ty, .mod = mod }).?);
+            },
+        };
+
+        const fields = switch (ty.tag()) {
+            .enum_full, .enum_nonexhaustive => ty.cast(Type.Payload.EnumFull).?.data.fields,
+            .enum_numbered => ty.castTag(.enum_numbered).?.data.fields,
+            .enum_simple => ty.castTag(.enum_simple).?.data.fields,
+            else => unreachable,
+        };
+        return fields.keys()[field_index];
+    }
+
     /// Asserts the value is an integer.
     pub fn toBigInt(val: Value, space: *BigIntSpace, target: Target) BigIntConst {
         return val.toBigIntAdvanced(space, target, null) catch unreachable;
@@ -1065,7 +1099,7 @@ pub const Value = extern union {
         val: Value,
         space: *BigIntSpace,
         target: Target,
-        sema_kit: ?Module.WipAnalysis,
+        opt_sema: ?*Sema,
     ) Module.CompileError!BigIntConst {
         switch (val.tag()) {
             .null_value,
@@ -1087,16 +1121,16 @@ pub const Value = extern union {
 
             .lazy_align => {
                 const ty = val.castTag(.lazy_align).?.data;
-                if (sema_kit) |sk| {
-                    try sk.sema.resolveTypeLayout(sk.block, sk.src, ty);
+                if (opt_sema) |sema| {
+                    try sema.resolveTypeLayout(ty);
                 }
                 const x = ty.abiAlignment(target);
                 return BigIntMutable.init(&space.limbs, x).toConst();
             },
             .lazy_size => {
                 const ty = val.castTag(.lazy_size).?.data;
-                if (sema_kit) |sk| {
-                    try sk.sema.resolveTypeLayout(sk.block, sk.src, ty);
+                if (opt_sema) |sema| {
+                    try sema.resolveTypeLayout(ty);
                 }
                 const x = ty.abiSize(target);
                 return BigIntMutable.init(&space.limbs, x).toConst();
@@ -1104,7 +1138,7 @@ pub const Value = extern union {
 
             .elem_ptr => {
                 const elem_ptr = val.castTag(.elem_ptr).?.data;
-                const array_addr = (try elem_ptr.array_ptr.getUnsignedIntAdvanced(target, sema_kit)).?;
+                const array_addr = (try elem_ptr.array_ptr.getUnsignedIntAdvanced(target, opt_sema)).?;
                 const elem_size = elem_ptr.elem_ty.abiSize(target);
                 const new_addr = array_addr + elem_size * elem_ptr.index;
                 return BigIntMutable.init(&space.limbs, new_addr).toConst();
@@ -1122,7 +1156,7 @@ pub const Value = extern union {
 
     /// If the value fits in a u64, return it, otherwise null.
     /// Asserts not undefined.
-    pub fn getUnsignedIntAdvanced(val: Value, target: Target, sema_kit: ?Module.WipAnalysis) !?u64 {
+    pub fn getUnsignedIntAdvanced(val: Value, target: Target, opt_sema: ?*Sema) !?u64 {
         switch (val.tag()) {
             .zero,
             .bool_false,
@@ -1142,16 +1176,16 @@ pub const Value = extern union {
 
             .lazy_align => {
                 const ty = val.castTag(.lazy_align).?.data;
-                if (sema_kit) |sk| {
-                    return (try ty.abiAlignmentAdvanced(target, .{ .sema_kit = sk })).scalar;
+                if (opt_sema) |sema| {
+                    return (try ty.abiAlignmentAdvanced(target, .{ .sema = sema })).scalar;
                 } else {
                     return ty.abiAlignment(target);
                 }
             },
             .lazy_size => {
                 const ty = val.castTag(.lazy_size).?.data;
-                if (sema_kit) |sk| {
-                    return (try ty.abiSizeAdvanced(target, .{ .sema_kit = sk })).scalar;
+                if (opt_sema) |sema| {
+                    return (try ty.abiSizeAdvanced(target, .{ .sema = sema })).scalar;
                 } else {
                     return ty.abiSize(target);
                 }
@@ -1403,12 +1437,12 @@ pub const Value = extern union {
         const target = mod.getTarget();
         const endian = target.cpu.arch.endian();
         switch (ty.zigTypeTag()) {
-            .Void => return Value.@"void",
+            .Void => return Value.void,
             .Bool => {
                 if (buffer[0] == 0) {
-                    return Value.@"false";
+                    return Value.false;
                 } else {
-                    return Value.@"true";
+                    return Value.true;
                 }
             },
             .Int, .Enum => {
@@ -1508,16 +1542,16 @@ pub const Value = extern union {
         const target = mod.getTarget();
         const endian = target.cpu.arch.endian();
         switch (ty.zigTypeTag()) {
-            .Void => return Value.@"void",
+            .Void => return Value.void,
             .Bool => {
                 const byte = switch (endian) {
                     .Big => buffer[buffer.len - bit_offset / 8 - 1],
                     .Little => buffer[bit_offset / 8],
                 };
                 if (((byte >> @intCast(u3, bit_offset % 8)) & 1) == 0) {
-                    return Value.@"false";
+                    return Value.false;
                 } else {
-                    return Value.@"true";
+                    return Value.true;
                 }
             },
             .Int, .Enum => {
@@ -1852,7 +1886,7 @@ pub const Value = extern union {
 
     pub fn orderAgainstZeroAdvanced(
         lhs: Value,
-        sema_kit: ?Module.WipAnalysis,
+        opt_sema: ?*Sema,
     ) Module.CompileError!std.math.Order {
         return switch (lhs.tag()) {
             .zero,
@@ -1877,7 +1911,11 @@ pub const Value = extern union {
 
             .lazy_align => {
                 const ty = lhs.castTag(.lazy_align).?.data;
-                if (try ty.hasRuntimeBitsAdvanced(false, sema_kit)) {
+                const strat: Type.AbiAlignmentAdvancedStrat = if (opt_sema) |sema| .{ .sema = sema } else .eager;
+                if (ty.hasRuntimeBitsAdvanced(false, strat) catch |err| switch (err) {
+                    error.NeedLazy => unreachable,
+                    else => |e| return e,
+                }) {
                     return .gt;
                 } else {
                     return .eq;
@@ -1885,7 +1923,11 @@ pub const Value = extern union {
             },
             .lazy_size => {
                 const ty = lhs.castTag(.lazy_size).?.data;
-                if (try ty.hasRuntimeBitsAdvanced(false, sema_kit)) {
+                const strat: Type.AbiAlignmentAdvancedStrat = if (opt_sema) |sema| .{ .sema = sema } else .eager;
+                if (ty.hasRuntimeBitsAdvanced(false, strat) catch |err| switch (err) {
+                    error.NeedLazy => unreachable,
+                    else => |e| return e,
+                }) {
                     return .gt;
                 } else {
                     return .eq;
@@ -1900,7 +1942,7 @@ pub const Value = extern union {
 
             .elem_ptr => {
                 const elem_ptr = lhs.castTag(.elem_ptr).?.data;
-                switch (try elem_ptr.array_ptr.orderAgainstZeroAdvanced(sema_kit)) {
+                switch (try elem_ptr.array_ptr.orderAgainstZeroAdvanced(opt_sema)) {
                     .lt => unreachable,
                     .gt => return .gt,
                     .eq => {
@@ -1923,12 +1965,12 @@ pub const Value = extern union {
     }
 
     /// Asserts the value is comparable.
-    /// If sema_kit is null then this function asserts things are resolved and cannot fail.
-    pub fn orderAdvanced(lhs: Value, rhs: Value, target: Target, sema_kit: ?Module.WipAnalysis) !std.math.Order {
+    /// If opt_sema is null then this function asserts things are resolved and cannot fail.
+    pub fn orderAdvanced(lhs: Value, rhs: Value, target: Target, opt_sema: ?*Sema) !std.math.Order {
         const lhs_tag = lhs.tag();
         const rhs_tag = rhs.tag();
-        const lhs_against_zero = try lhs.orderAgainstZeroAdvanced(sema_kit);
-        const rhs_against_zero = try rhs.orderAgainstZeroAdvanced(sema_kit);
+        const lhs_against_zero = try lhs.orderAgainstZeroAdvanced(opt_sema);
+        const rhs_against_zero = try rhs.orderAgainstZeroAdvanced(opt_sema);
         switch (lhs_against_zero) {
             .lt => if (rhs_against_zero != .lt) return .lt,
             .eq => return rhs_against_zero.invert(),
@@ -1962,8 +2004,8 @@ pub const Value = extern union {
 
         var lhs_bigint_space: BigIntSpace = undefined;
         var rhs_bigint_space: BigIntSpace = undefined;
-        const lhs_bigint = try lhs.toBigIntAdvanced(&lhs_bigint_space, target, sema_kit);
-        const rhs_bigint = try rhs.toBigIntAdvanced(&rhs_bigint_space, target, sema_kit);
+        const lhs_bigint = try lhs.toBigIntAdvanced(&lhs_bigint_space, target, opt_sema);
+        const rhs_bigint = try rhs.toBigIntAdvanced(&rhs_bigint_space, target, opt_sema);
         return lhs_bigint.order(rhs_bigint);
     }
 
@@ -1978,7 +2020,7 @@ pub const Value = extern union {
         op: std.math.CompareOperator,
         rhs: Value,
         target: Target,
-        sema_kit: ?Module.WipAnalysis,
+        opt_sema: ?*Sema,
     ) !bool {
         if (lhs.pointerDecl()) |lhs_decl| {
             if (rhs.pointerDecl()) |rhs_decl| {
@@ -2001,12 +2043,12 @@ pub const Value = extern union {
                 else => {},
             }
         }
-        return (try orderAdvanced(lhs, rhs, target, sema_kit)).compare(op);
+        return (try orderAdvanced(lhs, rhs, target, opt_sema)).compare(op);
     }
 
     /// Asserts the values are comparable. Both operands have type `ty`.
-    /// Vector results will be reduced with AND.
-    pub fn compare(lhs: Value, op: std.math.CompareOperator, rhs: Value, ty: Type, mod: *Module) bool {
+    /// For vectors, returns true if comparison is true for ALL elements.
+    pub fn compareAll(lhs: Value, op: std.math.CompareOperator, rhs: Value, ty: Type, mod: *Module) bool {
         if (ty.zigTypeTag() == .Vector) {
             var i: usize = 0;
             while (i < ty.vectorLen()) : (i += 1) {
@@ -2035,32 +2077,43 @@ pub const Value = extern union {
     }
 
     /// Asserts the value is comparable.
-    /// Vector results will be reduced with AND.
-    pub fn compareWithZero(lhs: Value, op: std.math.CompareOperator) bool {
-        return compareWithZeroAdvanced(lhs, op, null) catch unreachable;
+    /// For vectors, returns true if comparison is true for ALL elements.
+    ///
+    /// Note that `!compareAllWithZero(.eq, ...) != compareAllWithZero(.neq, ...)`
+    pub fn compareAllWithZero(lhs: Value, op: std.math.CompareOperator) bool {
+        return compareAllWithZeroAdvanced(lhs, op, null) catch unreachable;
     }
 
-    pub fn compareWithZeroAdvanced(
+    pub fn compareAllWithZeroAdvanced(
         lhs: Value,
         op: std.math.CompareOperator,
-        sema_kit: ?Module.WipAnalysis,
+        opt_sema: ?*Sema,
     ) Module.CompileError!bool {
+        if (lhs.isInf()) {
+            switch (op) {
+                .neq => return true,
+                .eq => return false,
+                .gt, .gte => return !lhs.isNegativeInf(),
+                .lt, .lte => return lhs.isNegativeInf(),
+            }
+        }
+
         switch (lhs.tag()) {
-            .repeated => return lhs.castTag(.repeated).?.data.compareWithZeroAdvanced(op, sema_kit),
+            .repeated => return lhs.castTag(.repeated).?.data.compareAllWithZeroAdvanced(op, opt_sema),
             .aggregate => {
                 for (lhs.castTag(.aggregate).?.data) |elem_val| {
-                    if (!(try elem_val.compareWithZeroAdvanced(op, sema_kit))) return false;
+                    if (!(try elem_val.compareAllWithZeroAdvanced(op, opt_sema))) return false;
                 }
                 return true;
             },
-            .float_16 => if (std.math.isNan(lhs.castTag(.float_16).?.data)) return op != .neq,
-            .float_32 => if (std.math.isNan(lhs.castTag(.float_32).?.data)) return op != .neq,
-            .float_64 => if (std.math.isNan(lhs.castTag(.float_64).?.data)) return op != .neq,
-            .float_80 => if (std.math.isNan(lhs.castTag(.float_80).?.data)) return op != .neq,
-            .float_128 => if (std.math.isNan(lhs.castTag(.float_128).?.data)) return op != .neq,
+            .float_16 => if (std.math.isNan(lhs.castTag(.float_16).?.data)) return op == .neq,
+            .float_32 => if (std.math.isNan(lhs.castTag(.float_32).?.data)) return op == .neq,
+            .float_64 => if (std.math.isNan(lhs.castTag(.float_64).?.data)) return op == .neq,
+            .float_80 => if (std.math.isNan(lhs.castTag(.float_80).?.data)) return op == .neq,
+            .float_128 => if (std.math.isNan(lhs.castTag(.float_128).?.data)) return op == .neq,
             else => {},
         }
-        return (try orderAgainstZeroAdvanced(lhs, sema_kit)).compare(op);
+        return (try orderAgainstZeroAdvanced(lhs, opt_sema)).compare(op);
     }
 
     pub fn eql(a: Value, b: Value, ty: Type, mod: *Module) bool {
@@ -2075,14 +2128,14 @@ pub const Value = extern union {
     /// for `a`. This function must act *as if* `a` has been coerced to `ty`. This complication
     /// is required in order to make generic function instantiation efficient - specifically
     /// the insertion into the monomorphized function table.
-    /// If `null` is provided for `sema_kit` then it is guaranteed no error will be returned.
+    /// If `null` is provided for `opt_sema` then it is guaranteed no error will be returned.
     pub fn eqlAdvanced(
         a: Value,
         a_ty: Type,
         b: Value,
         ty: Type,
         mod: *Module,
-        sema_kit: ?Module.WipAnalysis,
+        opt_sema: ?*Sema,
     ) Module.CompileError!bool {
         const target = mod.getTarget();
         const a_tag = a.tag();
@@ -2105,33 +2158,33 @@ pub const Value = extern union {
                 const b_payload = b.castTag(.opt_payload).?.data;
                 var buffer: Type.Payload.ElemType = undefined;
                 const payload_ty = ty.optionalChild(&buffer);
-                return eqlAdvanced(a_payload, payload_ty, b_payload, payload_ty, mod, sema_kit);
+                return eqlAdvanced(a_payload, payload_ty, b_payload, payload_ty, mod, opt_sema);
             },
             .slice => {
                 const a_payload = a.castTag(.slice).?.data;
                 const b_payload = b.castTag(.slice).?.data;
-                if (!(try eqlAdvanced(a_payload.len, Type.usize, b_payload.len, Type.usize, mod, sema_kit))) {
+                if (!(try eqlAdvanced(a_payload.len, Type.usize, b_payload.len, Type.usize, mod, opt_sema))) {
                     return false;
                 }
 
                 var ptr_buf: Type.SlicePtrFieldTypeBuffer = undefined;
                 const ptr_ty = ty.slicePtrFieldType(&ptr_buf);
 
-                return eqlAdvanced(a_payload.ptr, ptr_ty, b_payload.ptr, ptr_ty, mod, sema_kit);
+                return eqlAdvanced(a_payload.ptr, ptr_ty, b_payload.ptr, ptr_ty, mod, opt_sema);
             },
             .elem_ptr => {
                 const a_payload = a.castTag(.elem_ptr).?.data;
                 const b_payload = b.castTag(.elem_ptr).?.data;
                 if (a_payload.index != b_payload.index) return false;
 
-                return eqlAdvanced(a_payload.array_ptr, ty, b_payload.array_ptr, ty, mod, sema_kit);
+                return eqlAdvanced(a_payload.array_ptr, ty, b_payload.array_ptr, ty, mod, opt_sema);
             },
             .field_ptr => {
                 const a_payload = a.castTag(.field_ptr).?.data;
                 const b_payload = b.castTag(.field_ptr).?.data;
                 if (a_payload.field_index != b_payload.field_index) return false;
 
-                return eqlAdvanced(a_payload.container_ptr, ty, b_payload.container_ptr, ty, mod, sema_kit);
+                return eqlAdvanced(a_payload.container_ptr, ty, b_payload.container_ptr, ty, mod, opt_sema);
             },
             .@"error" => {
                 const a_name = a.castTag(.@"error").?.data.name;
@@ -2142,7 +2195,7 @@ pub const Value = extern union {
                 const a_payload = a.castTag(.eu_payload).?.data;
                 const b_payload = b.castTag(.eu_payload).?.data;
                 const payload_ty = ty.errorUnionPayload();
-                return eqlAdvanced(a_payload, payload_ty, b_payload, payload_ty, mod, sema_kit);
+                return eqlAdvanced(a_payload, payload_ty, b_payload, payload_ty, mod, opt_sema);
             },
             .eu_payload_ptr => @panic("TODO: Implement more pointer eql cases"),
             .opt_payload_ptr => @panic("TODO: Implement more pointer eql cases"),
@@ -2160,7 +2213,7 @@ pub const Value = extern union {
                     const types = ty.tupleFields().types;
                     assert(types.len == a_field_vals.len);
                     for (types) |field_ty, i| {
-                        if (!(try eqlAdvanced(a_field_vals[i], field_ty, b_field_vals[i], field_ty, mod, sema_kit))) {
+                        if (!(try eqlAdvanced(a_field_vals[i], field_ty, b_field_vals[i], field_ty, mod, opt_sema))) {
                             return false;
                         }
                     }
@@ -2171,7 +2224,7 @@ pub const Value = extern union {
                     const fields = ty.structFields().values();
                     assert(fields.len == a_field_vals.len);
                     for (fields) |field, i| {
-                        if (!(try eqlAdvanced(a_field_vals[i], field.ty, b_field_vals[i], field.ty, mod, sema_kit))) {
+                        if (!(try eqlAdvanced(a_field_vals[i], field.ty, b_field_vals[i], field.ty, mod, opt_sema))) {
                             return false;
                         }
                     }
@@ -2182,7 +2235,7 @@ pub const Value = extern union {
                 for (a_field_vals) |a_elem, i| {
                     const b_elem = b_field_vals[i];
 
-                    if (!(try eqlAdvanced(a_elem, elem_ty, b_elem, elem_ty, mod, sema_kit))) {
+                    if (!(try eqlAdvanced(a_elem, elem_ty, b_elem, elem_ty, mod, opt_sema))) {
                         return false;
                     }
                 }
@@ -2194,7 +2247,7 @@ pub const Value = extern union {
                 switch (ty.containerLayout()) {
                     .Packed, .Extern => {
                         const tag_ty = ty.unionTagTypeHypothetical();
-                        if (!(try eqlAdvanced(a_union.tag, tag_ty, b_union.tag, tag_ty, mod, sema_kit))) {
+                        if (!(try eqlAdvanced(a_union.tag, tag_ty, b_union.tag, tag_ty, mod, opt_sema))) {
                             // In this case, we must disregard mismatching tags and compare
                             // based on the in-memory bytes of the payloads.
                             @panic("TODO comptime comparison of extern union values with mismatching tags");
@@ -2202,16 +2255,16 @@ pub const Value = extern union {
                     },
                     .Auto => {
                         const tag_ty = ty.unionTagTypeHypothetical();
-                        if (!(try eqlAdvanced(a_union.tag, tag_ty, b_union.tag, tag_ty, mod, sema_kit))) {
+                        if (!(try eqlAdvanced(a_union.tag, tag_ty, b_union.tag, tag_ty, mod, opt_sema))) {
                             return false;
                         }
                     },
                 }
                 const active_field_ty = ty.unionFieldType(a_union.tag, mod);
-                return eqlAdvanced(a_union.val, active_field_ty, b_union.val, active_field_ty, mod, sema_kit);
+                return eqlAdvanced(a_union.val, active_field_ty, b_union.val, active_field_ty, mod, opt_sema);
             },
             else => {},
-        } else if (a_tag == .null_value or b_tag == .null_value) {
+        } else if (b_tag == .null_value or b_tag == .@"error") {
             return false;
         } else if (a_tag == .undef or b_tag == .undef) {
             return false;
@@ -2242,7 +2295,7 @@ pub const Value = extern union {
                 const b_val = b.enumToInt(ty, &buf_b);
                 var buf_ty: Type.Payload.Bits = undefined;
                 const int_ty = ty.intTagType(&buf_ty);
-                return eqlAdvanced(a_val, int_ty, b_val, int_ty, mod, sema_kit);
+                return eqlAdvanced(a_val, int_ty, b_val, int_ty, mod, opt_sema);
             },
             .Array, .Vector => {
                 const len = ty.arrayLen();
@@ -2253,7 +2306,7 @@ pub const Value = extern union {
                 while (i < len) : (i += 1) {
                     const a_elem = elemValueBuffer(a, mod, i, &a_buf);
                     const b_elem = elemValueBuffer(b, mod, i, &b_buf);
-                    if (!(try eqlAdvanced(a_elem, elem_ty, b_elem, elem_ty, mod, sema_kit))) {
+                    if (!(try eqlAdvanced(a_elem, elem_ty, b_elem, elem_ty, mod, opt_sema))) {
                         return false;
                     }
                 }
@@ -2277,7 +2330,7 @@ pub const Value = extern union {
                         .One => a,
                         else => unreachable,
                     };
-                    return try eqlAdvanced(a_ptr, ptr_ty, b.slicePtr(), ptr_ty, mod, sema_kit);
+                    return try eqlAdvanced(a_ptr, ptr_ty, b.slicePtr(), ptr_ty, mod, opt_sema);
                 },
                 .Many, .C, .One => {},
             },
@@ -2310,7 +2363,7 @@ pub const Value = extern union {
                     const field_tag = Value.initPayload(&field_tag_buf.base);
                     const tag_matches = tag_and_val.tag.eql(field_tag, union_obj.tag_ty, mod);
                     if (!tag_matches) return false;
-                    return eqlAdvanced(tag_and_val.val, union_obj.tag_ty, tuple.values[0], tuple.types[0], mod, sema_kit);
+                    return eqlAdvanced(tag_and_val.val, union_obj.tag_ty, tuple.values[0], tuple.types[0], mod, opt_sema);
                 }
                 return false;
             },
@@ -2335,19 +2388,26 @@ pub const Value = extern union {
                 if (a_nan) return true;
                 return a_float == b_float;
             },
-            .Optional => {
-                if (a.tag() != .opt_payload and b.tag() == .opt_payload) {
-                    var buffer: Payload.SubValue = .{
-                        .base = .{ .tag = .opt_payload },
-                        .data = a,
-                    };
-                    const opt_val = Value.initPayload(&buffer.base);
-                    return eqlAdvanced(opt_val, ty, b, ty, mod, sema_kit);
-                }
+            .Optional => if (a_tag != .null_value and b_tag == .opt_payload) {
+                var sub_pl: Payload.SubValue = .{
+                    .base = .{ .tag = b.tag() },
+                    .data = a,
+                };
+                const sub_val = Value.initPayload(&sub_pl.base);
+                return eqlAdvanced(sub_val, ty, b, ty, mod, opt_sema);
+            },
+            .ErrorUnion => if (a_tag != .@"error" and b_tag == .eu_payload) {
+                var sub_pl: Payload.SubValue = .{
+                    .base = .{ .tag = b.tag() },
+                    .data = a,
+                };
+                const sub_val = Value.initPayload(&sub_pl.base);
+                return eqlAdvanced(sub_val, ty, b, ty, mod, opt_sema);
             },
             else => {},
         }
-        return (try orderAdvanced(a, b, target, sema_kit)).compare(.eq);
+        if (a_tag == .null_value or a_tag == .@"error") return false;
+        return (try orderAdvanced(a, b, target, opt_sema)).compare(.eq);
     }
 
     /// This function is used by hash maps and so treats floating-point NaNs as equal
@@ -2436,7 +2496,7 @@ pub const Value = extern union {
                     const sub_ty = ty.optionalChild(&buffer);
                     sub_val.hash(sub_ty, hasher, mod);
                 } else {
-                    std.hash.autoHash(hasher, false); // non-null
+                    std.hash.autoHash(hasher, false); // null
                 }
             },
             .ErrorUnion => {
@@ -2474,8 +2534,8 @@ pub const Value = extern union {
                 union_obj.val.hash(active_field_ty, hasher, mod);
             },
             .Fn => {
-                // Note that his hashes the *Fn/*ExternFn rather than the *Decl. This is
-                // to differentiate function bodies from function pointers.
+                // Note that this hashes the *Fn/*ExternFn rather than the *Decl.
+                // This is to differentiate function bodies from function pointers.
                 // This is currently redundant since we already hash the zig type tag
                 // at the top of this function.
                 if (val.castTag(.function)) |func| {
@@ -2494,6 +2554,64 @@ pub const Value = extern union {
                 const bytes = val.castTag(.enum_literal).?.data;
                 hasher.update(bytes);
             },
+        }
+    }
+
+    /// This is a more conservative hash function that produces equal hashes for values
+    /// that can coerce into each other.
+    /// This function is used by hash maps and so treats floating-point NaNs as equal
+    /// to each other, and not equal to other floating-point values.
+    pub fn hashUncoerced(val: Value, ty: Type, hasher: *std.hash.Wyhash, mod: *Module) void {
+        if (val.isUndef()) return;
+        // The value is runtime-known and shouldn't affect the hash.
+        if (val.tag() == .runtime_value) return;
+
+        switch (ty.zigTypeTag()) {
+            .BoundFn => unreachable, // TODO remove this from the language
+            .Opaque => unreachable, // Cannot hash opaque types
+            .Void,
+            .NoReturn,
+            .Undefined,
+            .Null,
+            .Struct, // It sure would be nice to do something clever with structs.
+            => |zig_type_tag| std.hash.autoHash(hasher, zig_type_tag),
+            .Type => {
+                var buf: ToTypeBuffer = undefined;
+                val.toType(&buf).hashWithHasher(hasher, mod);
+            },
+            .Float, .ComptimeFloat => std.hash.autoHash(hasher, @bitCast(u128, val.toFloat(f128))),
+            .Bool, .Int, .ComptimeInt, .Pointer, .Fn => switch (val.tag()) {
+                .slice => val.castTag(.slice).?.data.ptr.hashPtr(hasher, mod.getTarget()),
+                else => val.hashPtr(hasher, mod.getTarget()),
+            },
+            .Array, .Vector => {
+                const len = ty.arrayLen();
+                const elem_ty = ty.childType();
+                var index: usize = 0;
+                var elem_value_buf: ElemValueBuffer = undefined;
+                while (index < len) : (index += 1) {
+                    const elem_val = val.elemValueBuffer(mod, index, &elem_value_buf);
+                    elem_val.hashUncoerced(elem_ty, hasher, mod);
+                }
+            },
+            .Optional => if (val.castTag(.opt_payload)) |payload| {
+                var buf: Type.Payload.ElemType = undefined;
+                const child_ty = ty.optionalChild(&buf);
+                payload.data.hashUncoerced(child_ty, hasher, mod);
+            } else std.hash.autoHash(hasher, std.builtin.TypeId.Null),
+            .ErrorSet, .ErrorUnion => if (val.getError()) |err| hasher.update(err) else {
+                const pl_ty = ty.errorUnionPayload();
+                val.castTag(.eu_payload).?.data.hashUncoerced(pl_ty, hasher, mod);
+            },
+            .Enum, .EnumLiteral, .Union => {
+                hasher.update(val.tagName(ty, mod));
+                if (val.cast(Payload.Union)) |union_obj| {
+                    const active_field_ty = ty.unionFieldType(union_obj.data.tag, mod);
+                    union_obj.data.val.hashUncoerced(active_field_ty, hasher, mod);
+                } else std.hash.autoHash(hasher, std.builtin.TypeId.Void);
+            },
+            .Frame => @panic("TODO implement hashing frame values"),
+            .AnyFrame => @panic("TODO implement hashing anyframe values"),
         }
     }
 
@@ -2806,6 +2924,29 @@ pub const Value = extern union {
         };
     }
 
+    pub fn isPtrToThreadLocal(val: Value, mod: *Module) bool {
+        return switch (val.tag()) {
+            .variable => false,
+            else => val.isPtrToThreadLocalInner(mod),
+        };
+    }
+
+    fn isPtrToThreadLocalInner(val: Value, mod: *Module) bool {
+        return switch (val.tag()) {
+            .slice => val.castTag(.slice).?.data.ptr.isPtrToThreadLocalInner(mod),
+            .comptime_field_ptr => val.castTag(.comptime_field_ptr).?.data.field_val.isPtrToThreadLocalInner(mod),
+            .elem_ptr => val.castTag(.elem_ptr).?.data.array_ptr.isPtrToThreadLocalInner(mod),
+            .field_ptr => val.castTag(.field_ptr).?.data.container_ptr.isPtrToThreadLocalInner(mod),
+            .eu_payload_ptr => val.castTag(.eu_payload_ptr).?.data.container_ptr.isPtrToThreadLocalInner(mod),
+            .opt_payload_ptr => val.castTag(.opt_payload_ptr).?.data.container_ptr.isPtrToThreadLocalInner(mod),
+            .decl_ref => mod.declPtr(val.castTag(.decl_ref).?.data).val.isPtrToThreadLocalInner(mod),
+            .decl_ref_mut => mod.declPtr(val.castTag(.decl_ref_mut).?.data.decl_index).val.isPtrToThreadLocalInner(mod),
+
+            .variable => val.castTag(.variable).?.data.is_threadlocal,
+            else => false,
+        };
+    }
+
     // Asserts that the provided start/end are in-bounds.
     pub fn sliceArray(
         val: Value,
@@ -2959,7 +3100,7 @@ pub const Value = extern union {
             .int_i64,
             .int_big_positive,
             .int_big_negative,
-            => compareWithZero(self, .eq),
+            => compareAllWithZero(self, .eq),
 
             .undef => unreachable,
             .unreachable_value => unreachable,
@@ -3037,18 +3178,18 @@ pub const Value = extern union {
         };
     }
 
-    pub fn intToFloatAdvanced(val: Value, arena: Allocator, int_ty: Type, float_ty: Type, target: Target, sema_kit: ?Module.WipAnalysis) !Value {
+    pub fn intToFloatAdvanced(val: Value, arena: Allocator, int_ty: Type, float_ty: Type, target: Target, opt_sema: ?*Sema) !Value {
         if (int_ty.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, int_ty.vectorLen());
             for (result_data) |*scalar, i| {
-                scalar.* = try intToFloatScalar(val.indexVectorlike(i), arena, float_ty.scalarType(), target, sema_kit);
+                scalar.* = try intToFloatScalar(val.indexVectorlike(i), arena, float_ty.scalarType(), target, opt_sema);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
-        return intToFloatScalar(val, arena, float_ty, target, sema_kit);
+        return intToFloatScalar(val, arena, float_ty, target, opt_sema);
     }
 
-    pub fn intToFloatScalar(val: Value, arena: Allocator, float_ty: Type, target: Target, sema_kit: ?Module.WipAnalysis) !Value {
+    pub fn intToFloatScalar(val: Value, arena: Allocator, float_ty: Type, target: Target, opt_sema: ?*Sema) !Value {
         switch (val.tag()) {
             .undef, .zero, .one => return val,
             .the_only_possible_value => return Value.initTag(.zero), // for i0, u0
@@ -3070,16 +3211,16 @@ pub const Value = extern union {
             },
             .lazy_align => {
                 const ty = val.castTag(.lazy_align).?.data;
-                if (sema_kit) |sk| {
-                    return intToFloatInner((try ty.abiAlignmentAdvanced(target, .{ .sema_kit = sk })).scalar, arena, float_ty, target);
+                if (opt_sema) |sema| {
+                    return intToFloatInner((try ty.abiAlignmentAdvanced(target, .{ .sema = sema })).scalar, arena, float_ty, target);
                 } else {
                     return intToFloatInner(ty.abiAlignment(target), arena, float_ty, target);
                 }
             },
             .lazy_size => {
                 const ty = val.castTag(.lazy_size).?.data;
-                if (sema_kit) |sk| {
-                    return intToFloatInner((try ty.abiSizeAdvanced(target, .{ .sema_kit = sk })).scalar, arena, float_ty, target);
+                if (opt_sema) |sema| {
+                    return intToFloatInner((try ty.abiSizeAdvanced(target, .{ .sema = sema })).scalar, arena, float_ty, target);
                 } else {
                     return intToFloatInner(ty.abiSize(target), arena, float_ty, target);
                 }
@@ -3689,6 +3830,17 @@ pub const Value = extern union {
             .float_64 => std.math.isInf(val.castTag(.float_64).?.data),
             .float_80 => std.math.isInf(val.castTag(.float_80).?.data),
             .float_128 => std.math.isInf(val.castTag(.float_128).?.data),
+            else => false,
+        };
+    }
+
+    pub fn isNegativeInf(val: Value) bool {
+        return switch (val.tag()) {
+            .float_16 => std.math.isNegativeInf(val.castTag(.float_16).?.data),
+            .float_32 => std.math.isNegativeInf(val.castTag(.float_32).?.data),
+            .float_64 => std.math.isNegativeInf(val.castTag(.float_64).?.data),
+            .float_80 => std.math.isNegativeInf(val.castTag(.float_80).?.data),
+            .float_128 => std.math.isNegativeInf(val.castTag(.float_128).?.data),
             else => false,
         };
     }
@@ -5155,7 +5307,7 @@ pub const Value = extern union {
     pub const @"true" = initTag(.bool_true);
 
     pub fn makeBool(x: bool) Value {
-        return if (x) Value.@"true" else Value.@"false";
+        return if (x) Value.true else Value.false;
     }
 
     pub const RuntimeIndex = enum(u32) {

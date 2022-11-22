@@ -988,6 +988,25 @@ pub const Object = struct {
                         args.appendAssumeCapacity(load_inst);
                     }
                 },
+                .byref_mut => {
+                    const param_ty = fn_info.param_types[it.zig_index - 1];
+                    const param_llvm_ty = try dg.lowerType(param_ty);
+                    const param = llvm_func.getParam(llvm_arg_i);
+                    const alignment = param_ty.abiAlignment(target);
+
+                    dg.addArgAttr(llvm_func, llvm_arg_i, "noundef");
+                    llvm_arg_i += 1;
+
+                    try args.ensureUnusedCapacity(1);
+
+                    if (isByRef(param_ty)) {
+                        args.appendAssumeCapacity(param);
+                    } else {
+                        const load_inst = builder.buildLoad(param_llvm_ty, param, "");
+                        load_inst.setAlignment(alignment);
+                        args.appendAssumeCapacity(load_inst);
+                    }
+                },
                 .abi_sized_int => {
                     assert(!it.byval_attr);
                     const param_ty = fn_info.param_types[it.zig_index - 1];
@@ -1049,60 +1068,20 @@ pub const Object = struct {
                     const aggregate = builder.buildInsertValue(partial, len_param, 1, "");
                     try args.append(aggregate);
                 },
-                .multiple_llvm_ints => {
+                .multiple_llvm_types => {
                     assert(!it.byval_attr);
-                    const llvm_ints = it.llvm_types_buffer[0..it.llvm_types_len];
+                    const field_types = it.llvm_types_buffer[0..it.llvm_types_len];
                     const param_ty = fn_info.param_types[it.zig_index - 1];
                     const param_llvm_ty = try dg.lowerType(param_ty);
                     const param_alignment = param_ty.abiAlignment(target);
                     const arg_ptr = buildAllocaInner(builder, llvm_func, false, param_llvm_ty, param_alignment, target);
-                    var field_types_buf: [8]*llvm.Type = undefined;
-                    const field_types = field_types_buf[0..llvm_ints.len];
-                    for (llvm_ints) |int_bits, i| {
-                        field_types[i] = dg.context.intType(int_bits);
-                    }
-                    const ints_llvm_ty = dg.context.structType(field_types.ptr, @intCast(c_uint, field_types.len), .False);
-                    const casted_ptr = builder.buildBitCast(arg_ptr, ints_llvm_ty.pointerType(0), "");
-                    for (llvm_ints) |_, field_i_usize| {
+                    const llvm_ty = dg.context.structType(field_types.ptr, @intCast(c_uint, field_types.len), .False);
+                    const casted_ptr = builder.buildBitCast(arg_ptr, llvm_ty.pointerType(0), "");
+                    for (field_types) |_, field_i_usize| {
                         const field_i = @intCast(c_uint, field_i_usize);
                         const param = llvm_func.getParam(llvm_arg_i);
                         llvm_arg_i += 1;
-                        const field_ptr = builder.buildStructGEP(ints_llvm_ty, casted_ptr, field_i, "");
-                        const store_inst = builder.buildStore(param, field_ptr);
-                        store_inst.setAlignment(target.cpu.arch.ptrBitWidth() / 8);
-                    }
-
-                    const is_by_ref = isByRef(param_ty);
-                    const loaded = if (is_by_ref) arg_ptr else l: {
-                        const load_inst = builder.buildLoad(param_llvm_ty, arg_ptr, "");
-                        load_inst.setAlignment(param_alignment);
-                        break :l load_inst;
-                    };
-                    try args.append(loaded);
-                },
-                .multiple_llvm_float => {
-                    assert(!it.byval_attr);
-                    const llvm_floats = it.llvm_types_buffer[0..it.llvm_types_len];
-                    const param_ty = fn_info.param_types[it.zig_index - 1];
-                    const param_llvm_ty = try dg.lowerType(param_ty);
-                    const param_alignment = param_ty.abiAlignment(target);
-                    const arg_ptr = buildAllocaInner(builder, llvm_func, false, param_llvm_ty, param_alignment, target);
-                    var field_types_buf: [8]*llvm.Type = undefined;
-                    const field_types = field_types_buf[0..llvm_floats.len];
-                    for (llvm_floats) |float_bits, i| {
-                        switch (float_bits) {
-                            64 => field_types[i] = dg.context.doubleType(),
-                            80 => field_types[i] = dg.context.x86FP80Type(),
-                            else => {},
-                        }
-                    }
-                    const floats_llvm_ty = dg.context.structType(field_types.ptr, @intCast(c_uint, field_types.len), .False);
-                    const casted_ptr = builder.buildBitCast(arg_ptr, floats_llvm_ty.pointerType(0), "");
-                    for (llvm_floats) |_, field_i_usize| {
-                        const field_i = @intCast(c_uint, field_i_usize);
-                        const param = llvm_func.getParam(llvm_arg_i);
-                        llvm_arg_i += 1;
-                        const field_ptr = builder.buildStructGEP(floats_llvm_ty, casted_ptr, field_i, "");
+                        const field_ptr = builder.buildStructGEP(llvm_ty, casted_ptr, field_i, "");
                         const store_inst = builder.buildStore(param, field_ptr);
                         store_inst.setAlignment(target.cpu.arch.ptrBitWidth() / 8);
                     }
@@ -1507,6 +1486,11 @@ pub const Object = struct {
                 };
                 const field_index_val = Value.initPayload(&buf_field_index.base);
 
+                var buffer: Type.Payload.Bits = undefined;
+                const int_ty = ty.intTagType(&buffer);
+                const int_info = ty.intInfo(target);
+                assert(int_info.bits != 0);
+
                 for (field_names) |field_name, i| {
                     const field_name_z = try gpa.dupeZ(u8, field_name);
                     defer gpa.free(field_name_z);
@@ -1514,9 +1498,25 @@ pub const Object = struct {
                     buf_field_index.data = @intCast(u32, i);
                     var buf_u64: Value.Payload.U64 = undefined;
                     const field_int_val = field_index_val.enumToInt(ty, &buf_u64);
-                    // See https://github.com/ziglang/zig/issues/645
-                    const field_int = field_int_val.toSignedInt();
-                    enumerators[i] = dib.createEnumerator(field_name_z, field_int);
+
+                    var bigint_space: Value.BigIntSpace = undefined;
+                    const bigint = field_int_val.toBigInt(&bigint_space, target);
+
+                    if (bigint.limbs.len == 1) {
+                        enumerators[i] = dib.createEnumerator(field_name_z, bigint.limbs[0], int_info.signedness == .unsigned);
+                        continue;
+                    }
+                    if (@sizeOf(usize) == @sizeOf(u64)) {
+                        enumerators[i] = dib.createEnumerator2(
+                            field_name_z,
+                            @intCast(c_uint, bigint.limbs.len),
+                            bigint.limbs.ptr,
+                            int_info.bits,
+                            int_info.signedness == .unsigned,
+                        );
+                        continue;
+                    }
+                    @panic("TODO implement bigint debug enumerators to llvm int for 32-bit compiler builds");
                 }
 
                 const di_file = try o.getDIFile(gpa, owner_decl.src_namespace.file_scope);
@@ -1524,8 +1524,6 @@ pub const Object = struct {
 
                 const name = try ty.nameAlloc(gpa, o.module);
                 defer gpa.free(name);
-                var buffer: Type.Payload.Bits = undefined;
-                const int_ty = ty.intTagType(&buffer);
 
                 const enum_di_ty = dib.createEnumerationType(
                     di_scope,
@@ -1966,7 +1964,7 @@ pub const Object = struct {
 
                     for (tuple.types) |field_ty, i| {
                         const field_val = tuple.values[i];
-                        if (field_val.tag() != .unreachable_value) continue;
+                        if (field_val.tag() != .unreachable_value or !field_ty.hasRuntimeBits()) continue;
 
                         const field_size = field_ty.abiSize(target);
                         const field_align = field_ty.abiAlignment(target);
@@ -2118,7 +2116,8 @@ pub const Object = struct {
                     break :blk fwd_decl;
                 };
 
-                if (!ty.hasRuntimeBitsIgnoreComptime()) {
+                const union_obj = ty.cast(Type.Payload.Union).?.data;
+                if (!union_obj.haveFieldTypes() or !ty.hasRuntimeBitsIgnoreComptime()) {
                     const union_di_ty = try o.makeEmptyNamespaceDIType(owner_decl_index);
                     dib.replaceTemporary(fwd_decl, union_di_ty);
                     // The recursive call to `lowerDebugType` via `makeEmptyNamespaceDIType`
@@ -2128,7 +2127,6 @@ pub const Object = struct {
                 }
 
                 const layout = ty.unionGetLayout(target);
-                const union_obj = ty.cast(Type.Payload.Union).?.data;
 
                 if (layout.payload_size == 0) {
                     const tag_di_ty = try o.lowerDebugType(union_obj.tag_ty, .full);
@@ -2604,11 +2602,13 @@ pub const DeclGen = struct {
                     const alignment = param_ty.abiAlignment(target);
                     dg.addByRefParamAttrs(llvm_fn, it.llvm_index - 1, alignment, it.byval_attr, param_llvm_ty);
                 },
+                .byref_mut => {
+                    dg.addArgAttr(llvm_fn, it.llvm_index - 1, "noundef");
+                },
                 // No attributes needed for these.
                 .no_bits,
                 .abi_sized_int,
-                .multiple_llvm_ints,
-                .multiple_llvm_float,
+                .multiple_llvm_types,
                 .as_u16,
                 .float_array,
                 .i32_array,
@@ -2901,7 +2901,7 @@ pub const DeclGen = struct {
 
                     for (tuple.types) |field_ty, i| {
                         const field_val = tuple.values[i];
-                        if (field_val.tag() != .unreachable_value) continue;
+                        if (field_val.tag() != .unreachable_value or !field_ty.hasRuntimeBits()) continue;
 
                         const field_align = field_ty.abiAlignment(target);
                         big_align = @max(big_align, field_align);
@@ -3013,6 +3013,13 @@ pub const DeclGen = struct {
                 const layout = t.unionGetLayout(target);
                 const union_obj = t.cast(Type.Payload.Union).?.data;
 
+                if (union_obj.layout == .Packed) {
+                    const bitsize = @intCast(c_uint, t.bitSize(target));
+                    const int_llvm_ty = dg.context.intType(bitsize);
+                    gop.value_ptr.* = int_llvm_ty;
+                    return int_llvm_ty;
+                }
+
                 if (layout.payload_size == 0) {
                     const enum_tag_llvm_ty = try dg.lowerType(union_obj.tag_ty);
                     gop.value_ptr.* = enum_tag_llvm_ty;
@@ -3116,7 +3123,7 @@ pub const DeclGen = struct {
                 const param_ty = fn_info.param_types[it.zig_index - 1];
                 try llvm_params.append(try dg.lowerType(param_ty));
             },
-            .byref => {
+            .byref, .byref_mut => {
                 const param_ty = fn_info.param_types[it.zig_index - 1];
                 const raw_llvm_ty = try dg.lowerType(param_ty);
                 try llvm_params.append(raw_llvm_ty.pointerType(0));
@@ -3141,25 +3148,8 @@ pub const DeclGen = struct {
                 llvm_params.appendAssumeCapacity(ptr_llvm_ty);
                 llvm_params.appendAssumeCapacity(len_llvm_ty);
             },
-            .multiple_llvm_ints => {
-                const llvm_ints = it.llvm_types_buffer[0..it.llvm_types_len];
-                try llvm_params.ensureUnusedCapacity(it.llvm_types_len);
-                for (llvm_ints) |int_bits| {
-                    const big_int_ty = dg.context.intType(int_bits);
-                    llvm_params.appendAssumeCapacity(big_int_ty);
-                }
-            },
-            .multiple_llvm_float => {
-                const llvm_ints = it.llvm_types_buffer[0..it.llvm_types_len];
-                try llvm_params.ensureUnusedCapacity(it.llvm_types_len);
-                for (llvm_ints) |float_bits| {
-                    const float_ty = switch (float_bits) {
-                        64 => dg.context.doubleType(),
-                        80 => dg.context.x86FP80Type(),
-                        else => unreachable,
-                    };
-                    llvm_params.appendAssumeCapacity(float_ty);
-                }
+            .multiple_llvm_types => {
+                try llvm_params.appendSlice(it.llvm_types_buffer[0..it.llvm_types_len]);
             },
             .as_u16 => {
                 try llvm_params.append(dg.context.intType(16));
@@ -3191,7 +3181,8 @@ pub const DeclGen = struct {
     /// There are other similar cases handled here as well.
     fn lowerPtrElemTy(dg: *DeclGen, elem_ty: Type) Allocator.Error!*llvm.Type {
         const lower_elem_ty = switch (elem_ty.zigTypeTag()) {
-            .Opaque, .Fn => true,
+            .Opaque => true,
+            .Fn => !elem_ty.fnInfo().is_generic,
             .Array => elem_ty.childType().hasRuntimeBitsIgnoreComptime(),
             else => elem_ty.hasRuntimeBitsIgnoreComptime(),
         };
@@ -3762,13 +3753,23 @@ pub const DeclGen = struct {
                 const field_index = tv.ty.unionTagFieldIndex(tag_and_val.tag, dg.module).?;
                 assert(union_obj.haveFieldTypes());
 
+                const field_ty = union_obj.fields.values()[field_index].ty;
+                if (union_obj.layout == .Packed) {
+                    const non_int_val = try lowerValue(dg, .{ .ty = field_ty, .val = tag_and_val.val });
+                    const ty_bit_size = @intCast(u16, field_ty.bitSize(target));
+                    const small_int_ty = dg.context.intType(ty_bit_size);
+                    const small_int_val = if (field_ty.isPtrAtRuntime())
+                        non_int_val.constPtrToInt(small_int_ty)
+                    else
+                        non_int_val.constBitCast(small_int_ty);
+                    return small_int_val.constZExtOrBitCast(llvm_union_ty);
+                }
+
                 // Sometimes we must make an unnamed struct because LLVM does
                 // not support bitcasting our payload struct to the true union payload type.
                 // Instead we use an unnamed struct and every reference to the global
                 // must pointer cast to the expected type before accessing the union.
                 var need_unnamed: bool = layout.most_aligned_field != field_index;
-
-                const field_ty = union_obj.fields.values()[field_index].ty;
                 const payload = p: {
                     if (!field_ty.hasRuntimeBitsIgnoreComptime()) {
                         const padding_len = @intCast(c_uint, layout.payload_size);
@@ -3959,6 +3960,9 @@ pub const DeclGen = struct {
                 switch (parent_ty.zigTypeTag()) {
                     .Union => {
                         bitcast_needed = true;
+                        if (parent_ty.containerLayout() == .Packed) {
+                            break :blk parent_llvm_ptr;
+                        }
 
                         const layout = parent_ty.unionGetLayout(target);
                         if (layout.payload_size == 0) {
@@ -4125,7 +4129,9 @@ pub const DeclGen = struct {
         }
 
         const is_fn_body = decl.ty.zigTypeTag() == .Fn;
-        if (!is_fn_body and !decl.ty.hasRuntimeBits()) {
+        if ((!is_fn_body and !decl.ty.hasRuntimeBits()) or
+            (is_fn_body and decl.ty.fnInfo().is_generic))
+        {
             return self.lowerPtrToVoid(tv.ty);
         }
 
@@ -4548,14 +4554,14 @@ pub const FuncGen = struct {
                 .ret_addr       => try self.airRetAddr(inst),
                 .frame_addr     => try self.airFrameAddress(inst),
                 .cond_br        => try self.airCondBr(inst),
-                .@"try"         => try self.airTry(inst),
+                .@"try"         => try self.airTry(body[i..]),
                 .try_ptr        => try self.airTryPtr(inst),
                 .intcast        => try self.airIntCast(inst),
                 .trunc          => try self.airTrunc(inst),
                 .fptrunc        => try self.airFptrunc(inst),
                 .fpext          => try self.airFpext(inst),
                 .ptrtoint       => try self.airPtrToInt(inst),
-                .load           => try self.airLoad(inst, body, i + 1),
+                .load           => try self.airLoad(body[i..]),
                 .loop           => try self.airLoop(inst),
                 .not            => try self.airNot(inst),
                 .ret            => try self.airRet(inst),
@@ -4614,7 +4620,7 @@ pub const FuncGen = struct {
                 .atomic_store_seq_cst   => try self.airAtomicStore(inst, .SequentiallyConsistent),
 
                 .struct_field_ptr => try self.airStructFieldPtr(inst),
-                .struct_field_val => try self.airStructFieldVal(inst),
+                .struct_field_val => try self.airStructFieldVal(body[i..]),
 
                 .struct_field_ptr_index_0 => try self.airStructFieldPtrIndex(inst, 0),
                 .struct_field_ptr_index_1 => try self.airStructFieldPtrIndex(inst, 1),
@@ -4623,18 +4629,18 @@ pub const FuncGen = struct {
 
                 .field_parent_ptr => try self.airFieldParentPtr(inst),
 
-                .array_elem_val     => try self.airArrayElemVal(inst),
-                .slice_elem_val     => try self.airSliceElemVal(inst),
+                .array_elem_val     => try self.airArrayElemVal(body[i..]),
+                .slice_elem_val     => try self.airSliceElemVal(body[i..]),
                 .slice_elem_ptr     => try self.airSliceElemPtr(inst),
-                .ptr_elem_val       => try self.airPtrElemVal(inst),
+                .ptr_elem_val       => try self.airPtrElemVal(body[i..]),
                 .ptr_elem_ptr       => try self.airPtrElemPtr(inst),
 
-                .optional_payload         => try self.airOptionalPayload(inst),
+                .optional_payload         => try self.airOptionalPayload(body[i..]),
                 .optional_payload_ptr     => try self.airOptionalPayloadPtr(inst),
                 .optional_payload_ptr_set => try self.airOptionalPayloadPtrSet(inst),
 
-                .unwrap_errunion_payload     => try self.airErrUnionPayload(inst, false),
-                .unwrap_errunion_payload_ptr => try self.airErrUnionPayload(inst, true),
+                .unwrap_errunion_payload     => try self.airErrUnionPayload(body[i..], false),
+                .unwrap_errunion_payload_ptr => try self.airErrUnionPayload(body[i..], true),
                 .unwrap_errunion_err         => try self.airErrUnionErr(inst, false),
                 .unwrap_errunion_err_ptr     => try self.airErrUnionErr(inst, true),
                 .errunion_payload_ptr_set    => try self.airErrUnionPayloadPtrSet(inst),
@@ -4694,9 +4700,9 @@ pub const FuncGen = struct {
             break :blk ret_ptr;
         };
 
-        if (fn_info.return_type.isError() and
-            self.dg.module.comp.bin_file.options.error_return_tracing)
-        {
+        const err_return_tracing = fn_info.return_type.isError() and
+            self.dg.module.comp.bin_file.options.error_return_tracing;
+        if (err_return_tracing) {
             try llvm_args.append(self.err_ret_trace.?);
         }
 
@@ -4742,6 +4748,27 @@ pub const FuncGen = struct {
                     try llvm_args.append(arg_ptr);
                 }
             },
+            .byref_mut => {
+                const arg = args[it.zig_index - 1];
+                const param_ty = self.air.typeOf(arg);
+                const llvm_arg = try self.resolveInst(arg);
+
+                const alignment = param_ty.abiAlignment(target);
+                const param_llvm_ty = try self.dg.lowerType(param_ty);
+                const arg_ptr = self.buildAlloca(param_llvm_ty, alignment);
+                if (isByRef(param_ty)) {
+                    const load_inst = self.builder.buildLoad(param_llvm_ty, llvm_arg, "");
+                    load_inst.setAlignment(alignment);
+
+                    const store_inst = self.builder.buildStore(load_inst, arg_ptr);
+                    store_inst.setAlignment(alignment);
+                    try llvm_args.append(arg_ptr);
+                } else {
+                    const store_inst = self.builder.buildStore(llvm_arg, arg_ptr);
+                    store_inst.setAlignment(alignment);
+                    try llvm_args.append(arg_ptr);
+                }
+            },
             .abi_sized_int => {
                 const arg = args[it.zig_index - 1];
                 const param_ty = self.air.typeOf(arg);
@@ -4782,10 +4809,10 @@ pub const FuncGen = struct {
                 llvm_args.appendAssumeCapacity(ptr);
                 llvm_args.appendAssumeCapacity(len);
             },
-            .multiple_llvm_ints => {
+            .multiple_llvm_types => {
                 const arg = args[it.zig_index - 1];
                 const param_ty = self.air.typeOf(arg);
-                const llvm_ints = it.llvm_types_buffer[0..it.llvm_types_len];
+                const llvm_types = it.llvm_types_buffer[0..it.llvm_types_len];
                 const llvm_arg = try self.resolveInst(arg);
                 const is_by_ref = isByRef(param_ty);
                 const arg_ptr = if (is_by_ref) llvm_arg else p: {
@@ -4795,51 +4822,13 @@ pub const FuncGen = struct {
                     break :p p;
                 };
 
-                var field_types_buf: [8]*llvm.Type = undefined;
-                const field_types = field_types_buf[0..llvm_ints.len];
-                for (llvm_ints) |int_bits, i| {
-                    field_types[i] = self.dg.context.intType(int_bits);
-                }
-                const ints_llvm_ty = self.dg.context.structType(field_types.ptr, @intCast(c_uint, field_types.len), .False);
-                const casted_ptr = self.builder.buildBitCast(arg_ptr, ints_llvm_ty.pointerType(0), "");
+                const llvm_ty = self.dg.context.structType(llvm_types.ptr, @intCast(c_uint, llvm_types.len), .False);
+                const casted_ptr = self.builder.buildBitCast(arg_ptr, llvm_ty.pointerType(0), "");
                 try llvm_args.ensureUnusedCapacity(it.llvm_types_len);
-                for (llvm_ints) |_, i_usize| {
+                for (llvm_types) |field_ty, i_usize| {
                     const i = @intCast(c_uint, i_usize);
-                    const field_ptr = self.builder.buildStructGEP(ints_llvm_ty, casted_ptr, i, "");
-                    const load_inst = self.builder.buildLoad(field_types[i], field_ptr, "");
-                    load_inst.setAlignment(target.cpu.arch.ptrBitWidth() / 8);
-                    llvm_args.appendAssumeCapacity(load_inst);
-                }
-            },
-            .multiple_llvm_float => {
-                const arg = args[it.zig_index - 1];
-                const param_ty = self.air.typeOf(arg);
-                const llvm_floats = it.llvm_types_buffer[0..it.llvm_types_len];
-                const llvm_arg = try self.resolveInst(arg);
-                const is_by_ref = isByRef(param_ty);
-                const arg_ptr = if (is_by_ref) llvm_arg else p: {
-                    const p = self.buildAlloca(llvm_arg.typeOf(), null);
-                    const store_inst = self.builder.buildStore(llvm_arg, p);
-                    store_inst.setAlignment(param_ty.abiAlignment(target));
-                    break :p p;
-                };
-
-                var field_types_buf: [8]*llvm.Type = undefined;
-                const field_types = field_types_buf[0..llvm_floats.len];
-                for (llvm_floats) |float_bits, i| {
-                    switch (float_bits) {
-                        64 => field_types[i] = self.dg.context.doubleType(),
-                        80 => field_types[i] = self.dg.context.x86FP80Type(),
-                        else => {},
-                    }
-                }
-                const floats_llvm_ty = self.dg.context.structType(field_types.ptr, @intCast(c_uint, field_types.len), .False);
-                const casted_ptr = self.builder.buildBitCast(arg_ptr, floats_llvm_ty.pointerType(0), "");
-                try llvm_args.ensureUnusedCapacity(it.llvm_types_len);
-                for (llvm_floats) |_, i_usize| {
-                    const i = @intCast(c_uint, i_usize);
-                    const field_ptr = self.builder.buildStructGEP(floats_llvm_ty, casted_ptr, i, "");
-                    const load_inst = self.builder.buildLoad(field_types[i], field_ptr, "");
+                    const field_ptr = self.builder.buildStructGEP(llvm_ty, casted_ptr, i, "");
+                    const load_inst = self.builder.buildLoad(field_ty, field_ptr, "");
                     load_inst.setAlignment(target.cpu.arch.ptrBitWidth() / 8);
                     llvm_args.appendAssumeCapacity(load_inst);
                 }
@@ -4901,6 +4890,66 @@ pub const FuncGen = struct {
             "",
         );
 
+        if (callee_ty.zigTypeTag() == .Pointer) {
+            // Add argument attributes for function pointer calls.
+            it = iterateParamTypes(self.dg, fn_info);
+            it.llvm_index += @boolToInt(sret);
+            it.llvm_index += @boolToInt(err_return_tracing);
+            while (it.next()) |lowering| switch (lowering) {
+                .byval => {
+                    const param_index = it.zig_index - 1;
+                    const param_ty = fn_info.param_types[param_index];
+                    if (!isByRef(param_ty)) {
+                        self.dg.addByValParamAttrs(call, param_ty, param_index, fn_info, it.llvm_index - 1);
+                    }
+                },
+                .byref => {
+                    const param_index = it.zig_index - 1;
+                    const param_ty = fn_info.param_types[param_index];
+                    const param_llvm_ty = try self.dg.lowerType(param_ty);
+                    const alignment = param_ty.abiAlignment(target);
+                    self.dg.addByRefParamAttrs(call, it.llvm_index - 1, alignment, it.byval_attr, param_llvm_ty);
+                },
+                .byref_mut => {
+                    self.dg.addArgAttr(call, it.llvm_index - 1, "noundef");
+                },
+                // No attributes needed for these.
+                .no_bits,
+                .abi_sized_int,
+                .multiple_llvm_types,
+                .as_u16,
+                .float_array,
+                .i32_array,
+                .i64_array,
+                => continue,
+
+                .slice => {
+                    assert(!it.byval_attr);
+                    const param_ty = fn_info.param_types[it.zig_index - 1];
+                    const ptr_info = param_ty.ptrInfo().data;
+                    const llvm_arg_i = it.llvm_index - 2;
+
+                    if (math.cast(u5, it.zig_index - 1)) |i| {
+                        if (@truncate(u1, fn_info.noalias_bits >> i) != 0) {
+                            self.dg.addArgAttr(call, llvm_arg_i, "noalias");
+                        }
+                    }
+                    if (param_ty.zigTypeTag() != .Optional) {
+                        self.dg.addArgAttr(call, llvm_arg_i, "nonnull");
+                    }
+                    if (!ptr_info.mutable) {
+                        self.dg.addArgAttr(call, llvm_arg_i, "readonly");
+                    }
+                    if (ptr_info.@"align" != 0) {
+                        self.dg.addArgAttrInt(call, llvm_arg_i, "align", ptr_info.@"align");
+                    } else {
+                        const elem_align = @max(ptr_info.pointee_type.abiAlignment(target), 1);
+                        self.dg.addArgAttrInt(call, llvm_arg_i, "align", elem_align);
+                    }
+                },
+            };
+        }
+
         if (return_type.isNoReturn() and attr != .AlwaysTail) {
             _ = self.builder.buildUnreachable();
             return null;
@@ -4930,7 +4979,7 @@ pub const FuncGen = struct {
             // In this case the function return type is honoring the calling convention by having
             // a different LLVM type than the usual one. We solve this here at the callsite
             // by bitcasting a pointer to our canonical type, then loading it if necessary.
-            const alignment = return_type.abiAlignment(target);
+            const alignment = self.dg.object.target_data.abiAlignmentOfType(abi_ret_ty);
             const rp = self.buildAlloca(llvm_ret_ty, alignment);
             const ptr_abi_ty = abi_ret_ty.pointerType(0);
             const casted_ptr = self.builder.buildBitCast(rp, ptr_abi_ty, "");
@@ -5139,8 +5188,8 @@ pub const FuncGen = struct {
                 _ = self.builder.buildBr(end_block);
 
                 self.builder.positionBuilderAtEnd(both_pl_block);
-                const lhs_payload = try self.optPayloadHandle(opt_llvm_ty, lhs, scalar_ty);
-                const rhs_payload = try self.optPayloadHandle(opt_llvm_ty, rhs, scalar_ty);
+                const lhs_payload = try self.optPayloadHandle(opt_llvm_ty, lhs, scalar_ty, true);
+                const rhs_payload = try self.optPayloadHandle(opt_llvm_ty, rhs, scalar_ty, true);
                 const payload_cmp = try self.cmp(lhs_payload, rhs_payload, payload_ty, op);
                 _ = self.builder.buildBr(end_block);
                 const both_pl_block_end = self.builder.getInsertBlock();
@@ -5285,14 +5334,16 @@ pub const FuncGen = struct {
         return null;
     }
 
-    fn airTry(self: *FuncGen, inst: Air.Inst.Index) !?*llvm.Value {
+    fn airTry(self: *FuncGen, body_tail: []const Air.Inst.Index) !?*llvm.Value {
+        const inst = body_tail[0];
         const pl_op = self.air.instructions.items(.data)[inst].pl_op;
         const err_union = try self.resolveInst(pl_op.operand);
         const extra = self.air.extraData(Air.Try, pl_op.payload);
         const body = self.air.extra[extra.end..][0..extra.data.body_len];
         const err_union_ty = self.air.typeOf(pl_op.operand);
-        const result_ty = self.air.typeOfIndex(inst);
-        return lowerTry(self, err_union, body, err_union_ty, false, result_ty);
+        const payload_ty = self.air.typeOfIndex(inst);
+        const can_elide_load = if (isByRef(payload_ty)) self.canElideLoad(body_tail) else false;
+        return lowerTry(self, err_union, body, err_union_ty, false, can_elide_load, payload_ty);
     }
 
     fn airTryPtr(self: *FuncGen, inst: Air.Inst.Index) !?*llvm.Value {
@@ -5301,8 +5352,8 @@ pub const FuncGen = struct {
         const err_union_ptr = try self.resolveInst(extra.data.ptr);
         const body = self.air.extra[extra.end..][0..extra.data.body_len];
         const err_union_ty = self.air.typeOf(extra.data.ptr).childType();
-        const result_ty = self.air.typeOfIndex(inst);
-        return lowerTry(self, err_union_ptr, body, err_union_ty, true, result_ty);
+        const payload_ty = self.air.typeOfIndex(inst);
+        return lowerTry(self, err_union_ptr, body, err_union_ty, true, true, payload_ty);
     }
 
     fn lowerTry(
@@ -5311,6 +5362,7 @@ pub const FuncGen = struct {
         body: []const Air.Inst.Index,
         err_union_ty: Type,
         operand_is_ptr: bool,
+        can_elide_load: bool,
         result_ty: Type,
     ) !?*llvm.Value {
         const payload_ty = err_union_ty.errorUnionPayload();
@@ -5359,12 +5411,15 @@ pub const FuncGen = struct {
             return fg.builder.buildBitCast(err_union, res_ptr_ty, "");
         }
         const offset = errUnionPayloadOffset(payload_ty, target);
-        if (operand_is_ptr or isByRef(payload_ty)) {
+        if (operand_is_ptr) {
             return fg.builder.buildStructGEP(err_union_llvm_ty, err_union, offset, "");
         } else if (isByRef(err_union_ty)) {
             const payload_ptr = fg.builder.buildStructGEP(err_union_llvm_ty, err_union, offset, "");
             if (isByRef(payload_ty)) {
-                return payload_ptr;
+                if (can_elide_load)
+                    return payload_ptr;
+
+                return fg.loadByRef(payload_ptr, payload_ty, payload_ty.abiAlignment(target), false);
             }
             const load_inst = fg.builder.buildLoad(payload_ptr.getGEPResultElementType(), payload_ptr, "");
             load_inst.setAlignment(payload_ty.abiAlignment(target));
@@ -5605,17 +5660,27 @@ pub const FuncGen = struct {
         return self.builder.buildStructGEP(slice_llvm_ty, slice_ptr, index, "");
     }
 
-    fn airSliceElemVal(self: *FuncGen, inst: Air.Inst.Index) !?*llvm.Value {
+    fn airSliceElemVal(self: *FuncGen, body_tail: []const Air.Inst.Index) !?*llvm.Value {
+        const inst = body_tail[0];
         const bin_op = self.air.instructions.items(.data)[inst].bin_op;
         const slice_ty = self.air.typeOf(bin_op.lhs);
         if (!slice_ty.isVolatilePtr() and self.liveness.isUnused(inst)) return null;
 
         const slice = try self.resolveInst(bin_op.lhs);
         const index = try self.resolveInst(bin_op.rhs);
-        const llvm_elem_ty = try self.dg.lowerPtrElemTy(slice_ty.childType());
+        const elem_ty = slice_ty.childType();
+        const llvm_elem_ty = try self.dg.lowerPtrElemTy(elem_ty);
         const base_ptr = self.builder.buildExtractValue(slice, 0, "");
         const indices: [1]*llvm.Value = .{index};
         const ptr = self.builder.buildInBoundsGEP(llvm_elem_ty, base_ptr, &indices, indices.len, "");
+        if (isByRef(elem_ty)) {
+            if (self.canElideLoad(body_tail))
+                return ptr;
+
+            const target = self.dg.module.getTarget();
+            return self.loadByRef(ptr, elem_ty, elem_ty.abiAlignment(target), false);
+        }
+
         return self.load(ptr, slice_ty);
     }
 
@@ -5633,7 +5698,8 @@ pub const FuncGen = struct {
         return self.builder.buildInBoundsGEP(llvm_elem_ty, base_ptr, &indices, indices.len, "");
     }
 
-    fn airArrayElemVal(self: *FuncGen, inst: Air.Inst.Index) !?*llvm.Value {
+    fn airArrayElemVal(self: *FuncGen, body_tail: []const Air.Inst.Index) !?*llvm.Value {
+        const inst = body_tail[0];
         if (self.liveness.isUnused(inst)) return null;
 
         const bin_op = self.air.instructions.items(.data)[inst].bin_op;
@@ -5646,7 +5712,11 @@ pub const FuncGen = struct {
             const elem_ptr = self.builder.buildInBoundsGEP(array_llvm_ty, array_llvm_val, &indices, indices.len, "");
             const elem_ty = array_ty.childType();
             if (isByRef(elem_ty)) {
-                return elem_ptr;
+                if (canElideLoad(self, body_tail))
+                    return elem_ptr;
+
+                const target = self.dg.module.getTarget();
+                return self.loadByRef(elem_ptr, elem_ty, elem_ty.abiAlignment(target), false);
             } else {
                 const elem_llvm_ty = try self.dg.lowerType(elem_ty);
                 return self.builder.buildLoad(elem_llvm_ty, elem_ptr, "");
@@ -5657,12 +5727,14 @@ pub const FuncGen = struct {
         return self.builder.buildExtractElement(array_llvm_val, rhs, "");
     }
 
-    fn airPtrElemVal(self: *FuncGen, inst: Air.Inst.Index) !?*llvm.Value {
+    fn airPtrElemVal(self: *FuncGen, body_tail: []const Air.Inst.Index) !?*llvm.Value {
+        const inst = body_tail[0];
         const bin_op = self.air.instructions.items(.data)[inst].bin_op;
         const ptr_ty = self.air.typeOf(bin_op.lhs);
         if (!ptr_ty.isVolatilePtr() and self.liveness.isUnused(inst)) return null;
 
-        const llvm_elem_ty = try self.dg.lowerPtrElemTy(ptr_ty.childType());
+        const elem_ty = ptr_ty.childType();
+        const llvm_elem_ty = try self.dg.lowerPtrElemTy(elem_ty);
         const base_ptr = try self.resolveInst(bin_op.lhs);
         const rhs = try self.resolveInst(bin_op.rhs);
         // TODO: when we go fully opaque pointers in LLVM 16 we can remove this branch
@@ -5674,6 +5746,14 @@ pub const FuncGen = struct {
             const indices: [1]*llvm.Value = .{rhs};
             break :ptr self.builder.buildInBoundsGEP(llvm_elem_ty, base_ptr, &indices, indices.len, "");
         };
+        if (isByRef(elem_ty)) {
+            if (self.canElideLoad(body_tail))
+                return ptr;
+
+            const target = self.dg.module.getTarget();
+            return self.loadByRef(ptr, elem_ty, elem_ty.abiAlignment(target), false);
+        }
+
         return self.load(ptr, ptr_ty);
     }
 
@@ -5723,7 +5803,8 @@ pub const FuncGen = struct {
         return self.fieldPtr(inst, struct_ptr, struct_ptr_ty, field_index);
     }
 
-    fn airStructFieldVal(self: *FuncGen, inst: Air.Inst.Index) !?*llvm.Value {
+    fn airStructFieldVal(self: *FuncGen, body_tail: []const Air.Inst.Index) !?*llvm.Value {
+        const inst = body_tail[0];
         if (self.liveness.isUnused(inst)) return null;
 
         const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
@@ -5768,7 +5849,21 @@ pub const FuncGen = struct {
                     },
                 },
                 .Union => {
-                    return self.todo("airStructFieldVal byval union", .{});
+                    assert(struct_ty.containerLayout() == .Packed);
+                    const containing_int = struct_llvm_val;
+                    const elem_llvm_ty = try self.dg.lowerType(field_ty);
+                    if (field_ty.zigTypeTag() == .Float) {
+                        const elem_bits = @intCast(c_uint, field_ty.bitSize(target));
+                        const same_size_int = self.context.intType(elem_bits);
+                        const truncated_int = self.builder.buildTrunc(containing_int, same_size_int, "");
+                        return self.builder.buildBitCast(truncated_int, elem_llvm_ty, "");
+                    } else if (field_ty.isPtrAtRuntime()) {
+                        const elem_bits = @intCast(c_uint, field_ty.bitSize(target));
+                        const same_size_int = self.context.intType(elem_bits);
+                        const truncated_int = self.builder.buildTrunc(containing_int, same_size_int, "");
+                        return self.builder.buildIntToPtr(truncated_int, elem_llvm_ty, "");
+                    }
+                    return self.builder.buildTrunc(containing_int, elem_llvm_ty, "");
                 },
                 else => unreachable,
             }
@@ -5782,7 +5877,14 @@ pub const FuncGen = struct {
                 const struct_llvm_ty = try self.dg.lowerType(struct_ty);
                 const field_ptr = self.builder.buildStructGEP(struct_llvm_ty, struct_llvm_val, llvm_field_index, "");
                 const field_ptr_ty = Type.initPayload(&ptr_ty_buf.base);
-                return self.load(field_ptr, field_ptr_ty);
+                if (isByRef(field_ty)) {
+                    if (canElideLoad(self, body_tail))
+                        return field_ptr;
+
+                    return self.loadByRef(field_ptr, field_ty, ptr_ty_buf.data.alignment(target), false);
+                } else {
+                    return self.load(field_ptr, field_ptr_ty);
+                }
             },
             .Union => {
                 const union_llvm_ty = try self.dg.lowerType(struct_ty);
@@ -5792,7 +5894,10 @@ pub const FuncGen = struct {
                 const llvm_field_ty = try self.dg.lowerType(field_ty);
                 const field_ptr = self.builder.buildBitCast(union_field_ptr, llvm_field_ty.pointerType(0), "");
                 if (isByRef(field_ty)) {
-                    return field_ptr;
+                    if (canElideLoad(self, body_tail))
+                        return field_ptr;
+
+                    return self.loadByRef(field_ptr, field_ty, layout.payload_align, false);
                 } else {
                     return self.builder.buildLoad(llvm_field_ty, field_ptr, "");
                 }
@@ -6214,11 +6319,12 @@ pub const FuncGen = struct {
         var rendered_template = std.ArrayList(u8).init(self.gpa);
         defer rendered_template.deinit();
 
-        const State = enum { start, percent, input };
+        const State = enum { start, percent, input, modifier };
 
         var state: State = .start;
 
         var name_start: usize = undefined;
+        var modifier_start: usize = undefined;
         for (asm_source) |byte, i| {
             switch (state) {
                 .start => switch (byte) {
@@ -6233,6 +6339,7 @@ pub const FuncGen = struct {
                     },
                     '[' => {
                         try rendered_template.append('$');
+                        try rendered_template.append('{');
                         name_start = i + 1;
                         state = .input;
                     },
@@ -6243,15 +6350,30 @@ pub const FuncGen = struct {
                     },
                 },
                 .input => switch (byte) {
-                    ']' => {
+                    ']', ':' => {
                         const name = asm_source[name_start..i];
-                        state = .start;
 
                         const index = name_map.get(name) orelse {
                             // we should validate the assembly in Sema; by now it is too late
                             return self.todo("unknown input or output name: '{s}'", .{name});
                         };
                         try rendered_template.writer().print("{d}", .{index});
+                        if (byte == ':') {
+                            try rendered_template.append(':');
+                            modifier_start = i + 1;
+                            state = .modifier;
+                        } else {
+                            try rendered_template.append('}');
+                            state = .start;
+                        }
+                    },
+                    else => {},
+                },
+                .modifier => switch (byte) {
+                    ']' => {
+                        try rendered_template.appendSlice(asm_source[modifier_start..i]);
+                        try rendered_template.append('}');
+                        state = .start;
                     },
                     else => {},
                 },
@@ -6482,7 +6604,8 @@ pub const FuncGen = struct {
         return self.builder.buildStructGEP(optional_llvm_ty, operand, 0, "");
     }
 
-    fn airOptionalPayload(self: *FuncGen, inst: Air.Inst.Index) !?*llvm.Value {
+    fn airOptionalPayload(self: *FuncGen, body_tail: []const Air.Inst.Index) !?*llvm.Value {
+        const inst = body_tail[0];
         if (self.liveness.isUnused(inst)) return null;
 
         const ty_op = self.air.instructions.items(.data)[inst].ty_op;
@@ -6497,14 +6620,16 @@ pub const FuncGen = struct {
         }
 
         const opt_llvm_ty = try self.dg.lowerType(optional_ty);
-        return self.optPayloadHandle(opt_llvm_ty, operand, optional_ty);
+        const can_elide_load = if (isByRef(payload_ty)) self.canElideLoad(body_tail) else false;
+        return self.optPayloadHandle(opt_llvm_ty, operand, optional_ty, can_elide_load);
     }
 
     fn airErrUnionPayload(
         self: *FuncGen,
-        inst: Air.Inst.Index,
+        body_tail: []const Air.Inst.Index,
         operand_is_ptr: bool,
     ) !?*llvm.Value {
+        const inst = body_tail[0];
         if (self.liveness.isUnused(inst)) return null;
 
         const ty_op = self.air.instructions.items(.data)[inst].ty_op;
@@ -6524,12 +6649,15 @@ pub const FuncGen = struct {
         }
         const offset = errUnionPayloadOffset(payload_ty, target);
         const err_union_llvm_ty = try self.dg.lowerType(err_union_ty);
-        if (operand_is_ptr or isByRef(payload_ty)) {
+        if (operand_is_ptr) {
             return self.builder.buildStructGEP(err_union_llvm_ty, operand, offset, "");
         } else if (isByRef(err_union_ty)) {
             const payload_ptr = self.builder.buildStructGEP(err_union_llvm_ty, operand, offset, "");
             if (isByRef(payload_ty)) {
-                return payload_ptr;
+                if (self.canElideLoad(body_tail))
+                    return payload_ptr;
+
+                return self.loadByRef(payload_ptr, payload_ty, payload_ty.abiAlignment(target), false);
             }
             const load_inst = self.builder.buildLoad(payload_ptr.getGEPResultElementType(), payload_ptr, "");
             load_inst.setAlignment(payload_ty.abiAlignment(target));
@@ -8030,35 +8158,37 @@ pub const FuncGen = struct {
         return null;
     }
 
-    fn airLoad(
-        self: *FuncGen,
-        inst: Air.Inst.Index,
-        body: []const Air.Inst.Index,
-        body_i: usize,
-    ) !?*llvm.Value {
-        const ty_op = self.air.instructions.items(.data)[inst].ty_op;
-        const ptr_ty = self.air.typeOf(ty_op.operand);
-        elide: {
-            const ptr_info = ptr_ty.ptrInfo().data;
-            if (ptr_info.@"volatile") break :elide;
-            if (self.liveness.isUnused(inst)) return null;
-            if (!isByRef(ptr_info.pointee_type)) break :elide;
+    /// As an optimization, we want to avoid unnecessary copies of isByRef=true
+    /// types. Here, we scan forward in the current block, looking to see if
+    /// this load dies before any side effects occur. In such case, we can
+    /// safely return the operand without making a copy.
+    ///
+    /// The first instruction of `body_tail` is the one whose copy we want to elide.
+    fn canElideLoad(fg: *FuncGen, body_tail: []const Air.Inst.Index) bool {
+        for (body_tail[1..]) |body_inst| {
+            switch (fg.liveness.categorizeOperand(fg.air, body_inst, body_tail[0])) {
+                .none => continue,
+                .write, .noret, .complex => return false,
+                .tomb => return true,
+            }
+        } else unreachable;
+    }
 
-            // It would be valid to fall back to the code below here that simply calls
-            // load(). However, as an optimization, we want to avoid unnecessary copies
-            // of isByRef=true types. Here, we scan forward in the current block,
-            // looking to see if this load dies before any side effects occur.
-            // In such case, we can safely return the operand without making a copy.
-            for (body[body_i..]) |body_inst| {
-                switch (self.liveness.categorizeOperand(self.air, body_inst, inst)) {
-                    .none => continue,
-                    .write, .noret, .complex => break :elide,
-                    .tomb => return try self.resolveInst(ty_op.operand),
-                }
-            } else unreachable;
+    fn airLoad(fg: *FuncGen, body_tail: []const Air.Inst.Index) !?*llvm.Value {
+        const inst = body_tail[0];
+        const ty_op = fg.air.instructions.items(.data)[inst].ty_op;
+        const ptr_ty = fg.air.typeOf(ty_op.operand);
+        const ptr_info = ptr_ty.ptrInfo().data;
+        const ptr = try fg.resolveInst(ty_op.operand);
+
+        elide: {
+            if (ptr_info.@"volatile") break :elide;
+            if (fg.liveness.isUnused(inst)) return null;
+            if (!isByRef(ptr_info.pointee_type)) break :elide;
+            if (!canElideLoad(fg, body_tail)) break :elide;
+            return ptr;
         }
-        const ptr = try self.resolveInst(ty_op.operand);
-        return self.load(ptr, ptr_ty);
+        return fg.load(ptr, ptr_ty);
     }
 
     fn airBreakpoint(self: *FuncGen, inst: Air.Inst.Index) !?*llvm.Value {
@@ -8570,9 +8700,9 @@ pub const FuncGen = struct {
         const arena = arena_allocator.allocator();
 
         const mod = self.dg.module;
-        const llvm_fn_name = try std.fmt.allocPrintZ(arena, "__zig_is_named_enum_value_{s}", .{
-            try mod.declPtr(enum_decl).getFullyQualifiedName(mod),
-        });
+        const fqn = try mod.declPtr(enum_decl).getFullyQualifiedName(mod);
+        defer self.gpa.free(fqn);
+        const llvm_fn_name = try std.fmt.allocPrintZ(arena, "__zig_is_named_enum_value_{s}", .{fqn});
 
         var int_tag_type_buffer: Type.Payload.Bits = undefined;
         const int_tag_ty = enum_ty.intTagType(&int_tag_type_buffer);
@@ -8651,9 +8781,9 @@ pub const FuncGen = struct {
         const arena = arena_allocator.allocator();
 
         const mod = self.dg.module;
-        const llvm_fn_name = try std.fmt.allocPrintZ(arena, "__zig_tag_name_{s}", .{
-            try mod.declPtr(enum_decl).getFullyQualifiedName(mod),
-        });
+        const fqn = try mod.declPtr(enum_decl).getFullyQualifiedName(mod);
+        defer self.gpa.free(fqn);
+        const llvm_fn_name = try std.fmt.allocPrintZ(arena, "__zig_tag_name_{s}", .{fqn});
 
         const slice_ty = Type.initTag(.const_slice_u8_sentinel_0);
         const llvm_ret_ty = try self.dg.lowerType(slice_ty);
@@ -9378,6 +9508,7 @@ pub const FuncGen = struct {
         opt_llvm_ty: *llvm.Type,
         opt_handle: *llvm.Value,
         opt_ty: Type,
+        can_elide_load: bool,
     ) !*llvm.Value {
         var buf: Type.Payload.ElemType = undefined;
         const payload_ty = opt_ty.optionalChild(&buf);
@@ -9386,11 +9517,14 @@ pub const FuncGen = struct {
             // We have a pointer and we need to return a pointer to the first field.
             const payload_ptr = fg.builder.buildStructGEP(opt_llvm_ty, opt_handle, 0, "");
 
-            if (isByRef(payload_ty)) {
-                return payload_ptr;
-            }
             const target = fg.dg.module.getTarget();
             const payload_alignment = payload_ty.abiAlignment(target);
+            if (isByRef(payload_ty)) {
+                if (can_elide_load)
+                    return payload_ptr;
+
+                return fg.loadByRef(payload_ptr, payload_ty, payload_alignment, false);
+            }
             const payload_llvm_ty = try fg.dg.lowerType(payload_ty);
             const load_inst = fg.builder.buildLoad(payload_llvm_ty, payload_ptr, "");
             load_inst.setAlignment(payload_alignment);
@@ -9510,6 +9644,9 @@ pub const FuncGen = struct {
         if (layout.payload_size == 0) {
             return self.builder.buildBitCast(union_ptr, result_llvm_ty, "");
         }
+        if (union_ty.containerLayout() == .Packed) {
+            return self.builder.buildBitCast(union_ptr, result_llvm_ty, "");
+        }
         const payload_index = @boolToInt(layout.tag_align >= layout.payload_align);
         const union_llvm_ty = try self.dg.lowerType(union_ty);
         const union_field_ptr = self.builder.buildStructGEP(union_llvm_ty, union_ptr, payload_index, "");
@@ -9520,6 +9657,32 @@ pub const FuncGen = struct {
         const id = llvm.lookupIntrinsicID(name.ptr, name.len);
         assert(id != 0);
         return self.llvmModule().getIntrinsicDeclaration(id, types.ptr, types.len);
+    }
+
+    /// Load a by-ref type by constructing a new alloca and performing a memcpy.
+    fn loadByRef(
+        fg: *FuncGen,
+        ptr: *llvm.Value,
+        pointee_type: Type,
+        ptr_alignment: u32,
+        is_volatile: bool,
+    ) !*llvm.Value {
+        const pointee_llvm_ty = try fg.dg.lowerType(pointee_type);
+        const target = fg.dg.module.getTarget();
+        const result_align = @max(ptr_alignment, pointee_type.abiAlignment(target));
+        const result_ptr = fg.buildAlloca(pointee_llvm_ty, result_align);
+        const llvm_ptr_u8 = fg.context.intType(8).pointerType(0);
+        const llvm_usize = fg.context.intType(Type.usize.intInfo(target).bits);
+        const size_bytes = pointee_type.abiSize(target);
+        _ = fg.builder.buildMemCpy(
+            fg.builder.buildBitCast(result_ptr, llvm_ptr_u8, ""),
+            result_align,
+            fg.builder.buildBitCast(ptr, llvm_ptr_u8, ""),
+            ptr_alignment,
+            llvm_usize.constInt(size_bytes, .False),
+            is_volatile,
+        );
+        return result_ptr;
     }
 
     /// This function always performs a copy. For isByRef=true types, it creates a new
@@ -9533,24 +9696,10 @@ pub const FuncGen = struct {
         const ptr_alignment = info.alignment(target);
         const ptr_volatile = llvm.Bool.fromBool(ptr_ty.isVolatilePtr());
         if (info.host_size == 0) {
-            const elem_llvm_ty = try self.dg.lowerType(info.pointee_type);
             if (isByRef(info.pointee_type)) {
-                const result_align = info.pointee_type.abiAlignment(target);
-                const max_align = @max(result_align, ptr_alignment);
-                const result_ptr = self.buildAlloca(elem_llvm_ty, max_align);
-                const llvm_ptr_u8 = self.context.intType(8).pointerType(0);
-                const llvm_usize = self.context.intType(Type.usize.intInfo(target).bits);
-                const size_bytes = info.pointee_type.abiSize(target);
-                _ = self.builder.buildMemCpy(
-                    self.builder.buildBitCast(result_ptr, llvm_ptr_u8, ""),
-                    max_align,
-                    self.builder.buildBitCast(ptr, llvm_ptr_u8, ""),
-                    max_align,
-                    llvm_usize.constInt(size_bytes, .False),
-                    info.@"volatile",
-                );
-                return result_ptr;
+                return self.loadByRef(ptr, info.pointee_type, ptr_alignment, info.@"volatile");
             }
+            const elem_llvm_ty = try self.dg.lowerType(info.pointee_type);
             const llvm_inst = self.builder.buildLoad(elem_llvm_ty, ptr, "");
             llvm_inst.setAlignment(ptr_alignment);
             llvm_inst.setVolatile(ptr_volatile);
@@ -10084,7 +10233,7 @@ fn llvmFieldIndex(
         const tuple = ty.tupleFields();
         var llvm_field_index: c_uint = 0;
         for (tuple.types) |field_ty, i| {
-            if (tuple.values[i].tag() != .unreachable_value) continue;
+            if (tuple.values[i].tag() != .unreachable_value or !field_ty.hasRuntimeBits()) continue;
 
             const field_align = field_ty.abiAlignment(target);
             big_align = @max(big_align, field_align);
@@ -10096,7 +10245,7 @@ fn llvmFieldIndex(
                 llvm_field_index += 1;
             }
 
-            if (field_index == i) {
+            if (field_index <= i) {
                 ptr_pl_buf.* = .{
                     .data = .{
                         .pointee_type = field_ty,
@@ -10129,7 +10278,7 @@ fn llvmFieldIndex(
             llvm_field_index += 1;
         }
 
-        if (field_index == i) {
+        if (field_index <= i) {
             ptr_pl_buf.* = .{
                 .data = .{
                     .pointee_type = field.ty,
@@ -10331,16 +10480,16 @@ const ParamTypeIterator = struct {
     llvm_index: u32,
     target: std.Target,
     llvm_types_len: u32,
-    llvm_types_buffer: [8]u16,
+    llvm_types_buffer: [8]*llvm.Type,
     byval_attr: bool,
 
     const Lowering = union(enum) {
         no_bits,
         byval,
         byref,
+        byref_mut,
         abi_sized_int,
-        multiple_llvm_ints,
-        multiple_llvm_float,
+        multiple_llvm_types,
         slice,
         as_u16,
         float_array: u8,
@@ -10373,13 +10522,14 @@ const ParamTypeIterator = struct {
             it.zig_index += 1;
             return .no_bits;
         }
-
+        const dg = it.dg;
         switch (it.fn_info.cc) {
             .Unspecified, .Inline => {
                 it.zig_index += 1;
                 it.llvm_index += 1;
                 var buf: Type.Payload.ElemType = undefined;
                 if (ty.isSlice() or (ty.zigTypeTag() == .Optional and ty.optionalChild(&buf).isSlice())) {
+                    it.llvm_index += 1;
                     return .slice;
                 } else if (isByRef(ty)) {
                     return .byref;
@@ -10442,28 +10592,28 @@ const ParamTypeIterator = struct {
                                 it.llvm_index += 1;
                                 return .byval;
                             }
-                            var llvm_types_buffer: [8]u16 = undefined;
+                            var llvm_types_buffer: [8]*llvm.Type = undefined;
                             var llvm_types_index: u32 = 0;
                             for (classes) |class| {
                                 switch (class) {
                                     .integer => {
-                                        llvm_types_buffer[llvm_types_index] = 64;
+                                        llvm_types_buffer[llvm_types_index] = dg.context.intType(64);
                                         llvm_types_index += 1;
                                     },
                                     .sse => {
-                                        llvm_types_buffer[llvm_types_index] = 64;
+                                        llvm_types_buffer[llvm_types_index] = dg.context.doubleType();
                                         llvm_types_index += 1;
                                     },
                                     .sseup => {
-                                        llvm_types_buffer[llvm_types_index] = 64;
+                                        llvm_types_buffer[llvm_types_index] = dg.context.doubleType();
                                         llvm_types_index += 1;
                                     },
                                     .x87 => {
-                                        llvm_types_buffer[llvm_types_index] = 80;
+                                        llvm_types_buffer[llvm_types_index] = dg.context.x86FP80Type();
                                         llvm_types_index += 1;
                                     },
                                     .x87up => {
-                                        llvm_types_buffer[llvm_types_index] = 80;
+                                        llvm_types_buffer[llvm_types_index] = dg.context.x86FP80Type();
                                         llvm_types_index += 1;
                                     },
                                     .complex_x87 => {
@@ -10483,7 +10633,7 @@ const ParamTypeIterator = struct {
                             it.llvm_types_len = llvm_types_index;
                             it.llvm_index += llvm_types_index;
                             it.zig_index += 1;
-                            return if (classes[0] == .integer) .multiple_llvm_ints else .multiple_llvm_float;
+                            return .multiple_llvm_types;
                         },
                     },
                     .wasm32 => {
@@ -10502,13 +10652,13 @@ const ParamTypeIterator = struct {
                         it.zig_index += 1;
                         it.llvm_index += 1;
                         switch (aarch64_c_abi.classifyType(ty, it.target)) {
-                            .memory => return .byref,
+                            .memory => return .byref_mut,
                             .float_array => |len| return Lowering{ .float_array = len },
                             .byval => return .byval,
                             .integer => {
                                 it.llvm_types_len = 1;
-                                it.llvm_types_buffer[0] = 64;
-                                return .multiple_llvm_ints;
+                                it.llvm_types_buffer[0] = dg.context.intType(64);
+                                return .multiple_llvm_types;
                             },
                             .double_integer => return Lowering{ .i64_array = 2 },
                         }
@@ -10533,9 +10683,7 @@ const ParamTypeIterator = struct {
                             return .as_u16;
                         }
                         switch (riscv_c_abi.classifyType(ty, it.target)) {
-                            .memory => {
-                                return .byref;
-                            },
+                            .memory => return .byref_mut,
                             .byval => return .byval,
                             .integer => return .abi_sized_int,
                             .double_integer => return Lowering{ .i64_array = 2 },
@@ -10581,7 +10729,7 @@ fn ccAbiPromoteInt(
         else => {},
     }
     const int_info = switch (ty.zigTypeTag()) {
-        .Bool => Type.@"u1".intInfo(target),
+        .Bool => Type.u1.intInfo(target),
         .Int, .Enum, .ErrorSet => ty.intInfo(target),
         else => return null,
     };
@@ -10648,7 +10796,7 @@ fn isByRef(ty: Type) bool {
                 const tuple = ty.tupleFields();
                 var count: usize = 0;
                 for (tuple.values) |field_val, i| {
-                    if (field_val.tag() != .unreachable_value) continue;
+                    if (field_val.tag() != .unreachable_value or !tuple.types[i].hasRuntimeBits()) continue;
 
                     count += 1;
                     if (count > max_fields_byval) return true;
@@ -10667,7 +10815,10 @@ fn isByRef(ty: Type) bool {
             }
             return false;
         },
-        .Union => return ty.hasRuntimeBits(),
+        .Union => switch (ty.containerLayout()) {
+            .Packed => return false,
+            else => return ty.hasRuntimeBits(),
+        },
         .ErrorUnion => {
             const payload_ty = ty.errorUnionPayload();
             if (!payload_ty.hasRuntimeBitsIgnoreComptime()) {

@@ -213,7 +213,7 @@ const TestManifestConfigDefaults = struct {
 ///
 /// build test
 const TestManifest = struct {
-    @"type": Type,
+    type: Type,
     config_map: std.StringHashMap([]const u8),
     trailing_bytes: []const u8 = "",
 
@@ -294,7 +294,7 @@ const TestManifest = struct {
         };
 
         var manifest: TestManifest = .{
-            .@"type" = tt,
+            .type = tt,
             .config_map = std.StringHashMap([]const u8).init(arena),
         };
 
@@ -320,7 +320,7 @@ const TestManifest = struct {
         key: []const u8,
         comptime T: type,
     ) ConfigValueIterator(T) {
-        const bytes = self.config_map.get(key) orelse TestManifestConfigDefaults.get(self.@"type", key);
+        const bytes = self.config_map.get(key) orelse TestManifestConfigDefaults.get(self.type, key);
         return ConfigValueIterator(T){
             .inner = std.mem.split(u8, bytes, ","),
         };
@@ -1157,7 +1157,7 @@ pub const TestContext = struct {
 
                 for (cases.items) |case_index| {
                     const case = &ctx.cases.items[case_index];
-                    switch (manifest.@"type") {
+                    switch (manifest.type) {
                         .@"error" => {
                             const errors = try manifest.trailingAlloc(ctx.arena);
                             switch (strategy) {
@@ -1812,6 +1812,9 @@ pub const TestContext = struct {
                                 "-lc",
                                 exe_path,
                             });
+                            if (zig_lib_directory.path) |p| {
+                                try argv.appendSlice(&.{ "-I", p });
+                            }
                         } else switch (host.getExternalExecutor(target_info, .{ .link_libc = case.link_libc })) {
                             .native => try argv.append(exe_path),
                             .bad_dl, .bad_os_or_cpu => continue :update, // Pass test.

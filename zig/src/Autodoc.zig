@@ -660,8 +660,8 @@ const DocData = struct {
         comptimeExpr: usize, // index in `comptimeExprs`
         void: struct {},
         @"unreachable": struct {},
-        @"null": struct {},
-        @"undefined": struct {},
+        null: struct {},
+        undefined: struct {},
         @"struct": []FieldVal,
         bool: bool,
         @"anytype": struct {},
@@ -2129,7 +2129,15 @@ fn walkInstruction(
                 file,
                 parent_scope,
                 parent_src,
-                getBlockInlineBreak(file.zir, inst_index),
+                getBlockInlineBreak(file.zir, inst_index) orelse {
+                    const res = DocData.WalkResult{ .expr = .{
+                        .comptimeExpr = self.comptime_exprs.items.len,
+                    } };
+                    try self.comptime_exprs.append(self.arena, .{
+                        .code = "if (...) { ... }",
+                    });
+                    return res;
+                },
                 need_type,
             );
         },
@@ -3155,7 +3163,7 @@ fn walkDecls(
             2 => {
                 // decl test
                 const decl_being_tested = scope.resolveDeclName(doc_comment_index);
-                const func_index = getBlockInlineBreak(file.zir, value_index);
+                const func_index = getBlockInlineBreak(file.zir, value_index).?;
 
                 const pl_node = data[Zir.refToIndex(func_index).?].pl_node;
                 const fn_src = try self.srcLocInfo(file, pl_node.src_node, decl_src);
@@ -4209,7 +4217,7 @@ fn walkRef(
                 );
             },
             .undef => {
-                return DocData.WalkResult{ .expr = .@"undefined" };
+                return DocData.WalkResult{ .expr = .undefined };
             },
             .zero => {
                 return DocData.WalkResult{
@@ -4237,7 +4245,7 @@ fn walkRef(
                 };
             },
             .null_value => {
-                return DocData.WalkResult{ .expr = .@"null" };
+                return DocData.WalkResult{ .expr = .null };
             },
             .bool_true => {
                 return DocData.WalkResult{
@@ -4301,12 +4309,13 @@ fn walkRef(
     }
 }
 
-fn getBlockInlineBreak(zir: Zir, inst_index: usize) Zir.Inst.Ref {
+fn getBlockInlineBreak(zir: Zir, inst_index: usize) ?Zir.Inst.Ref {
     const tags = zir.instructions.items(.tag);
     const data = zir.instructions.items(.data);
     const pl_node = data[inst_index].pl_node;
     const extra = zir.extraData(Zir.Inst.Block, pl_node.payload_index);
     const break_index = zir.extra[extra.end..][extra.data.body_len - 1];
+    if (tags[break_index] == .condbr_inline) return null;
     std.debug.assert(tags[break_index] == .break_inline);
     return data[break_index].@"break".operand;
 }

@@ -51,6 +51,7 @@ whole_cache_manifest: ?*Cache.Manifest = null,
 whole_cache_manifest_mutex: std.Thread.Mutex = .{},
 
 link_error_flags: link.File.ErrorFlags = .{},
+lld_errors: std.ArrayListUnmanaged(LldError) = .{},
 
 work_queue: std.fifo.LinearFifo(Job, .Dynamic),
 anon_work_queue: std.fifo.LinearFifo(Job, .Dynamic),
@@ -335,6 +336,21 @@ pub const MiscError = struct {
     }
 };
 
+pub const LldError = struct {
+    /// Allocated with gpa.
+    msg: []const u8,
+    context_lines: []const []const u8 = &.{},
+
+    pub fn deinit(self: *LldError, gpa: Allocator) void {
+        for (self.context_lines) |line| {
+            gpa.free(line);
+        }
+
+        gpa.free(self.context_lines);
+        gpa.free(self.msg);
+    }
+};
+
 /// To support incremental compilation, errors are stored in various places
 /// so that they can be created and destroyed appropriately. This structure
 /// is used to collect all the errors from the various places into one
@@ -498,7 +514,7 @@ pub const AllErrors = struct {
                     }
                     ttyconf.setColor(stderr, .Reset);
                     for (plain.notes) |note| {
-                        try note.renderToWriter(ttyconf, stderr, "error", .Red, indent + 4);
+                        try note.renderToWriter(ttyconf, stderr, "note", .Cyan, indent + 4);
                     }
                 },
             }
@@ -994,6 +1010,7 @@ pub const InitOptions = struct {
     reference_trace: ?u32 = null,
     test_filter: ?[]const u8 = null,
     test_name_prefix: ?[]const u8 = null,
+    test_runner_path: ?[]const u8 = null,
     subsystem: ?std.Target.SubSystem = null,
     /// WASI-only. Type of WASI execution model ("command" or "reactor").
     wasi_exec_model: ?std.builtin.WasiExecModel = null,
@@ -1016,6 +1033,9 @@ pub const InitOptions = struct {
     /// (Darwin) remove dylibs that are unreachable by the entry point or exported symbols
     dead_strip_dylibs: bool = false,
     libcxx_abi_version: libcxx.AbiVersion = libcxx.AbiVersion.default,
+    /// (Windows) PDB source path prefix to instruct the linker how to resolve relative
+    /// paths when consolidating CodeView streams into a single PDB file.
+    pdb_source_path: ?[]const u8 = null,
 };
 
 fn addPackageTableToCacheHash(
@@ -1578,12 +1598,15 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             errdefer std_pkg.destroy(gpa);
 
             const root_pkg = if (options.is_test) root_pkg: {
-                const test_pkg = try Package.createWithDir(
-                    gpa,
-                    options.zig_lib_directory,
-                    null,
-                    "test_runner.zig",
-                );
+                const test_pkg = if (options.test_runner_path) |test_runner|
+                    try Package.create(gpa, null, test_runner)
+                else
+                    try Package.createWithDir(
+                        gpa,
+                        options.zig_lib_directory,
+                        null,
+                        "test_runner.zig",
+                    );
                 errdefer test_pkg.destroy(gpa);
 
                 break :root_pkg test_pkg;
@@ -1717,6 +1740,27 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
                 .directory = link_artifact_directory,
                 .sub_path = emit_bin.basename,
             };
+        };
+
+        const pdb_source_path: ?[]const u8 = options.pdb_source_path orelse blk: {
+            if (builtin.target.os.tag == .windows) {
+                // PDB requires all file paths to be fully resolved, and it is really the
+                // linker's responsibility to canonicalize any path extracted from the CodeView
+                // in the object file. However, LLD-link has some very questionable defaults, and
+                // in particular, it purposely bakes in path separator of the host system it was
+                // built on rather than the targets, or just throw an error. Thankfully, they have
+                // left a backdoor we can use via -PDBSOURCEPATH.
+                const mod = module orelse break :blk null;
+                var buffer: [std.fs.MAX_PATH_BYTES]u8 = undefined;
+                const resolved_path = if (mod.main_pkg.root_src_directory.path) |base_path| p: {
+                    if (std.fs.path.isAbsolute(base_path)) break :blk base_path;
+                    const resolved_path = std.os.realpath(base_path, &buffer) catch break :blk null;
+                    const pos = std.mem.lastIndexOfLinear(u8, resolved_path, base_path) orelse resolved_path.len;
+                    break :p resolved_path[0..pos];
+                } else std.os.realpath(".", &buffer) catch break :blk null;
+                break :blk try arena.dupe(u8, resolved_path);
+            }
+            break :blk null;
         };
 
         const implib_emit: ?link.Emit = blk: {
@@ -1865,6 +1909,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             .headerpad_max_install_names = options.headerpad_max_install_names,
             .dead_strip_dylibs = options.dead_strip_dylibs,
             .force_undefined_symbols = .{},
+            .pdb_source_path = pdb_source_path,
         });
         errdefer bin_file.destroy();
         comp.* = .{
@@ -2017,10 +2062,6 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             for (mingw.always_link_libs) |name| {
                 try comp.bin_file.options.system_libs.put(comp.gpa, name, .{});
             }
-
-            // LLD might drop some symbols as unused during LTO and GCing, therefore,
-            // we force mark them for resolution here.
-            try comp.bin_file.options.force_undefined_symbols.put(comp.gpa, "_tls_index", {});
         }
         // Generate Windows import libs.
         if (target.os.tag == .windows) {
@@ -2040,6 +2081,18 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
         }
         if (build_options.have_llvm and comp.bin_file.options.tsan) {
             try comp.work_queue.writeItem(.libtsan);
+        }
+
+        if (comp.getTarget().isMinGW() and !comp.bin_file.options.single_threaded) {
+            // LLD might drop some symbols as unused during LTO and GCing, therefore,
+            // we force mark them for resolution here.
+
+            var tls_index_sym = switch (comp.getTarget().cpu.arch) {
+                .x86 => "__tls_index",
+                else => "_tls_index",
+            };
+
+            try comp.bin_file.options.force_undefined_symbols.put(comp.gpa, tls_index_sym, {});
         }
 
         if (comp.bin_file.options.include_compiler_rt and capable_of_building_compiler_rt) {
@@ -2128,6 +2181,11 @@ pub fn destroy(self: *Compilation) void {
         value.destroy(gpa);
     }
     self.failed_c_objects.deinit(gpa);
+
+    for (self.lld_errors.items) |*lld_error| {
+        lld_error.deinit(gpa);
+    }
+    self.lld_errors.deinit(gpa);
 
     self.clearMiscFailures();
 
@@ -2336,7 +2394,7 @@ pub fn update(comp: *Compilation) !void {
                 // The `test_functions` decl has been intentionally postponed until now,
                 // at which point we must populate it with the list of test functions that
                 // have been discovered and not filtered out.
-                try module.populateTestFunctions();
+                try module.populateTestFunctions(main_progress_node);
             }
 
             // Process the deletion set. We use a while loop here because the
@@ -2428,6 +2486,10 @@ pub fn update(comp: *Compilation) !void {
             try comp.flush(main_progress_node);
         }
 
+        if (comp.totalErrorCount() != 0) {
+            return;
+        }
+
         // Failure here only means an unnecessary cache miss.
         man.writeManifest() catch |err| {
             log.warn("failed to write cache manifest: {s}", .{@errorName(err)});
@@ -2457,7 +2519,7 @@ fn flush(comp: *Compilation, prog_node: *std.Progress.Node) !void {
     // This is needed before reading the error flags.
     comp.bin_file.flush(comp, prog_node) catch |err| switch (err) {
         error.FlushFailure => {}, // error reported through link_error_flags
-        error.LLDReportedFailure => {}, // error reported through log.err
+        error.LLDReportedFailure => {}, // error reported via lockAndParseLldStderr
         else => |e| return e,
     };
     comp.link_error_flags = comp.bin_file.errorFlags();
@@ -2690,7 +2752,7 @@ pub fn makeBinFileWritable(self: *Compilation) !void {
 /// This function is temporally single-threaded.
 pub fn totalErrorCount(self: *Compilation) usize {
     var total: usize = self.failed_c_objects.count() + self.misc_failures.count() +
-        @boolToInt(self.alloc_failure_occurred);
+        @boolToInt(self.alloc_failure_occurred) + self.lld_errors.items.len;
 
     if (self.bin_file.options.module) |module| {
         total += module.failed_exports.count();
@@ -2777,6 +2839,21 @@ pub fn getAllErrorsAlloc(self: *Compilation) !AllErrors {
                 },
             });
         }
+    }
+    for (self.lld_errors.items) |lld_error| {
+        const notes = try arena_allocator.alloc(AllErrors.Message, lld_error.context_lines.len);
+        for (lld_error.context_lines) |context_line, i| {
+            notes[i] = .{ .plain = .{
+                .msg = try arena_allocator.dupe(u8, context_line),
+            } };
+        }
+
+        try errors.append(.{
+            .plain = .{
+                .msg = try arena_allocator.dupe(u8, lld_error.msg),
+                .notes = notes,
+            },
+        });
     }
     for (self.misc_failures.values()) |*value| {
         try AllErrors.addPlainWithChildren(&arena, &errors, value.msg, value.children);
@@ -4950,6 +5027,52 @@ pub fn lockAndSetMiscFailure(
     defer comp.mutex.unlock();
 
     return setMiscFailure(comp, tag, format, args);
+}
+
+fn parseLldStderr(comp: *Compilation, comptime prefix: []const u8, stderr: []const u8) Allocator.Error!void {
+    var context_lines = std.ArrayList([]const u8).init(comp.gpa);
+    defer context_lines.deinit();
+
+    var current_err: ?*LldError = null;
+    var lines = mem.split(u8, stderr, std.cstr.line_sep);
+    while (lines.next()) |line| {
+        if (mem.startsWith(u8, line, prefix ++ ":")) {
+            if (current_err) |err| {
+                err.context_lines = context_lines.toOwnedSlice();
+            }
+
+            var split = std.mem.split(u8, line, "error: ");
+            _ = split.first();
+
+            const duped_msg = try std.fmt.allocPrint(comp.gpa, "{s}: {s}", .{ prefix, split.rest() });
+            errdefer comp.gpa.free(duped_msg);
+
+            current_err = try comp.lld_errors.addOne(comp.gpa);
+            current_err.?.* = .{ .msg = duped_msg };
+        } else if (current_err != null) {
+            const context_prefix = ">>> ";
+            var trimmed = mem.trimRight(u8, line, &std.ascii.whitespace);
+            if (mem.startsWith(u8, trimmed, context_prefix)) {
+                trimmed = trimmed[context_prefix.len..];
+            }
+
+            if (trimmed.len > 0) {
+                const duped_line = try comp.gpa.dupe(u8, trimmed);
+                try context_lines.append(duped_line);
+            }
+        }
+    }
+
+    if (current_err) |err| {
+        err.context_lines = context_lines.toOwnedSlice();
+    }
+}
+
+pub fn lockAndParseLldStderr(comp: *Compilation, comptime prefix: []const u8, stderr: []const u8) void {
+    comp.mutex.lock();
+    defer comp.mutex.unlock();
+
+    comp.parseLldStderr(prefix, stderr) catch comp.setAllocFailure();
 }
 
 pub fn dump_argv(argv: []const []const u8) void {

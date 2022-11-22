@@ -224,12 +224,6 @@ const MonomorphedFuncsContext = struct {
     }
 };
 
-pub const WipAnalysis = struct {
-    sema: *Sema,
-    block: *Sema.Block,
-    src: Module.LazySrcLoc,
-};
-
 pub const MemoizedCallSet = std.HashMapUnmanaged(
     MemoizedCall.Key,
     MemoizedCall.Result,
@@ -1050,7 +1044,8 @@ pub const Struct = struct {
 
             .root => return queryFieldSrc(tree.*, query, file, tree.containerDeclRoot()),
 
-            else => unreachable,
+            // This struct was generated using @Type
+            else => return s.srcLoc(mod),
         }
     }
 
@@ -1276,7 +1271,8 @@ pub const Union = struct {
             .tagged_union_enum_tag,
             .tagged_union_enum_tag_trailing,
             => return queryFieldSrc(tree.*, query, file, tree.taggedUnionEnumTag(node)),
-            else => unreachable,
+            // This union was generated using @Type
+            else => return u.srcLoc(mod),
         }
     }
 
@@ -4637,12 +4633,12 @@ fn semaDecl(mod: *Module, decl_index: Decl.Index) !bool {
     const address_space_src: LazySrcLoc = .{ .node_offset_var_decl_addrspace = 0 };
     const ty_src: LazySrcLoc = .{ .node_offset_var_decl_ty = 0 };
     const init_src: LazySrcLoc = .{ .node_offset_var_decl_init = 0 };
-    const decl_tv = try sema.resolveInstValue(&block_scope, init_src, result_ref, undefined);
+    const decl_tv = try sema.resolveInstValue(&block_scope, init_src, result_ref, "global variable initializer must be comptime-known");
 
     // Note this resolves the type of the Decl, not the value; if this Decl
     // is a struct, for example, this resolves `type` (which needs no resolution),
     // not the struct itself.
-    try sema.resolveTypeLayout(&block_scope, ty_src, decl_tv.ty);
+    try sema.resolveTypeLayout(decl_tv.ty);
 
     const decl_arena_state = try decl_arena_allocator.create(std.heap.ArenaAllocator.State);
 
@@ -4810,14 +4806,14 @@ fn semaDecl(mod: *Module, decl_index: Decl.Index) !bool {
     decl.generation = mod.generation;
 
     const has_runtime_bits = is_extern or
-        (queue_linker_work and try sema.typeHasRuntimeBits(&block_scope, ty_src, decl.ty));
+        (queue_linker_work and try sema.typeHasRuntimeBits(decl.ty));
 
     if (has_runtime_bits) {
         log.debug("queue linker work for {*} ({s})", .{ decl, decl.name });
 
         // Needed for codegen_decl which will call updateDecl and then the
         // codegen backend wants full access to the Decl Type.
-        try sema.resolveTypeFully(&block_scope, ty_src, decl.ty);
+        try sema.resolveTypeFully(decl.ty);
 
         try mod.comp.bin_file.allocateDeclIndexes(decl_index);
         try mod.comp.work_queue.writeItem(.{ .codegen_decl = decl_index });
@@ -5586,21 +5582,10 @@ pub fn analyzeFnBody(mod: *Module, func: *Fn, arena: Allocator) SemaError!Air {
     var runtime_param_index: usize = 0;
     var total_param_index: usize = 0;
     for (fn_info.param_body) |inst| {
-        const param: struct { name: u32, src: LazySrcLoc } = switch (zir_tags[inst]) {
-            .param, .param_comptime => blk: {
-                const pl_tok = sema.code.instructions.items(.data)[inst].pl_tok;
-                const extra = sema.code.extraData(Zir.Inst.Param, pl_tok.payload_index).data;
-                break :blk .{ .name = extra.name, .src = pl_tok.src() };
-            },
-
-            .param_anytype, .param_anytype_comptime => blk: {
-                const str_tok = sema.code.instructions.items(.data)[inst].str_tok;
-                break :blk .{ .name = str_tok.start, .src = str_tok.src() };
-            },
-
+        switch (zir_tags[inst]) {
+            .param, .param_comptime, .param_anytype, .param_anytype_comptime => {},
             else => continue,
-        };
-
+        }
         const param_ty = if (func.comptime_args) |comptime_args| t: {
             const arg_tv = comptime_args[total_param_index];
 
@@ -5617,7 +5602,7 @@ pub fn analyzeFnBody(mod: *Module, func: *Fn, arena: Allocator) SemaError!Air {
             continue;
         } else fn_ty_info.param_types[runtime_param_index];
 
-        const opt_opv = sema.typeHasOnePossibleValue(&inner_block, param.src, param_ty) catch |err| switch (err) {
+        const opt_opv = sema.typeHasOnePossibleValue(param_ty) catch |err| switch (err) {
             error.NeededSourceLocation => unreachable,
             error.GenericPoison => unreachable,
             error.ComptimeReturn => unreachable,
@@ -5707,8 +5692,7 @@ pub fn analyzeFnBody(mod: *Module, func: *Fn, arena: Allocator) SemaError!Air {
     // Crucially, this happens *after* we set the function state to success above,
     // so that dependencies on the function body will now be satisfied rather than
     // result in circular dependency errors.
-    const src = LazySrcLoc.nodeOffset(0);
-    sema.resolveFnTypes(&inner_block, src, fn_ty_info) catch |err| switch (err) {
+    sema.resolveFnTypes(fn_ty_info) catch |err| switch (err) {
         error.NeededSourceLocation => unreachable,
         error.GenericPoison => unreachable,
         error.ComptimeReturn => unreachable,
@@ -5726,7 +5710,7 @@ pub fn analyzeFnBody(mod: *Module, func: *Fn, arena: Allocator) SemaError!Air {
     // the backends.
     for (sema.types_to_resolve.items) |inst_ref| {
         const ty = sema.getTmpAir().getRefType(inst_ref);
-        sema.resolveTypeFully(&inner_block, src, ty) catch |err| switch (err) {
+        sema.resolveTypeFully(ty) catch |err| switch (err) {
             error.NeededSourceLocation => unreachable,
             error.GenericPoison => unreachable,
             error.ComptimeReturn => unreachable,
@@ -6449,13 +6433,27 @@ pub fn processExports(mod: *Module) !void {
     }
 }
 
-pub fn populateTestFunctions(mod: *Module) !void {
+pub fn populateTestFunctions(
+    mod: *Module,
+    main_progress_node: *std.Progress.Node,
+) !void {
     const gpa = mod.gpa;
     const builtin_pkg = mod.main_pkg.table.get("builtin").?;
     const builtin_file = (mod.importPkg(builtin_pkg) catch unreachable).file;
     const root_decl = mod.declPtr(builtin_file.root_decl.unwrap().?);
     const builtin_namespace = root_decl.src_namespace;
     const decl_index = builtin_namespace.decls.getKeyAdapted(@as([]const u8, "test_functions"), DeclAdapter{ .mod = mod }).?;
+    {
+        // We have to call `ensureDeclAnalyzed` here in case `builtin.test_functions`
+        // was not referenced by start code.
+        mod.sema_prog_node = main_progress_node.start("Semantic Analysis", 0);
+        mod.sema_prog_node.activate();
+        defer {
+            mod.sema_prog_node.end();
+            mod.sema_prog_node = undefined;
+        }
+        try mod.ensureDeclAnalyzed(decl_index);
+    }
     const decl = mod.declPtr(decl_index);
     var buf: Type.SlicePtrFieldTypeBuffer = undefined;
     const tmp_test_fn_ty = decl.ty.slicePtrFieldType(&buf).elemType();

@@ -176,7 +176,7 @@ const reserved_idents = std.ComptimeStringMap(void, .{
     .{ "register", {} },
     .{ "restrict", {} },
     .{ "return", {} },
-    .{ "short ", {} },
+    .{ "short", {} },
     .{ "signed", {} },
     .{ "size_t", {} },
     .{ "sizeof", {} },
@@ -607,7 +607,7 @@ pub const DeclGen = struct {
         if (val.isUndefDeep()) {
             switch (ty.zigTypeTag()) {
                 // bool b = 0xaa; evals to true, but memcpy(&b, 0xaa, 1); evals to false.
-                .Bool => return dg.renderValue(writer, ty, Value.@"false", location),
+                .Bool => return dg.renderValue(writer, ty, Value.false, location),
                 .Int, .Enum, .ErrorSet => return writer.print("{x}", .{try dg.fmtIntLiteral(ty, val)}),
                 .Float => {
                     const bits = ty.floatBits(target);
@@ -740,14 +740,24 @@ pub const DeclGen = struct {
                         try writer.writeByte(')');
                     }
 
-                    try writer.writeByte('{');
-                    const c_len = ty.arrayLenIncludingSentinel();
-                    var index: usize = 0;
-                    while (index < c_len) : (index += 1) {
-                        if (index > 0) try writer.writeAll(", ");
-                        try dg.renderValue(writer, ty.childType(), val, .Initializer);
+                    const ai = ty.arrayInfo();
+                    if (ai.elem_type.eql(Type.u8, dg.module)) {
+                        try writer.writeByte('"');
+                        const c_len = ty.arrayLenIncludingSentinel();
+                        var index: usize = 0;
+                        while (index < c_len) : (index += 1)
+                            try writeStringLiteralChar(writer, 0xaa);
+                        return writer.writeByte('"');
+                    } else {
+                        try writer.writeByte('{');
+                        const c_len = ty.arrayLenIncludingSentinel();
+                        var index: usize = 0;
+                        while (index < c_len) : (index += 1) {
+                            if (index > 0) try writer.writeAll(", ");
+                            try dg.renderValue(writer, ty.childType(), val, .Initializer);
+                        }
+                        return writer.writeByte('}');
                     }
-                    return writer.writeByte('}');
                 },
                 .ComptimeInt,
                 .ComptimeFloat,
@@ -931,25 +941,48 @@ pub const DeclGen = struct {
                         }
                         try writer.writeByte('}');
                     },
+                    .bytes => {
+                        try writer.print("{s}", .{fmtStringLiteral(val.castTag(.bytes).?.data)});
+                    },
+                    .str_lit => {
+                        const str_lit = val.castTag(.str_lit).?.data;
+                        const bytes = dg.module.string_literal_bytes.items[str_lit.index..][0..str_lit.len];
+                        try writer.print("{s}", .{fmtStringLiteral(bytes)});
+                    },
                     else => {
                         // Fall back to generic implementation.
                         var arena = std.heap.ArenaAllocator.init(dg.gpa);
                         defer arena.deinit();
                         const arena_allocator = arena.allocator();
 
-                        try writer.writeByte('{');
                         const ai = ty.arrayInfo();
-                        var index: usize = 0;
-                        while (index < ai.len) : (index += 1) {
-                            if (index != 0) try writer.writeByte(',');
-                            const elem_val = try val.elemValue(dg.module, arena_allocator, index);
-                            try dg.renderValue(writer, ai.elem_type, elem_val, .Initializer);
+                        if (ai.elem_type.eql(Type.u8, dg.module)) {
+                            try writer.writeByte('"');
+                            var index: usize = 0;
+                            while (index < ai.len) : (index += 1) {
+                                const elem_val = try val.elemValue(dg.module, arena_allocator, index);
+                                const elem_val_u8 = @intCast(u8, elem_val.toUnsignedInt(target));
+                                try writeStringLiteralChar(writer, elem_val_u8);
+                            }
+                            if (ai.sentinel) |s| {
+                                const s_u8 = @intCast(u8, s.toUnsignedInt(target));
+                                try writeStringLiteralChar(writer, s_u8);
+                            }
+                            try writer.writeByte('"');
+                        } else {
+                            try writer.writeByte('{');
+                            var index: usize = 0;
+                            while (index < ai.len) : (index += 1) {
+                                if (index != 0) try writer.writeByte(',');
+                                const elem_val = try val.elemValue(dg.module, arena_allocator, index);
+                                try dg.renderValue(writer, ai.elem_type, elem_val, .Initializer);
+                            }
+                            if (ai.sentinel) |s| {
+                                if (index != 0) try writer.writeByte(',');
+                                try dg.renderValue(writer, ai.elem_type, s, .Initializer);
+                            }
+                            try writer.writeByte('}');
                         }
-                        if (ai.sentinel) |s| {
-                            if (index != 0) try writer.writeByte(',');
-                            try dg.renderValue(writer, ai.elem_type, s, .Initializer);
-                        }
-                        try writer.writeByte('}');
                     },
                 }
             },
@@ -1140,10 +1173,16 @@ pub const DeclGen = struct {
                 const index = ty.unionTagFieldIndex(union_obj.tag, dg.module).?;
                 const field_ty = ty.unionFields().values()[index].ty;
                 const field_name = ty.unionFields().keys()[index];
+                var it = ty.unionFields().iterator();
                 if (field_ty.hasRuntimeBits()) {
                     try writer.print(".{ } = ", .{fmtIdent(field_name)});
                     try dg.renderValue(writer, field_ty, union_obj.val, .Initializer);
-                } else try writer.writeByte('0');
+                } else while (it.next()) |field| {
+                    if (!field.value_ptr.ty.hasRuntimeBits()) continue;
+                    try writer.print(".{ } = ", .{fmtIdent(field.key_ptr.*)});
+                    try dg.renderValue(writer, field.value_ptr.ty, Value.undef, .Initializer);
+                    break;
+                } else try writer.writeAll(".empty_union = 0");
                 if (ty.unionTagTypeSafety()) |_| try writer.writeByte('}');
                 try writer.writeByte('}');
             },
@@ -1958,7 +1997,7 @@ pub const DeclGen = struct {
             try buffer.appendSlice("  }\n");
         }
         try buffer.appendSlice(" }\n while (");
-        try dg.renderValue(bw, Type.bool, Value.@"true", .Other);
+        try dg.renderValue(bw, Type.bool, Value.true, .Other);
         try buffer.appendSlice(") ");
         _ = try airBreakpoint(bw);
         try buffer.appendSlice("}\n");
@@ -2658,12 +2697,14 @@ fn airPtrElemPtr(f: *Function, inst: Air.Inst.Index) !CValue {
     const ty_pl = f.air.instructions.items(.data)[inst].ty_pl;
     const bin_op = f.air.extraData(Air.Bin, ty_pl.payload).data;
     const ptr_ty = f.air.typeOf(bin_op.lhs);
+    const child_ty = ptr_ty.childType();
 
     const ptr = try f.resolveInst(bin_op.lhs);
+    if (!child_ty.hasRuntimeBitsIgnoreComptime()) return ptr;
     const index = try f.resolveInst(bin_op.rhs);
+
     const writer = f.object.writer();
     const local = try f.allocLocal(f.air.typeOfIndex(inst), .Const);
-
     try writer.writeAll(" = &(");
     if (ptr_ty.ptrSize() == .One) {
         // It's a pointer to an array, so we need to de-reference.
@@ -2717,15 +2758,23 @@ fn airSliceElemPtr(f: *Function, inst: Air.Inst.Index) !CValue {
     const ty_pl = f.air.instructions.items(.data)[inst].ty_pl;
     const bin_op = f.air.extraData(Air.Bin, ty_pl.payload).data;
 
+    const slice_ty = f.air.typeOf(bin_op.lhs);
+    const child_ty = slice_ty.elemType2();
     const slice = try f.resolveInst(bin_op.lhs);
-    const index = try f.resolveInst(bin_op.rhs);
+
     const writer = f.object.writer();
     const local = try f.allocLocal(f.air.typeOfIndex(inst), .Const);
-    try writer.writeAll(" = &");
+    try writer.writeAll(" = ");
+    if (child_ty.hasRuntimeBitsIgnoreComptime()) try writer.writeByte('&');
     try f.writeCValue(writer, slice, .Other);
-    try writer.writeAll(".ptr[");
-    try f.writeCValue(writer, index, .Other);
-    try writer.writeAll("];\n");
+    try writer.writeAll(".ptr");
+    if (child_ty.hasRuntimeBitsIgnoreComptime()) {
+        const index = try f.resolveInst(bin_op.rhs);
+        try writer.writeByte('[');
+        try f.writeCValue(writer, index, .Other);
+        try writer.writeByte(']');
+    }
+    try writer.writeAll(";\n");
     return local;
 }
 
@@ -3784,7 +3833,7 @@ fn airLoop(f: *Function, inst: Air.Inst.Index) !CValue {
     const body = f.air.extra[loop.end..][0..loop.data.body_len];
     const writer = f.object.writer();
     try writer.writeAll("while (");
-    try f.object.dg.renderValue(writer, Type.bool, Value.@"true", .Other);
+    try f.object.dg.renderValue(writer, Type.bool, Value.true, .Other);
     try writer.writeAll(") ");
     try genBody(f, body);
     try writer.writeByte('\n');
@@ -4079,19 +4128,19 @@ fn airIsNull(
     var slice_ptr_buf: Type.SlicePtrFieldTypeBuffer = undefined;
 
     const rhs = if (!payload_ty.hasRuntimeBitsIgnoreComptime())
-        TypedValue{ .ty = Type.bool, .val = Value.@"true" }
+        TypedValue{ .ty = Type.bool, .val = Value.true }
     else if (optional_ty.isPtrLikeOptional())
         // operand is a regular pointer, test `operand !=/== NULL`
-        TypedValue{ .ty = optional_ty, .val = Value.@"null" }
+        TypedValue{ .ty = optional_ty, .val = Value.null }
     else if (payload_ty.zigTypeTag() == .ErrorSet)
         TypedValue{ .ty = payload_ty, .val = Value.zero }
     else if (payload_ty.isSlice() and optional_ty.optionalReprIsPayload()) rhs: {
         try writer.writeAll(".ptr");
         const slice_ptr_ty = payload_ty.slicePtrFieldType(&slice_ptr_buf);
-        break :rhs TypedValue{ .ty = slice_ptr_ty, .val = Value.@"null" };
+        break :rhs TypedValue{ .ty = slice_ptr_ty, .val = Value.null };
     } else rhs: {
         try writer.writeAll(".is_null");
-        break :rhs TypedValue{ .ty = Type.bool, .val = Value.@"true" };
+        break :rhs TypedValue{ .ty = Type.bool, .val = Value.true };
     };
     try writer.writeByte(' ');
     try writer.writeAll(operator);
@@ -4179,7 +4228,7 @@ fn airOptionalPayloadPtrSet(f: *Function, inst: Air.Inst.Index) !CValue {
 
     try f.writeCValueDeref(writer, operand);
     try writer.writeAll(".is_null = ");
-    try f.object.dg.renderValue(writer, Type.bool, Value.@"false", .Initializer);
+    try f.object.dg.renderValue(writer, Type.bool, Value.false, .Initializer);
     try writer.writeAll(";\n");
 
     const inst_ty = f.air.typeOfIndex(inst);
@@ -4518,7 +4567,7 @@ fn airWrapOptional(f: *Function, inst: Air.Inst.Index) !CValue {
     try writer.writeAll(" = { .payload = ");
     try f.writeCValue(writer, if (is_array) CValue{ .undef = payload_ty } else payload, .Initializer);
     try writer.writeAll(", .is_null = ");
-    try f.object.dg.renderValue(writer, Type.bool, Value.@"false", .Initializer);
+    try f.object.dg.renderValue(writer, Type.bool, Value.false, .Initializer);
     try writer.writeAll(" };\n");
     if (is_array) {
         try writer.writeAll("memcpy(");
@@ -4825,7 +4874,7 @@ fn airCmpBuiltinCall(
     try f.writeCValue(writer, try f.resolveInst(bin_op.lhs), .FunctionArgument);
     try writer.writeAll(", ");
     try f.writeCValue(writer, try f.resolveInst(bin_op.rhs), .FunctionArgument);
-    try writer.print(") {s} {};\n", .{ operator, try f.fmtIntLiteral(Type.initTag(.i8), Value.zero) });
+    try writer.print(") {s} {};\n", .{ operator, try f.fmtIntLiteral(Type.initTag(.i32), Value.zero) });
     return local;
 }
 
@@ -4846,7 +4895,7 @@ fn airCmpxchg(f: *Function, inst: Air.Inst.Index, flavor: [*:0]const u8) !CValue
     try f.writeCValue(writer, expected_value, .Initializer);
     if (is_struct) {
         try writer.writeAll(", .is_null = ");
-        try f.object.dg.renderValue(writer, Type.bool, Value.@"false", .Initializer);
+        try f.object.dg.renderValue(writer, Type.bool, Value.false, .Initializer);
         try writer.writeAll(" }");
     }
     try writer.writeAll(";\n");
@@ -5602,7 +5651,17 @@ fn formatStringLiteral(
 ) @TypeOf(writer).Error!void {
     if (fmt.len != 1 or fmt[0] != 's') @compileError("Invalid fmt: " ++ fmt);
     try writer.writeByte('\"');
-    for (str) |c| switch (c) {
+    for (str) |c|
+        try writeStringLiteralChar(writer, c);
+    try writer.writeByte('\"');
+}
+
+fn fmtStringLiteral(str: []const u8) std.fmt.Formatter(formatStringLiteral) {
+    return .{ .data = str };
+}
+
+fn writeStringLiteralChar(writer: anytype, c: u8) !void {
+    switch (c) {
         7 => try writer.writeAll("\\a"),
         8 => try writer.writeAll("\\b"),
         '\t' => try writer.writeAll("\\t"),
@@ -5615,11 +5674,7 @@ fn formatStringLiteral(
             ' '...'~' => try writer.writeByte(c),
             else => try writer.print("\\{o:0>3}", .{c}),
         },
-    };
-    try writer.writeByte('\"');
-}
-fn fmtStringLiteral(str: []const u8) std.fmt.Formatter(formatStringLiteral) {
-    return .{ .data = str };
+    }
 }
 
 fn undefPattern(comptime IntType: type) IntType {

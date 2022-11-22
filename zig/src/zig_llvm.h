@@ -129,6 +129,8 @@ ZIG_EXTERN_C LLVMValueRef ZigLLVMBuildCall(LLVMBuilderRef B, LLVMTypeRef functio
         LLVMValueRef Fn, LLVMValueRef *Args, unsigned NumArgs, enum ZigLLVM_CallingConv CC,
         enum ZigLLVM_CallAttr attr, const char *Name);
 
+ZIG_EXTERN_C void ZigLLVMAddAttributeAtIndex(LLVMValueRef Val, unsigned Idx, LLVMAttributeRef A);
+
 ZIG_EXTERN_C LLVMValueRef ZigLLVMBuildMemCpy(LLVMBuilderRef B, LLVMValueRef Dst, unsigned DstAlign,
         LLVMValueRef Src, unsigned SrcAlign, LLVMValueRef Size, bool isVolatile);
 
@@ -176,7 +178,11 @@ ZIG_EXTERN_C struct ZigLLVMDIType *ZigLLVMCreateDebugArrayType(struct ZigLLVMDIB
         int elem_count);
 
 ZIG_EXTERN_C struct ZigLLVMDIEnumerator *ZigLLVMCreateDebugEnumerator(struct ZigLLVMDIBuilder *dibuilder,
-        const char *name, int64_t val);
+        const char *name, uint64_t val, bool isUnsigned);
+
+
+ZIG_EXTERN_C struct ZigLLVMDIEnumerator *ZigLLVMCreateDebugEnumeratorOfArbitraryPrecision(struct ZigLLVMDIBuilder *dibuilder,
+        const char *name, unsigned NumWords, const uint64_t Words[], unsigned int bits, bool isUnsigned);
 
 ZIG_EXTERN_C struct ZigLLVMDIType *ZigLLVMCreateDebugEnumerationType(struct ZigLLVMDIBuilder *dibuilder,
         struct ZigLLVMDIScope *scope, const char *name, struct ZigLLVMDIFile *file, unsigned line_number,

@@ -1523,6 +1523,21 @@ pub fn timerfd_settime(fd: i32, flags: u32, new_value: *const itimerspec, old_va
     return syscall4(.timerfd_settime, @bitCast(usize, @as(isize, fd)), flags, @ptrToInt(new_value), @ptrToInt(old_value));
 }
 
+// Flags for the 'setitimer' system call
+pub const ITIMER = enum(i32) {
+    REAL = 0,
+    VIRTUAL = 1,
+    PROF = 2,
+};
+
+pub fn getitimer(which: i32, curr_value: *itimerspec) usize {
+    return syscall2(.getitimer, @bitCast(usize, @as(isize, which)), @ptrToInt(curr_value));
+}
+
+pub fn setitimer(which: i32, new_value: *const itimerspec, old_value: ?*itimerspec) usize {
+    return syscall3(.setitimer, @bitCast(usize, @as(isize, which)), @ptrToInt(new_value), @ptrToInt(old_value));
+}
+
 pub fn unshare(flags: usize) usize {
     return syscall1(.unshare, flags);
 }
@@ -2823,46 +2838,46 @@ pub const DT = struct {
 
 pub const T = struct {
     pub const CGETS = if (is_mips) 0x540D else 0x5401;
-    pub const CSETS = 0x5402;
-    pub const CSETSW = 0x5403;
-    pub const CSETSF = 0x5404;
-    pub const CGETA = 0x5405;
-    pub const CSETA = 0x5406;
-    pub const CSETAW = 0x5407;
-    pub const CSETAF = 0x5408;
-    pub const CSBRK = 0x5409;
-    pub const CXONC = 0x540A;
-    pub const CFLSH = 0x540B;
-    pub const IOCEXCL = 0x540C;
-    pub const IOCNXCL = 0x540D;
-    pub const IOCSCTTY = 0x540E;
-    pub const IOCGPGRP = 0x540F;
-    pub const IOCSPGRP = 0x5410;
+    pub const CSETS = if (is_mips) 0x540e else 0x5402;
+    pub const CSETSW = if (is_mips) 0x540f else 0x5403;
+    pub const CSETSF = if (is_mips) 0x5410 else 0x5404;
+    pub const CGETA = if (is_mips) 0x5401 else 0x5405;
+    pub const CSETA = if (is_mips) 0x5402 else 0x5406;
+    pub const CSETAW = if (is_mips) 0x5403 else 0x5407;
+    pub const CSETAF = if (is_mips) 0x5404 else 0x5408;
+    pub const CSBRK = if (is_mips) 0x5405 else 0x5409;
+    pub const CXONC = if (is_mips) 0x5406 else 0x540A;
+    pub const CFLSH = if (is_mips) 0x5407 else 0x540B;
+    pub const IOCEXCL = if (is_mips) 0x740d else 0x540C;
+    pub const IOCNXCL = if (is_mips) 0x740e else 0x540D;
+    pub const IOCSCTTY = if (is_mips) 0x7472 else 0x540E;
+    pub const IOCGPGRP = if (is_mips) 0x5472 else 0x540F;
+    pub const IOCSPGRP = if (is_mips) 0x741d else 0x5410;
     pub const IOCOUTQ = if (is_mips) 0x7472 else 0x5411;
-    pub const IOCSTI = 0x5412;
+    pub const IOCSTI = if (is_mips) 0x5472 else 0x5412;
     pub const IOCGWINSZ = if (is_mips or is_ppc64) 0x40087468 else 0x5413;
     pub const IOCSWINSZ = if (is_mips or is_ppc64) 0x80087467 else 0x5414;
-    pub const IOCMGET = 0x5415;
-    pub const IOCMBIS = 0x5416;
-    pub const IOCMBIC = 0x5417;
-    pub const IOCMSET = 0x5418;
-    pub const IOCGSOFTCAR = 0x5419;
-    pub const IOCSSOFTCAR = 0x541A;
+    pub const IOCMGET = if (is_mips) 0x741d else 0x5415;
+    pub const IOCMBIS = if (is_mips) 0x741b else 0x5416;
+    pub const IOCMBIC = if (is_mips) 0x741c else 0x5417;
+    pub const IOCMSET = if (is_mips) 0x741a else 0x5418;
+    pub const IOCGSOFTCAR = if (is_mips) 0x5481 else 0x5419;
+    pub const IOCSSOFTCAR = if (is_mips) 0x5482 else 0x541A;
     pub const FIONREAD = if (is_mips) 0x467F else 0x541B;
     pub const IOCINQ = FIONREAD;
-    pub const IOCLINUX = 0x541C;
-    pub const IOCCONS = 0x541D;
-    pub const IOCGSERIAL = 0x541E;
-    pub const IOCSSERIAL = 0x541F;
-    pub const IOCPKT = 0x5420;
-    pub const FIONBIO = 0x5421;
-    pub const IOCNOTTY = 0x5422;
-    pub const IOCSETD = 0x5423;
-    pub const IOCGETD = 0x5424;
-    pub const CSBRKP = 0x5425;
+    pub const IOCLINUX = if (is_mips) 0x5483 else 0x541C;
+    pub const IOCCONS = if (is_mips) IOCTL.IOW('t', 120, c_int) else 0x541D;
+    pub const IOCGSERIAL = if (is_mips) 0x5484 else 0x541E;
+    pub const IOCSSERIAL = if (is_mips) 0x5485 else 0x541F;
+    pub const IOCPKT = if (is_mips) 0x5470 else 0x5420;
+    pub const FIONBIO = if (is_mips) 0x667e else 0x5421;
+    pub const IOCNOTTY = if (is_mips) 0x5471 else 0x5422;
+    pub const IOCSETD = if (is_mips) 0x7401 else 0x5423;
+    pub const IOCGETD = if (is_mips) 0x7400 else 0x5424;
+    pub const CSBRKP = if (is_mips) 0x5486 else 0x5425;
     pub const IOCSBRK = 0x5427;
     pub const IOCCBRK = 0x5428;
-    pub const IOCGSID = 0x5429;
+    pub const IOCGSID = if (is_mips) 0x7416 else 0x5429;
     pub const IOCGRS485 = 0x542E;
     pub const IOCSRS485 = 0x542F;
     pub const IOCGPTN = IOCTL.IOR('T', 0x30, c_uint);
@@ -3130,7 +3145,7 @@ pub const all_mask: sigset_t = [_]u32{0xffffffff} ** @typeInfo(sigset_t).Array.l
 pub const app_mask: sigset_t = [2]u32{ 0xfffffffc, 0x7fffffff } ++ [_]u32{0xffffffff} ** 30;
 
 const k_sigaction_funcs = struct {
-    const handler = ?std.meta.FnPtr(fn (c_int) callconv(.C) void);
+    const handler = ?std.meta.FnPtr(fn (c_int) align(1) callconv(.C) void);
     const restorer = std.meta.FnPtr(fn () callconv(.C) void);
 };
 
@@ -3157,7 +3172,7 @@ pub const k_sigaction = switch (native_arch) {
 
 /// Renamed from `sigaction` to `Sigaction` to avoid conflict with the syscall.
 pub const Sigaction = extern struct {
-    pub const handler_fn = std.meta.FnPtr(fn (c_int) callconv(.C) void);
+    pub const handler_fn = std.meta.FnPtr(fn (c_int) align(1) callconv(.C) void);
     pub const sigaction_fn = std.meta.FnPtr(fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void);
 
     handler: extern union {
@@ -3295,8 +3310,8 @@ pub const mmsghdr_const = extern struct {
 pub const epoll_data = extern union {
     ptr: usize,
     fd: i32,
-    @"u32": u32,
-    @"u64": u64,
+    u32: u32,
+    u64: u64,
 };
 
 pub const epoll_event = switch (builtin.zig_backend) {
@@ -5109,7 +5124,7 @@ pub const nlmsghdr = extern struct {
     len: u32,
 
     /// Message content
-    @"type": NetlinkMessageType,
+    type: NetlinkMessageType,
 
     /// Additional flags
     flags: u16,
@@ -5126,7 +5141,7 @@ pub const ifinfomsg = extern struct {
     __pad1: u8 = 0,
 
     /// ARPHRD_*
-    @"type": c_ushort,
+    type: c_ushort,
 
     /// Link index
     index: c_int,
@@ -5143,7 +5158,7 @@ pub const rtattr = extern struct {
     len: c_ushort,
 
     /// Type of option
-    @"type": IFLA,
+    type: IFLA,
 
     pub const ALIGNTO = 4;
 };
@@ -5498,6 +5513,7 @@ pub const PERF = struct {
         RAW,
         BREAKPOINT,
         MAX,
+        _,
     };
 
     pub const COUNT = struct {

@@ -87,7 +87,8 @@ pub const kdf = struct {
 
 /// MAC functions requiring single-use secret keys.
 pub const onetimeauth = struct {
-    pub const Ghash = @import("crypto/ghash.zig").Ghash;
+    pub const Ghash = @import("crypto/ghash_polyval.zig").Ghash;
+    pub const Polyval = @import("crypto/ghash_polyval.zig").Polyval;
     pub const Poly1305 = @import("crypto/poly1305.zig").Poly1305;
 };
 
@@ -147,6 +148,8 @@ pub const stream = struct {
     };
 
     pub const salsa = struct {
+        pub const Salsa = @import("crypto/salsa20.zig").Salsa;
+        pub const XSalsa = @import("crypto/salsa20.zig").XSalsa;
         pub const Salsa20 = @import("crypto/salsa20.zig").Salsa20;
         pub const XSalsa20 = @import("crypto/salsa20.zig").XSalsa20;
     };
