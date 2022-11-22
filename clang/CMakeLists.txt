@@ -117,6 +117,7 @@ if(CLANG_BUILT_STANDALONE)
   include(TableGen)
   include(HandleLLVMOptions)
   include(VersionFromVCS)
+  include(CheckAtomic)
   include(GetErrcMessages)
   include(LLVMDistributionSupport)
 
@@ -560,6 +561,7 @@ add_subdirectory(tools)
 add_subdirectory(runtime)
 
 option(CLANG_BUILD_EXAMPLES "Build CLANG example programs by default." OFF)
+add_subdirectory(examples)
 
 if(APPLE)
   # this line is needed as a cleanup to ensure that any CMakeCaches with the old
