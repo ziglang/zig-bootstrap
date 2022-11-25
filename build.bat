@@ -31,7 +31,6 @@ set "ROOTDIR_CMAKE=%ROOTDIR:\=/%"
 set ZIG_VERSION=0.11.0-dev.78+28288dcbb
 
 set JOBS_ARG=
-set BUILD_SYSTEM_ARGS=
 
 pushd %ROOTDIR%
 
@@ -86,6 +85,7 @@ cmake "%ROOTDIR%/zig" ^
   -DZIG_ENABLE_ZSTD=OFF ^
   -DZIG_ENABLE_LIBCPP=OFF ^
   -DZIG_TARGET_TRIPLE=x86_64-windows-msvc ^
+  -DZIG_TARGET_MCPU=baseline ^
   -DZIG_VERSION="%ZIG_VERSION%"
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 cmake --build . %JOBS_ARG% --target install
