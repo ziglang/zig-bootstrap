@@ -1,3 +1,15 @@
+test "zig fmt: tuple struct" {
+    try testCanonical(
+        \\const T = struct {
+        \\    comptime u32,
+        \\    *u32 = 1,
+        \\    // needs to be wrapped in parentheses to not be parsed as a function decl
+        \\    (fn () void) align(1),
+        \\};
+        \\
+    );
+}
+
 test "zig fmt: preserves clobbers in inline asm with stray comma" {
     try testCanonical(
         \\fn foo() void {
@@ -262,14 +274,6 @@ test "zig fmt: decl between fields" {
         .decl_between_fields,
         .previous_field,
         .next_field,
-    });
-}
-
-test "zig fmt: eof after missing comma" {
-    try testError(
-        \\foo()
-    , &[_]Error{
-        .expected_comma_after_field,
     });
 }
 
@@ -4229,6 +4233,30 @@ test "zig fmt: remove newlines surrounding doc comment within container decl" {
     );
 }
 
+test "zig fmt: invalid else branch statement" {
+    try testError(
+        \\comptime {
+        \\    if (true) {} else var a = 0;
+        \\    if (true) {} else defer {}
+        \\}
+        \\comptime {
+        \\    while (true) {} else var a = 0;
+        \\    while (true) {} else defer {}
+        \\}
+        \\comptime {
+        \\    for ("") |_| {} else var a = 0;
+        \\    for ("") |_| {} else defer {}
+        \\}
+    , &[_]Error{
+        .expected_statement,
+        .expected_statement,
+        .expected_statement,
+        .expected_statement,
+        .expected_statement,
+        .expected_statement,
+    });
+}
+
 test "zig fmt: anytype struct field" {
     try testError(
         \\pub const Pointer = struct {
@@ -5732,8 +5760,8 @@ test "recovery: missing semicolon" {
 test "recovery: invalid container members" {
     try testError(
         \\usingnamespace;
-        \\foo+
-        \\bar@,
+        \\@foo()+
+        \\@bar()@,
         \\while (a == 2) { test "" {}}
         \\test "" {
         \\    a & b
@@ -5741,7 +5769,7 @@ test "recovery: invalid container members" {
     , &[_]Error{
         .expected_expr,
         .expected_comma_after_field,
-        .expected_container_members,
+        .expected_type_expr,
         .expected_semi_after_stmt,
     });
 }
@@ -5820,7 +5848,7 @@ test "recovery: invalid comptime" {
     try testError(
         \\comptime
     , &[_]Error{
-        .expected_block_or_field,
+        .expected_type_expr,
     });
 }
 

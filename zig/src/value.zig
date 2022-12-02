@@ -1677,22 +1677,8 @@ pub const Value = extern union {
                 @panic("TODO implement i64 Value clz");
             },
             .int_big_positive => {
-                // TODO: move this code into std lib big ints
                 const bigint = val.castTag(.int_big_positive).?.asBigInt();
-                // Limbs are stored in little-endian order but we need
-                // to iterate big-endian.
-                var total_limb_lz: u64 = 0;
-                var i: usize = bigint.limbs.len;
-                const bits_per_limb = @sizeOf(std.math.big.Limb) * 8;
-                while (i != 0) {
-                    i -= 1;
-                    const limb = bigint.limbs[i];
-                    const this_limb_lz = @clz(limb);
-                    total_limb_lz += this_limb_lz;
-                    if (this_limb_lz != bits_per_limb) break;
-                }
-                const total_limb_bits = bigint.limbs.len * bits_per_limb;
-                return total_limb_lz + ty_bits - total_limb_bits;
+                return bigint.clz(ty_bits);
             },
             .int_big_negative => {
                 @panic("TODO implement int_big_negative Value clz");
@@ -1701,6 +1687,12 @@ pub const Value = extern union {
             .the_only_possible_value => {
                 assert(ty_bits == 0);
                 return ty_bits;
+            },
+
+            .lazy_align, .lazy_size => {
+                var bigint_buf: BigIntSpace = undefined;
+                const bigint = val.toBigIntAdvanced(&bigint_buf, target, null) catch unreachable;
+                return bigint.clz(ty_bits);
             },
 
             else => unreachable,
@@ -1721,16 +1713,8 @@ pub const Value = extern union {
                 @panic("TODO implement i64 Value ctz");
             },
             .int_big_positive => {
-                // TODO: move this code into std lib big ints
                 const bigint = val.castTag(.int_big_positive).?.asBigInt();
-                // Limbs are stored in little-endian order.
-                var result: u64 = 0;
-                for (bigint.limbs) |limb| {
-                    const limb_tz = @ctz(limb);
-                    result += limb_tz;
-                    if (limb_tz != @sizeOf(std.math.big.Limb) * 8) break;
-                }
-                return result;
+                return bigint.ctz();
             },
             .int_big_negative => {
                 @panic("TODO implement int_big_negative Value ctz");
@@ -1739,6 +1723,12 @@ pub const Value = extern union {
             .the_only_possible_value => {
                 assert(ty_bits == 0);
                 return ty_bits;
+            },
+
+            .lazy_align, .lazy_size => {
+                var bigint_buf: BigIntSpace = undefined;
+                const bigint = val.toBigIntAdvanced(&bigint_buf, target, null) catch unreachable;
+                return bigint.ctz();
             },
 
             else => unreachable,
@@ -2209,7 +2199,7 @@ pub const Value = extern union {
                 const b_field_vals = b.castTag(.aggregate).?.data;
                 assert(a_field_vals.len == b_field_vals.len);
 
-                if (ty.isTupleOrAnonStruct()) {
+                if (ty.isSimpleTupleOrAnonStruct()) {
                     const types = ty.tupleFields().types;
                     assert(types.len == a_field_vals.len);
                     for (types) |field_ty, i| {
@@ -2581,7 +2571,12 @@ pub const Value = extern union {
             },
             .Float, .ComptimeFloat => std.hash.autoHash(hasher, @bitCast(u128, val.toFloat(f128))),
             .Bool, .Int, .ComptimeInt, .Pointer, .Fn => switch (val.tag()) {
-                .slice => val.castTag(.slice).?.data.ptr.hashPtr(hasher, mod.getTarget()),
+                .slice => {
+                    const slice = val.castTag(.slice).?.data;
+                    var ptr_buf: Type.SlicePtrFieldTypeBuffer = undefined;
+                    const ptr_ty = ty.slicePtrFieldType(&ptr_buf);
+                    slice.ptr.hashUncoerced(ptr_ty, hasher, mod);
+                },
                 else => val.hashPtr(hasher, mod.getTarget()),
             },
             .Array, .Vector => {
@@ -2900,6 +2895,12 @@ pub const Value = extern union {
                 return val;
             },
 
+            .opt_payload_ptr => return val.castTag(.opt_payload_ptr).?.data.container_ptr.elemValueAdvanced(mod, index, arena, buffer),
+            .eu_payload_ptr => return val.castTag(.eu_payload_ptr).?.data.container_ptr.elemValueAdvanced(mod, index, arena, buffer),
+
+            .opt_payload => return val.castTag(.opt_payload).?.data.elemValueAdvanced(mod, index, arena, buffer),
+            .eu_payload => return val.castTag(.eu_payload).?.data.elemValueAdvanced(mod, index, arena, buffer),
+
             else => unreachable,
         }
     }
@@ -2999,7 +3000,7 @@ pub const Value = extern union {
             .the_only_possible_value => return ty.onePossibleValue().?,
 
             .empty_struct_value => {
-                if (ty.isTupleOrAnonStruct()) {
+                if (ty.isSimpleTupleOrAnonStruct()) {
                     const tuple = ty.tupleFields();
                     return tuple.values[index];
                 }

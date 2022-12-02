@@ -16,7 +16,6 @@ const Package = @import("../Package.zig");
 const TypedValue = @import("../TypedValue.zig");
 const Air = @import("../Air.zig");
 const Liveness = @import("../Liveness.zig");
-const target_util = @import("../target.zig");
 const Value = @import("../value.zig").Value;
 const Type = @import("../type.zig").Type;
 const LazySrcLoc = Module.LazySrcLoc;
@@ -26,6 +25,12 @@ const wasm_c_abi = @import("../arch/wasm/abi.zig");
 const aarch64_c_abi = @import("../arch/aarch64/abi.zig");
 const arm_c_abi = @import("../arch/arm/abi.zig");
 const riscv_c_abi = @import("../arch/riscv64/abi.zig");
+
+const target_util = @import("../target.zig");
+const libcFloatPrefix = target_util.libcFloatPrefix;
+const libcFloatSuffix = target_util.libcFloatSuffix;
+const compilerRtFloatAbbrev = target_util.compilerRtFloatAbbrev;
+const compilerRtIntAbbrev = target_util.compilerRtIntAbbrev;
 
 const Error = error{ OutOfMemory, CodegenFail };
 
@@ -688,7 +693,7 @@ pub const Object = struct {
         for (mod.decl_exports.values()) |export_list, i| {
             const decl_index = export_keys[i];
             const llvm_global = object.decl_map.get(decl_index) orelse continue;
-            for (export_list) |exp| {
+            for (export_list.items) |exp| {
                 // Detect if the LLVM global has already been created as an extern. In such
                 // case, we need to replace all uses of it with this exported global.
                 // TODO update std.builtin.ExportOptions to have the name be a
@@ -1174,8 +1179,7 @@ pub const Object = struct {
 
             llvm_func.fnSetSubprogram(subprogram);
 
-            const lexical_block = dib.createLexicalBlock(subprogram.toScope(), di_file.?, line_number, 1);
-            di_scope = lexical_block.toScope();
+            di_scope = subprogram.toScope();
         }
 
         var fg: FuncGen = .{
@@ -1211,8 +1215,7 @@ pub const Object = struct {
             else => |e| return e,
         };
 
-        const decl_exports = module.decl_exports.get(decl_index) orelse &[0]*Module.Export{};
-        try o.updateDeclExports(module, decl_index, decl_exports);
+        try o.updateDeclExports(module, decl_index, module.getDeclExports(decl_index));
     }
 
     pub fn updateDecl(self: *Object, module: *Module, decl_index: Module.Decl.Index) !void {
@@ -1235,8 +1238,7 @@ pub const Object = struct {
             },
             else => |e| return e,
         };
-        const decl_exports = module.decl_exports.get(decl_index) orelse &[0]*Module.Export{};
-        try self.updateDeclExports(module, decl_index, decl_exports);
+        try self.updateDeclExports(module, decl_index, module.getDeclExports(decl_index));
     }
 
     /// TODO replace this with a call to `Module::getNamedValue`. This will require adding
@@ -1388,9 +1390,10 @@ pub const Object = struct {
             return @ptrCast(*llvm.DIFile, gop.value_ptr.*);
         }
         const dir_path = file.pkg.root_src_directory.path orelse ".";
-        const sub_file_path_z = try gpa.dupeZ(u8, file.sub_file_path);
+        const sub_file_path_z = try gpa.dupeZ(u8, std.fs.path.basename(file.sub_file_path));
         defer gpa.free(sub_file_path_z);
-        const dir_path_z = try gpa.dupeZ(u8, dir_path);
+        const stage1_workaround = std.fs.path.dirname(file.sub_file_path) orelse "";
+        const dir_path_z = try std.fs.path.joinZ(gpa, &.{ dir_path, stage1_workaround });
         defer gpa.free(dir_path_z);
         const di_file = o.di_builder.?.createFile(sub_file_path_z, dir_path_z);
         gop.value_ptr.* = di_file.toNode();
@@ -1951,7 +1954,7 @@ pub const Object = struct {
                     break :blk fwd_decl;
                 };
 
-                if (ty.isTupleOrAnonStruct()) {
+                if (ty.isSimpleTupleOrAnonStruct()) {
                     const tuple = ty.tupleFields();
 
                     var di_fields: std.ArrayListUnmanaged(*llvm.DIType) = .{};
@@ -2885,7 +2888,7 @@ pub const DeclGen = struct {
                 // reference, we need to copy it here.
                 gop.key_ptr.* = try t.copy(dg.object.type_map_arena.allocator());
 
-                if (t.isTupleOrAnonStruct()) {
+                if (t.isSimpleTupleOrAnonStruct()) {
                     const tuple = t.tupleFields();
                     const llvm_struct_ty = dg.context.structCreateNamed("");
                     gop.value_ptr.* = llvm_struct_ty; // must be done before any recursive calls
@@ -3579,7 +3582,7 @@ pub const DeclGen = struct {
                 const field_vals = tv.val.castTag(.aggregate).?.data;
                 const gpa = dg.gpa;
 
-                if (tv.ty.isTupleOrAnonStruct()) {
+                if (tv.ty.isSimpleTupleOrAnonStruct()) {
                     const tuple = tv.ty.tupleFields();
                     var llvm_fields: std.ArrayListUnmanaged(*llvm.Value) = .{};
                     defer llvm_fields.deinit(gpa);
@@ -6085,6 +6088,12 @@ pub const FuncGen = struct {
         const insert_block = self.builder.getInsertBlock();
         if (isByRef(operand_ty)) {
             _ = dib.insertDeclareAtEnd(operand, di_local_var, debug_loc, insert_block);
+        } else if (self.dg.module.comp.bin_file.options.optimize_mode == .Debug) {
+            const alignment = operand_ty.abiAlignment(self.dg.module.getTarget());
+            const alloca = self.buildAlloca(operand.typeOf(), alignment);
+            const store_inst = self.builder.buildStore(operand, alloca);
+            store_inst.setAlignment(alignment);
+            _ = dib.insertDeclareAtEnd(alloca, di_local_var, debug_loc, insert_block);
         } else {
             _ = dib.insertDbgValueIntrinsicAtEnd(operand, di_local_var, debug_loc, insert_block);
         }
@@ -7328,46 +7337,6 @@ pub const FuncGen = struct {
         };
     }
 
-    fn libcFloatPrefix(float_bits: u16) []const u8 {
-        return switch (float_bits) {
-            16, 80 => "__",
-            32, 64, 128 => "",
-            else => unreachable,
-        };
-    }
-
-    fn libcFloatSuffix(float_bits: u16) []const u8 {
-        return switch (float_bits) {
-            16 => "h", // Non-standard
-            32 => "f",
-            64 => "",
-            80 => "x", // Non-standard
-            128 => "q", // Non-standard (mimics convention in GCC libquadmath)
-            else => unreachable,
-        };
-    }
-
-    fn compilerRtFloatAbbrev(float_bits: u16) []const u8 {
-        return switch (float_bits) {
-            16 => "h",
-            32 => "s",
-            64 => "d",
-            80 => "x",
-            128 => "t",
-            else => unreachable,
-        };
-    }
-
-    fn compilerRtIntAbbrev(bits: u16) []const u8 {
-        return switch (bits) {
-            16 => "h",
-            32 => "s",
-            64 => "d",
-            128 => "t",
-            else => "o", // Non-standard
-        };
-    }
-
     /// Creates a floating point comparison by lowering to the appropriate
     /// hardware instruction or softfloat routine for the target
     fn buildFloatCmp(
@@ -8063,6 +8032,12 @@ pub const FuncGen = struct {
             const insert_block = self.builder.getInsertBlock();
             if (isByRef(inst_ty)) {
                 _ = dib.insertDeclareAtEnd(arg_val, di_local_var, debug_loc, insert_block);
+            } else if (self.dg.module.comp.bin_file.options.optimize_mode == .Debug) {
+                const alignment = inst_ty.abiAlignment(self.dg.module.getTarget());
+                const alloca = self.buildAlloca(arg_val.typeOf(), alignment);
+                const store_inst = self.builder.buildStore(arg_val, alloca);
+                store_inst.setAlignment(alignment);
+                _ = dib.insertDeclareAtEnd(alloca, di_local_var, debug_loc, insert_block);
             } else {
                 _ = dib.insertDbgValueIntrinsicAtEnd(arg_val, di_local_var, debug_loc, insert_block);
             }
@@ -8171,7 +8146,10 @@ pub const FuncGen = struct {
                 .write, .noret, .complex => return false,
                 .tomb => return true,
             }
-        } else unreachable;
+        }
+        // The only way to get here is to hit the end of a loop instruction
+        // (implicit repeat).
+        return false;
     }
 
     fn airLoad(fg: *FuncGen, body_tail: []const Air.Inst.Index) !?*llvm.Value {
@@ -9034,11 +9012,9 @@ pub const FuncGen = struct {
         const target = self.dg.module.getTarget();
 
         const reduce = self.air.instructions.items(.data)[inst].reduce;
-        var operand = try self.resolveInst(reduce.operand);
+        const operand = try self.resolveInst(reduce.operand);
         const operand_ty = self.air.typeOf(reduce.operand);
         const scalar_ty = self.air.typeOfIndex(inst);
-
-        // TODO handle the fast math setting
 
         switch (reduce.operation) {
             .And => return self.builder.buildAndReduce(operand),
@@ -9265,6 +9241,21 @@ pub const FuncGen = struct {
         const target = self.dg.module.getTarget();
         const layout = union_ty.unionGetLayout(target);
         const union_obj = union_ty.cast(Type.Payload.Union).?.data;
+
+        if (union_obj.layout == .Packed) {
+            const big_bits = union_ty.bitSize(target);
+            const int_llvm_ty = self.dg.context.intType(@intCast(c_uint, big_bits));
+            const field = union_obj.fields.values()[extra.field_index];
+            const non_int_val = try self.resolveInst(extra.init);
+            const ty_bit_size = @intCast(u16, field.ty.bitSize(target));
+            const small_int_ty = self.dg.context.intType(ty_bit_size);
+            const small_int_val = if (field.ty.isPtrAtRuntime())
+                self.builder.buildPtrToInt(non_int_val, small_int_ty, "")
+            else
+                self.builder.buildBitCast(non_int_val, small_int_ty, "");
+            return self.builder.buildZExtOrBitCast(small_int_val, int_llvm_ty, "");
+        }
+
         const tag_int = blk: {
             const tag_ty = union_ty.unionTagTypeHypothetical();
             const union_field_name = union_obj.fields.keys()[extra.field_index];
@@ -9839,62 +9830,80 @@ pub const FuncGen = struct {
         const usize_llvm_ty = fg.context.intType(target.cpu.arch.ptrBitWidth());
         const usize_alignment = @intCast(c_uint, Type.usize.abiSize(target));
 
-        switch (target.cpu.arch) {
-            .x86_64 => {
-                const array_llvm_ty = usize_llvm_ty.arrayType(6);
-                const array_ptr = fg.valgrind_client_request_array orelse a: {
-                    const array_ptr = fg.buildAlloca(array_llvm_ty, usize_alignment);
-                    fg.valgrind_client_request_array = array_ptr;
-                    break :a array_ptr;
-                };
-                const array_elements = [_]*llvm.Value{ request, a1, a2, a3, a4, a5 };
-                const zero = usize_llvm_ty.constInt(0, .False);
-                for (array_elements) |elem, i| {
-                    const indexes = [_]*llvm.Value{
-                        zero, usize_llvm_ty.constInt(@intCast(c_uint, i), .False),
-                    };
-                    const elem_ptr = fg.builder.buildInBoundsGEP(array_llvm_ty, array_ptr, &indexes, indexes.len, "");
-                    const store_inst = fg.builder.buildStore(elem, elem_ptr);
-                    store_inst.setAlignment(usize_alignment);
-                }
+        const array_llvm_ty = usize_llvm_ty.arrayType(6);
+        const array_ptr = fg.valgrind_client_request_array orelse a: {
+            const array_ptr = fg.buildAlloca(array_llvm_ty, usize_alignment);
+            fg.valgrind_client_request_array = array_ptr;
+            break :a array_ptr;
+        };
+        const array_elements = [_]*llvm.Value{ request, a1, a2, a3, a4, a5 };
+        const zero = usize_llvm_ty.constInt(0, .False);
+        for (array_elements) |elem, i| {
+            const indexes = [_]*llvm.Value{
+                zero, usize_llvm_ty.constInt(@intCast(c_uint, i), .False),
+            };
+            const elem_ptr = fg.builder.buildInBoundsGEP(array_llvm_ty, array_ptr, &indexes, indexes.len, "");
+            const store_inst = fg.builder.buildStore(elem, elem_ptr);
+            store_inst.setAlignment(usize_alignment);
+        }
 
-                const asm_template =
-                    \\rolq $$3,  %rdi ; rolq $$13, %rdi
-                    \\rolq $$61, %rdi ; rolq $$51, %rdi
-                    \\xchgq %rbx,%rbx
-                ;
-
-                const asm_constraints = "={rdx},{rax},0,~{cc},~{memory}";
-
-                const array_ptr_as_usize = fg.builder.buildPtrToInt(array_ptr, usize_llvm_ty, "");
-                const args = [_]*llvm.Value{ array_ptr_as_usize, default_value };
-                const param_types = [_]*llvm.Type{ usize_llvm_ty, usize_llvm_ty };
-                const fn_llvm_ty = llvm.functionType(usize_llvm_ty, &param_types, args.len, .False);
-                const asm_fn = llvm.getInlineAsm(
-                    fn_llvm_ty,
-                    asm_template,
-                    asm_template.len,
-                    asm_constraints,
-                    asm_constraints.len,
-                    .True, // has side effects
-                    .False, // alignstack
-                    .ATT,
-                    .False,
-                );
-
-                const call = fg.builder.buildCall(
-                    fn_llvm_ty,
-                    asm_fn,
-                    &args,
-                    args.len,
-                    .C,
-                    .Auto,
-                    "",
-                );
-                return call;
+        const arch_specific: struct {
+            template: [:0]const u8,
+            constraints: [:0]const u8,
+        } = switch (target.cpu.arch) {
+            .x86 => .{
+                .template = 
+                \\roll $$3,  %edi ; roll $$13, %edi
+                \\roll $$61, %edi ; roll $$51, %edi
+                \\xchgl %ebx,%ebx
+                ,
+                .constraints = "={edx},{eax},0,~{cc},~{memory}",
+            },
+            .x86_64 => .{
+                .template = 
+                \\rolq $$3,  %rdi ; rolq $$13, %rdi
+                \\rolq $$61, %rdi ; rolq $$51, %rdi
+                \\xchgq %rbx,%rbx
+                ,
+                .constraints = "={rdx},{rax},0,~{cc},~{memory}",
+            },
+            .aarch64, .aarch64_32, .aarch64_be => .{
+                .template = 
+                \\ror x12, x12, #3  ;  ror x12, x12, #13
+                \\ror x12, x12, #51 ;  ror x12, x12, #61
+                \\orr x10, x10, x10
+                ,
+                .constraints = "={x3},{x4},0,~{cc},~{memory}",
             },
             else => unreachable,
-        }
+        };
+
+        const array_ptr_as_usize = fg.builder.buildPtrToInt(array_ptr, usize_llvm_ty, "");
+        const args = [_]*llvm.Value{ array_ptr_as_usize, default_value };
+        const param_types = [_]*llvm.Type{ usize_llvm_ty, usize_llvm_ty };
+        const fn_llvm_ty = llvm.functionType(usize_llvm_ty, &param_types, args.len, .False);
+        const asm_fn = llvm.getInlineAsm(
+            fn_llvm_ty,
+            arch_specific.template.ptr,
+            arch_specific.template.len,
+            arch_specific.constraints.ptr,
+            arch_specific.constraints.len,
+            .True, // has side effects
+            .False, // alignstack
+            .ATT,
+            .False, // can throw
+        );
+
+        const call = fg.builder.buildCall(
+            fn_llvm_ty,
+            asm_fn,
+            &args,
+            args.len,
+            .C,
+            .Auto,
+            "",
+        );
+        return call;
     }
 };
 
@@ -10229,7 +10238,7 @@ fn llvmFieldIndex(
     var offset: u64 = 0;
     var big_align: u32 = 0;
 
-    if (ty.isTupleOrAnonStruct()) {
+    if (ty.isSimpleTupleOrAnonStruct()) {
         const tuple = ty.tupleFields();
         var llvm_field_index: c_uint = 0;
         for (tuple.types) |field_ty, i| {
@@ -10792,7 +10801,7 @@ fn isByRef(ty: Type) bool {
         .Struct => {
             // Packed structs are represented to LLVM as integers.
             if (ty.containerLayout() == .Packed) return false;
-            if (ty.isTupleOrAnonStruct()) {
+            if (ty.isSimpleTupleOrAnonStruct()) {
                 const tuple = ty.tupleFields();
                 var count: usize = 0;
                 for (tuple.values) |field_val, i| {

@@ -168,7 +168,7 @@ pub const AddressSpace = enum {
     gs,
     fs,
     ss,
-    // GPU address spaces
+    // GPU address spaces.
     global,
     constant,
     param,
@@ -862,6 +862,40 @@ pub fn panicOutOfBounds(index: usize, len: usize) noreturn {
     @setCold(true);
     std.debug.panicExtra(null, @returnAddress(), "index out of bounds: index {d}, len {d}", .{ index, len });
 }
+
+pub fn panicStartGreaterThanEnd(start: usize, end: usize) noreturn {
+    @setCold(true);
+    std.debug.panicExtra(null, @returnAddress(), "start index {d} is larger than end index {d}", .{ start, end });
+}
+
+pub fn panicInactiveUnionField(active: anytype, wanted: @TypeOf(active)) noreturn {
+    @setCold(true);
+    std.debug.panicExtra(null, @returnAddress(), "access of union field '{s}' while field '{s}' is active", .{ @tagName(wanted), @tagName(active) });
+}
+
+pub const panic_messages = struct {
+    pub const unreach = "reached unreachable code";
+    pub const unwrap_null = "attempt to use null value";
+    pub const cast_to_null = "cast causes pointer to be null";
+    pub const incorrect_alignment = "incorrect alignment";
+    pub const invalid_error_code = "invalid error code";
+    pub const cast_truncated_data = "integer cast truncated bits";
+    pub const negative_to_unsigned = "attempt to cast negative value to unsigned integer";
+    pub const integer_overflow = "integer overflow";
+    pub const shl_overflow = "left shift overflowed bits";
+    pub const shr_overflow = "right shift overflowed bits";
+    pub const divide_by_zero = "division by zero";
+    pub const exact_division_remainder = "exact division produced remainder";
+    pub const inactive_union_field = "access of inactive union field";
+    pub const integer_part_out_of_bounds = "integer part of floating point value out of bounds";
+    pub const corrupt_switch = "switch on corrupt value";
+    pub const shift_rhs_too_big = "shift amount is greater than the type size";
+    pub const invalid_enum_value = "invalid enum value";
+    pub const sentinel_mismatch = "sentinel mismatch";
+    pub const unwrap_error = "attempt to unwrap error";
+    pub const index_out_of_bounds = "index out of bounds";
+    pub const start_index_greater_than_end = "start index is larger than end index";
+};
 
 pub noinline fn returnError(st: *StackTrace) void {
     @setCold(true);

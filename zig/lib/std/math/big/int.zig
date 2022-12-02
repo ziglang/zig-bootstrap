@@ -238,12 +238,14 @@ pub const Mutable = struct {
                     self.limbs[0] = w_value;
                 } else {
                     var i: usize = 0;
-                    while (w_value != 0) : (i += 1) {
+                    while (true) : (i += 1) {
                         self.limbs[i] = @truncate(Limb, w_value);
 
                         // TODO: shift == 64 at compile-time fails. Fails on u128 limbs.
                         w_value >>= limb_bits / 2;
                         w_value >>= limb_bits / 2;
+
+                        if (w_value == 0) break;
                     }
                 }
             },
@@ -256,11 +258,13 @@ pub const Mutable = struct {
                     const mask = (1 << limb_bits) - 1;
 
                     comptime var i = 0;
-                    inline while (w_value != 0) : (i += 1) {
+                    inline while (true) : (i += 1) {
                         self.limbs[i] = w_value & mask;
 
                         w_value >>= limb_bits / 2;
                         w_value >>= limb_bits / 2;
+
+                        if (w_value == 0) break;
                     }
                 }
             },
@@ -2144,7 +2148,7 @@ pub const Const = struct {
         const limbs = try allocator.alloc(Limb, calcToStringLimbsBufferLen(self.limbs.len, base));
         defer allocator.free(limbs);
 
-        return allocator.shrink(string, self.toString(string, base, case, limbs));
+        return allocator.realloc(string, self.toString(string, base, case, limbs));
     }
 
     /// Converts self to a string in the requested base.
@@ -2371,6 +2375,34 @@ pub const Const = struct {
     /// Returns true if `a == b`.
     pub fn eq(a: Const, b: Const) bool {
         return order(a, b) == .eq;
+    }
+
+    pub fn clz(a: Const, bits: Limb) Limb {
+        // Limbs are stored in little-endian order but we need
+        // to iterate big-endian.
+        var total_limb_lz: Limb = 0;
+        var i: usize = a.limbs.len;
+        const bits_per_limb = @sizeOf(Limb) * 8;
+        while (i != 0) {
+            i -= 1;
+            const limb = a.limbs[i];
+            const this_limb_lz = @clz(limb);
+            total_limb_lz += this_limb_lz;
+            if (this_limb_lz != bits_per_limb) break;
+        }
+        const total_limb_bits = a.limbs.len * bits_per_limb;
+        return total_limb_lz + bits - total_limb_bits;
+    }
+
+    pub fn ctz(a: Const) Limb {
+        // Limbs are stored in little-endian order.
+        var result: Limb = 0;
+        for (a.limbs) |limb| {
+            const limb_tz = @ctz(limb);
+            result += limb_tz;
+            if (limb_tz != @sizeOf(Limb) * 8) break;
+        }
+        return result;
     }
 };
 

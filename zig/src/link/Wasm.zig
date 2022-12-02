@@ -1841,8 +1841,9 @@ fn setupStart(wasm: *Wasm) !void {
 /// Sets up the memory section of the wasm module, as well as the stack.
 fn setupMemory(wasm: *Wasm) !void {
     log.debug("Setting up memory layout", .{});
-    const page_size = 64 * 1024;
-    const stack_size = wasm.base.options.stack_size_override orelse page_size * 1;
+    const page_size = std.wasm.page_size; // 64kb
+    // Use the user-provided stack size or else we use 1MB by default
+    const stack_size = wasm.base.options.stack_size_override orelse page_size * 16;
     const stack_alignment = 16; // wasm's stack alignment as specified by tool-convention
     // Always place the stack at the start by default
     // unless the user specified the global-base flag
@@ -3206,7 +3207,7 @@ fn linkWithLLD(wasm: *Wasm, comp: *Compilation, prog_node: *std.Progress.Node) !
                     const skip_export_non_fn = target.os.tag == .wasi and
                         wasm.base.options.wasi_exec_model == .command;
                     for (mod.decl_exports.values()) |exports| {
-                        for (exports) |exprt| {
+                        for (exports.items) |exprt| {
                             const exported_decl = mod.declPtr(exprt.exported_decl);
                             if (skip_export_non_fn and exported_decl.ty.zigTypeTag() != .Fn) {
                                 // skip exporting symbols when we're building a WASI command

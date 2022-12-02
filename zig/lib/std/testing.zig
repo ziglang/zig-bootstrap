@@ -281,7 +281,12 @@ test "expectApproxEqRel" {
 /// equal, prints diagnostics to stderr to show exactly how they are not equal,
 /// then returns a test failure error.
 /// If your inputs are UTF-8 encoded strings, consider calling `expectEqualStrings` instead.
+/// If your inputs are slices of bytes, consider calling `expectEqualBytes` instead (this
+/// function calls `expectEqualBytes` implicitly when `T` is `u8`).
 pub fn expectEqualSlices(comptime T: type, expected: []const T, actual: []const T) !void {
+    if (T == u8) {
+        return expectEqualBytes(expected, actual);
+    }
     // TODO better printing of the difference
     // If the arrays are small enough we could print the whole thing
     // If the child type is u8 and no weird bytes, we could print it as strings
@@ -379,28 +384,13 @@ pub const TmpIterableDir = struct {
     }
 };
 
-fn getCwdOrWasiPreopen() std.fs.Dir {
-    if (builtin.os.tag == .wasi and !builtin.link_libc) {
-        var preopens = std.fs.wasi.PreopenList.init(allocator);
-        defer preopens.deinit();
-        preopens.populate(null) catch
-            @panic("unable to make tmp dir for testing: unable to populate preopens");
-        const preopen = preopens.find(std.fs.wasi.PreopenType{ .Dir = "." }) orelse
-            @panic("unable to make tmp dir for testing: didn't find '.' in the preopens");
-
-        return std.fs.Dir{ .fd = preopen.fd };
-    } else {
-        return std.fs.cwd();
-    }
-}
-
 pub fn tmpDir(opts: std.fs.Dir.OpenDirOptions) TmpDir {
     var random_bytes: [TmpDir.random_bytes_count]u8 = undefined;
     std.crypto.random.bytes(&random_bytes);
     var sub_path: [TmpDir.sub_path_len]u8 = undefined;
     _ = std.fs.base64_encoder.encode(&sub_path, &random_bytes);
 
-    var cwd = getCwdOrWasiPreopen();
+    var cwd = std.fs.cwd();
     var cache_dir = cwd.makeOpenPath("zig-cache", .{}) catch
         @panic("unable to make tmp dir for testing: unable to make and open zig-cache dir");
     defer cache_dir.close();
@@ -422,7 +412,7 @@ pub fn tmpIterableDir(opts: std.fs.Dir.OpenDirOptions) TmpIterableDir {
     var sub_path: [TmpIterableDir.sub_path_len]u8 = undefined;
     _ = std.fs.base64_encoder.encode(&sub_path, &random_bytes);
 
-    var cwd = getCwdOrWasiPreopen();
+    var cwd = std.fs.cwd();
     var cache_dir = cwd.makeOpenPath("zig-cache", .{}) catch
         @panic("unable to make tmp dir for testing: unable to make and open zig-cache dir");
     defer cache_dir.close();
@@ -563,6 +553,121 @@ fn printLine(line: []const u8) void {
 
 test {
     try expectEqualStrings("foo", "foo");
+}
+
+/// This function is intended to be used only in tests. When the two slices are not
+/// equal, prints hexdumps of the inputs with the differences highlighted in red to stderr,
+/// then returns a test failure error. The colorized output is optional and controlled
+/// by the return of `std.debug.detectTTYConfig()`.
+pub fn expectEqualBytes(expected: []const u8, actual: []const u8) !void {
+    if (std.mem.indexOfDiff(u8, actual, expected)) |diff_index| {
+        std.debug.print("byte slices differ. first difference occurs at offset {d} (0x{X})\n", .{ diff_index, diff_index });
+
+        // TODO: Should this be configurable by the caller?
+        const max_window_size: usize = 256;
+
+        // Print a maximum of max_window_size bytes of each input, starting just before the
+        // first difference.
+        var window_start: usize = 0;
+        if (@max(actual.len, expected.len) > max_window_size) {
+            window_start = std.mem.alignBackward(diff_index - @min(diff_index, 16), 16);
+        }
+        const expected_window = expected[window_start..@min(expected.len, window_start + max_window_size)];
+        const expected_truncated = window_start + expected_window.len < expected.len;
+        const actual_window = actual[window_start..@min(actual.len, window_start + max_window_size)];
+        const actual_truncated = window_start + actual_window.len < actual.len;
+
+        var differ = BytesDiffer{
+            .expected = expected_window,
+            .actual = actual_window,
+            .ttyconf = std.debug.detectTTYConfig(),
+        };
+        const stderr = std.io.getStdErr();
+
+        std.debug.print("\n============ expected this output: =============  len: {} (0x{X})\n\n", .{ expected.len, expected.len });
+        if (window_start > 0) {
+            std.debug.print("... truncated, start offset: 0x{X} ...\n", .{window_start});
+        }
+        differ.write(stderr.writer()) catch {};
+        if (expected_truncated) {
+            const end_offset = window_start + expected_window.len;
+            const num_missing_bytes = expected.len - (window_start + expected_window.len);
+            std.debug.print("... truncated, end offset: 0x{X}, remaining bytes: 0x{X} ...\n", .{ end_offset, num_missing_bytes });
+        }
+
+        // now reverse expected/actual and print again
+        differ.expected = actual_window;
+        differ.actual = expected_window;
+        std.debug.print("\n============= instead found this: ==============  len: {} (0x{X})\n\n", .{ actual.len, actual.len });
+        if (window_start > 0) {
+            std.debug.print("... truncated, start offset: 0x{X} ...\n", .{window_start});
+        }
+        differ.write(stderr.writer()) catch {};
+        if (actual_truncated) {
+            const end_offset = window_start + actual_window.len;
+            const num_missing_bytes = actual.len - (window_start + actual_window.len);
+            std.debug.print("... truncated, end offset: 0x{X}, remaining bytes: 0x{X} ...\n", .{ end_offset, num_missing_bytes });
+        }
+        std.debug.print("\n================================================\n\n", .{});
+
+        return error.TestExpectedEqual;
+    }
+}
+
+const BytesDiffer = struct {
+    expected: []const u8,
+    actual: []const u8,
+    ttyconf: std.debug.TTY.Config,
+
+    pub fn write(self: BytesDiffer, writer: anytype) !void {
+        var expected_iterator = ChunkIterator{ .bytes = self.expected };
+        while (expected_iterator.next()) |chunk| {
+            // to avoid having to calculate diffs twice per chunk
+            var diffs: std.bit_set.IntegerBitSet(16) = .{ .mask = 0 };
+            for (chunk) |byte, i| {
+                var absolute_byte_index = (expected_iterator.index - chunk.len) + i;
+                const diff = if (absolute_byte_index < self.actual.len) self.actual[absolute_byte_index] != byte else true;
+                if (diff) diffs.set(i);
+                try self.writeByteDiff(writer, "{X:0>2} ", byte, diff);
+                if (i == 7) try writer.writeByte(' ');
+            }
+            try writer.writeByte(' ');
+            if (chunk.len < 16) {
+                var missing_columns = (16 - chunk.len) * 3;
+                if (chunk.len < 8) missing_columns += 1;
+                try writer.writeByteNTimes(' ', missing_columns);
+            }
+            for (chunk) |byte, i| {
+                const byte_to_print = if (std.ascii.isPrint(byte)) byte else '.';
+                try self.writeByteDiff(writer, "{c}", byte_to_print, diffs.isSet(i));
+            }
+            try writer.writeByte('\n');
+        }
+    }
+
+    fn writeByteDiff(self: BytesDiffer, writer: anytype, comptime fmt: []const u8, byte: u8, diff: bool) !void {
+        if (diff) self.ttyconf.setColor(writer, .Red);
+        try writer.print(fmt, .{byte});
+        if (diff) self.ttyconf.setColor(writer, .Reset);
+    }
+
+    const ChunkIterator = struct {
+        bytes: []const u8,
+        index: usize = 0,
+
+        pub fn next(self: *ChunkIterator) ?[]const u8 {
+            if (self.index == self.bytes.len) return null;
+
+            const start_index = self.index;
+            const end_index = @min(self.bytes.len, start_index + 16);
+            self.index = end_index;
+            return self.bytes[start_index..end_index];
+        }
+    };
+};
+
+test {
+    try expectEqualBytes("foo\x00", "foo\x00");
 }
 
 /// Exhaustively check that allocation failures within `test_fn` are handled without

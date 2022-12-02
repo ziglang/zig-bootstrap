@@ -1101,7 +1101,6 @@ test "enum literal in array literal" {
 }
 
 test "tag name functions are unique" {
-    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
@@ -1146,8 +1145,6 @@ test "size of enum with only one tag which has explicit integer tag type" {
 }
 
 test "switch on an extern enum with negative value" {
-    if (@import("builtin").zig_backend == .stage2_wasm) return error.SkipZigTest;
-
     const Foo = enum(c_int) {
         Bar = -1,
     };

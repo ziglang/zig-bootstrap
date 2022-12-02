@@ -72,6 +72,7 @@ pub const Builder = struct {
     pkg_config_pkg_list: ?(PkgConfigError![]const PkgConfigPkg) = null,
     args: ?[][]const u8 = null,
     debug_log_scopes: []const []const u8 = &.{},
+    debug_compile_errors: bool = false,
 
     /// Experimental. Use system Darling installation to run cross compiled macOS build artifacts.
     enable_darling: bool = false,
@@ -531,7 +532,7 @@ pub const Builder = struct {
                 options.appendAssumeCapacity(field.name);
             }
 
-            break :blk options.toOwnedSlice();
+            break :blk options.toOwnedSlice() catch unreachable;
         } else null;
         const available_option = AvailableOption{
             .name = name,
@@ -2686,6 +2687,10 @@ pub const LibExeObjStep = struct {
             try zig_args.append(log_scope);
         }
 
+        if (builder.debug_compile_errors) {
+            try zig_args.append("--debug-compile-errors");
+        }
+
         if (builder.verbose_cimport) zig_args.append("--verbose-cimport") catch unreachable;
         if (builder.verbose_air) zig_args.append("--verbose-air") catch unreachable;
         if (builder.verbose_llvm_ir) zig_args.append("--verbose-llvm-ir") catch unreachable;
@@ -2934,7 +2939,7 @@ pub const LibExeObjStep = struct {
                     }
                 }
 
-                try zig_args.append(mcpu_buffer.toOwnedSlice());
+                try zig_args.append(try mcpu_buffer.toOwnedSlice());
             }
 
             if (self.target.dynamic_linker.get()) |dynamic_linker| {

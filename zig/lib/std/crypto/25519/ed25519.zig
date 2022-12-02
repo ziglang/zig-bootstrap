@@ -181,7 +181,7 @@ pub const Ed25519 = struct {
             const hram = Curve.scalar.reduce64(hram64);
 
             const sb_ah = try Curve.basePoint.mulDoubleBasePublic(self.s, self.a.neg(), hram);
-            if (self.expected_r.sub(sb_ah).clearCofactor().rejectIdentity()) |_| {
+            if (self.expected_r.sub(sb_ah).rejectLowOrder()) {
                 return error.SignatureVerificationFailed;
             } else |_| {}
         }
@@ -318,6 +318,7 @@ pub const Ed25519 = struct {
             h.update(&scalar_and_prefix.prefix);
             var noise2: [noise_length]u8 = undefined;
             crypto.random.bytes(&noise2);
+            h.update(&noise2);
             if (noise) |*z| {
                 h.update(z);
             }

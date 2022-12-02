@@ -81,20 +81,22 @@ const test_targets = blk: {
             .single_threaded = true,
             .backend = .stage2_wasm,
         },
-        .{
-            .target = .{
-                .cpu_arch = .arm,
-                .os_tag = .linux,
-            },
-            .backend = .stage2_arm,
-        },
-        .{
-            .target = CrossTarget.parse(.{
-                .arch_os_abi = "arm-linux-none",
-                .cpu_features = "generic+v8a",
-            }) catch unreachable,
-            .backend = .stage2_arm,
-        },
+        // https://github.com/ziglang/zig/issues/13623
+        //.{
+        //    .target = .{
+        //        .cpu_arch = .arm,
+        //        .os_tag = .linux,
+        //    },
+        //    .backend = .stage2_arm,
+        //},
+        // https://github.com/ziglang/zig/issues/13623
+        //.{
+        //    .target = CrossTarget.parse(.{
+        //        .arch_os_abi = "arm-linux-none",
+        //        .cpu_features = "generic+v8a",
+        //    }) catch unreachable,
+        //    .backend = .stage2_arm,
+        //},
         .{
             .target = .{
                 .cpu_arch = .aarch64,
@@ -503,6 +505,7 @@ pub fn addStandaloneTests(
     enable_rosetta: bool,
     enable_wasmtime: bool,
     enable_wine: bool,
+    enable_symlinks_windows: bool,
 ) *build.Step {
     const cases = b.allocator.create(StandaloneContext) catch unreachable;
     cases.* = StandaloneContext{
@@ -520,6 +523,7 @@ pub fn addStandaloneTests(
         .enable_rosetta = enable_rosetta,
         .enable_wasmtime = enable_wasmtime,
         .enable_wine = enable_wine,
+        .enable_symlinks_windows = enable_symlinks_windows,
     };
 
     standalone.addCases(cases);
@@ -533,6 +537,7 @@ pub fn addLinkTests(
     modes: []const Mode,
     enable_macos_sdk: bool,
     omit_stage2: bool,
+    enable_symlinks_windows: bool,
 ) *build.Step {
     const cases = b.allocator.create(StandaloneContext) catch unreachable;
     cases.* = StandaloneContext{
@@ -545,6 +550,7 @@ pub fn addLinkTests(
         .enable_macos_sdk = enable_macos_sdk,
         .target = .{},
         .omit_stage2 = omit_stage2,
+        .enable_symlinks_windows = enable_symlinks_windows,
     };
     link.addCases(cases);
     return cases.step;
@@ -986,7 +992,7 @@ pub const StackTracesContext = struct {
                     }
                     try buf.appendSlice("\n");
                 }
-                break :got_result buf.toOwnedSlice();
+                break :got_result try buf.toOwnedSlice();
             };
 
             if (!mem.eql(u8, self.expect_output, got)) {
@@ -1020,6 +1026,7 @@ pub const StandaloneContext = struct {
     enable_rosetta: bool = false,
     enable_wasmtime: bool = false,
     enable_wine: bool = false,
+    enable_symlinks_windows: bool,
 
     pub fn addC(self: *StandaloneContext, root_src: []const u8) void {
         self.addAllArgs(root_src, true);
@@ -1035,11 +1042,14 @@ pub const StandaloneContext = struct {
         requires_macos_sdk: bool = false,
         requires_stage2: bool = false,
         use_emulation: bool = false,
+        requires_symlinks: bool = false,
+        extra_argv: []const []const u8 = &.{},
     }) void {
         const b = self.b;
 
         if (features.requires_macos_sdk and !self.enable_macos_sdk) return;
         if (features.requires_stage2 and self.omit_stage2) return;
+        if (features.requires_symlinks and !self.enable_symlinks_windows and builtin.os.tag == .windows) return;
 
         const annotated_case_name = b.fmt("build {s}", .{build_file});
         if (self.test_filter) |filter| {
@@ -1053,6 +1063,8 @@ pub const StandaloneContext = struct {
 
         zig_args.append("--build-file") catch unreachable;
         zig_args.append(b.pathFromRoot(build_file)) catch unreachable;
+
+        zig_args.appendSlice(features.extra_argv) catch unreachable;
 
         zig_args.append("test") catch unreachable;
 

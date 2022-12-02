@@ -1287,7 +1287,14 @@ test "noreturn field in union" {
             try expect(a == .a);
         },
     }
-    try expect(count == 5);
+    switch (a) {
+        .a => count += 1,
+        .b, .c => |*val| {
+            _ = val;
+            @compileError("bad");
+        },
+    }
+    try expect(count == 6);
 }
 
 test "union and enum field order doesn't match" {
@@ -1369,7 +1376,6 @@ test "union field ptr - zero sized field" {
 
 test "packed union in packed struct" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO

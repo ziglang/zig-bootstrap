@@ -199,8 +199,8 @@ pub fn generate(gpa: Allocator, tree: Ast) Allocator.Error!Zir {
 
     return Zir{
         .instructions = astgen.instructions.toOwnedSlice(),
-        .string_bytes = astgen.string_bytes.toOwnedSlice(gpa),
-        .extra = astgen.extra.toOwnedSlice(gpa),
+        .string_bytes = try astgen.string_bytes.toOwnedSlice(gpa),
+        .extra = try astgen.extra.toOwnedSlice(gpa),
     };
 }
 
@@ -2071,6 +2071,11 @@ fn continueExpr(parent_gz: *GenZir, parent_scope: *Scope, node: Ast.Node.Index) 
                 if (break_tag == .break_inline) {
                     _ = try parent_gz.addUnNode(.check_comptime_control_flow, Zir.indexToRef(continue_block), node);
                 }
+
+                // As our last action before the continue, "pop" the error trace if needed
+                if (!gen_zir.force_comptime)
+                    _ = try parent_gz.addRestoreErrRetIndex(.{ .block = continue_block }, .always);
+
                 _ = try parent_gz.addBreak(break_tag, continue_block, .void_value);
                 return Zir.Inst.Ref.unreachable_value;
             },
@@ -4381,6 +4386,7 @@ fn structDeclInner(
             .backing_int_body_len = 0,
             .known_non_opv = false,
             .known_comptime_only = false,
+            .is_tuple = false,
         });
         return indexToRef(decl_inst);
     }
@@ -4462,22 +4468,53 @@ fn structDeclInner(
     // No defer needed here because it is handled by `wip_members.deinit()` above.
     const bodies_start = astgen.scratch.items.len;
 
+    var is_tuple = false;
+    const node_tags = tree.nodes.items(.tag);
+    for (container_decl.ast.members) |member_node| {
+        switch (node_tags[member_node]) {
+            .container_field_init => is_tuple = tree.containerFieldInit(member_node).ast.tuple_like,
+            .container_field_align => is_tuple = tree.containerFieldAlign(member_node).ast.tuple_like,
+            .container_field => is_tuple = tree.containerField(member_node).ast.tuple_like,
+            else => continue,
+        }
+        if (is_tuple) break;
+    }
+    if (is_tuple) for (container_decl.ast.members) |member_node| {
+        switch (node_tags[member_node]) {
+            .container_field_init,
+            .container_field_align,
+            .container_field,
+            .@"comptime",
+            => continue,
+            else => {
+                return astgen.failNode(member_node, "tuple declarations cannot contain declarations", .{});
+            },
+        }
+    };
+
     var known_non_opv = false;
     var known_comptime_only = false;
     for (container_decl.ast.members) |member_node| {
-        const member = switch (try containerMember(&block_scope, &namespace.base, &wip_members, member_node)) {
+        var member = switch (try containerMember(&block_scope, &namespace.base, &wip_members, member_node)) {
             .decl => continue,
             .field => |field| field,
         };
 
-        const field_name = try astgen.identAsString(member.ast.name_token);
-        wip_members.appendToField(field_name);
+        if (!is_tuple) {
+            member.convertToNonTupleLike(astgen.tree.nodes);
+            assert(!member.ast.tuple_like);
+
+            const field_name = try astgen.identAsString(member.ast.main_token);
+            wip_members.appendToField(field_name);
+        } else if (!member.ast.tuple_like) {
+            return astgen.failTok(member.ast.main_token, "tuple field has a name", .{});
+        }
 
         const doc_comment_index = try astgen.docCommentAsString(member.firstToken());
         wip_members.appendToField(doc_comment_index);
 
         if (member.ast.type_expr == 0) {
-            return astgen.failTok(member.ast.name_token, "struct field missing type", .{});
+            return astgen.failTok(member.ast.main_token, "struct field missing type", .{});
         }
 
         const field_type = try typeExpr(&block_scope, &namespace.base, member.ast.type_expr);
@@ -4557,6 +4594,7 @@ fn structDeclInner(
         .backing_int_body_len = @intCast(u32, backing_int_body_len),
         .known_non_opv = known_non_opv,
         .known_comptime_only = known_comptime_only,
+        .is_tuple = is_tuple,
     });
 
     wip_members.finishBits(bits_per_field);
@@ -4635,15 +4673,19 @@ fn unionDeclInner(
     defer wip_members.deinit();
 
     for (members) |member_node| {
-        const member = switch (try containerMember(&block_scope, &namespace.base, &wip_members, member_node)) {
+        var member = switch (try containerMember(&block_scope, &namespace.base, &wip_members, member_node)) {
             .decl => continue,
             .field => |field| field,
         };
+        member.convertToNonTupleLike(astgen.tree.nodes);
+        if (member.ast.tuple_like) {
+            return astgen.failTok(member.ast.main_token, "union field missing name", .{});
+        }
         if (member.comptime_token) |comptime_token| {
             return astgen.failTok(comptime_token, "union fields cannot be marked comptime", .{});
         }
 
-        const field_name = try astgen.identAsString(member.ast.name_token);
+        const field_name = try astgen.identAsString(member.ast.main_token);
         wip_members.appendToField(field_name);
 
         const doc_comment_index = try astgen.docCommentAsString(member.firstToken());
@@ -4782,7 +4824,7 @@ fn containerDecl(
                 var nonexhaustive_node: Ast.Node.Index = 0;
                 var nonfinal_nonexhaustive = false;
                 for (container_decl.ast.members) |member_node| {
-                    const member = switch (node_tags[member_node]) {
+                    var member = switch (node_tags[member_node]) {
                         .container_field_init => tree.containerFieldInit(member_node),
                         .container_field_align => tree.containerFieldAlign(member_node),
                         .container_field => tree.containerField(member_node),
@@ -4791,6 +4833,10 @@ fn containerDecl(
                             continue;
                         },
                     };
+                    member.convertToNonTupleLike(astgen.tree.nodes);
+                    if (member.ast.tuple_like) {
+                        return astgen.failTok(member.ast.main_token, "enum field missing name", .{});
+                    }
                     if (member.comptime_token) |comptime_token| {
                         return astgen.failTok(comptime_token, "enum fields cannot be marked comptime", .{});
                     }
@@ -4808,10 +4854,11 @@ fn containerDecl(
                             },
                         );
                     }
-                    // Alignment expressions in enums are caught by the parser.
-                    assert(member.ast.align_expr == 0);
+                    if (member.ast.align_expr != 0) {
+                        return astgen.failNode(member.ast.align_expr, "enum fields cannot be aligned", .{});
+                    }
 
-                    const name_token = member.ast.name_token;
+                    const name_token = member.ast.main_token;
                     if (mem.eql(u8, tree.tokenSlice(name_token), "_")) {
                         if (nonexhaustive_node != 0) {
                             return astgen.failNodeNotes(
@@ -4910,15 +4957,16 @@ fn containerDecl(
             for (container_decl.ast.members) |member_node| {
                 if (member_node == counts.nonexhaustive_node)
                     continue;
-                const member = switch (try containerMember(&block_scope, &namespace.base, &wip_members, member_node)) {
+                var member = switch (try containerMember(&block_scope, &namespace.base, &wip_members, member_node)) {
                     .decl => continue,
                     .field => |field| field,
                 };
+                member.convertToNonTupleLike(astgen.tree.nodes);
                 assert(member.comptime_token == null);
                 assert(member.ast.type_expr == 0);
                 assert(member.ast.align_expr == 0);
 
-                const field_name = try astgen.identAsString(member.ast.name_token);
+                const field_name = try astgen.identAsString(member.ast.main_token);
                 wip_members.appendToField(field_name);
 
                 const doc_comment_index = try astgen.docCommentAsString(member.firstToken());
@@ -5022,6 +5070,7 @@ fn containerDecl(
             try astgen.extra.ensureUnusedCapacity(gpa, decls_slice.len);
             astgen.extra.appendSliceAssumeCapacity(decls_slice);
 
+            block_scope.unstack();
             try gz.addNamespaceCaptures(&namespace);
             return rvalue(gz, ri, indexToRef(decl_inst), node);
         },
@@ -7669,6 +7718,7 @@ fn typeOf(
 
         var typeof_scope = gz.makeSubBlock(scope);
         typeof_scope.force_comptime = false;
+        typeof_scope.c_import = false;
         defer typeof_scope.unstack();
 
         const ty_expr = try reachableExpr(&typeof_scope, &typeof_scope.base, .{ .rl = .none }, args[0], node);
@@ -8501,11 +8551,18 @@ fn shiftOp(
     rhs_node: Ast.Node.Index,
     tag: Zir.Inst.Tag,
 ) InnerError!Zir.Inst.Ref {
+    var line = gz.astgen.source_line - gz.decl_line;
+    var column = gz.astgen.source_column;
     const lhs = try expr(gz, scope, .{ .rl = .none }, lhs_node);
 
-    maybeAdvanceSourceCursorToMainToken(gz, node);
-    const line = gz.astgen.source_line - gz.decl_line;
-    const column = gz.astgen.source_column;
+    switch (gz.astgen.tree.nodes.items(.tag)[node]) {
+        .shl, .shr => {
+            maybeAdvanceSourceCursorToMainToken(gz, node);
+            line = gz.astgen.source_line - gz.decl_line;
+            column = gz.astgen.source_column;
+        },
+        else => {},
+    }
 
     const log2_int_type = try gz.addUnNode(.typeof_log2_int_type, lhs, lhs_node);
     const rhs = try expr(gz, scope, .{ .rl = .{ .ty = log2_int_type }, .ctx = .shift_op }, rhs_node);
@@ -8526,6 +8583,8 @@ fn cImport(
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     const gpa = astgen.gpa;
+
+    if (gz.c_import) return gz.astgen.failNode(node, "cannot nest @cImport", .{});
 
     var block_scope = gz.makeSubBlock(scope);
     block_scope.force_comptime = true;
@@ -11781,6 +11840,7 @@ const GenZir = struct {
         layout: std.builtin.Type.ContainerLayout,
         known_non_opv: bool,
         known_comptime_only: bool,
+        is_tuple: bool,
     }) !void {
         const astgen = gz.astgen;
         const gpa = astgen.gpa;
@@ -11815,6 +11875,7 @@ const GenZir = struct {
                     .has_backing_int = args.backing_int_ref != .none,
                     .known_non_opv = args.known_non_opv,
                     .known_comptime_only = args.known_comptime_only,
+                    .is_tuple = args.is_tuple,
                     .name_strategy = gz.anon_name_strategy,
                     .layout = args.layout,
                 }),

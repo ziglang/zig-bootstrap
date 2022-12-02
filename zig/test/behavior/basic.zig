@@ -739,7 +739,6 @@ test "thread local variable" {
 }
 
 test "result location is optional inside error union" {
-    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
 
@@ -771,6 +770,7 @@ threadlocal var buffer: [11]u8 = undefined;
 
 test "auto created variables have correct alignment" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
 
     const S = struct {
         fn foo(str: [*]const u8) u32 {
@@ -1126,4 +1126,15 @@ test "pointer to zero sized global is mutable" {
         var thing: Thing = undefined;
     };
     try expect(@TypeOf(&S.thing) == *S.Thing);
+}
+
+test "returning an opaque type from a function" {
+    const S = struct {
+        fn foo(comptime a: u32) type {
+            return opaque {
+                const b = a;
+            };
+        }
+    };
+    try expect(S.foo(123).b == 123);
 }

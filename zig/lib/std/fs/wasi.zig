@@ -160,7 +160,7 @@ pub const PreopenList = struct {
         if (cwd_root) |root| assert(fs.path.isAbsolute(root));
 
         // Clear contents if we're being called again
-        for (self.toOwnedSlice()) |preopen| {
+        for (try self.toOwnedSlice()) |preopen| {
             switch (preopen.type) {
                 PreopenType.Dir => |path| self.buffer.allocator.free(path),
             }
@@ -202,10 +202,7 @@ pub const PreopenList = struct {
             // POSIX paths, relative to "/" or `cwd_root` depending on whether they start with "."
             const path = if (cwd_root) |cwd| blk: {
                 const resolve_paths: []const []const u8 = if (raw_path[0] == '.') &.{ cwd, raw_path } else &.{ "/", raw_path };
-                break :blk fs.path.resolve(self.buffer.allocator, resolve_paths) catch |err| switch (err) {
-                    error.CurrentWorkingDirectoryUnlinked => unreachable, // root is absolute, so CWD not queried
-                    else => |e| return e,
-                };
+                break :blk try fs.path.resolve(self.buffer.allocator, resolve_paths);
             } else blk: {
                 // If we were provided no CWD root, we preserve the preopen dir without resolving
                 break :blk try self.buffer.allocator.dupe(u8, raw_path);
@@ -266,8 +263,8 @@ pub const PreopenList = struct {
     }
 
     /// The caller owns the returned memory. ArrayList becomes empty.
-    pub fn toOwnedSlice(self: *Self) []Preopen {
-        return self.buffer.toOwnedSlice();
+    pub fn toOwnedSlice(self: *Self) ![]Preopen {
+        return try self.buffer.toOwnedSlice();
     }
 };
 

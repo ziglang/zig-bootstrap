@@ -406,6 +406,8 @@ const usage_build_generic =
     \\  -fno-function-sections    All functions go into same section
     \\  -fstrip                   Omit debug symbols
     \\  -fno-strip                Keep debug symbols
+    \\  -fformatted-panics        Enable formatted safety panics
+    \\  -fno-formatted-panics     Disable formatted safety panics
     \\  -ofmt=[mode]              Override target object format
     \\    elf                     Executable and Linking Format
     \\    c                       C source code
@@ -632,6 +634,7 @@ fn buildOutputType(
     var have_version = false;
     var compatibility_version: ?std.builtin.Version = null;
     var strip: ?bool = null;
+    var formatted_panics: ?bool = null;
     var function_sections = false;
     var no_builtin = false;
     var watch = false;
@@ -885,24 +888,28 @@ fn buildOutputType(
                             fatal("unexpected end-of-parameter mark: --", .{});
                         }
                     } else if (mem.eql(u8, arg, "--pkg-begin")) {
-                        const pkg_name = args_iter.next();
-                        const pkg_path = args_iter.next();
-                        if (pkg_name == null or pkg_path == null) fatal("Expected 2 arguments after {s}", .{arg});
+                        const opt_pkg_name = args_iter.next();
+                        const opt_pkg_path = args_iter.next();
+                        if (opt_pkg_name == null or opt_pkg_path == null)
+                            fatal("Expected 2 arguments after {s}", .{arg});
+
+                        const pkg_name = opt_pkg_name.?;
+                        const pkg_path = try introspect.resolvePath(arena, opt_pkg_path.?);
 
                         const new_cur_pkg = Package.create(
                             gpa,
-                            fs.path.dirname(pkg_path.?),
-                            fs.path.basename(pkg_path.?),
+                            fs.path.dirname(pkg_path),
+                            fs.path.basename(pkg_path),
                         ) catch |err| {
-                            fatal("Failed to add package at path {s}: {s}", .{ pkg_path.?, @errorName(err) });
+                            fatal("Failed to add package at path {s}: {s}", .{ pkg_path, @errorName(err) });
                         };
 
-                        if (mem.eql(u8, pkg_name.?, "std") or mem.eql(u8, pkg_name.?, "root") or mem.eql(u8, pkg_name.?, "builtin")) {
-                            fatal("unable to add package '{s}' -> '{s}': conflicts with builtin package", .{ pkg_name.?, pkg_path.? });
-                        } else if (cur_pkg.table.get(pkg_name.?)) |prev| {
-                            fatal("unable to add package '{s}' -> '{s}': already exists as '{s}", .{ pkg_name.?, pkg_path.?, prev.root_src_path });
+                        if (mem.eql(u8, pkg_name, "std") or mem.eql(u8, pkg_name, "root") or mem.eql(u8, pkg_name, "builtin")) {
+                            fatal("unable to add package '{s}' -> '{s}': conflicts with builtin package", .{ pkg_name, pkg_path });
+                        } else if (cur_pkg.table.get(pkg_name)) |prev| {
+                            fatal("unable to add package '{s}' -> '{s}': already exists as '{s}", .{ pkg_name, pkg_path, prev.root_src_path });
                         }
-                        try cur_pkg.addAndAdopt(gpa, pkg_name.?, new_cur_pkg);
+                        try cur_pkg.addAndAdopt(gpa, pkg_name, new_cur_pkg);
                         cur_pkg = new_cur_pkg;
                     } else if (mem.eql(u8, arg, "--pkg-end")) {
                         cur_pkg = cur_pkg.parent orelse
@@ -1238,6 +1245,10 @@ fn buildOutputType(
                         strip = true;
                     } else if (mem.eql(u8, arg, "-fno-strip")) {
                         strip = false;
+                    } else if (mem.eql(u8, arg, "-fformatted-panics")) {
+                        formatted_panics = true;
+                    } else if (mem.eql(u8, arg, "-fno-formatted-panics")) {
+                        formatted_panics = false;
                     } else if (mem.eql(u8, arg, "-fsingle-threaded")) {
                         single_threaded = true;
                     } else if (mem.eql(u8, arg, "-fno-single-threaded")) {
@@ -1847,6 +1858,11 @@ fn buildOutputType(
                         linker_z_relro = true;
                     } else if (mem.eql(u8, z_arg, "norelro")) {
                         linker_z_relro = false;
+                    } else if (mem.startsWith(u8, z_arg, "stack-size=")) {
+                        const next_arg = z_arg["stack-size=".len..];
+                        stack_size_override = std.fmt.parseUnsigned(u64, next_arg, 0) catch |err| {
+                            fatal("unable to parse stack size '{s}': {s}", .{ next_arg, @errorName(err) });
+                        };
                     } else {
                         warn("unsupported linker extension flag: -z {s}", .{z_arg});
                     }
@@ -2705,11 +2721,16 @@ fn buildOutputType(
     };
     defer emit_implib_resolved.deinit();
 
-    const main_pkg: ?*Package = if (root_src_file) |src_path| blk: {
-        if (main_pkg_path) |p| {
-            const rel_src_path = try fs.path.relative(gpa, p, src_path);
-            defer gpa.free(rel_src_path);
-            break :blk try Package.create(gpa, p, rel_src_path);
+    const main_pkg: ?*Package = if (root_src_file) |unresolved_src_path| blk: {
+        const src_path = try introspect.resolvePath(arena, unresolved_src_path);
+        if (main_pkg_path) |unresolved_main_pkg_path| {
+            const p = try introspect.resolvePath(arena, unresolved_main_pkg_path);
+            if (p.len == 0) {
+                break :blk try Package.create(gpa, null, src_path);
+            } else {
+                const rel_src_path = try fs.path.relative(arena, p, src_path);
+                break :blk try Package.create(gpa, p, rel_src_path);
+            }
         } else {
             const root_src_dir_path = fs.path.dirname(src_path);
             break :blk Package.create(gpa, root_src_dir_path, fs.path.basename(src_path)) catch |err| {
@@ -2744,11 +2765,14 @@ fn buildOutputType(
     }
 
     const self_exe_path = try introspect.findZigExePath(arena);
-    var zig_lib_directory: Compilation.Directory = if (override_lib_dir) |lib_dir| .{
-        .path = lib_dir,
-        .handle = fs.cwd().openDir(lib_dir, .{}) catch |err| {
-            fatal("unable to open zig lib directory '{s}': {s}", .{ lib_dir, @errorName(err) });
-        },
+    var zig_lib_directory: Compilation.Directory = if (override_lib_dir) |unresolved_lib_dir| l: {
+        const lib_dir = try introspect.resolvePath(arena, unresolved_lib_dir);
+        break :l .{
+            .path = lib_dir,
+            .handle = fs.cwd().openDir(lib_dir, .{}) catch |err| {
+                fatal("unable to open zig lib directory '{s}': {s}", .{ lib_dir, @errorName(err) });
+            },
+        };
     } else introspect.findZigLibDirFromSelfExe(arena, self_exe_path) catch |err| {
         fatal("unable to find zig installation directory: {s}\n", .{@errorName(err)});
     };
@@ -2926,6 +2950,7 @@ fn buildOutputType(
         .stack_size_override = stack_size_override,
         .image_base_override = image_base_override,
         .strip = strip,
+        .formatted_panics = formatted_panics,
         .single_threaded = single_threaded,
         .function_sections = function_sections,
         .no_builtin = no_builtin,
@@ -3758,6 +3783,7 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
         var override_local_cache_dir: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_LOCAL_CACHE_DIR");
         var child_argv = std.ArrayList([]const u8).init(arena);
         var reference_trace: ?u32 = null;
+        var debug_compile_errors = false;
 
         const argv_index_exe = child_argv.items.len;
         _ = try child_argv.addOne();
@@ -3819,6 +3845,9 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
                     } else if (mem.eql(u8, arg, "-fno-reference-trace")) {
                         try child_argv.append(arg);
                         reference_trace = null;
+                    } else if (mem.eql(u8, arg, "--debug-compile-errors")) {
+                        try child_argv.append(arg);
+                        debug_compile_errors = true;
                     }
                 }
                 try child_argv.append(arg);
@@ -3953,6 +3982,7 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
             .use_stage1 = use_stage1,
             .cache_mode = .whole,
             .reference_trace = reference_trace,
+            .debug_compile_errors = debug_compile_errors,
         }) catch |err| {
             fatal("unable to create compilation: {s}", .{@errorName(err)});
         };
@@ -4783,7 +4813,7 @@ pub const ClangArgIterator = struct {
                 };
                 self.root_args = args;
             }
-            const resp_arg_slice = resp_arg_list.toOwnedSlice();
+            const resp_arg_slice = try resp_arg_list.toOwnedSlice();
             self.next_index = 0;
             self.argv = resp_arg_slice;
 

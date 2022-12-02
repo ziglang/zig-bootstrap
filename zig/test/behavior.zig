@@ -116,6 +116,8 @@ test {
     _ = @import("behavior/bugs/13171.zig");
     _ = @import("behavior/bugs/13285.zig");
     _ = @import("behavior/bugs/13435.zig");
+    _ = @import("behavior/bugs/13664.zig");
+    _ = @import("behavior/bugs/13714.zig");
     _ = @import("behavior/byteswap.zig");
     _ = @import("behavior/byval_arg_var.zig");
     _ = @import("behavior/call.zig");
@@ -200,6 +202,7 @@ test {
         _ = @import("behavior/packed_struct_explicit_backing_int.zig");
         _ = @import("behavior/empty_union.zig");
         _ = @import("behavior/inline_switch.zig");
+        _ = @import("behavior/tuple_declarations.zig");
         _ = @import("behavior/bugs/12723.zig");
         _ = @import("behavior/bugs/12776.zig");
     }
