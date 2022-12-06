@@ -16,6 +16,7 @@ const DW = std.dwarf;
 const File = link.File;
 const LinkBlock = File.LinkBlock;
 const LinkFn = File.LinkFn;
+const LinkerLoad = @import("../codegen.zig").LinkerLoad;
 const Module = @import("../Module.zig");
 const Value = @import("../value.zig").Value;
 const Type = @import("../type.zig").Type;
@@ -101,7 +102,7 @@ pub const DeclState = struct {
         self.exprloc_relocs.deinit(self.gpa);
     }
 
-    pub fn addExprlocReloc(self: *DeclState, target: u32, offset: u32, is_ptr: bool) !void {
+    fn addExprlocReloc(self: *DeclState, target: u32, offset: u32, is_ptr: bool) !void {
         log.debug("{x}: target sym %{d}, via GOT {}", .{ offset, target, is_ptr });
         try self.exprloc_relocs.append(self.gpa, .{
             .type = if (is_ptr) .got_load else .direct_load,
@@ -112,7 +113,7 @@ pub const DeclState = struct {
 
     /// Adds local type relocation of the form: @offset => @this + addend
     /// @this signifies the offset within the .debug_abbrev section of the containing atom.
-    pub fn addTypeRelocLocal(self: *DeclState, atom: *const Atom, offset: u32, addend: u32) !void {
+    fn addTypeRelocLocal(self: *DeclState, atom: *const Atom, offset: u32, addend: u32) !void {
         log.debug("{x}: @this + {x}", .{ offset, addend });
         try self.abbrev_relocs.append(self.gpa, .{
             .target = null,
@@ -125,7 +126,7 @@ pub const DeclState = struct {
     /// Adds global type relocation of the form: @offset => @symbol + 0
     /// @symbol signifies a type abbreviation posititioned somewhere in the .debug_abbrev section
     /// which we use as our target of the relocation.
-    pub fn addTypeRelocGlobal(self: *DeclState, atom: *const Atom, ty: Type, offset: u32) !void {
+    fn addTypeRelocGlobal(self: *DeclState, atom: *const Atom, ty: Type, offset: u32) !void {
         const resolv = self.abbrev_resolver.getContext(ty, .{
             .mod = self.mod,
         }) orelse blk: {
@@ -409,7 +410,7 @@ pub const DeclState = struct {
                         // See https://github.com/ziglang/zig/issues/645
                         var int_buffer: Value.Payload.U64 = undefined;
                         const field_int_val = value.enumToInt(ty, &int_buffer);
-                        break :value @bitCast(u64, field_int_val.toSignedInt());
+                        break :value @bitCast(u64, field_int_val.toSignedInt(target));
                     } else @intCast(u64, field_i);
                     mem.writeInt(u64, dbg_info_buffer.addManyAsArrayAssumeCapacity(8), value, target_endian);
                 }
@@ -560,6 +561,250 @@ pub const DeclState = struct {
             },
         }
     }
+
+    pub const DbgInfoLoc = union(enum) {
+        register: u8,
+        stack: struct {
+            fp_register: u8,
+            offset: i32,
+        },
+        wasm_local: u32,
+        memory: u64,
+        linker_load: LinkerLoad,
+        immediate: u64,
+        undef,
+        none,
+        nop,
+    };
+
+    pub fn genArgDbgInfo(
+        self: *DeclState,
+        name: [:0]const u8,
+        ty: Type,
+        tag: File.Tag,
+        owner_decl: Module.Decl.Index,
+        loc: DbgInfoLoc,
+    ) error{OutOfMemory}!void {
+        const dbg_info = &self.dbg_info;
+        const atom = getDbgInfoAtom(tag, self.mod, owner_decl);
+        const name_with_null = name.ptr[0 .. name.len + 1];
+
+        switch (loc) {
+            .register => |reg| {
+                try dbg_info.ensureUnusedCapacity(3);
+                dbg_info.appendAssumeCapacity(@enumToInt(AbbrevKind.parameter));
+                dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT.location, DW.FORM.exprloc
+                    1, // ULEB128 dwarf expression length
+                    reg,
+                });
+            },
+            .stack => |info| {
+                try dbg_info.ensureUnusedCapacity(8);
+                dbg_info.appendAssumeCapacity(@enumToInt(AbbrevKind.parameter));
+                const fixup = dbg_info.items.len;
+                dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT.location, DW.FORM.exprloc
+                    1, // we will backpatch it after we encode the displacement in LEB128
+                    info.fp_register, // frame pointer
+                });
+                leb128.writeILEB128(dbg_info.writer(), info.offset) catch unreachable;
+                dbg_info.items[fixup] += @intCast(u8, dbg_info.items.len - fixup - 2);
+            },
+            .wasm_local => |value| {
+                const leb_size = link.File.Wasm.getULEB128Size(value);
+                try dbg_info.ensureUnusedCapacity(3 + leb_size);
+                // wasm locations are encoded as follow:
+                // DW_OP_WASM_location wasm-op
+                // where wasm-op is defined as
+                // wasm-op := wasm-local | wasm-global | wasm-operand_stack
+                // where each argument is encoded as
+                // <opcode> i:uleb128
+                dbg_info.appendSliceAssumeCapacity(&.{
+                    @enumToInt(AbbrevKind.parameter),
+                    DW.OP.WASM_location,
+                    DW.OP.WASM_local,
+                });
+                leb128.writeULEB128(dbg_info.writer(), value) catch unreachable;
+            },
+            else => unreachable,
+        }
+
+        try dbg_info.ensureUnusedCapacity(5 + name_with_null.len);
+        const index = dbg_info.items.len;
+        try dbg_info.resize(index + 4); // dw.at.type,  dw.form.ref4
+        try self.addTypeRelocGlobal(atom, ty, @intCast(u32, index)); // DW.AT.type,  DW.FORM.ref4
+        dbg_info.appendSliceAssumeCapacity(name_with_null); // DW.AT.name, DW.FORM.string
+    }
+
+    pub fn genVarDbgInfo(
+        self: *DeclState,
+        name: [:0]const u8,
+        ty: Type,
+        tag: File.Tag,
+        owner_decl: Module.Decl.Index,
+        is_ptr: bool,
+        loc: DbgInfoLoc,
+    ) error{OutOfMemory}!void {
+        const dbg_info = &self.dbg_info;
+        const atom = getDbgInfoAtom(tag, self.mod, owner_decl);
+        const name_with_null = name.ptr[0 .. name.len + 1];
+        try dbg_info.append(@enumToInt(AbbrevKind.variable));
+        const target = self.mod.getTarget();
+        const endian = target.cpu.arch.endian();
+        const child_ty = if (is_ptr) ty.childType() else ty;
+
+        switch (loc) {
+            .register => |reg| {
+                try dbg_info.ensureUnusedCapacity(2);
+                dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT.location, DW.FORM.exprloc
+                    1, // ULEB128 dwarf expression length
+                    reg,
+                });
+            },
+
+            .stack => |info| {
+                try dbg_info.ensureUnusedCapacity(7);
+                const fixup = dbg_info.items.len;
+                dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT.location, DW.FORM.exprloc
+                    1, // we will backpatch it after we encode the displacement in LEB128
+                    info.fp_register,
+                });
+                leb128.writeILEB128(dbg_info.writer(), info.offset) catch unreachable;
+                dbg_info.items[fixup] += @intCast(u8, dbg_info.items.len - fixup - 2);
+            },
+
+            .wasm_local => |value| {
+                const leb_size = link.File.Wasm.getULEB128Size(value);
+                try dbg_info.ensureUnusedCapacity(2 + leb_size);
+                // wasm locals are encoded as follow:
+                // DW_OP_WASM_location wasm-op
+                // where wasm-op is defined as
+                // wasm-op := wasm-local | wasm-global | wasm-operand_stack
+                // where wasm-local is encoded as
+                // wasm-local := 0x00 i:uleb128
+                dbg_info.appendSliceAssumeCapacity(&.{
+                    DW.OP.WASM_location,
+                    DW.OP.WASM_local,
+                });
+                leb128.writeULEB128(dbg_info.writer(), value) catch unreachable;
+            },
+
+            .memory,
+            .linker_load,
+            => {
+                const ptr_width = @intCast(u8, @divExact(target.cpu.arch.ptrBitWidth(), 8));
+                try dbg_info.ensureUnusedCapacity(2 + ptr_width);
+                dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT.location, DW.FORM.exprloc
+                    1 + ptr_width + @boolToInt(is_ptr),
+                    DW.OP.addr, // literal address
+                });
+                const offset = @intCast(u32, dbg_info.items.len);
+                const addr = switch (loc) {
+                    .memory => |x| x,
+                    else => 0,
+                };
+                switch (ptr_width) {
+                    0...4 => {
+                        try dbg_info.writer().writeInt(u32, @intCast(u32, addr), endian);
+                    },
+                    5...8 => {
+                        try dbg_info.writer().writeInt(u64, addr, endian);
+                    },
+                    else => unreachable,
+                }
+                if (is_ptr) {
+                    // We need deref the address as we point to the value via GOT entry.
+                    try dbg_info.append(DW.OP.deref);
+                }
+                switch (loc) {
+                    .linker_load => |load_struct| try self.addExprlocReloc(
+                        load_struct.sym_index,
+                        offset,
+                        is_ptr,
+                    ),
+                    else => {},
+                }
+            },
+
+            .immediate => |x| {
+                try dbg_info.ensureUnusedCapacity(2);
+                const fixup = dbg_info.items.len;
+                dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT.location, DW.FORM.exprloc
+                    1,
+                    if (child_ty.isSignedInt()) DW.OP.consts else DW.OP.constu,
+                });
+                if (child_ty.isSignedInt()) {
+                    try leb128.writeILEB128(dbg_info.writer(), @bitCast(i64, x));
+                } else {
+                    try leb128.writeULEB128(dbg_info.writer(), x);
+                }
+                try dbg_info.append(DW.OP.stack_value);
+                dbg_info.items[fixup] += @intCast(u8, dbg_info.items.len - fixup - 2);
+            },
+
+            .undef => {
+                // DW.AT.location, DW.FORM.exprloc
+                // uleb128(exprloc_len)
+                // DW.OP.implicit_value uleb128(len_of_bytes) bytes
+                const abi_size = @intCast(u32, child_ty.abiSize(target));
+                var implicit_value_len = std.ArrayList(u8).init(self.gpa);
+                defer implicit_value_len.deinit();
+                try leb128.writeULEB128(implicit_value_len.writer(), abi_size);
+                const total_exprloc_len = 1 + implicit_value_len.items.len + abi_size;
+                try leb128.writeULEB128(dbg_info.writer(), total_exprloc_len);
+                try dbg_info.ensureUnusedCapacity(total_exprloc_len);
+                dbg_info.appendAssumeCapacity(DW.OP.implicit_value);
+                dbg_info.appendSliceAssumeCapacity(implicit_value_len.items);
+                dbg_info.appendNTimesAssumeCapacity(0xaa, abi_size);
+            },
+
+            .none => {
+                try dbg_info.ensureUnusedCapacity(3);
+                dbg_info.appendSliceAssumeCapacity(&[3]u8{ // DW.AT.location, DW.FORM.exprloc
+                    2, DW.OP.lit0, DW.OP.stack_value,
+                });
+            },
+
+            .nop => {
+                try dbg_info.ensureUnusedCapacity(2);
+                dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT.location, DW.FORM.exprloc
+                    1, DW.OP.nop,
+                });
+            },
+        }
+
+        try dbg_info.ensureUnusedCapacity(5 + name_with_null.len);
+        const index = dbg_info.items.len;
+        try dbg_info.resize(index + 4); // dw.at.type,  dw.form.ref4
+        try self.addTypeRelocGlobal(atom, child_ty, @intCast(u32, index));
+        dbg_info.appendSliceAssumeCapacity(name_with_null); // DW.AT.name, DW.FORM.string
+    }
+
+    pub fn advancePCAndLine(
+        self: *DeclState,
+        delta_line: i32,
+        delta_pc: usize,
+    ) error{OutOfMemory}!void {
+        // TODO Look into using the DWARF special opcodes to compress this data.
+        // It lets you emit single-byte opcodes that add different numbers to
+        // both the PC and the line number at the same time.
+        const dbg_line = &self.dbg_line;
+        try dbg_line.ensureUnusedCapacity(11);
+        dbg_line.appendAssumeCapacity(DW.LNS.advance_pc);
+        leb128.writeULEB128(dbg_line.writer(), delta_pc) catch unreachable;
+        if (delta_line != 0) {
+            dbg_line.appendAssumeCapacity(DW.LNS.advance_line);
+            leb128.writeILEB128(dbg_line.writer(), delta_line) catch unreachable;
+        }
+        dbg_line.appendAssumeCapacity(DW.LNS.copy);
+    }
+
+    pub fn setPrologueEnd(self: *DeclState) error{OutOfMemory}!void {
+        try self.dbg_line.append(DW.LNS.set_prologue_end);
+    }
+
+    pub fn setEpilogueBegin(self: *DeclState) error{OutOfMemory}!void {
+        try self.dbg_line.append(DW.LNS.set_epilogue_begin);
+    }
 };
 
 pub const AbbrevEntry = struct {
@@ -671,10 +916,11 @@ pub fn deinit(self: *Dwarf) void {
 
 /// Initializes Decl's state and its matching output buffers.
 /// Call this before `commitDeclState`.
-pub fn initDeclState(self: *Dwarf, mod: *Module, decl: *Module.Decl) !DeclState {
+pub fn initDeclState(self: *Dwarf, mod: *Module, decl_index: Module.Decl.Index) !DeclState {
     const tracy = trace(@src());
     defer tracy.end();
 
+    const decl = mod.declPtr(decl_index);
     const decl_name = try decl.getFullyQualifiedName(mod);
     defer self.allocator.free(decl_name);
 
@@ -749,12 +995,7 @@ pub fn initDeclState(self: *Dwarf, mod: *Module, decl: *Module.Decl) !DeclState 
             dbg_info_buffer.items.len += 4; // DW.AT.high_pc,  DW.FORM.data4
             //
             if (fn_ret_has_bits) {
-                const atom = switch (self.tag) {
-                    .elf => &decl.link.elf.dbg_info_atom,
-                    .macho => &decl.link.macho.dbg_info_atom,
-                    .wasm => &decl.link.wasm.dbg_info_atom,
-                    else => unreachable,
-                };
+                const atom = getDbgInfoAtom(self.tag, mod, decl_index);
                 try decl_state.addTypeRelocGlobal(atom, fn_ret_type, @intCast(u32, dbg_info_buffer.items.len));
                 dbg_info_buffer.items.len += 4; // DW.AT.type,  DW.FORM.ref4
             }
@@ -774,7 +1015,7 @@ pub fn commitDeclState(
     self: *Dwarf,
     file: *File,
     module: *Module,
-    decl: *Module.Decl,
+    decl_index: Module.Decl.Index,
     sym_addr: u64,
     sym_size: u64,
     decl_state: *DeclState,
@@ -785,6 +1026,7 @@ pub fn commitDeclState(
     const gpa = self.allocator;
     var dbg_line_buffer = &decl_state.dbg_line;
     var dbg_info_buffer = &decl_state.dbg_info;
+    const decl = module.declPtr(decl_index);
 
     const target_endian = self.target.cpu.arch.endian();
 
@@ -935,32 +1177,28 @@ pub fn commitDeclState(
                         next_padding_size,
                     );
                 },
+
                 .macho => {
                     const macho_file = file.cast(File.MachO).?;
                     const d_sym = &macho_file.d_sym.?;
-                    const dwarf_segment = d_sym.segments.items[d_sym.dwarf_segment_cmd_index.?];
                     const debug_line_sect = &d_sym.sections.items[d_sym.debug_line_section_index.?];
                     if (needed_size != debug_line_sect.size) {
                         if (needed_size > d_sym.allocatedSize(debug_line_sect.offset)) {
                             const new_offset = d_sym.findFreeSpace(needed_size, 1);
                             const existing_size = last_src_fn.off;
-
-                            log.debug("moving __debug_line section: {} bytes from 0x{x} to 0x{x}", .{
+                            std.log.scoped(.dsym).debug("moving __debug_line section: {} bytes from 0x{x} to 0x{x}", .{
                                 existing_size,
                                 debug_line_sect.offset,
                                 new_offset,
                             });
-
-                            try copyRangeAllOverlappingAlloc(
-                                gpa,
-                                d_sym.file,
+                            const amt = try d_sym.file.copyRangeAll(
                                 debug_line_sect.offset,
+                                d_sym.file,
                                 new_offset,
                                 existing_size,
                             );
-
+                            if (amt != existing_size) return error.InputOutput;
                             debug_line_sect.offset = @intCast(u32, new_offset);
-                            debug_line_sect.addr = dwarf_segment.vmaddr + new_offset - dwarf_segment.fileoff;
                         }
                         debug_line_sect.size = needed_size;
                         d_sym.debug_line_header_dirty = true;
@@ -974,6 +1212,7 @@ pub fn commitDeclState(
                         next_padding_size,
                     );
                 },
+
                 .wasm => {
                     const wasm_file = file.cast(File.Wasm).?;
                     const atom = wasm_file.debug_line_atom.?;
@@ -1008,13 +1247,7 @@ pub fn commitDeclState(
     if (dbg_info_buffer.items.len == 0)
         return;
 
-    const atom = switch (self.tag) {
-        .elf => &decl.link.elf.dbg_info_atom,
-        .macho => &decl.link.macho.dbg_info_atom,
-        .wasm => &decl.link.wasm.dbg_info_atom,
-        else => unreachable,
-    };
-
+    const atom = getDbgInfoAtom(self.tag, module, decl_index);
     if (decl_state.abbrev_table.items.len > 0) {
         // Now we emit the .debug_info types of the Decl. These will count towards the size of
         // the buffer, so we have to do it before computing the offset, and we can't perform the actual
@@ -1090,7 +1323,7 @@ pub fn commitDeclState(
             .macho => {
                 const macho_file = file.cast(File.MachO).?;
                 const d_sym = &macho_file.d_sym.?;
-                try d_sym.relocs.append(d_sym.base.base.allocator, .{
+                try d_sym.relocs.append(d_sym.allocator, .{
                     .type = switch (reloc.type) {
                         .direct_load => .direct_load,
                         .got_load => .got_load,
@@ -1234,32 +1467,28 @@ fn writeDeclDebugInfo(self: *Dwarf, file: *File, atom: *Atom, dbg_info_buf: []co
                 trailing_zero,
             );
         },
+
         .macho => {
             const macho_file = file.cast(File.MachO).?;
             const d_sym = &macho_file.d_sym.?;
-            const dwarf_segment = d_sym.segments.items[d_sym.dwarf_segment_cmd_index.?];
             const debug_info_sect = &d_sym.sections.items[d_sym.debug_info_section_index.?];
             if (needed_size != debug_info_sect.size) {
                 if (needed_size > d_sym.allocatedSize(debug_info_sect.offset)) {
                     const new_offset = d_sym.findFreeSpace(needed_size, 1);
                     const existing_size = last_decl.off;
-
-                    log.debug("moving __debug_info section: {} bytes from 0x{x} to 0x{x}", .{
+                    std.log.scoped(.dsym).debug("moving __debug_info section: {} bytes from 0x{x} to 0x{x}", .{
                         existing_size,
                         debug_info_sect.offset,
                         new_offset,
                     });
-
-                    try copyRangeAllOverlappingAlloc(
-                        gpa,
-                        d_sym.file,
+                    const amt = try d_sym.file.copyRangeAll(
                         debug_info_sect.offset,
+                        d_sym.file,
                         new_offset,
                         existing_size,
                     );
-
+                    if (amt != existing_size) return error.InputOutput;
                     debug_info_sect.offset = @intCast(u32, new_offset);
-                    debug_info_sect.addr = dwarf_segment.vmaddr + new_offset - dwarf_segment.fileoff;
                 }
                 debug_info_sect.size = needed_size;
                 d_sym.debug_info_header_dirty = true;
@@ -1274,6 +1503,7 @@ fn writeDeclDebugInfo(self: *Dwarf, file: *File, atom: *Atom, dbg_info_buf: []co
                 trailing_zero,
             );
         },
+
         .wasm => {
             const wasm_file = file.cast(File.Wasm).?;
             const info_atom = wasm_file.debug_info_atom.?;
@@ -2342,15 +2572,12 @@ fn addDbgInfoErrorSet(
     try dbg_info_buffer.append(0);
 }
 
-fn copyRangeAllOverlappingAlloc(
-    allocator: Allocator,
-    file: std.fs.File,
-    in_offset: u64,
-    out_offset: u64,
-    len: usize,
-) !void {
-    const buf = try allocator.alloc(u8, len);
-    defer allocator.free(buf);
-    const amt = try file.preadAll(buf, in_offset);
-    try file.pwriteAll(buf[0..amt], out_offset);
+fn getDbgInfoAtom(tag: File.Tag, mod: *Module, decl_index: Module.Decl.Index) *Atom {
+    const decl = mod.declPtr(decl_index);
+    return switch (tag) {
+        .elf => &decl.link.elf.dbg_info_atom,
+        .macho => &decl.link.macho.dbg_info_atom,
+        .wasm => &decl.link.wasm.dbg_info_atom,
+        else => unreachable,
+    };
 }

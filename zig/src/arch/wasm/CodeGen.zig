@@ -1291,23 +1291,6 @@ fn firstParamSRet(cc: std.builtin.CallingConvention, return_type: Type, target: 
     }
 }
 
-/// For a given `Type`, add debug information to .debug_info at the current position.
-/// The actual bytes will be written to the position after relocation.
-fn addDbgInfoTypeReloc(func: *CodeGen, ty: Type) !void {
-    switch (func.debug_output) {
-        .dwarf => |dwarf| {
-            assert(ty.hasRuntimeBitsIgnoreComptime());
-            const dbg_info = &dwarf.dbg_info;
-            const index = dbg_info.items.len;
-            try dbg_info.resize(index + 4);
-            const atom = &func.decl.link.wasm.dbg_info_atom;
-            try dwarf.addTypeRelocGlobal(atom, ty, @intCast(u32, index));
-        },
-        .plan9 => unreachable,
-        .none => {},
-    }
-}
-
 /// Lowers a Zig type and its value based on a given calling convention to ensure
 /// it matches the ABI.
 fn lowerArg(func: *CodeGen, cc: std.builtin.CallingConvention, ty: Type, value: WValue) !void {
@@ -2018,7 +2001,7 @@ fn airRetLoad(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 
     try func.restoreStackPointer();
     try func.addTag(.@"return");
-    return func.finishAir(inst, .none, &.{});
+    return func.finishAir(inst, .none, &.{un_op});
 }
 
 fn airCall(func: *CodeGen, inst: Air.Inst.Index, modifier: std.builtin.CallOptions.Modifier) InnerError!void {
@@ -2358,24 +2341,9 @@ fn airArg(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .dwarf => |dwarf| {
             // TODO: Get the original arg index rather than wasm arg index
             const name = func.mod_fn.getParamName(func.bin_file.base.options.module.?, arg_index);
-            const leb_size = link.File.Wasm.getULEB128Size(arg.local.value);
-            const dbg_info = &dwarf.dbg_info;
-            try dbg_info.ensureUnusedCapacity(3 + leb_size + 5 + name.len + 1);
-            // wasm locations are encoded as follow:
-            // DW_OP_WASM_location wasm-op
-            // where wasm-op is defined as
-            // wasm-op := wasm-local | wasm-global | wasm-operand_stack
-            // where each argument is encoded as
-            // <opcode> i:uleb128
-            dbg_info.appendSliceAssumeCapacity(&.{
-                @enumToInt(link.File.Dwarf.AbbrevKind.parameter),
-                std.dwarf.OP.WASM_location,
-                std.dwarf.OP.WASM_local,
+            try dwarf.genArgDbgInfo(name, arg_ty, .wasm, func.mod_fn.owner_decl, .{
+                .wasm_local = arg.local.value,
             });
-            leb.writeULEB128(dbg_info.writer(), arg.local.value) catch unreachable;
-            try func.addDbgInfoTypeReloc(arg_ty);
-            dbg_info.appendSliceAssumeCapacity(name);
-            dbg_info.appendAssumeCapacity(0);
         },
         else => {},
     }
@@ -2702,11 +2670,11 @@ fn lowerConstant(func: *CodeGen, arg_val: Value, ty: Type) InnerError!WValue {
             switch (int_info.signedness) {
                 .signed => switch (int_info.bits) {
                     0...32 => return WValue{ .imm32 = @intCast(u32, toTwosComplement(
-                        val.toSignedInt(),
+                        val.toSignedInt(target),
                         @intCast(u6, int_info.bits),
                     )) },
                     33...64 => return WValue{ .imm64 = toTwosComplement(
-                        val.toSignedInt(),
+                        val.toSignedInt(target),
                         @intCast(u7, int_info.bits),
                     ) },
                     else => unreachable,
@@ -2873,15 +2841,15 @@ fn valueAsI32(func: *const CodeGen, val: Value, ty: Type) i32 {
             }
         },
         .Int => switch (ty.intInfo(func.target).signedness) {
-            .signed => return @truncate(i32, val.toSignedInt()),
+            .signed => return @truncate(i32, val.toSignedInt(target)),
             .unsigned => return @bitCast(i32, @truncate(u32, val.toUnsignedInt(target))),
         },
         .ErrorSet => {
             const kv = func.bin_file.base.options.module.?.getErrorValue(val.getError().?) catch unreachable; // passed invalid `Value` to function
             return @bitCast(i32, kv.value);
         },
-        .Bool => return @intCast(i32, val.toSignedInt()),
-        .Pointer => return @intCast(i32, val.toSignedInt()),
+        .Bool => return @intCast(i32, val.toSignedInt(target)),
+        .Pointer => return @intCast(i32, val.toSignedInt(target)),
         else => unreachable, // Programmer called this function for an illegal type
     }
 }
@@ -3193,7 +3161,7 @@ fn airBitcast(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         }
         break :result func.reuseOperand(ty_op.operand, operand);
     } else WValue{ .none = {} };
-    func.finishAir(inst, result, &.{});
+    func.finishAir(inst, result, &.{ty_op.operand});
 }
 
 fn bitcast(func: *CodeGen, wanted_ty: Type, given_ty: Type, operand: WValue) InnerError!WValue {
@@ -4147,7 +4115,7 @@ fn airMemset(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const len = try func.resolveInst(bin_op.rhs);
     try func.memset(ptr, len, value);
 
-    func.finishAir(inst, .none, &.{pl_op.operand});
+    func.finishAir(inst, .none, &.{ pl_op.operand, bin_op.lhs, bin_op.rhs });
 }
 
 /// Sets a region of memory at `ptr` to the value of `value`
@@ -4456,6 +4424,7 @@ fn airAggregateInit(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
             else => unreachable,
         }
     };
+    // TODO: this is incorrect Liveness handling code
     func.finishAir(inst, result, &.{});
 }
 
@@ -4779,7 +4748,7 @@ fn airMemcpy(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const len = try func.resolveInst(bin_op.rhs);
     try func.memcpy(dst, src, len);
 
-    func.finishAir(inst, .none, &.{pl_op.operand});
+    func.finishAir(inst, .none, &.{ pl_op.operand, bin_op.lhs, bin_op.rhs });
 }
 
 fn airPopcount(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
@@ -5190,7 +5159,8 @@ fn airMaxMin(func: *CodeGen, inst: Air.Inst.Index, op: enum { max, min }) InnerE
 fn airMulAdd(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const pl_op = func.air.instructions.items(.data)[inst].pl_op;
     const bin_op = func.air.extraData(Air.Bin, pl_op.payload).data;
-    if (func.liveness.isUnused(inst)) return func.finishAir(inst, .none, &.{ bin_op.lhs, bin_op.rhs });
+    if (func.liveness.isUnused(inst))
+        return func.finishAir(inst, .none, &.{ bin_op.lhs, bin_op.rhs, pl_op.operand });
 
     const ty = func.air.typeOfIndex(inst);
     if (ty.zigTypeTag() == .Vector) {
@@ -5218,7 +5188,7 @@ fn airMulAdd(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         break :result try (try func.binOp(mul_result, addend, ty, .add)).toLocal(func, ty);
     };
 
-    func.finishAir(inst, result, &.{ bin_op.lhs, bin_op.rhs });
+    func.finishAir(inst, result, &.{ bin_op.lhs, bin_op.rhs, pl_op.operand });
 }
 
 fn airClz(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
@@ -5345,38 +5315,21 @@ fn airDbgVar(func: *CodeGen, inst: Air.Inst.Index, is_ptr: bool) !void {
     const pl_op = func.air.instructions.items(.data)[inst].pl_op;
     const ty = func.air.typeOf(pl_op.operand);
     const operand = try func.resolveInst(pl_op.operand);
-    const op_ty = if (is_ptr) ty.childType() else ty;
 
-    log.debug("airDbgVar: %{d}: {}, {}", .{ inst, op_ty.fmtDebug(), operand });
+    log.debug("airDbgVar: %{d}: {}, {}", .{ inst, ty.fmtDebug(), operand });
 
     const name = func.air.nullTerminatedString(pl_op.payload);
     log.debug(" var name = ({s})", .{name});
 
-    const dbg_info = &func.debug_output.dwarf.dbg_info;
-    try dbg_info.append(@enumToInt(link.File.Dwarf.AbbrevKind.variable));
-    switch (operand) {
-        .local => |local| {
-            const leb_size = link.File.Wasm.getULEB128Size(local.value);
-            try dbg_info.ensureUnusedCapacity(2 + leb_size);
-            // wasm locals are encoded as follow:
-            // DW_OP_WASM_location wasm-op
-            // where wasm-op is defined as
-            // wasm-op := wasm-local | wasm-global | wasm-operand_stack
-            // where wasm-local is encoded as
-            // wasm-local := 0x00 i:uleb128
-            dbg_info.appendSliceAssumeCapacity(&.{
-                std.dwarf.OP.WASM_location,
-                std.dwarf.OP.WASM_local,
-            });
-            leb.writeULEB128(dbg_info.writer(), local.value) catch unreachable;
+    const loc: link.File.Dwarf.DeclState.DbgInfoLoc = switch (operand) {
+        .local => |local| .{ .wasm_local = local.value },
+        else => blk: {
+            log.debug("TODO generate debug info for {}", .{operand});
+            break :blk .nop;
         },
-        else => {}, // TODO
-    }
+    };
+    try func.debug_output.dwarf.genVarDbgInfo(name, ty, .wasm, func.mod_fn.owner_decl, is_ptr, loc);
 
-    try dbg_info.ensureUnusedCapacity(5 + name.len + 1);
-    try func.addDbgInfoTypeReloc(op_ty);
-    dbg_info.appendSliceAssumeCapacity(name);
-    dbg_info.appendAssumeCapacity(0);
     func.finishAir(inst, .none, &.{});
 }
 

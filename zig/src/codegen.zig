@@ -68,6 +68,19 @@ pub const DebugInfoOutput = union(enum) {
     none,
 };
 
+/// Helper struct to denote that the value is in memory but requires a linker relocation fixup:
+/// * got - the value is referenced indirectly via GOT entry index (the linker emits a got-type reloc)
+/// * direct - the value is referenced directly via symbol index index (the linker emits a displacement reloc)
+/// * import - the value is referenced indirectly via import entry index (the linker emits an import-type reloc)
+pub const LinkerLoad = struct {
+    type: enum {
+        got,
+        direct,
+        import,
+    },
+    sym_index: u32,
+};
+
 pub fn generateFunction(
     bin_file: *link.File,
     src_loc: Module.SrcLoc,
@@ -459,7 +472,7 @@ pub fn generateSymbol(
             if (info.bits <= 8) {
                 const x: u8 = switch (info.signedness) {
                     .unsigned => @intCast(u8, typed_value.val.toUnsignedInt(target)),
-                    .signed => @bitCast(u8, @intCast(i8, typed_value.val.toSignedInt())),
+                    .signed => @bitCast(u8, @intCast(i8, typed_value.val.toSignedInt(target))),
                 };
                 try code.append(x);
                 return Result{ .appended = {} };
@@ -488,13 +501,13 @@ pub fn generateSymbol(
                 },
                 .signed => {
                     if (info.bits <= 16) {
-                        const x = @intCast(i16, typed_value.val.toSignedInt());
+                        const x = @intCast(i16, typed_value.val.toSignedInt(target));
                         mem.writeInt(i16, try code.addManyAsArray(2), x, endian);
                     } else if (info.bits <= 32) {
-                        const x = @intCast(i32, typed_value.val.toSignedInt());
+                        const x = @intCast(i32, typed_value.val.toSignedInt(target));
                         mem.writeInt(i32, try code.addManyAsArray(4), x, endian);
                     } else {
-                        const x = typed_value.val.toSignedInt();
+                        const x = typed_value.val.toSignedInt(target);
                         mem.writeInt(i64, try code.addManyAsArray(8), x, endian);
                     }
                 },
@@ -536,13 +549,13 @@ pub fn generateSymbol(
                 },
                 .signed => {
                     if (info.bits <= 16) {
-                        const x = @intCast(i16, int_val.toSignedInt());
+                        const x = @intCast(i16, int_val.toSignedInt(target));
                         mem.writeInt(i16, try code.addManyAsArray(2), x, endian);
                     } else if (info.bits <= 32) {
-                        const x = @intCast(i32, int_val.toSignedInt());
+                        const x = @intCast(i32, int_val.toSignedInt(target));
                         mem.writeInt(i32, try code.addManyAsArray(4), x, endian);
                     } else {
-                        const x = int_val.toSignedInt();
+                        const x = int_val.toSignedInt(target);
                         mem.writeInt(i64, try code.addManyAsArray(8), x, endian);
                     }
                 },

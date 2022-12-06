@@ -641,7 +641,6 @@ test "default struct initialization fields" {
 
 test "packed array 24bits" {
     if (builtin.zig_backend == .stage1) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
@@ -1391,7 +1390,6 @@ test "address of zero-bit field is equal to address of only field" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
 
     {
         const A = struct { b: void = {}, u: u8 };
@@ -1405,4 +1403,16 @@ test "address of zero-bit field is equal to address of only field" {
         const a_ptr = @fieldParentPtr(A, "b", &a.b);
         try std.testing.expectEqual(&a, a_ptr);
     }
+}
+
+test "struct field has a pointer to an aligned version of itself" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+
+    const E = struct {
+        next: *align(1) @This(),
+    };
+    var e: E = undefined;
+    e = .{ .next = &e };
+
+    try expect(&e == e.next);
 }
