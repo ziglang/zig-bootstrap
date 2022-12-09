@@ -2415,8 +2415,8 @@ test "anonymous list literal syntax" {
 }
       {#code_end#}
       <p>
-      If there is no type in the result location then an anonymous list literal actually
-      turns into a {#link|struct#} with numbered field names:
+      If there is no type in the {#link|result location|Result Location Semantics#} then an
+      anonymous list literal actually turns into a {#link|struct#} with numbered field names:
       </p>
       {#code_begin|test|infer_list_literal#}
 const std = @import("std");
@@ -2511,7 +2511,7 @@ test "null terminated array" {
       and vectors. Zig provides the {#link|@splat#} builtin to easily convert from scalars
       to vectors, and it supports {#link|@reduce#} and array indexing syntax to convert
       from vectors to scalars. Vectors also support assignment to and from fixed-length
-      arrays with comptime known length.
+      arrays with comptime-known length.
       </p>
       <p>
       For rearranging elements within and between vectors, Zig provides the {#link|@shuffle#} and {#link|@select#} functions.
@@ -2557,7 +2557,7 @@ test "Conversion between vectors, arrays, and slices" {
     var offset: u32 = 1;
     // To extract a comptime-known length from a runtime-known offset,
     // first extract a new slice from the starting offset, then an array of
-    // comptime known length
+    // comptime-known length
     const vec3: @Vector(2, f32) = slice[offset..][0..2].*;
     try expectEqual(slice[offset], vec2[0]);
     try expectEqual(slice[offset + 1], vec2[1]);
@@ -3013,7 +3013,7 @@ test "slice pointer" {
 
       {#header_open|Sentinel-Terminated Slices#}
       <p>
-      The syntax {#syntax#}[:x]T{#endsyntax#} is a slice which has a runtime known length
+      The syntax {#syntax#}[:x]T{#endsyntax#} is a slice which has a runtime-known length
       and also guarantees a sentinel value at the element indexed by the length. The type does not
       guarantee that there are no sentinel elements before that. Sentinel-terminated slices allow element
       access to the {#syntax#}len{#endsyntax#} index.
@@ -3233,7 +3233,7 @@ test "default struct initialization fields" {
         .b = 5,
     };
     if (x.a + x.b != 1239) {
-        @compileError("it's even comptime known!");
+        @compileError("it's even comptime-known!");
     }
 }
       {#code_end#}
@@ -3472,7 +3472,7 @@ test "aligned struct fields" {
           that variable.</li>
           <li>If the struct is in the {#syntax#}return{#endsyntax#} expression, it gets named after
           the function it is returning from, with the parameter values serialized.</li>
-          <li>Otherwise, the struct gets a name such as <code>(anonymous struct at file.zig:7:38)</code>.</li>
+          <li>Otherwise, the struct gets a name such as <code>(filename.funcname.__struct_ID)</code>.</li>
           <li>If the struct is declared inside another struct, it gets named after both the parent
           struct and the name inferred by the previous rules, separated by a dot.</li>
       </ul>
@@ -3497,7 +3497,8 @@ fn List(comptime T: type) type {
       {#header_open|Anonymous Struct Literals#}
       <p>
       Zig allows omitting the struct type of a literal. When the result is {#link|coerced|Type Coercion#},
-      the struct literal will directly instantiate the result location, with no copy:
+      the struct literal will directly instantiate the {#link|result location|Result Location Semantics#},
+      with no copy:
       </p>
       {#code_begin|test|struct_result#}
 const std = @import("std");
@@ -3515,8 +3516,8 @@ test "anonymous struct literal" {
 }
       {#code_end#}
       <p>
-      The struct type can be inferred. Here the result location does not include a type, and
-      so Zig infers the type:
+      The struct type can be inferred. Here the {#link|result location|Result Location Semantics#}
+      does not include a type, and so Zig infers the type:
       </p>
       {#code_begin|test|struct_anon#}
 const std = @import("std");
@@ -4256,7 +4257,7 @@ fn isFieldOptional(comptime T: type, field_index: usize) !bool {
     const fields = @typeInfo(T).Struct.fields;
     return switch (field_index) {
         // This prong is analyzed `fields.len - 1` times with `idx` being an
-        // unique comptime known value each time.
+        // unique comptime-known value each time.
         inline 0...fields.len - 1 => |idx| @typeInfo(fields[idx].field_type) == .Optional,
         else => return error.IndexOutOfBounds,
     };
@@ -4351,8 +4352,8 @@ const U = union(enum) {
 
 fn getNum(u: U) u32 {
     switch (u) {
-        // Here `num` is a runtime known value that is either
-        // `u.a` or `u.b` and `tag` is `u`'s comptime known tag value.
+        // Here `num` is a runtime-known value that is either
+        // `u.a` or `u.b` and `tag` is `u`'s comptime-known tag value.
         inline else => |num, tag| {
             if (tag == .b) {
                 return @floatToInt(u32, num);
@@ -6398,7 +6399,7 @@ test "coercion to error unions" {
 const std = @import("std");
 const expect = std.testing.expect;
 
-test "coercing large integer type to smaller one when value is comptime known to fit" {
+test "coercing large integer type to smaller one when value is comptime-known to fit" {
     const x: u64 = 255;
     const y: u8 = x;
     try expect(y == 255);
@@ -10961,24 +10962,28 @@ pub fn main() !void {
       {#code_begin|exe|preopens#}
       {#target_wasi#}
 const std = @import("std");
-const PreopenList = std.fs.wasi.PreopenList;
+const fs = std.fs;
 
 pub fn main() !void {
     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
     const gpa = general_purpose_allocator.allocator();
 
-    var preopens = PreopenList.init(gpa);
-    defer preopens.deinit();
+    var arena_instance = std.heap.ArenaAllocator.init(gpa);
+    defer arena_instance.deinit();
+    const arena = arena_instance.allocator();
 
-    try preopens.populate(null);
+    const preopens = try fs.wasi.preopensAlloc(arena);
 
-    for (preopens.asSlice()) |preopen, i| {
-        std.debug.print("{}: {}\n", .{ i, preopen });
+    for (preopens.names) |preopen, i| {
+        std.debug.print("{}: {s}\n", .{ i, preopen });
     }
 }
       {#code_end#}
       {#shell_samp#}$ wasmtime --dir=. preopens.wasm
-0: Preopen{ .fd = 3, .type = PreopenType{ .Dir = '.' } }
+0: stdin
+1: stdout
+2: stderr
+3: .
       {#end_shell_samp#}
       {#header_close#}
       {#header_close#}

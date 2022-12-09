@@ -290,8 +290,7 @@ pub const Export = struct {
 pub fn openPath(allocator: Allocator, options: link.Options) !*MachO {
     assert(options.target.ofmt == .macho);
 
-    const use_stage1 = build_options.have_stage1 and options.use_stage1;
-    if (use_stage1 or options.emit == null or options.module == null) {
+    if (options.emit == null or options.module == null) {
         return createEmpty(allocator, options);
     }
 
@@ -348,7 +347,7 @@ pub fn openPath(allocator: Allocator, options: link.Options) !*MachO {
 
         self.d_sym = .{
             .allocator = allocator,
-            .dwarf = link.File.Dwarf.init(allocator, .macho, options.target),
+            .dwarf = link.File.Dwarf.init(allocator, &self.base, options.target),
             .file = d_sym_file,
             .page_size = self.page_size,
         };
@@ -377,7 +376,6 @@ pub fn createEmpty(gpa: Allocator, options: link.Options) !*MachO {
     const cpu_arch = options.target.cpu.arch;
     const page_size: u16 = if (cpu_arch == .aarch64) 0x4000 else 0x1000;
     const use_llvm = build_options.have_llvm and options.use_llvm;
-    const use_stage1 = build_options.have_stage1 and options.use_stage1;
 
     const self = try gpa.create(MachO);
     errdefer gpa.destroy(self);
@@ -390,13 +388,13 @@ pub fn createEmpty(gpa: Allocator, options: link.Options) !*MachO {
             .file = null,
         },
         .page_size = page_size,
-        .mode = if (use_stage1 or use_llvm or options.module == null or options.cache_mode == .whole)
+        .mode = if (use_llvm or options.module == null or options.cache_mode == .whole)
             .one_shot
         else
             .incremental,
     };
 
-    if (use_llvm and !use_stage1) {
+    if (use_llvm) {
         self.llvm_object = try LlvmObject.create(gpa, options);
     }
 
@@ -451,7 +449,7 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
     const module = self.base.options.module orelse return error.LinkingWithoutZigSourceUnimplemented;
 
     if (self.d_sym) |*d_sym| {
-        try d_sym.dwarf.flushModule(&self.base, module);
+        try d_sym.dwarf.flushModule(module);
     }
 
     var libs = std.StringArrayHashMap(link.SystemLib).init(arena);
@@ -2215,7 +2213,6 @@ pub fn updateFunc(self: *MachO, module: *Module, func: *Module.Fn, air: Air, liv
 
     if (decl_state) |*ds| {
         try self.d_sym.?.dwarf.commitDeclState(
-            &self.base,
             module,
             decl_index,
             addr,
@@ -2366,7 +2363,6 @@ pub fn updateDecl(self: *MachO, module: *Module, decl_index: Module.Decl.Index) 
 
     if (decl_state) |*ds| {
         try self.d_sym.?.dwarf.commitDeclState(
-            &self.base,
             module,
             decl_index,
             addr,
@@ -2605,7 +2601,7 @@ fn updateDeclCode(self: *MachO, decl_index: Module.Decl.Index, code: []const u8)
 pub fn updateDeclLineNumber(self: *MachO, module: *Module, decl: *const Module.Decl) !void {
     _ = module;
     if (self.d_sym) |*d_sym| {
-        try d_sym.dwarf.updateDeclLineNumber(&self.base, decl);
+        try d_sym.dwarf.updateDeclLineNumber(decl);
     }
 }
 
@@ -4302,6 +4298,11 @@ pub fn getEntryPoint(self: MachO) error{MissingMainEntrypoint}!SymbolWithLoc {
         return error.MissingMainEntrypoint;
     };
     return global;
+}
+
+pub fn getDebugSymbols(self: *MachO) ?*DebugSymbols {
+    if (self.d_sym == null) return null;
+    return &self.d_sym.?;
 }
 
 pub fn findFirst(comptime T: type, haystack: []align(1) const T, start: usize, predicate: anytype) usize {

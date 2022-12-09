@@ -199,7 +199,7 @@ pub fn format(
         switch (missing_count) {
             0 => unreachable,
             1 => @compileError("unused argument in '" ++ fmt ++ "'"),
-            else => @compileError((comptime comptimePrint("{d}", .{missing_count})) ++ " unused arguments in '" ++ fmt ++ "'"),
+            else => @compileError(comptimePrint("{d}", .{missing_count}) ++ " unused arguments in '" ++ fmt ++ "'"),
         }
     }
 }
@@ -827,7 +827,7 @@ fn formatSliceHexImpl(comptime case: Case) type {
     const charset = "0123456789" ++ if (case == .upper) "ABCDEF" else "abcdef";
 
     return struct {
-        pub fn f(
+        pub fn formatSliceHexImpl(
             bytes: []const u8,
             comptime fmt: []const u8,
             options: std.fmt.FormatOptions,
@@ -846,8 +846,8 @@ fn formatSliceHexImpl(comptime case: Case) type {
     };
 }
 
-const formatSliceHexLower = formatSliceHexImpl(.lower).f;
-const formatSliceHexUpper = formatSliceHexImpl(.upper).f;
+const formatSliceHexLower = formatSliceHexImpl(.lower).formatSliceHexImpl;
+const formatSliceHexUpper = formatSliceHexImpl(.upper).formatSliceHexImpl;
 
 /// Return a Formatter for a []const u8 where every byte is formatted as a pair
 /// of lowercase hexadecimal digits.
@@ -865,7 +865,7 @@ fn formatSliceEscapeImpl(comptime case: Case) type {
     const charset = "0123456789" ++ if (case == .upper) "ABCDEF" else "abcdef";
 
     return struct {
-        pub fn f(
+        pub fn formatSliceEscapeImpl(
             bytes: []const u8,
             comptime fmt: []const u8,
             options: std.fmt.FormatOptions,
@@ -891,8 +891,8 @@ fn formatSliceEscapeImpl(comptime case: Case) type {
     };
 }
 
-const formatSliceEscapeLower = formatSliceEscapeImpl(.lower).f;
-const formatSliceEscapeUpper = formatSliceEscapeImpl(.upper).f;
+const formatSliceEscapeLower = formatSliceEscapeImpl(.lower).formatSliceEscapeImpl;
+const formatSliceEscapeUpper = formatSliceEscapeImpl(.upper).formatSliceEscapeImpl;
 
 /// Return a Formatter for a []const u8 where every non-printable ASCII
 /// character is escaped as \xNN, where NN is the character in lowercase
@@ -910,7 +910,7 @@ pub fn fmtSliceEscapeUpper(bytes: []const u8) std.fmt.Formatter(formatSliceEscap
 
 fn formatSizeImpl(comptime radix: comptime_int) type {
     return struct {
-        fn f(
+        fn formatSizeImpl(
             value: u64,
             comptime fmt: []const u8,
             options: FormatOptions,
@@ -958,8 +958,8 @@ fn formatSizeImpl(comptime radix: comptime_int) type {
     };
 }
 
-const formatSizeDec = formatSizeImpl(1000).f;
-const formatSizeBin = formatSizeImpl(1024).f;
+const formatSizeDec = formatSizeImpl(1000).formatSizeImpl;
+const formatSizeBin = formatSizeImpl(1024).formatSizeImpl;
 
 /// Return a Formatter for a u64 value representing a file size.
 /// This formatter represents the number as multiple of 1000 and uses the SI
@@ -2209,7 +2209,7 @@ test "pointer" {
         try expectFmt("pointer: i32@deadbeef\n", "pointer: {}\n", .{value});
         try expectFmt("pointer: i32@deadbeef\n", "pointer: {*}\n", .{value});
     }
-    const FnPtr = if (builtin.zig_backend == .stage1) fn () void else *align(1) const fn () void;
+    const FnPtr = *align(1) const fn () void;
     {
         const value = @intToPtr(FnPtr, 0xdeadbeef);
         try expectFmt("pointer: fn() void@deadbeef\n", "pointer: {}\n", .{value});
@@ -2266,10 +2266,6 @@ test "struct" {
 }
 
 test "enum" {
-    if (builtin.zig_backend == .stage1) {
-        // stage1 starts the typename with 'std' which might also be desireable for stage2
-        return error.SkipZigTest;
-    }
     const Enum = enum {
         One,
         Two,
@@ -2285,10 +2281,6 @@ test "enum" {
 }
 
 test "non-exhaustive enum" {
-    if (builtin.zig_backend == .stage1) {
-        // stage1 fails to return fully qualified namespaces.
-        return error.SkipZigTest;
-    }
     const Enum = enum(u16) {
         One = 0x000f,
         Two = 0xbeef,
@@ -2462,10 +2454,6 @@ test "custom" {
 }
 
 test "struct" {
-    if (builtin.zig_backend == .stage1) {
-        // stage1 fails to return fully qualified namespaces.
-        return error.SkipZigTest;
-    }
     const S = struct {
         a: u32,
         b: anyerror,
@@ -2484,10 +2472,6 @@ test "struct" {
 }
 
 test "union" {
-    if (builtin.zig_backend == .stage1) {
-        // stage1 fails to return fully qualified namespaces.
-        return error.SkipZigTest;
-    }
     const TU = union(enum) {
         float: f32,
         int: u32,
@@ -2518,10 +2502,6 @@ test "union" {
 }
 
 test "enum" {
-    if (builtin.zig_backend == .stage1) {
-        // stage1 fails to return fully qualified namespaces.
-        return error.SkipZigTest;
-    }
     const E = enum {
         One,
         Two,
@@ -2534,10 +2514,6 @@ test "enum" {
 }
 
 test "struct.self-referential" {
-    if (builtin.zig_backend == .stage1) {
-        // stage1 fails to return fully qualified namespaces.
-        return error.SkipZigTest;
-    }
     const S = struct {
         const SelfType = @This();
         a: ?*SelfType,
@@ -2552,10 +2528,6 @@ test "struct.self-referential" {
 }
 
 test "struct.zero-size" {
-    if (builtin.zig_backend == .stage1) {
-        // stage1 fails to return fully qualified namespaces.
-        return error.SkipZigTest;
-    }
     const A = struct {
         fn foo() void {}
     };
@@ -2633,10 +2605,6 @@ test "formatFloatValue with comptime_float" {
 }
 
 test "formatType max_depth" {
-    if (builtin.zig_backend == .stage1) {
-        // stage1 fails to return fully qualified namespaces.
-        return error.SkipZigTest;
-    }
     const Vec2 = struct {
         const SelfType = @This();
         x: f32,
@@ -2721,12 +2689,6 @@ test "positional/alignment/width/precision" {
 test "vector" {
     if (builtin.target.cpu.arch == .riscv64) {
         // https://github.com/ziglang/zig/issues/4486
-        return error.SkipZigTest;
-    }
-
-    if (builtin.zig_backend == .stage1) {
-        // Regressed in LLVM 14:
-        // https://github.com/llvm/llvm-project/issues/55522
         return error.SkipZigTest;
     }
 

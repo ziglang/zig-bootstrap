@@ -195,13 +195,8 @@ test "approxEqAbs and approxEqRel" {
     }
 }
 
-pub fn doNotOptimizeAway(value: anytype) void {
-    // TODO: use @declareSideEffect() when it is available.
-    // https://github.com/ziglang/zig/issues/6168
-    const T = @TypeOf(value);
-    var x: T = undefined;
-    const p = @ptrCast(*volatile T, &x);
-    p.* = x;
+pub fn doNotOptimizeAway(val: anytype) void {
+    return mem.doNotOptimizeAway(val);
 }
 
 pub fn raiseInvalid() void {
@@ -528,9 +523,7 @@ pub fn shl(comptime T: type, a: T, shift_amt: anytype) T {
 }
 
 test "shl" {
-    if ((builtin.zig_backend == .stage1 or builtin.zig_backend == .stage2_llvm) and
-        builtin.cpu.arch == .aarch64)
-    {
+    if (builtin.zig_backend == .stage2_llvm and builtin.cpu.arch == .aarch64) {
         // https://github.com/ziglang/zig/issues/12012
         return error.SkipZigTest;
     }
@@ -574,9 +567,7 @@ pub fn shr(comptime T: type, a: T, shift_amt: anytype) T {
 }
 
 test "shr" {
-    if ((builtin.zig_backend == .stage1 or builtin.zig_backend == .stage2_llvm) and
-        builtin.cpu.arch == .aarch64)
-    {
+    if (builtin.zig_backend == .stage2_llvm and builtin.cpu.arch == .aarch64) {
         // https://github.com/ziglang/zig/issues/12012
         return error.SkipZigTest;
     }
@@ -621,9 +612,7 @@ pub fn rotr(comptime T: type, x: T, r: anytype) T {
 }
 
 test "rotr" {
-    if ((builtin.zig_backend == .stage1 or builtin.zig_backend == .stage2_llvm) and
-        builtin.cpu.arch == .aarch64)
-    {
+    if (builtin.zig_backend == .stage2_llvm and builtin.cpu.arch == .aarch64) {
         // https://github.com/ziglang/zig/issues/12012
         return error.SkipZigTest;
     }
@@ -667,9 +656,7 @@ pub fn rotl(comptime T: type, x: T, r: anytype) T {
 }
 
 test "rotl" {
-    if ((builtin.zig_backend == .stage1 or builtin.zig_backend == .stage2_llvm) and
-        builtin.cpu.arch == .aarch64)
-    {
+    if (builtin.zig_backend == .stage2_llvm and builtin.cpu.arch == .aarch64) {
         // https://github.com/ziglang/zig/issues/12012
         return error.SkipZigTest;
     }
@@ -1695,7 +1682,7 @@ fn testSign() !void {
 }
 
 test "sign" {
-    if (builtin.zig_backend == .stage1 or builtin.zig_backend == .stage2_llvm) {
+    if (builtin.zig_backend == .stage2_llvm) {
         // https://github.com/ziglang/zig/issues/12012
         return error.SkipZigTest;
     }

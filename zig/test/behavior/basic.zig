@@ -198,11 +198,6 @@ const OpaqueA = opaque {};
 const OpaqueB = opaque {};
 
 test "opaque types" {
-    if (builtin.zig_backend == .stage1) {
-        // stage1 gets the type names wrong
-        return error.SkipZigTest;
-    }
-
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
 
     try expect(*OpaqueA != *OpaqueB);
@@ -290,7 +285,6 @@ fn fB() []const u8 {
 
 test "call function pointer in struct" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
 
     try expect(mem.eql(u8, f3(true), "a"));
     try expect(mem.eql(u8, f3(false), "b"));
@@ -329,7 +323,6 @@ fn copy(src: *const u64, dst: *u64) void {
 }
 
 test "call result of if else expression" {
-    if (builtin.zig_backend == .stage1) return error.SkipZigTest; // stage1 has different function pointers
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
@@ -573,22 +566,16 @@ fn emptyFn() void {}
 
 const addr1 = @ptrCast(*const u8, &emptyFn);
 test "comptime cast fn to ptr" {
-    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
-
     const addr2 = @ptrCast(*const u8, &emptyFn);
     comptime try expect(addr1 == addr2);
 }
 
 test "equality compare fn ptrs" {
-    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
-
     var a = &emptyFn;
     try expect(a == a);
 }
 
 test "self reference through fn ptr field" {
-    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
-
     const S = struct {
         const A = struct {
             f: *const fn (A) u8,
@@ -724,20 +711,6 @@ test "comptime manyptr concatenation" {
     try expect(expected[len] == 0);
 }
 
-test "thread local variable" {
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_llvm and builtin.cpu.arch != .x86_64) return error.SkipZigTest; // TODO
-
-    const S = struct {
-        threadlocal var t: i32 = 1234;
-    };
-    S.t += 1;
-    try expect(S.t == 1235);
-}
-
 test "result location is optional inside error union" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
@@ -752,20 +725,6 @@ fn maybe(x: bool) anyerror!?u32 {
         else => null,
     };
 }
-
-test "pointer to thread local array" {
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_llvm and builtin.cpu.arch != .x86_64) return error.SkipZigTest; // TODO
-
-    const s = "Hello world";
-    std.mem.copy(u8, buffer[0..], s);
-    try std.testing.expectEqualSlices(u8, buffer[0..], s);
-}
-
-threadlocal var buffer: [11]u8 = undefined;
 
 test "auto created variables have correct alignment" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
@@ -783,10 +742,6 @@ test "auto created variables have correct alignment" {
 }
 
 test "extern variable with non-pointer opaque type" {
-    if (builtin.zig_backend == .stage1) {
-        // Regressed with LLVM 14
-        return error.SkipZigTest;
-    }
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
@@ -963,7 +918,7 @@ test "array type comes from generic function" {
 }
 
 test "generic function uses return type of other generic function" {
-    if (builtin.zig_backend != .stage1) {
+    if (true) {
         // This test has been failing sporadically on the CI.
         // It's not enough to verify that it works locally; we need to diagnose why
         // it fails on the CI sometimes before turning it back on.
@@ -1067,7 +1022,6 @@ test "inline call of function with a switch inside the return statement" {
 }
 
 test "namespace lookup ignores decl causing the lookup" {
-    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO

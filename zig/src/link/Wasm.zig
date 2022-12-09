@@ -361,7 +361,7 @@ pub fn openPath(allocator: Allocator, sub_path: []const u8, options: link.Option
     }
 
     if (!options.strip and options.module != null) {
-        wasm_bin.dwarf = Dwarf.init(allocator, .wasm, options.target);
+        wasm_bin.dwarf = Dwarf.init(allocator, &wasm_bin.base, options.target);
         try wasm_bin.initDebugSections();
     }
 
@@ -382,8 +382,7 @@ pub fn createEmpty(gpa: Allocator, options: link.Options) !*Wasm {
     };
 
     const use_llvm = build_options.have_llvm and options.use_llvm;
-    const use_stage1 = build_options.have_stage1 and options.use_stage1;
-    if (use_llvm and !use_stage1) {
+    if (use_llvm) {
         wasm.llvm_object = try LlvmObject.create(gpa, options);
     }
     return wasm;
@@ -911,7 +910,6 @@ pub fn updateFunc(wasm: *Wasm, mod: *Module, func: *Module.Fn, air: Air, livenes
 
     if (wasm.dwarf) |*dwarf| {
         try dwarf.commitDeclState(
-            &wasm.base,
             mod,
             decl_index,
             // Actual value will be written after relocation.
@@ -991,7 +989,7 @@ pub fn updateDeclLineNumber(wasm: *Wasm, mod: *Module, decl: *const Module.Decl)
         defer wasm.base.allocator.free(decl_name);
 
         log.debug("updateDeclLineNumber {s}{*}", .{ decl_name, decl });
-        try dw.updateDeclLineNumber(&wasm.base, decl);
+        try dw.updateDeclLineNumber(decl);
     }
 }
 
@@ -2300,7 +2298,7 @@ pub fn flushModule(wasm: *Wasm, comp: *Compilation, prog_node: *std.Progress.Nod
         }
 
         if (wasm.dwarf) |*dwarf| {
-            try dwarf.flushModule(&wasm.base, wasm.base.options.module.?);
+            try dwarf.flushModule(wasm.base.options.module.?);
         }
     }
 
@@ -2669,12 +2667,12 @@ pub fn flushModule(wasm: *Wasm, comp: *Compilation, prog_node: *std.Progress.Nod
     if (!wasm.base.options.strip) {
         if (wasm.dwarf) |*dwarf| {
             const mod = wasm.base.options.module.?;
-            try dwarf.writeDbgAbbrev(&wasm.base);
+            try dwarf.writeDbgAbbrev();
             // for debug info and ranges, the address is always 0,
             // as locations are always offsets relative to 'code' section.
-            try dwarf.writeDbgInfoHeader(&wasm.base, mod, 0, code_section_size);
-            try dwarf.writeDbgAranges(&wasm.base, 0, code_section_size);
-            try dwarf.writeDbgLineHeader(&wasm.base, mod);
+            try dwarf.writeDbgInfoHeader(mod, 0, code_section_size);
+            try dwarf.writeDbgAranges(0, code_section_size);
+            try dwarf.writeDbgLineHeader();
         }
 
         var debug_bytes = std.ArrayList(u8).init(wasm.base.allocator);
@@ -2986,25 +2984,7 @@ fn linkWithLLD(wasm: *Wasm, comp: *Compilation, prog_node: *std.Progress.Node) !
 
     // If there is no Zig code to compile, then we should skip flushing the output file because it
     // will not be part of the linker line anyway.
-    const module_obj_path: ?[]const u8 = if (wasm.base.options.module) |mod| blk: {
-        const use_stage1 = build_options.have_stage1 and wasm.base.options.use_stage1;
-        if (use_stage1) {
-            const obj_basename = try std.zig.binNameAlloc(arena, .{
-                .root_name = wasm.base.options.root_name,
-                .target = wasm.base.options.target,
-                .output_mode = .Obj,
-            });
-            switch (wasm.base.options.cache_mode) {
-                .incremental => break :blk try mod.zig_cache_artifact_directory.join(
-                    arena,
-                    &[_][]const u8{obj_basename},
-                ),
-                .whole => break :blk try fs.path.join(arena, &.{
-                    fs.path.dirname(full_out_path).?, obj_basename,
-                }),
-            }
-        }
-
+    const module_obj_path: ?[]const u8 = if (wasm.base.options.module != null) blk: {
         try wasm.flushModule(comp, prog_node);
 
         if (fs.path.dirname(full_out_path)) |dirname| {
@@ -3198,26 +3178,19 @@ fn linkWithLLD(wasm: *Wasm, comp: *Compilation, prog_node: *std.Progress.Node) !
             if (wasm.base.options.module) |mod| {
                 // when we use stage1, we use the exports that stage1 provided us.
                 // For stage2, we can directly retrieve them from the module.
-                const use_stage1 = build_options.have_stage1 and wasm.base.options.use_stage1;
-                if (use_stage1) {
-                    for (comp.export_symbol_names.items) |symbol_name| {
-                        try argv.append(try std.fmt.allocPrint(arena, "--export={s}", .{symbol_name}));
-                    }
-                } else {
-                    const skip_export_non_fn = target.os.tag == .wasi and
-                        wasm.base.options.wasi_exec_model == .command;
-                    for (mod.decl_exports.values()) |exports| {
-                        for (exports.items) |exprt| {
-                            const exported_decl = mod.declPtr(exprt.exported_decl);
-                            if (skip_export_non_fn and exported_decl.ty.zigTypeTag() != .Fn) {
-                                // skip exporting symbols when we're building a WASI command
-                                // and the symbol is not a function
-                                continue;
-                            }
-                            const symbol_name = exported_decl.name;
-                            const arg = try std.fmt.allocPrint(arena, "--export={s}", .{symbol_name});
-                            try argv.append(arg);
+                const skip_export_non_fn = target.os.tag == .wasi and
+                    wasm.base.options.wasi_exec_model == .command;
+                for (mod.decl_exports.values()) |exports| {
+                    for (exports.items) |exprt| {
+                        const exported_decl = mod.declPtr(exprt.exported_decl);
+                        if (skip_export_non_fn and exported_decl.ty.zigTypeTag() != .Fn) {
+                            // skip exporting symbols when we're building a WASI command
+                            // and the symbol is not a function
+                            continue;
                         }
+                        const symbol_name = exported_decl.name;
+                        const arg = try std.fmt.allocPrint(arena, "--export={s}", .{symbol_name});
+                        try argv.append(arg);
                     }
                 }
             }

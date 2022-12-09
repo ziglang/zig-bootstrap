@@ -682,13 +682,6 @@ pub fn addPkgTests(
         } else false;
         if (!want_this_mode) continue;
 
-        if (test_target.backend) |backend| {
-            if (backend == .stage2_c and builtin.os.tag == .windows) {
-                // https://github.com/ziglang/zig/issues/12415
-                continue;
-            }
-        }
-
         const libc_prefix = if (test_target.target.getOs().requiresLibC())
             ""
         else if (test_target.link_libc)
@@ -720,20 +713,18 @@ pub fn addPkgTests(
         these_tests.addIncludePath("test");
         if (test_target.backend) |backend| switch (backend) {
             .stage1 => {
-                these_tests.use_stage1 = true;
+                @panic("stage1 testing requested");
             },
             .stage2_llvm => {
-                these_tests.use_stage1 = false;
                 these_tests.use_llvm = true;
             },
             .stage2_c => {
-                these_tests.use_stage1 = false;
                 these_tests.use_llvm = false;
             },
             else => {
-                these_tests.use_stage1 = false;
                 these_tests.use_llvm = false;
-                // TODO: force self-hosted linkers to avoid LLD creeping in until the auto-select mechanism deems them worthy
+                // TODO: force self-hosted linkers to avoid LLD creeping in
+                // until the auto-select mechanism deems them worthy
                 these_tests.use_lld = false;
             },
         };
@@ -1354,8 +1345,6 @@ pub fn addCAbiTests(b: *build.Builder, skip_non_native: bool) *build.Step {
             "test-c-abi",
             triple_prefix,
         }));
-
-        test_step.use_stage1 = false;
 
         step.dependOn(&test_step.step);
     }

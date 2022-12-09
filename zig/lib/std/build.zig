@@ -46,7 +46,6 @@ pub const Builder = struct {
     prominent_compile_errors: bool,
     color: enum { auto, on, off } = .auto,
     reference_trace: ?u32 = null,
-    use_stage1: ?bool = null,
     invalid_user_input: bool,
     zig_exe: []const u8,
     default_step: *Step,
@@ -1621,7 +1620,6 @@ pub const LibExeObjStep = struct {
     stack_size: ?u64 = null,
 
     want_lto: ?bool = null,
-    use_stage1: ?bool = null,
     use_llvm: ?bool = null,
     use_lld: ?bool = null,
 
@@ -2467,20 +2465,6 @@ pub const LibExeObjStep = struct {
             try zig_args.append(try std.fmt.allocPrint(builder.allocator, "-freference-trace={d}", .{some}));
         }
 
-        if (self.use_stage1) |stage1| {
-            if (stage1) {
-                try zig_args.append("-fstage1");
-            } else {
-                try zig_args.append("-fno-stage1");
-            }
-        } else if (builder.use_stage1) |stage1| {
-            if (stage1) {
-                try zig_args.append("-fstage1");
-            } else {
-                try zig_args.append("-fno-stage1");
-            }
-        }
-
         if (self.use_llvm) |use_llvm| {
             if (use_llvm) {
                 try zig_args.append("-fLLVM");
@@ -3309,8 +3293,7 @@ pub const LibExeObjStep = struct {
             while (try it.next()) |entry| {
                 // The compiler can put these files into the same directory, but we don't
                 // want to copy them over.
-                if (mem.eql(u8, entry.name, "stage1.id") or
-                    mem.eql(u8, entry.name, "llvm-ar.id") or
+                if (mem.eql(u8, entry.name, "llvm-ar.id") or
                     mem.eql(u8, entry.name, "libs.txt") or
                     mem.eql(u8, entry.name, "builtin.zig") or
                     mem.eql(u8, entry.name, "zld.id") or
@@ -3623,7 +3606,7 @@ pub const Step = struct {
     loop_flag: bool,
     done_flag: bool,
 
-    const MakeFn = std.meta.FnPtr(fn (self: *Step) anyerror!void);
+    const MakeFn = *const fn (self: *Step) anyerror!void;
 
     pub const Id = enum {
         top_level,

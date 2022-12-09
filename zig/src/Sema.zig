@@ -1359,7 +1359,7 @@ fn analyzeBodyInner(
                             break check_block.runtime_index;
                         }
                         check_block = check_block.parent.?;
-                    } else unreachable;
+                    };
 
                     if (@enumToInt(target_runtime_index) < @enumToInt(block.runtime_index)) {
                         const runtime_src = block.runtime_cond orelse block.runtime_loop.?;
@@ -1733,7 +1733,7 @@ fn analyzeBodyInner(
             break always_noreturn;
         map.putAssumeCapacity(inst, air_inst);
         i += 1;
-    } else unreachable;
+    };
 
     // balance out dbg_block_begins in case of early noreturn
     const noreturn_inst = block.instructions.popOrNull();
@@ -2121,8 +2121,6 @@ fn failWithUseOfAsync(sema: *Sema, block: *Block, src: LazySrcLoc) CompileError 
     const msg = msg: {
         const msg = try sema.errMsg(block, src, "async has not been implemented in the self-hosted compiler yet", .{});
         errdefer msg.destroy(sema.gpa);
-
-        try sema.errNote(block, src, msg, "to use async enable the stage1 compiler with either '-fstage1' or by setting '.use_stage1 = true` in your 'build.zig' script", .{});
         break :msg msg;
     };
     return sema.failWithOwnedErrorMsg(msg);
@@ -2191,6 +2189,7 @@ fn failWithOwnedErrorMsg(sema: *Sema, err_msg: *Module.ErrorMsg) CompileError {
     if (crash_report.is_enabled and sema.mod.comp.debug_compile_errors) {
         const err_path = err_msg.src_loc.file_scope.fullPath(sema.mod.gpa) catch unreachable;
         const err_source = err_msg.src_loc.file_scope.getSource(sema.mod.gpa) catch unreachable;
+        if (err_msg.src_loc.lazy == .unneeded) return error.NeededSourceLocation;
         const err_span = err_msg.src_loc.span(sema.mod.gpa) catch unreachable;
         const err_loc = std.zig.findLineColumn(err_source.bytes, err_span.main);
         std.debug.print("compile error during Sema:\n{s}:{d}:{d}: error: {s}\n{s}\n\n", .{
@@ -3480,7 +3479,7 @@ fn zirMakePtrConst(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileErro
                 .store => break candidate,
                 else => break :ct,
             }
-        } else unreachable; // TODO shouldn't need this
+        };
 
         while (true) {
             if (search_index == 0) break :ct;
@@ -3706,7 +3705,7 @@ fn zirResolveInferredAlloc(sema: *Sema, block: *Block, inst: Zir.Inst.Index) Com
                         .store => break candidate,
                         else => break :ct,
                     }
-                } else unreachable; // TODO shouldn't need this
+                };
 
                 const bitcast_inst = while (true) {
                     if (search_index == 0) break :ct;
@@ -3718,7 +3717,7 @@ fn zirResolveInferredAlloc(sema: *Sema, block: *Block, inst: Zir.Inst.Index) Com
                         .bitcast => break candidate,
                         else => break :ct,
                     }
-                } else unreachable; // TODO shouldn't need this
+                };
 
                 const const_inst = while (true) {
                     if (search_index == 0) break :ct;
@@ -3730,7 +3729,7 @@ fn zirResolveInferredAlloc(sema: *Sema, block: *Block, inst: Zir.Inst.Index) Com
                         .constant => break candidate,
                         else => break :ct,
                     }
-                } else unreachable; // TODO shouldn't need this
+                };
 
                 const store_op = air_datas[store_inst].bin_op;
                 const store_val = (try sema.resolveMaybeUndefVal(store_op.rhs)) orelse break :ct;
@@ -5407,6 +5406,13 @@ fn zirExport(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!void
         },
         else => |e| return e,
     };
+    {
+        try sema.mod.ensureDeclAnalyzed(decl_index);
+        const exported_decl = sema.mod.declPtr(decl_index);
+        if (exported_decl.val.castTag(.function)) |some| {
+            return sema.analyzeExport(block, src, options, some.data.owner_decl);
+        }
+    }
     try sema.analyzeExport(block, src, options, decl_index);
 }
 
@@ -8309,7 +8315,7 @@ fn handleExternLibName(
                 .{ lib_name, lib_name },
             );
         }
-        comp.stage1AddLinkLib(lib_name) catch |err| {
+        comp.addLinkLib(lib_name) catch |err| {
             return sema.fail(block, src_loc, "unable to add link lib '{s}': {s}", .{
                 lib_name, @errorName(err),
             });
@@ -8403,15 +8409,11 @@ fn funcCommon(
             }
         }
 
-        // These locals are pulled out from the init expression below to work around
-        // a stage1 compiler bug.
         // In the case of generic calling convention, or generic alignment, we use
         // default values which are only meaningful for the generic function, *not*
         // the instantiation, which can depend on comptime parameters.
         // Related proposal: https://github.com/ziglang/zig/issues/11834
-        const cc_workaround = cc orelse .Unspecified;
-        const align_workaround = alignment orelse 0;
-
+        const cc_resolved = cc orelse .Unspecified;
         const param_types = try sema.arena.alloc(Type, block.params.items.len);
         const comptime_params = try sema.arena.alloc(bool, block.params.items.len);
         for (block.params.items) |param, i| {
@@ -8423,7 +8425,7 @@ fn funcCommon(
                 comptime_params,
                 i,
                 &is_generic,
-                cc_workaround,
+                cc_resolved,
                 has_body,
             ) catch |err| switch (err) {
                 error.NeededSourceLocation => {
@@ -8435,7 +8437,7 @@ fn funcCommon(
                         comptime_params,
                         i,
                         &is_generic,
-                        cc_workaround,
+                        cc_resolved,
                         has_body,
                     );
                     return error.AnalysisFail;
@@ -8483,10 +8485,10 @@ fn funcCommon(
             };
             return sema.failWithOwnedErrorMsg(msg);
         }
-        if (!Type.fnCallingConventionAllowsZigTypes(cc_workaround) and !try sema.validateExternType(return_type, .ret_ty)) {
+        if (!Type.fnCallingConventionAllowsZigTypes(cc_resolved) and !try sema.validateExternType(return_type, .ret_ty)) {
             const msg = msg: {
                 const msg = try sema.errMsg(block, ret_ty_src, "return type '{}' not allowed in function with calling convention '{s}'", .{
-                    return_type.fmt(sema.mod), @tagName(cc_workaround),
+                    return_type.fmt(sema.mod), @tagName(cc_resolved),
                 });
                 errdefer msg.destroy(sema.gpa);
 
@@ -8535,7 +8537,7 @@ fn funcCommon(
         }
 
         const arch = sema.mod.getTarget().cpu.arch;
-        if (switch (cc_workaround) {
+        if (switch (cc_resolved) {
             .Unspecified, .C, .Naked, .Async, .Inline => null,
             .Interrupt => switch (arch) {
                 .x86, .x86_64, .avr, .msp430 => null,
@@ -8571,13 +8573,13 @@ fn funcCommon(
             },
         }) |allowed_platform| {
             return sema.fail(block, cc_src, "callconv '{s}' is only available on {s}, not {s}", .{
-                @tagName(cc_workaround),
+                @tagName(cc_resolved),
                 allowed_platform,
                 @tagName(arch),
             });
         }
 
-        if (cc_workaround == .Inline and is_noinline) {
+        if (cc_resolved == .Inline and is_noinline) {
             return sema.fail(block, cc_src, "'noinline' function cannot have callconv 'Inline'", .{});
         }
         if (is_generic and sema.no_partial_func_ty) return error.GenericPoison;
@@ -8595,9 +8597,9 @@ fn funcCommon(
             .param_types = param_types,
             .comptime_params = comptime_params.ptr,
             .return_type = return_type,
-            .cc = cc_workaround,
+            .cc = cc_resolved,
             .cc_is_generic = cc == null,
-            .alignment = align_workaround,
+            .alignment = alignment orelse 0,
             .align_is_generic = alignment == null,
             .section_is_generic = section == .generic,
             .addrspace_is_generic = address_space == null,
@@ -14966,7 +14968,7 @@ fn zirClosureGet(
             break tv;
         }
         scope = scope.parent.?;
-    } else unreachable;
+    };
 
     if (tv.val.tag() == .unreachable_value and !block.is_typeof and sema.func == null) {
         const msg = msg: {
@@ -15084,14 +15086,11 @@ fn zirBuiltinSrc(
     const file_name_val = blk: {
         var anon_decl = try block.startAnonDecl();
         defer anon_decl.deinit();
-        const relative_path = try fn_owner_decl.getFileScope().fullPath(sema.arena);
-        const absolute_path = std.fs.realpathAlloc(sema.arena, relative_path) catch |err| {
-            return sema.fail(block, src, "failed to get absolute path of file '{s}': {s}", .{ relative_path, @errorName(err) });
-        };
-        const aboslute_duped = try anon_decl.arena().dupeZ(u8, absolute_path);
+        // The compiler must not call realpath anywhere.
+        const name = try fn_owner_decl.getFileScope().fullPathZ(anon_decl.arena());
         const new_decl = try anon_decl.finish(
-            try Type.Tag.array_u8_sentinel_0.create(anon_decl.arena(), aboslute_duped.len),
-            try Value.Tag.bytes.create(anon_decl.arena(), aboslute_duped[0 .. aboslute_duped.len + 1]),
+            try Type.Tag.array_u8_sentinel_0.create(anon_decl.arena(), name.len),
+            try Value.Tag.bytes.create(anon_decl.arena(), name[0 .. name.len + 1]),
             0, // default alignment
         );
         break :blk try Value.Tag.decl_ref.create(sema.arena, new_decl);
@@ -17879,6 +17878,13 @@ fn zirTagName(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air
             operand_ty.fmt(mod),
         }),
     };
+    if (enum_ty.enumFieldCount() == 0) {
+        // TODO I don't think this is the correct way to handle this but
+        // it prevents a crash.
+        return sema.fail(block, operand_src, "cannot get @tagName of empty enum '{}'", .{
+            enum_ty.fmt(mod),
+        });
+    }
     const enum_decl_index = enum_ty.getOwnerDecl();
     const casted_operand = try sema.coerce(block, enum_ty, operand, operand_src);
     if (try sema.resolveDefinedValue(block, operand_src, casted_operand)) |val| {
@@ -19112,8 +19118,6 @@ fn zirPtrCast(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air
         const operand_elem_size = operand_elem_ty.abiSize(target);
         const dest_elem_size = dest_elem_ty.abiSize(target);
         if (operand_elem_size != dest_elem_size) {
-            // note that this is not implemented in stage1 so we should probably wait
-            // until that codebase is replaced before implementing this in stage2.
             return sema.fail(block, dest_ty_src, "TODO: implement @ptrCast between slices changing the length", .{});
         }
     }
@@ -20956,6 +20960,7 @@ fn zirFieldParentPtr(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileEr
     }
 
     try sema.requireRuntimeBlock(block, src, ptr_src);
+    try sema.queueFullTypeResolution(result_ptr);
     return block.addInst(.{
         .tag = .field_parent_ptr,
         .data = .{ .ty_pl = .{
@@ -21006,6 +21011,9 @@ fn analyzeMinMax(
         const rhs_val = simd_op.rhs_val orelse break :rs rhs_src;
 
         if (rhs_val.isUndef()) return sema.addConstUndef(simd_op.result_ty);
+
+        try sema.resolveLazyValue(lhs_val);
+        try sema.resolveLazyValue(rhs_val);
 
         const opFunc = switch (air_tag) {
             .min => Value.numberMin,
@@ -32535,7 +32543,7 @@ fn elemPtrType(sema: *Sema, ptr_ty: Type, offset: ?usize) !Type {
         }
         // If the addend is not a comptime-known value we can still count on
         // it being a multiple of the type size.
-        const elem_size = elem_ty.abiSize(target);
+        const elem_size = try sema.typeAbiSize(elem_ty);
         const addend = if (offset) |off| elem_size * off else elem_size;
 
         // The resulting pointer is aligned to the lcd between the offset (an
