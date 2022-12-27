@@ -1569,6 +1569,7 @@ pub const CreateProcessError = error{
     AccessDenied,
     InvalidName,
     NameTooLong,
+    InvalidExe,
     Unexpected,
 };
 
@@ -1603,6 +1604,30 @@ pub fn CreateProcessW(
             .INVALID_PARAMETER => unreachable,
             .INVALID_NAME => return error.InvalidName,
             .FILENAME_EXCED_RANGE => return error.NameTooLong,
+            // These are all the system errors that are mapped to ENOEXEC by
+            // the undocumented _dosmaperr (old CRT) or __acrt_errno_map_os_error
+            // (newer CRT) functions. Their code can be found in crt/src/dosmap.c (old SDK)
+            // or urt/misc/errno.cpp (newer SDK) in the Windows SDK.
+            .BAD_FORMAT,
+            .INVALID_STARTING_CODESEG, // MIN_EXEC_ERROR in errno.cpp
+            .INVALID_STACKSEG,
+            .INVALID_MODULETYPE,
+            .INVALID_EXE_SIGNATURE,
+            .EXE_MARKED_INVALID,
+            .BAD_EXE_FORMAT,
+            .ITERATED_DATA_EXCEEDS_64k,
+            .INVALID_MINALLOCSIZE,
+            .DYNLINK_FROM_INVALID_RING,
+            .IOPL_NOT_ENABLED,
+            .INVALID_SEGDPL,
+            .AUTODATASEG_EXCEEDS_64k,
+            .RING2SEG_MUST_BE_MOVABLE,
+            .RELOC_CHAIN_XEEDS_SEGLIM,
+            .INFLOOP_IN_RELOC_CHAIN, // MAX_EXEC_ERROR in errno.cpp
+            // This one is not mapped to ENOEXEC but it is possible, for example
+            // when calling CreateProcessW on a plain text file with a .exe extension
+            .EXE_MACHINE_TYPE_MISMATCH,
+            => return error.InvalidExe,
             else => |err| return unexpectedError(err),
         }
     }
@@ -1802,6 +1827,23 @@ pub fn nanoSecondsToFileTime(ns: i128) FILETIME {
     };
 }
 
+/// Compares two WTF16 strings using RtlEqualUnicodeString
+pub fn eqlIgnoreCaseWTF16(a: []const u16, b: []const u16) bool {
+    const a_bytes = @intCast(u16, a.len * 2);
+    const a_string = UNICODE_STRING{
+        .Length = a_bytes,
+        .MaximumLength = a_bytes,
+        .Buffer = @intToPtr([*]u16, @ptrToInt(a.ptr)),
+    };
+    const b_bytes = @intCast(u16, b.len * 2);
+    const b_string = UNICODE_STRING{
+        .Length = b_bytes,
+        .MaximumLength = b_bytes,
+        .Buffer = @intToPtr([*]u16, @ptrToInt(b.ptr)),
+    };
+    return ntdll.RtlEqualUnicodeString(&a_string, &b_string, TRUE) == TRUE;
+}
+
 pub const PathSpace = struct {
     data: [PATH_MAX_WIDE:0]u16,
     len: usize,
@@ -1983,7 +2025,7 @@ pub fn loadWinsockExtensionFunction(comptime T: type, sock: ws2_32.SOCKET, guid:
         ws2_32.SIO_GET_EXTENSION_FUNCTION_POINTER,
         @ptrCast(*const anyopaque, &guid),
         @sizeOf(GUID),
-        &function,
+        @intToPtr(?*anyopaque, @ptrToInt(function)),
         @sizeOf(T),
         &num_bytes,
         null,
@@ -3659,6 +3701,20 @@ pub const RTL_DRIVE_LETTER_CURDIR = extern struct {
 };
 
 pub const PPS_POST_PROCESS_INIT_ROUTINE = ?*const fn () callconv(.C) void;
+
+pub const FILE_DIRECTORY_INFORMATION = extern struct {
+    NextEntryOffset: ULONG,
+    FileIndex: ULONG,
+    CreationTime: LARGE_INTEGER,
+    LastAccessTime: LARGE_INTEGER,
+    LastWriteTime: LARGE_INTEGER,
+    ChangeTime: LARGE_INTEGER,
+    EndOfFile: LARGE_INTEGER,
+    AllocationSize: LARGE_INTEGER,
+    FileAttributes: ULONG,
+    FileNameLength: ULONG,
+    FileName: [1]WCHAR,
+};
 
 pub const FILE_BOTH_DIR_INFORMATION = extern struct {
     NextEntryOffset: ULONG,

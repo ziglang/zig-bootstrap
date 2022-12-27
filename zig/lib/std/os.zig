@@ -42,6 +42,7 @@ pub const uefi = @import("os/uefi.zig");
 pub const wasi = @import("os/wasi.zig");
 pub const windows = @import("os/windows.zig");
 pub const posix_spawn = @import("os/posix_spawn.zig");
+pub const ptrace = @import("os/ptrace.zig");
 
 comptime {
     assert(@import("std") == std); // std lib tests require --zig-lib-dir
@@ -660,6 +661,7 @@ pub const ReadError = error{
 /// The limit on Darwin is `0x7fffffff`, trying to read more than that returns EINVAL.
 /// The corresponding POSIX limit is `math.maxInt(isize)`.
 pub fn read(fd: fd_t, buf: []u8) ReadError!usize {
+    if (buf.len == 0) return 0;
     if (builtin.os.tag == .windows) {
         return windows.ReadFile(fd, buf, null, std.io.default_mode);
     }
@@ -787,6 +789,7 @@ pub const PReadError = ReadError || error{Unseekable};
 /// The limit on Darwin is `0x7fffffff`, trying to read more than that returns EINVAL.
 /// The corresponding POSIX limit is `math.maxInt(isize)`.
 pub fn pread(fd: fd_t, buf: []u8, offset: u64) PReadError!usize {
+    if (buf.len == 0) return 0;
     if (builtin.os.tag == .windows) {
         return windows.ReadFile(fd, buf, offset, std.io.default_mode);
     }
@@ -1045,6 +1048,7 @@ pub const WriteError = error{
 /// The limit on Darwin is `0x7fffffff`, trying to read more than that returns EINVAL.
 /// The corresponding POSIX limit is `math.maxInt(isize)`.
 pub fn write(fd: fd_t, bytes: []const u8) WriteError!usize {
+    if (bytes.len == 0) return 0;
     if (builtin.os.tag == .windows) {
         return windows.WriteFile(fd, bytes, null, std.io.default_mode);
     }
@@ -1197,6 +1201,7 @@ pub const PWriteError = WriteError || error{Unseekable};
 /// The limit on Darwin is `0x7fffffff`, trying to write more than that returns EINVAL.
 /// The corresponding POSIX limit is `math.maxInt(isize)`.
 pub fn pwrite(fd: fd_t, bytes: []const u8, offset: u64) PWriteError!usize {
+    if (bytes.len == 0) return 0;
     if (builtin.os.tag == .windows) {
         return windows.WriteFile(fd, bytes, offset, std.io.default_mode);
     }
@@ -1939,19 +1944,7 @@ pub fn getenvW(key: [*:0]const u16) ?[:0]const u16 {
         while (ptr[i] != 0) : (i += 1) {}
         const this_value = ptr[value_start..i :0];
 
-        const key_string_bytes = @intCast(u16, key_slice.len * 2);
-        const key_string = windows.UNICODE_STRING{
-            .Length = key_string_bytes,
-            .MaximumLength = key_string_bytes,
-            .Buffer = @intToPtr([*]u16, @ptrToInt(key)),
-        };
-        const this_key_string_bytes = @intCast(u16, this_key.len * 2);
-        const this_key_string = windows.UNICODE_STRING{
-            .Length = this_key_string_bytes,
-            .MaximumLength = this_key_string_bytes,
-            .Buffer = this_key.ptr,
-        };
-        if (windows.ntdll.RtlEqualUnicodeString(&key_string, &this_key_string, windows.TRUE) == windows.TRUE) {
+        if (windows.eqlIgnoreCaseWTF16(key_slice, this_key)) {
             return this_value;
         }
 
@@ -3158,7 +3151,7 @@ pub fn isatty(handle: fd_t) bool {
     if (builtin.os.tag == .wasi) {
         var statbuf: fdstat_t = undefined;
         const err = system.fd_fdstat_get(handle, &statbuf);
-        if (err != 0) {
+        if (err != .SUCCESS) {
             // errno = err;
             return false;
         }

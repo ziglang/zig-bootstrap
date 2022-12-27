@@ -737,6 +737,23 @@ pub const Inst = struct {
         /// Uses the `ty_pl` field.
         save_err_return_trace_index,
 
+        /// Store an element to a vector pointer at an index.
+        /// Uses the `vector_store_elem` field.
+        vector_store_elem,
+
+        /// Implements @cVaArg builtin.
+        /// Uses the `ty_op` field.
+        c_va_arg,
+        /// Implements @cVaCopy builtin.
+        /// Uses the `ty_op` field.
+        c_va_copy,
+        /// Implements @cVaEnd builtin.
+        /// Uses the `un_op` field.
+        c_va_end,
+        /// Implements @cVaStart builtin.
+        /// Uses the `ty` field.
+        c_va_start,
+
         pub fn fromCmpOp(op: std.math.CompareOperator, optimized: bool) Tag {
             switch (op) {
                 .lt => return if (optimized) .cmp_lt_optimized else .cmp_lt,
@@ -813,6 +830,11 @@ pub const Inst = struct {
         reduce: struct {
             operand: Ref,
             operation: std.builtin.ReduceOp,
+        },
+        vector_store_elem: struct {
+            vector_ptr: Ref,
+            // Index into a different array.
+            payload: u32,
         },
 
         // Make sure we don't accidentally add a field to make this union
@@ -1083,6 +1105,7 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .ret_ptr,
         .arg,
         .err_return_trace,
+        .c_va_start,
         => return datas[inst].ty,
 
         .assembly,
@@ -1147,6 +1170,8 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .byte_swap,
         .bit_reverse,
         .addrspace_cast,
+        .c_va_arg,
+        .c_va_copy,
         => return air.getRefType(datas[inst].ty_op.ty),
 
         .loop,
@@ -1177,6 +1202,8 @@ pub fn typeOfIndex(air: Air, inst: Air.Inst.Index) Type {
         .set_union_tag,
         .prefetch,
         .set_err_return_trace,
+        .vector_store_elem,
+        .c_va_end,
         => return Type.void,
 
         .ptrtoint,
@@ -1250,7 +1277,7 @@ pub fn extraData(air: Air, comptime T: type, index: usize) struct { data: T, end
     var i: usize = index;
     var result: T = undefined;
     inline for (fields) |field| {
-        @field(result, field.name) = switch (field.field_type) {
+        @field(result, field.name) = switch (field.type) {
             u32 => air.extra[i],
             Inst.Ref => @intToEnum(Inst.Ref, air.extra[i]),
             i32 => @bitCast(i32, air.extra[i]),

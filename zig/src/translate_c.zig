@@ -13,8 +13,6 @@ const Tag = Node.Tag;
 
 const CallingConvention = std.builtin.CallingConvention;
 
-pub const ClangErrMsg = clang.Stage2ErrorMsg;
-
 pub const Error = std.mem.Allocator.Error;
 const MacroProcessingError = Error || error{UnexpectedMacroToken};
 const TypeError = Error || error{UnsupportedType};
@@ -350,7 +348,7 @@ pub fn translate(
     gpa: mem.Allocator,
     args_begin: [*]?[*]const u8,
     args_end: [*]?[*]const u8,
-    errors: *[]ClangErrMsg,
+    errors: *[]clang.ErrorMsg,
     resources_path: [*:0]const u8,
 ) !std.zig.Ast {
     // TODO stage2 bug
@@ -5115,10 +5113,6 @@ pub fn failDecl(c: *Context, loc: clang.SourceLocation, name: []const u8, compti
     try c.global_scope.nodes.append(try Tag.warning.create(c.arena, location_comment));
 }
 
-pub fn freeErrors(errors: []ClangErrMsg) void {
-    errors.ptr.delete(errors.len);
-}
-
 const PatternList = struct {
     patterns: []Pattern,
 
@@ -5738,7 +5732,7 @@ fn parseCNumLit(c: *Context, m: *MacroCtx) ParseError!Node {
                 if (mem.indexOfScalar(u8, lit_bytes, '.')) |dot_index| {
                     if (dot_index == 2) {
                         lit_bytes = try std.fmt.allocPrint(c.arena, "0x0{s}", .{lit_bytes[2..]});
-                    } else if (dot_index + 1 == lit_bytes.len or !std.ascii.isXDigit(lit_bytes[dot_index + 1])) {
+                    } else if (dot_index + 1 == lit_bytes.len or !std.ascii.isHex(lit_bytes[dot_index + 1])) {
                         // If the literal lacks a digit after the `.`, we need to
                         // add one since `0x1.p10` would be invalid syntax in Zig.
                         lit_bytes = try std.fmt.allocPrint(c.arena, "0x{s}0{s}", .{

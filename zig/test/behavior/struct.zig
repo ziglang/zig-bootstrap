@@ -66,6 +66,8 @@ const SmallStruct = struct {
 };
 
 test "lower unnamed constants" {
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+
     var foo = SmallStruct{ .a = 1, .b = 255 };
     try expect(foo.first() == 1);
     try expect(foo.second() == 255);
@@ -104,7 +106,6 @@ fn testMutation(foo: *StructFoo) void {
 }
 
 test "struct byval assign" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     var foo1: StructFoo = undefined;
@@ -138,7 +139,6 @@ fn returnEmptyStructInstance() StructWithNoFields {
 }
 
 test "fn call of struct field" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const Foo = struct {
@@ -170,12 +170,16 @@ const MemberFnTestFoo = struct {
 };
 
 test "call member function directly" {
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+
     const instance = MemberFnTestFoo{ .x = 1234 };
     const result = MemberFnTestFoo.member(instance);
     try expect(result == 1234);
 }
 
 test "store member function in variable" {
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
+
     const instance = MemberFnTestFoo{ .x = 1234 };
     const memberFn = MemberFnTestFoo.member;
     const result = memberFn(instance);
@@ -317,7 +321,6 @@ const VoidStructFieldsFoo = struct {
 };
 
 test "return empty struct from fn" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     _ = testReturnEmptyStructFromFn();
@@ -328,7 +331,6 @@ fn testReturnEmptyStructFromFn() EmptyStruct2 {
 }
 
 test "pass slice of empty struct to fn" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     try expect(testPassSliceOfEmptyStructToFn(&[_]EmptyStruct2{EmptyStruct2{}}) == 1);
@@ -363,7 +365,6 @@ const EmptyStruct = struct {
 };
 
 test "align 1 field before self referential align 8 field as slice return type" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const result = alloc(Expr);
@@ -782,6 +783,7 @@ test "packed struct with fp fields" {
 test "fn with C calling convention returns struct by value" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const S = struct {
         fn entry() !void {
@@ -807,6 +809,7 @@ test "non-packed struct with u128 entry in union" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const U = union(enum) {
         Num: u128,
@@ -853,6 +856,7 @@ test "packed struct field passed to generic function" {
 
 test "anonymous struct literal syntax" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const S = struct {
         const Point = struct {
@@ -959,6 +963,7 @@ test "tuple element initialized with fn call" {
 test "struct with union field" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const Value = struct {
         ref: u32 = 2,
@@ -1084,7 +1089,6 @@ test "packed struct with undefined initializers" {
 
 test "for loop over pointers to struct, getting field from struct pointer" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
@@ -1226,7 +1230,6 @@ test "initialize struct with empty literal" {
 }
 
 test "loading a struct pointer perfoms a copy" {
-    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const S = struct {
@@ -1331,6 +1334,7 @@ test "under-aligned struct field" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const U = extern union {
         fd: i32,
@@ -1348,23 +1352,53 @@ test "under-aligned struct field" {
     try expect(result == 1234);
 }
 
-test "address of zero-bit field is equal to address of only field" {
+test "fieldParentPtr of a zero-bit field" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
 
-    {
-        const A = struct { b: void = {}, u: u8 };
-        var a = A{ .u = 0 };
-        const a_ptr = @fieldParentPtr(A, "b", &a.b);
-        try std.testing.expectEqual(&a, a_ptr);
-    }
-    {
-        const A = struct { u: u8, b: void = {} };
-        var a = A{ .u = 0 };
-        const a_ptr = @fieldParentPtr(A, "b", &a.b);
-        try std.testing.expectEqual(&a, a_ptr);
-    }
+    const S = struct {
+        fn testStruct(comptime A: type) !void {
+            {
+                const a = A{ .u = 0 };
+                const b_ptr = &a.b;
+                const a_ptr = @fieldParentPtr(A, "b", b_ptr);
+                try std.testing.expectEqual(&a, a_ptr);
+            }
+            {
+                var a = A{ .u = 0 };
+                const b_ptr = &a.b;
+                const a_ptr = @fieldParentPtr(A, "b", b_ptr);
+                try std.testing.expectEqual(&a, a_ptr);
+            }
+        }
+        fn testNestedStruct(comptime A: type) !void {
+            {
+                const a = A{ .u = 0 };
+                const c_ptr = &a.b.c;
+                const b_ptr = @fieldParentPtr(@TypeOf(a.b), "c", c_ptr);
+                try std.testing.expectEqual(&a.b, b_ptr);
+                const a_ptr = @fieldParentPtr(A, "b", b_ptr);
+                try std.testing.expectEqual(&a, a_ptr);
+            }
+            {
+                var a = A{ .u = 0 };
+                const c_ptr = &a.b.c;
+                const b_ptr = @fieldParentPtr(@TypeOf(a.b), "c", c_ptr);
+                try std.testing.expectEqual(&a.b, b_ptr);
+                const a_ptr = @fieldParentPtr(A, "b", b_ptr);
+                try std.testing.expectEqual(&a, a_ptr);
+            }
+        }
+        fn doTheTest() !void {
+            try testStruct(struct { b: void = {}, u: u8 });
+            try testStruct(struct { u: u8, b: void = {} });
+            try testNestedStruct(struct { b: struct { c: void = {} } = .{}, u: u8 });
+            try testNestedStruct(struct { u: u8, b: struct { c: void = {} } = .{} });
+        }
+    };
+    try S.doTheTest();
+    comptime try S.doTheTest();
 }
 
 test "struct field has a pointer to an aligned version of itself" {
@@ -1377,4 +1411,50 @@ test "struct field has a pointer to an aligned version of itself" {
     e = .{ .next = &e };
 
     try expect(&e == e.next);
+}
+
+test "struct has only one reference" {
+    const S = struct {
+        fn optionalStructParam(_: ?struct { x: u8 }) void {}
+        fn errorUnionStructParam(_: error{}!struct { x: u8 }) void {}
+        fn optionalStructReturn() ?struct { x: u8 } {
+            return null;
+        }
+        fn errorUnionStructReturn() error{Foo}!struct { x: u8 } {
+            return error.Foo;
+        }
+
+        fn pointerPackedStruct(_: *packed struct { x: u8 }) void {}
+        fn nestedPointerPackedStruct(_: struct { x: *packed struct { x: u8 } }) void {}
+        fn pointerNestedPackedStruct(_: *struct { x: packed struct { x: u8 } }) void {}
+        fn pointerNestedPointerPackedStruct(_: *struct { x: *packed struct { x: u8 } }) void {}
+
+        fn optionalComptimeIntParam(comptime x: ?comptime_int) comptime_int {
+            return x.?;
+        }
+        fn errorUnionComptimeIntParam(comptime x: error{}!comptime_int) comptime_int {
+            return x catch unreachable;
+        }
+    };
+
+    const optional_struct_param: *const anyopaque = &S.optionalStructParam;
+    const error_union_struct_param: *const anyopaque = &S.errorUnionStructParam;
+    try expect(optional_struct_param != error_union_struct_param);
+
+    const optional_struct_return: *const anyopaque = &S.optionalStructReturn;
+    const error_union_struct_return: *const anyopaque = &S.errorUnionStructReturn;
+    try expect(optional_struct_return != error_union_struct_return);
+
+    const pointer_packed_struct: *const anyopaque = &S.pointerPackedStruct;
+    const nested_pointer_packed_struct: *const anyopaque = &S.nestedPointerPackedStruct;
+    try expect(pointer_packed_struct != nested_pointer_packed_struct);
+
+    const pointer_nested_packed_struct: *const anyopaque = &S.pointerNestedPackedStruct;
+    const pointer_nested_pointer_packed_struct: *const anyopaque = &S.pointerNestedPointerPackedStruct;
+    try expect(pointer_nested_packed_struct != pointer_nested_pointer_packed_struct);
+
+    try expectEqual(@alignOf(struct {}), S.optionalComptimeIntParam(@alignOf(struct {})));
+    try expectEqual(@alignOf(struct { x: u8 }), S.errorUnionComptimeIntParam(@alignOf(struct { x: u8 })));
+    try expectEqual(@sizeOf(struct { x: u16 }), S.optionalComptimeIntParam(@sizeOf(struct { x: u16 })));
+    try expectEqual(@sizeOf(struct { x: u32 }), S.errorUnionComptimeIntParam(@sizeOf(struct { x: u32 })));
 }

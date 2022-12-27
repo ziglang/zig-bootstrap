@@ -106,7 +106,7 @@ pub fn build(b: *Builder) !void {
             .install_dir = .lib,
             .install_subdir = "zig",
             .exclude_extensions = &[_][]const u8{
-                // exclude files from lib/std/compress/
+                // exclude files from lib/std/compress/testdata
                 ".gz",
                 ".z.0",
                 ".z.9",
@@ -502,17 +502,8 @@ fn addWasiUpdateStep(b: *Builder, version: [:0]const u8) !void {
     run_opt.addArg("-o");
     run_opt.addFileSourceArg(.{ .path = "stage1/zig1.wasm" });
 
-    const run_zstd = b.addSystemCommand(&.{ "zstd", "-19", "-f" });
-    run_zstd.step.dependOn(&run_opt.step);
-    run_zstd.addFileSourceArg(.{ .path = "stage1/zig1.wasm" });
-    run_zstd.addArg("-o");
-    run_zstd.addFileSourceArg(.{ .path = "stage1/zig1.wasm.zst" });
-
-    const cleanup = b.addRemoveDirTree("stage1/zig1.wasm");
-    cleanup.step.dependOn(&run_zstd.step);
-
-    const update_zig1_step = b.step("update-zig1", "Update stage1/zig1.wasm.zst");
-    update_zig1_step.dependOn(&cleanup.step);
+    const update_zig1_step = b.step("update-zig1", "Update stage1/zig1.wasm");
+    update_zig1_step.dependOn(&run_opt.step);
 }
 
 fn addCompilerStep(b: *Builder) *std.build.LibExeObjStep {

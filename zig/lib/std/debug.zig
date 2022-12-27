@@ -109,17 +109,24 @@ pub fn getSelfDebugInfo() !*DebugInfo {
     }
 }
 
-pub fn detectTTYConfig() TTY.Config {
+pub fn detectTTYConfig(file: std.fs.File) TTY.Config {
     if (process.hasEnvVarConstant("ZIG_DEBUG_COLOR")) {
         return .escape_codes;
     } else if (process.hasEnvVarConstant("NO_COLOR")) {
         return .no_color;
     } else {
-        const stderr_file = io.getStdErr();
-        if (stderr_file.supportsAnsiEscapeCodes()) {
+        if (file.supportsAnsiEscapeCodes()) {
             return .escape_codes;
-        } else if (native_os == .windows and stderr_file.isTty()) {
-            return .windows_api;
+        } else if (native_os == .windows and file.isTty()) {
+            var info: windows.CONSOLE_SCREEN_BUFFER_INFO = undefined;
+            if (windows.kernel32.GetConsoleScreenBufferInfo(file.handle, &info) != windows.TRUE) {
+                // TODO: Should this return an error instead?
+                return .no_color;
+            }
+            return .{ .windows_api = .{
+                .handle = file.handle,
+                .reset_attributes = info.wAttributes,
+            } };
         } else {
             return .no_color;
         }
@@ -146,7 +153,7 @@ pub fn dumpCurrentStackTrace(start_addr: ?usize) void {
             stderr.print("Unable to dump stack trace: Unable to open debug info: {s}\n", .{@errorName(err)}) catch return;
             return;
         };
-        writeCurrentStackTrace(stderr, debug_info, detectTTYConfig(), start_addr) catch |err| {
+        writeCurrentStackTrace(stderr, debug_info, detectTTYConfig(io.getStdErr()), start_addr) catch |err| {
             stderr.print("Unable to dump stack trace: {s}\n", .{@errorName(err)}) catch return;
             return;
         };
@@ -174,7 +181,7 @@ pub fn dumpStackTraceFromBase(bp: usize, ip: usize) void {
             stderr.print("Unable to dump stack trace: Unable to open debug info: {s}\n", .{@errorName(err)}) catch return;
             return;
         };
-        const tty_config = detectTTYConfig();
+        const tty_config = detectTTYConfig(io.getStdErr());
         printSourceAtAddress(debug_info, stderr, ip, tty_config) catch return;
         var it = StackIterator.init(null, bp);
         while (it.next()) |return_address| {
@@ -257,7 +264,7 @@ pub fn dumpStackTrace(stack_trace: std.builtin.StackTrace) void {
             stderr.print("Unable to dump stack trace: Unable to open debug info: {s}\n", .{@errorName(err)}) catch return;
             return;
         };
-        writeStackTrace(stack_trace, stderr, getDebugInfoAllocator(), debug_info, detectTTYConfig()) catch |err| {
+        writeStackTrace(stack_trace, stderr, getDebugInfoAllocator(), debug_info, detectTTYConfig(io.getStdErr())) catch |err| {
             stderr.print("Unable to dump stack trace: {s}\n", .{@errorName(err)}) catch return;
             return;
         };
@@ -384,14 +391,6 @@ pub fn panicImpl(trace: ?*const std.builtin.StackTrace, first_trace_addr: ?usize
     os.abort();
 }
 
-const RED = "\x1b[31;1m";
-const GREEN = "\x1b[32;1m";
-const CYAN = "\x1b[36;1m";
-const WHITE = "\x1b[37;1m";
-const BOLD = "\x1b[1m";
-const DIM = "\x1b[2m";
-const RESET = "\x1b[0m";
-
 pub fn writeStackTrace(
     stack_trace: std.builtin.StackTrace,
     out_stream: anytype,
@@ -415,9 +414,9 @@ pub fn writeStackTrace(
     if (stack_trace.index > stack_trace.instruction_addresses.len) {
         const dropped_frames = stack_trace.index - stack_trace.instruction_addresses.len;
 
-        tty_config.setColor(out_stream, .Bold);
+        tty_config.setColor(out_stream, .Bold) catch {};
         try out_stream.print("({d} additional stack frames skipped...)\n", .{dropped_frames});
-        tty_config.setColor(out_stream, .Reset);
+        tty_config.setColor(out_stream, .Reset) catch {};
     }
 }
 
@@ -605,59 +604,41 @@ pub const TTY = struct {
         Reset,
     };
 
-    pub const Config = enum {
+    pub const Config = union(enum) {
         no_color,
         escape_codes,
-        // TODO give this a payload of file handle
-        windows_api,
+        windows_api: if (native_os == .windows) WindowsContext else void,
 
-        pub fn setColor(conf: Config, out_stream: anytype, color: Color) void {
+        pub const WindowsContext = struct {
+            handle: File.Handle,
+            reset_attributes: u16,
+        };
+
+        pub fn setColor(conf: Config, out_stream: anytype, color: Color) !void {
             nosuspend switch (conf) {
                 .no_color => return,
-                .escape_codes => switch (color) {
-                    .Red => out_stream.writeAll(RED) catch return,
-                    .Green => out_stream.writeAll(GREEN) catch return,
-                    .Cyan => out_stream.writeAll(CYAN) catch return,
-                    .White => out_stream.writeAll(WHITE) catch return,
-                    .Dim => out_stream.writeAll(DIM) catch return,
-                    .Bold => out_stream.writeAll(BOLD) catch return,
-                    .Reset => out_stream.writeAll(RESET) catch return,
-                },
-                .windows_api => if (native_os == .windows) {
-                    const stderr_file = io.getStdErr();
-                    const S = struct {
-                        var attrs: windows.WORD = undefined;
-                        var init_attrs = false;
+                .escape_codes => {
+                    const color_string = switch (color) {
+                        .Red => "\x1b[31;1m",
+                        .Green => "\x1b[32;1m",
+                        .Cyan => "\x1b[36;1m",
+                        .White => "\x1b[37;1m",
+                        .Bold => "\x1b[1m",
+                        .Dim => "\x1b[2m",
+                        .Reset => "\x1b[0m",
                     };
-                    if (!S.init_attrs) {
-                        S.init_attrs = true;
-                        var info: windows.CONSOLE_SCREEN_BUFFER_INFO = undefined;
-                        // TODO handle error
-                        _ = windows.kernel32.GetConsoleScreenBufferInfo(stderr_file.handle, &info);
-                        S.attrs = info.wAttributes;
-                    }
-
-                    // TODO handle errors
-                    switch (color) {
-                        .Red => {
-                            _ = windows.SetConsoleTextAttribute(stderr_file.handle, windows.FOREGROUND_RED | windows.FOREGROUND_INTENSITY) catch {};
-                        },
-                        .Green => {
-                            _ = windows.SetConsoleTextAttribute(stderr_file.handle, windows.FOREGROUND_GREEN | windows.FOREGROUND_INTENSITY) catch {};
-                        },
-                        .Cyan => {
-                            _ = windows.SetConsoleTextAttribute(stderr_file.handle, windows.FOREGROUND_GREEN | windows.FOREGROUND_BLUE | windows.FOREGROUND_INTENSITY) catch {};
-                        },
-                        .White, .Bold => {
-                            _ = windows.SetConsoleTextAttribute(stderr_file.handle, windows.FOREGROUND_RED | windows.FOREGROUND_GREEN | windows.FOREGROUND_BLUE | windows.FOREGROUND_INTENSITY) catch {};
-                        },
-                        .Dim => {
-                            _ = windows.SetConsoleTextAttribute(stderr_file.handle, windows.FOREGROUND_INTENSITY) catch {};
-                        },
-                        .Reset => {
-                            _ = windows.SetConsoleTextAttribute(stderr_file.handle, S.attrs) catch {};
-                        },
-                    }
+                    try out_stream.writeAll(color_string);
+                },
+                .windows_api => |ctx| if (native_os == .windows) {
+                    const attributes = switch (color) {
+                        .Red => windows.FOREGROUND_RED | windows.FOREGROUND_INTENSITY,
+                        .Green => windows.FOREGROUND_GREEN | windows.FOREGROUND_INTENSITY,
+                        .Cyan => windows.FOREGROUND_GREEN | windows.FOREGROUND_BLUE | windows.FOREGROUND_INTENSITY,
+                        .White, .Bold => windows.FOREGROUND_RED | windows.FOREGROUND_GREEN | windows.FOREGROUND_BLUE | windows.FOREGROUND_INTENSITY,
+                        .Dim => windows.FOREGROUND_INTENSITY,
+                        .Reset => ctx.reset_attributes,
+                    };
+                    try windows.SetConsoleTextAttribute(ctx.handle, attributes);
                 } else {
                     unreachable;
                 },
@@ -751,7 +732,7 @@ fn printLineInfo(
     comptime printLineFromFile: anytype,
 ) !void {
     nosuspend {
-        tty_config.setColor(out_stream, .Bold);
+        try tty_config.setColor(out_stream, .Bold);
 
         if (line_info) |*li| {
             try out_stream.print("{s}:{d}:{d}", .{ li.file_name, li.line, li.column });
@@ -759,11 +740,11 @@ fn printLineInfo(
             try out_stream.writeAll("???:?:?");
         }
 
-        tty_config.setColor(out_stream, .Reset);
+        try tty_config.setColor(out_stream, .Reset);
         try out_stream.writeAll(": ");
-        tty_config.setColor(out_stream, .Dim);
+        try tty_config.setColor(out_stream, .Dim);
         try out_stream.print("0x{x} in {s} ({s})", .{ address, symbol_name, compile_unit_name });
-        tty_config.setColor(out_stream, .Reset);
+        try tty_config.setColor(out_stream, .Reset);
         try out_stream.writeAll("\n");
 
         // Show the matching source code line if possible
@@ -774,9 +755,9 @@ fn printLineInfo(
                     const space_needed = @intCast(usize, li.column - 1);
 
                     try out_stream.writeByteNTimes(' ', space_needed);
-                    tty_config.setColor(out_stream, .Green);
+                    try tty_config.setColor(out_stream, .Green);
                     try out_stream.writeAll("^");
-                    tty_config.setColor(out_stream, .Reset);
+                    try tty_config.setColor(out_stream, .Reset);
                 }
                 try out_stream.writeAll("\n");
             } else |err| switch (err) {
@@ -789,14 +770,12 @@ fn printLineInfo(
     }
 }
 
-// TODO use this
 pub const OpenSelfDebugInfoError = error{
     MissingDebugInfo,
-    OutOfMemory,
     UnsupportedOperatingSystem,
 };
 
-pub fn openSelfDebugInfo(allocator: mem.Allocator) anyerror!DebugInfo {
+pub fn openSelfDebugInfo(allocator: mem.Allocator) OpenSelfDebugInfoError!DebugInfo {
     nosuspend {
         if (builtin.strip_debug_info)
             return error.MissingDebugInfo;
@@ -813,7 +792,7 @@ pub fn openSelfDebugInfo(allocator: mem.Allocator) anyerror!DebugInfo {
             .windows,
             .solaris,
             => return DebugInfo.init(allocator),
-            else => return error.UnsupportedDebugInfo,
+            else => return error.UnsupportedOperatingSystem,
         }
     }
 }
@@ -1110,7 +1089,12 @@ fn readMachODebugInfo(allocator: mem.Allocator, macho_file: File) !ModuleDebugIn
             else => {},
         }
     }
-    assert(state == .oso_close);
+
+    switch (state) {
+        .init => return error.MissingDebugInfo,
+        .oso_close => {},
+        else => return error.InvalidDebugInfo,
+    }
 
     const symbols = try allocator.realloc(symbols_buf, symbol_index);
 
@@ -2024,13 +2008,18 @@ pub fn dumpStackPointerAddr(prefix: []const u8) void {
     std.debug.print("{} sp = 0x{x}\n", .{ prefix, sp });
 }
 
-test "#4353: std.debug should manage resources correctly" {
+test "manage resources correctly" {
     if (builtin.os.tag == .wasi) return error.SkipZigTest;
+
+    if (builtin.os.tag == .windows and builtin.cpu.arch == .x86_64) {
+        // https://github.com/ziglang/zig/issues/13963
+        return error.SkipZigTest;
+    }
 
     const writer = std.io.null_writer;
     var di = try openSelfDebugInfo(testing.allocator);
     defer di.deinit();
-    try printSourceAtAddress(&di, writer, showMyTrace(), detectTTYConfig());
+    try printSourceAtAddress(&di, writer, showMyTrace(), detectTTYConfig(std.io.getStdErr()));
 }
 
 noinline fn showMyTrace() usize {
@@ -2090,7 +2079,7 @@ pub fn ConfigurableTrace(comptime size: usize, comptime stack_frame_count: usize
         pub fn dump(t: @This()) void {
             if (!enabled) return;
 
-            const tty_config = detectTTYConfig();
+            const tty_config = detectTTYConfig(std.io.getStdErr());
             const stderr = io.getStdErr().writer();
             const end = @min(t.index, size);
             const debug_info = getSelfDebugInfo() catch |err| {

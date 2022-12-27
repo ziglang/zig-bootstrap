@@ -207,18 +207,9 @@ fn renderExpression(gpa: Allocator, ais: *Ais, tree: Ast, node: Ast.Node.Index, 
     const node_tags = tree.nodes.items(.tag);
     const datas = tree.nodes.items(.data);
     switch (node_tags[node]) {
-        // TODO remove this c_void -> anyopaque rewrite after the 0.10.0 release.
-        // Also get rid of renderSpace() as it will no longer be necessary.
         .identifier => {
             const token_index = main_tokens[node];
-
-            const lexeme = tokenSliceForRender(tree, token_index);
-            if (mem.eql(u8, lexeme, "c_void")) {
-                try ais.writer().writeAll("anyopaque");
-                return renderSpace(ais, tree, token_index, lexeme.len, space);
-            } else {
-                return renderIdentifier(ais, tree, token_index, space, .preserve_when_shadowing);
-            }
+            return renderIdentifier(ais, tree, token_index, space, .preserve_when_shadowing);
         },
 
         .number_literal,
@@ -1684,7 +1675,12 @@ fn renderStructInit(
 
         try renderToken(ais, tree, struct_init.ast.lbrace + 1, .none); // .
         try renderIdentifier(ais, tree, struct_init.ast.lbrace + 2, .space, .eagerly_unquote); // name
-        try renderToken(ais, tree, struct_init.ast.lbrace + 3, .space); // =
+        // Don't output a space after the = if expression is a multiline string,
+        // since then it will start on the next line.
+        const nodes = tree.nodes.items(.tag);
+        const expr = nodes[struct_init.ast.fields[0]];
+        var space_after_equal: Space = if (expr == .multiline_string_literal) .none else .space;
+        try renderToken(ais, tree, struct_init.ast.lbrace + 3, space_after_equal); // =
         try renderExpression(gpa, ais, tree, struct_init.ast.fields[0], .comma);
 
         for (struct_init.ast.fields[1..]) |field_init| {
@@ -1692,7 +1688,8 @@ fn renderStructInit(
             try renderExtraNewlineToken(ais, tree, init_token - 3);
             try renderToken(ais, tree, init_token - 3, .none); // .
             try renderIdentifier(ais, tree, init_token - 2, .space, .eagerly_unquote); // name
-            try renderToken(ais, tree, init_token - 1, .space); // =
+            space_after_equal = if (nodes[field_init] == .multiline_string_literal) .none else .space;
+            try renderToken(ais, tree, init_token - 1, space_after_equal); // =
             try renderExpression(gpa, ais, tree, field_init, .comma);
         }
 
@@ -2648,7 +2645,7 @@ fn renderComments(ais: *Ais, tree: Ast, start: usize, end: usize) Error!bool {
         const newline = if (newline_index) |i| comment_start + i else null;
 
         const untrimmed_comment = tree.source[comment_start .. newline orelse tree.source.len];
-        const trimmed_comment = mem.trimRight(u8, untrimmed_comment, &std.ascii.spaces);
+        const trimmed_comment = mem.trimRight(u8, untrimmed_comment, &std.ascii.whitespace);
 
         // Don't leave any whitespace at the start of the file
         if (index != 0) {
@@ -2669,7 +2666,7 @@ fn renderComments(ais: *Ais, tree: Ast, start: usize, end: usize) Error!bool {
 
         index = 1 + (newline orelse end - 1);
 
-        const comment_content = mem.trimLeft(u8, trimmed_comment["//".len..], &std.ascii.spaces);
+        const comment_content = mem.trimLeft(u8, trimmed_comment["//".len..], &std.ascii.whitespace);
         if (ais.disabled_offset != null and mem.eql(u8, comment_content, "zig fmt: on")) {
             // Write the source for which formatting was disabled directly
             // to the underlying writer, fixing up invaild whitespace.
@@ -2716,7 +2713,7 @@ fn renderExtraNewlineToken(ais: *Ais, tree: Ast, token_index: Ast.TokenIndex) Er
     // non-whitespace character is encountered or two newlines have been found.
     var i = token_start - 1;
     var newlines: u2 = 0;
-    while (std.ascii.isSpace(tree.source[i])) : (i -= 1) {
+    while (std.ascii.isWhitespace(tree.source[i])) : (i -= 1) {
         if (tree.source[i] == '\n') newlines += 1;
         if (newlines == 2) return ais.insertNewline();
         if (i == prev_token_end) break;
@@ -2778,7 +2775,7 @@ fn tokenSliceForRender(tree: Ast, token_index: Ast.TokenIndex) []const u8 {
             ret.len -= 1;
         },
         .container_doc_comment, .doc_comment => {
-            ret = mem.trimRight(u8, ret, &std.ascii.spaces);
+            ret = mem.trimRight(u8, ret, &std.ascii.whitespace);
         },
         else => {},
     }

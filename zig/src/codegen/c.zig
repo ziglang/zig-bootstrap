@@ -559,6 +559,7 @@ pub const DeclGen = struct {
             try writer.writeByte(')');
         }
         switch (ptr_val.tag()) {
+            .int_u64, .one => try writer.print("{x}", .{try dg.fmtIntLiteral(Type.usize, ptr_val)}),
             .decl_ref_mut, .decl_ref, .variable => {
                 const decl_index = switch (ptr_val.tag()) {
                     .decl_ref => ptr_val.castTag(.decl_ref).?.data,
@@ -640,6 +641,9 @@ pub const DeclGen = struct {
                 };
 
                 if (field_info.ty.hasRuntimeBitsIgnoreComptime()) {
+                    // Ensure complete type definition is visible before accessing fields.
+                    try dg.renderType(std.io.null_writer, field_ptr.container_ty, .Complete);
+
                     try writer.writeAll("&(");
                     try dg.renderParentPtr(writer, field_ptr.container_ptr, container_ptr_ty);
                     try writer.writeAll(")->");
@@ -649,7 +653,7 @@ pub const DeclGen = struct {
                     }
                     try writer.print("{ }", .{fmtIdent(field_info.name)});
                 } else {
-                    try dg.renderParentPtr(writer, field_ptr.container_ptr, field_info.ty);
+                    try dg.renderParentPtr(writer, field_ptr.container_ptr, container_ptr_ty);
                 }
             },
             .elem_ptr => {
@@ -671,6 +675,9 @@ pub const DeclGen = struct {
                     .data = payload_ptr.container_ty,
                 };
                 const container_ptr_ty = Type.initPayload(&container_ptr_ty_pl.base);
+
+                // Ensure complete type definition is visible before accessing fields.
+                try dg.renderType(std.io.null_writer, payload_ptr.container_ty, .Complete);
 
                 try writer.writeAll("&(");
                 try dg.renderParentPtr(writer, payload_ptr.container_ptr, container_ptr_ty);
@@ -866,7 +873,6 @@ pub const DeclGen = struct {
                 .NoReturn,
                 .Undefined,
                 .Null,
-                .BoundFn,
                 .Opaque,
                 => unreachable,
 
@@ -1060,7 +1066,10 @@ pub const DeclGen = struct {
                             var index: usize = 0;
                             while (index < ai.len) : (index += 1) {
                                 const elem_val = try val.elemValue(dg.module, arena_allocator, index);
-                                const elem_val_u8 = @intCast(u8, elem_val.toUnsignedInt(target));
+                                const elem_val_u8 = if (elem_val.isUndef())
+                                    undefPattern(u8)
+                                else
+                                    @intCast(u8, elem_val.toUnsignedInt(target));
                                 try writeStringLiteralChar(writer, elem_val_u8);
                             }
                             if (ai.sentinel) |s| {
@@ -1320,7 +1329,6 @@ pub const DeclGen = struct {
             .NoReturn => unreachable,
             .Undefined => unreachable,
             .Null => unreachable,
-            .BoundFn => unreachable,
             .Opaque => unreachable,
 
             .Frame,
@@ -2050,8 +2058,6 @@ pub const DeclGen = struct {
             .ComptimeInt,
             .Type,
             => unreachable, // must be const or comptime
-
-            .BoundFn => unreachable, // this type will be deleted from the language
         }
     }
 
@@ -2905,6 +2911,12 @@ fn genBodyInner(f: *Function, body: []const Air.Inst.Index) error{ AnalysisFail,
 
             .is_named_enum_value => return f.fail("TODO: C backend: implement is_named_enum_value", .{}),
             .error_set_has_value => return f.fail("TODO: C backend: implement error_set_has_value", .{}),
+            .vector_store_elem => return f.fail("TODO: C backend: implement vector_store_elem", .{}),
+
+            .c_va_arg => return f.fail("TODO implement c_va_arg", .{}),
+            .c_va_copy => return f.fail("TODO implement c_va_copy", .{}),
+            .c_va_end => return f.fail("TODO implement c_va_end", .{}),
+            .c_va_start => return f.fail("TODO implement c_va_start", .{}),
             // zig fmt: on
         };
         if (result_value == .local) {
@@ -3582,6 +3594,10 @@ fn airOverflow(f: *Function, inst: Air.Inst.Index, operation: []const u8, info: 
 }
 
 fn airNot(f: *Function, inst: Air.Inst.Index) !CValue {
+    const inst_ty = f.air.typeOfIndex(inst);
+    if (inst_ty.tag() != .bool)
+        return try airUnBuiltinCall(f, inst, "not", .Bits);
+
     const ty_op = f.air.instructions.items(.data)[inst].ty_op;
 
     if (f.liveness.isUnused(inst)) {
@@ -3593,11 +3609,10 @@ fn airNot(f: *Function, inst: Air.Inst.Index) !CValue {
     try reap(f, inst, &.{ty_op.operand});
 
     const writer = f.object.writer();
-    const inst_ty = f.air.typeOfIndex(inst);
     const local = try f.allocLocal(inst, inst_ty);
     try f.writeCValue(writer, local, .Other);
     try writer.writeAll(" = ");
-    try writer.writeByte(if (inst_ty.tag() == .bool) '!' else '~');
+    try writer.writeByte('!');
     try f.writeCValue(writer, op, .Other);
     try writer.writeAll(";\n");
 
@@ -3871,7 +3886,7 @@ fn airSlice(f: *Function, inst: Air.Inst.Index) !CValue {
 fn airCall(
     f: *Function,
     inst: Air.Inst.Index,
-    modifier: std.builtin.CallOptions.Modifier,
+    modifier: std.builtin.CallModifier,
 ) !CValue {
     // Not even allowed to call panic in a naked function.
     if (f.object.dg.decl.ty.fnCallingConvention() == .Naked) return .none;
@@ -5122,7 +5137,9 @@ fn structFieldPtr(f: *Function, inst: Air.Inst.Index, struct_ptr_ty: Type, struc
         .begin, .end => {
             try writer.writeByte('(');
             try f.writeCValue(writer, struct_ptr, .Other);
-            try writer.print(")[{}]", .{@boolToInt(field_loc == .end)});
+            try writer.print(")[{}]", .{
+                @boolToInt(field_loc == .end and struct_ty.hasRuntimeBitsIgnoreComptime()),
+            });
         },
         .field => |field| if (extra_name != .none) {
             try f.writeCValueDerefMember(writer, struct_ptr, extra_name);

@@ -46,7 +46,6 @@ pub fn expectError(expected_error: anyerror, actual_error_union: anytype) !void 
 pub fn expectEqual(expected: anytype, actual: @TypeOf(expected)) !void {
     switch (@typeInfo(@TypeOf(actual))) {
         .NoReturn,
-        .BoundFn,
         .Opaque,
         .Frame,
         .AnyFrame,
@@ -313,7 +312,7 @@ pub fn expectEqualSlices(comptime T: type, expected: []const T, actual: []const 
     const actual_window = actual[window_start..@min(actual.len, window_start + max_window_size)];
     const actual_truncated = window_start + actual_window.len < actual.len;
 
-    const ttyconf = std.debug.detectTTYConfig();
+    const ttyconf = std.debug.detectTTYConfig(std.io.getStdErr());
     var differ = if (T == u8) BytesDiffer{
         .expected = expected_window,
         .actual = actual_window,
@@ -388,9 +387,9 @@ fn SliceDiffer(comptime T: type) type {
             for (self.expected) |value, i| {
                 var full_index = self.start_index + i;
                 const diff = if (i < self.actual.len) !std.meta.eql(self.actual[i], value) else true;
-                if (diff) self.ttyconf.setColor(writer, .Red);
+                if (diff) try self.ttyconf.setColor(writer, .Red);
                 try writer.print("[{}]: {any}\n", .{ full_index, value });
-                if (diff) self.ttyconf.setColor(writer, .Reset);
+                if (diff) try self.ttyconf.setColor(writer, .Reset);
             }
         }
     };
@@ -428,9 +427,9 @@ const BytesDiffer = struct {
     }
 
     fn writeByteDiff(self: BytesDiffer, writer: anytype, comptime fmt: []const u8, byte: u8, diff: bool) !void {
-        if (diff) self.ttyconf.setColor(writer, .Red);
+        if (diff) try self.ttyconf.setColor(writer, .Red);
         try writer.print(fmt, .{byte});
-        if (diff) self.ttyconf.setColor(writer, .Reset);
+        if (diff) try self.ttyconf.setColor(writer, .Reset);
     }
 
     const ChunkIterator = struct {
@@ -803,7 +802,7 @@ pub fn checkAllAllocationFailures(backing_allocator: std.mem.Allocator, comptime
 
     const ArgsTuple = std.meta.ArgsTuple(@TypeOf(test_fn));
     const fn_args_fields = @typeInfo(ArgsTuple).Struct.fields;
-    if (fn_args_fields.len == 0 or fn_args_fields[0].field_type != std.mem.Allocator) {
+    if (fn_args_fields.len == 0 or fn_args_fields[0].type != std.mem.Allocator) {
         @compileError("The provided function must have an " ++ @typeName(std.mem.Allocator) ++ " as its first argument");
     }
     const expected_args_tuple_len = fn_args_fields.len - 1;
@@ -829,7 +828,7 @@ pub fn checkAllAllocationFailures(backing_allocator: std.mem.Allocator, comptime
         var failing_allocator_inst = std.testing.FailingAllocator.init(backing_allocator, std.math.maxInt(usize));
         args.@"0" = failing_allocator_inst.allocator();
 
-        try @call(.{}, test_fn, args);
+        try @call(.auto, test_fn, args);
         break :x failing_allocator_inst.index;
     };
 
@@ -838,7 +837,7 @@ pub fn checkAllAllocationFailures(backing_allocator: std.mem.Allocator, comptime
         var failing_allocator_inst = std.testing.FailingAllocator.init(backing_allocator, fail_index);
         args.@"0" = failing_allocator_inst.allocator();
 
-        if (@call(.{}, test_fn, args)) |_| {
+        if (@call(.auto, test_fn, args)) |_| {
             if (failing_allocator_inst.has_induced_failure) {
                 return error.SwallowedOutOfMemoryError;
             } else {

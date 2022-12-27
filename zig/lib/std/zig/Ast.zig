@@ -125,7 +125,7 @@ pub fn extraData(tree: Ast, index: usize, comptime T: type) T {
     const fields = std.meta.fields(T);
     var result: T = undefined;
     inline for (fields) |field, i| {
-        comptime assert(field.field_type == Node.Index);
+        comptime assert(field.type == Node.Index);
         @field(result, field.name) = tree.extra_data[index + i];
     }
     return result;
@@ -559,8 +559,7 @@ pub fn firstToken(tree: Ast, node: Node.Index) TokenIndex {
         .container_field,
         => {
             const name_token = main_tokens[n];
-            if (token_tags[name_token + 1] != .colon) return name_token - end_offset;
-            if (name_token > 0 and token_tags[name_token - 1] == .keyword_comptime) {
+            if (token_tags[name_token] != .keyword_comptime and name_token > 0 and token_tags[name_token - 1] == .keyword_comptime) {
                 end_offset += 1;
             }
             return name_token - end_offset;
@@ -618,7 +617,7 @@ pub fn firstToken(tree: Ast, node: Node.Index) TokenIndex {
         .tagged_union_enum_tag_trailing,
         => {
             const main_token = main_tokens[n];
-            switch (token_tags[main_token - 1]) {
+            switch (token_tags[main_token -| 1]) {
                 .keyword_packed, .keyword_extern => end_offset += 1,
                 else => {},
             }
@@ -634,8 +633,8 @@ pub fn firstToken(tree: Ast, node: Node.Index) TokenIndex {
             return switch (token_tags[main_token]) {
                 .asterisk,
                 .asterisk_asterisk,
-                => switch (token_tags[main_token - 1]) {
-                    .l_bracket => main_token - 1,
+                => switch (token_tags[main_token -| 1]) {
+                    .l_bracket => main_token -| 1,
                     else => main_token,
                 },
                 .l_bracket => main_token,
@@ -2015,7 +2014,7 @@ fn fullPtrType(tree: Ast, info: full.PtrType.Components) full.PtrType {
         .asterisk_asterisk,
         => switch (token_tags[info.main_token + 1]) {
             .r_bracket, .colon => .Many,
-            .identifier => if (token_tags[info.main_token - 1] == .l_bracket) Size.C else .One,
+            .identifier => if (token_tags[info.main_token -| 1] == .l_bracket) Size.C else .One,
             else => .One,
         },
         .l_bracket => Size.Slice,
@@ -2060,6 +2059,9 @@ fn fullContainerDecl(tree: Ast, info: full.ContainerDecl.Components) full.Contai
         .ast = info,
         .layout_token = null,
     };
+
+    if (info.main_token == 0) return result;
+
     switch (token_tags[info.main_token - 1]) {
         .keyword_extern, .keyword_packed => result.layout_token = info.main_token - 1,
         else => {},
@@ -2189,9 +2191,9 @@ fn fullCall(tree: Ast, info: full.Call.Components) full.Call {
         .ast = info,
         .async_token = null,
     };
-    const maybe_async_token = tree.firstToken(info.fn_expr) - 1;
-    if (token_tags[maybe_async_token] == .keyword_async) {
-        result.async_token = maybe_async_token;
+    const first_token = tree.firstToken(info.fn_expr);
+    if (first_token != 0 and token_tags[first_token - 1] == .keyword_async) {
+        result.async_token = first_token - 1;
     }
     return result;
 }

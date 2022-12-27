@@ -1042,11 +1042,6 @@ test "access smoke test" {
 }
 
 test "timerfd" {
-    if (true) {
-        // https://github.com/ziglang/zig/issues/13721
-        return error.SkipZigTest;
-    }
-
     if (native_os != .linux)
         return error.SkipZigTest;
 
@@ -1054,14 +1049,122 @@ test "timerfd" {
     var tfd = try os.timerfd_create(linux.CLOCK.MONOTONIC, linux.TFD.CLOEXEC);
     defer os.close(tfd);
 
+    // Fire event 10_000_000ns = 10ms after the os.timerfd_settime call.
     var sit: linux.itimerspec = .{ .it_interval = .{ .tv_sec = 0, .tv_nsec = 0 }, .it_value = .{ .tv_sec = 0, .tv_nsec = 10 * (1000 * 1000) } };
     try os.timerfd_settime(tfd, 0, &sit, null);
 
     var fds: [1]os.pollfd = .{.{ .fd = tfd, .events = os.linux.POLL.IN, .revents = 0 }};
-    try expectEqual(try os.poll(&fds, -1), 1);
-    var git = try os.timerfd_gettime(tfd);
-    try expectEqual(git, .{ .it_interval = .{ .tv_sec = 0, .tv_nsec = 0 }, .it_value = .{ .tv_sec = 0, .tv_nsec = 0 } });
+    try expectEqual(@as(usize, 1), try os.poll(&fds, -1)); // -1 => infinite waiting
 
-    try os.timerfd_settime(tfd, 0, &sit, null);
-    try expectEqual(try os.poll(&fds, 5), 0);
+    var git = try os.timerfd_gettime(tfd);
+    var expect_disarmed_timer: linux.itimerspec = .{ .it_interval = .{ .tv_sec = 0, .tv_nsec = 0 }, .it_value = .{ .tv_sec = 0, .tv_nsec = 0 } };
+    try expectEqual(expect_disarmed_timer, git);
+}
+
+test "isatty" {
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+
+    var file = try tmp.dir.createFile("foo", .{});
+    try expectEqual(os.isatty(file.handle), false);
+}
+
+test "read with empty buffer" {
+    if (native_os == .wasi) return error.SkipZigTest;
+
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Get base abs path
+    const base_path = blk: {
+        const relative_path = try fs.path.join(allocator, &[_][]const u8{ "zig-cache", "tmp", tmp.sub_path[0..] });
+        break :blk try fs.realpathAlloc(allocator, relative_path);
+    };
+
+    var file_path: []u8 = try fs.path.join(allocator, &[_][]const u8{ base_path, "some_file" });
+    var file = try fs.cwd().createFile(file_path, .{ .read = true });
+    defer file.close();
+
+    var bytes = try allocator.alloc(u8, 0);
+
+    _ = try os.read(file.handle, bytes);
+}
+
+test "pread with empty buffer" {
+    if (native_os == .wasi) return error.SkipZigTest;
+
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Get base abs path
+    const base_path = blk: {
+        const relative_path = try fs.path.join(allocator, &[_][]const u8{ "zig-cache", "tmp", tmp.sub_path[0..] });
+        break :blk try fs.realpathAlloc(allocator, relative_path);
+    };
+
+    var file_path: []u8 = try fs.path.join(allocator, &[_][]const u8{ base_path, "some_file" });
+    var file = try fs.cwd().createFile(file_path, .{ .read = true });
+    defer file.close();
+
+    var bytes = try allocator.alloc(u8, 0);
+
+    _ = try os.pread(file.handle, bytes, 0);
+}
+
+test "write with empty buffer" {
+    if (native_os == .wasi) return error.SkipZigTest;
+
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Get base abs path
+    const base_path = blk: {
+        const relative_path = try fs.path.join(allocator, &[_][]const u8{ "zig-cache", "tmp", tmp.sub_path[0..] });
+        break :blk try fs.realpathAlloc(allocator, relative_path);
+    };
+
+    var file_path: []u8 = try fs.path.join(allocator, &[_][]const u8{ base_path, "some_file" });
+    var file = try fs.cwd().createFile(file_path, .{});
+    defer file.close();
+
+    var bytes = try allocator.alloc(u8, 0);
+
+    _ = try os.write(file.handle, bytes);
+}
+
+test "pwrite with empty buffer" {
+    if (native_os == .wasi) return error.SkipZigTest;
+
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+
+    var arena = ArenaAllocator.init(testing.allocator);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    // Get base abs path
+    const base_path = blk: {
+        const relative_path = try fs.path.join(allocator, &[_][]const u8{ "zig-cache", "tmp", tmp.sub_path[0..] });
+        break :blk try fs.realpathAlloc(allocator, relative_path);
+    };
+
+    var file_path: []u8 = try fs.path.join(allocator, &[_][]const u8{ base_path, "some_file" });
+    var file = try fs.cwd().createFile(file_path, .{});
+    defer file.close();
+
+    var bytes = try allocator.alloc(u8, 0);
+
+    _ = try os.pwrite(file.handle, bytes, 0);
 }

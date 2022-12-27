@@ -468,21 +468,26 @@ test "clamp" {
 
 /// Returns the product of a and b. Returns an error on overflow.
 pub fn mul(comptime T: type, a: T, b: T) (error{Overflow}!T) {
-    var answer: T = undefined;
-    return if (@mulWithOverflow(T, a, b, &answer)) error.Overflow else answer;
+    if (T == comptime_int) return a * b;
+    const ov = @mulWithOverflow(a, b);
+    if (ov[1] != 0) return error.Overflow;
+    return ov[0];
 }
 
 /// Returns the sum of a and b. Returns an error on overflow.
 pub fn add(comptime T: type, a: T, b: T) (error{Overflow}!T) {
     if (T == comptime_int) return a + b;
-    var answer: T = undefined;
-    return if (@addWithOverflow(T, a, b, &answer)) error.Overflow else answer;
+    const ov = @addWithOverflow(a, b);
+    if (ov[1] != 0) return error.Overflow;
+    return ov[0];
 }
 
 /// Returns a - b, or an error on overflow.
 pub fn sub(comptime T: type, a: T, b: T) (error{Overflow}!T) {
-    var answer: T = undefined;
-    return if (@subWithOverflow(T, a, b, &answer)) error.Overflow else answer;
+    if (T == comptime_int) return a - b;
+    const ov = @subWithOverflow(a, b);
+    if (ov[1] != 0) return error.Overflow;
+    return ov[0];
 }
 
 pub fn negate(x: anytype) !@TypeOf(x) {
@@ -492,8 +497,10 @@ pub fn negate(x: anytype) !@TypeOf(x) {
 /// Shifts a left by shift_amt. Returns an error on overflow. shift_amt
 /// is unsigned.
 pub fn shlExact(comptime T: type, a: T, shift_amt: Log2Int(T)) !T {
-    var answer: T = undefined;
-    return if (@shlWithOverflow(T, a, shift_amt, &answer)) error.Overflow else answer;
+    if (T == comptime_int) return a << shift_amt;
+    const ov = @shlWithOverflow(a, shift_amt);
+    if (ov[1] != 0) return error.Overflow;
+    return ov[0];
 }
 
 /// Shifts left. Overflowed bits are truncated.
@@ -523,10 +530,6 @@ pub fn shl(comptime T: type, a: T, shift_amt: anytype) T {
 }
 
 test "shl" {
-    if (builtin.zig_backend == .stage2_llvm and builtin.cpu.arch == .aarch64) {
-        // https://github.com/ziglang/zig/issues/12012
-        return error.SkipZigTest;
-    }
     try testing.expect(shl(u8, 0b11111111, @as(usize, 3)) == 0b11111000);
     try testing.expect(shl(u8, 0b11111111, @as(usize, 8)) == 0);
     try testing.expect(shl(u8, 0b11111111, @as(usize, 9)) == 0);
@@ -567,10 +570,6 @@ pub fn shr(comptime T: type, a: T, shift_amt: anytype) T {
 }
 
 test "shr" {
-    if (builtin.zig_backend == .stage2_llvm and builtin.cpu.arch == .aarch64) {
-        // https://github.com/ziglang/zig/issues/12012
-        return error.SkipZigTest;
-    }
     try testing.expect(shr(u8, 0b11111111, @as(usize, 3)) == 0b00011111);
     try testing.expect(shr(u8, 0b11111111, @as(usize, 8)) == 0);
     try testing.expect(shr(u8, 0b11111111, @as(usize, 9)) == 0);
@@ -612,10 +611,6 @@ pub fn rotr(comptime T: type, x: T, r: anytype) T {
 }
 
 test "rotr" {
-    if (builtin.zig_backend == .stage2_llvm and builtin.cpu.arch == .aarch64) {
-        // https://github.com/ziglang/zig/issues/12012
-        return error.SkipZigTest;
-    }
     try testing.expect(rotr(u0, 0b0, @as(usize, 3)) == 0b0);
     try testing.expect(rotr(u5, 0b00001, @as(usize, 0)) == 0b00001);
     try testing.expect(rotr(u6, 0b000001, @as(usize, 7)) == 0b100000);
@@ -656,10 +651,6 @@ pub fn rotl(comptime T: type, x: T, r: anytype) T {
 }
 
 test "rotl" {
-    if (builtin.zig_backend == .stage2_llvm and builtin.cpu.arch == .aarch64) {
-        // https://github.com/ziglang/zig/issues/12012
-        return error.SkipZigTest;
-    }
     try testing.expect(rotl(u0, 0b0, @as(usize, 3)) == 0b0);
     try testing.expect(rotl(u5, 0b00001, @as(usize, 0)) == 0b00001);
     try testing.expect(rotl(u6, 0b000001, @as(usize, 7)) == 0b000010);
@@ -1453,6 +1444,19 @@ pub const CompareOperator = enum {
     gt,
     /// Not equal (`!=`)
     neq,
+
+    /// Reverse the direction of the comparison.
+    /// Use when swapping the left and right hand operands.
+    pub fn reverse(op: CompareOperator) CompareOperator {
+        return switch (op) {
+            .lt => .gt,
+            .lte => .gte,
+            .gt => .lt,
+            .gte => .lte,
+            .eq => .eq,
+            .neq => .neq,
+        };
+    }
 };
 
 /// This function does the same thing as comparison operators, however the
@@ -1510,6 +1514,15 @@ test "order.compare" {
     try testing.expect(order(1, 0).compare(.gte));
     try testing.expect(order(1, 0).compare(.gt));
     try testing.expect(order(1, 0).compare(.neq));
+}
+
+test "compare.reverse" {
+    inline for (@typeInfo(CompareOperator).Enum.fields) |op_field| {
+        const op = @intToEnum(CompareOperator, op_field.value);
+        try testing.expect(compare(2, op, 3) == compare(3, op.reverse(), 2));
+        try testing.expect(compare(3, op, 3) == compare(3, op.reverse(), 3));
+        try testing.expect(compare(4, op, 3) == compare(3, op.reverse(), 4));
+    }
 }
 
 /// Returns a mask of all ones if value is true,

@@ -240,6 +240,7 @@ pub fn emitMir(emit: *Emit) InnerError!void {
             .i64_ctz => try emit.emitTag(tag),
 
             .extended => try emit.emitExtended(inst),
+            .simd => try emit.emitSimd(inst),
         }
     }
 }
@@ -341,11 +342,14 @@ fn emitMemArg(emit: *Emit, tag: Mir.Inst.Tag, inst: Mir.Inst.Index) !void {
     const extra_index = emit.mir.instructions.items(.data)[inst].payload;
     const mem_arg = emit.mir.extraData(Mir.MemArg, extra_index).data;
     try emit.code.append(@enumToInt(tag));
+    try encodeMemArg(mem_arg, emit.code.writer());
+}
 
+fn encodeMemArg(mem_arg: Mir.MemArg, writer: anytype) !void {
     // wasm encodes alignment as power of 2, rather than natural alignment
     const encoded_alignment = @ctz(mem_arg.alignment);
-    try leb128.writeULEB128(emit.code.writer(), encoded_alignment);
-    try leb128.writeULEB128(emit.code.writer(), mem_arg.offset);
+    try leb128.writeULEB128(writer, encoded_alignment);
+    try leb128.writeULEB128(writer, mem_arg.offset);
 }
 
 fn emitCall(emit: *Emit, inst: Mir.Inst.Index) !void {
@@ -419,10 +423,73 @@ fn emitMemAddress(emit: *Emit, inst: Mir.Inst.Index) !void {
 }
 
 fn emitExtended(emit: *Emit, inst: Mir.Inst.Index) !void {
-    const opcode = emit.mir.instructions.items(.secondary)[inst];
+    const extra_index = emit.mir.instructions.items(.data)[inst].payload;
+    const opcode = emit.mir.extra[extra_index];
+    const writer = emit.code.writer();
+    try emit.code.append(0xFC);
+    try leb128.writeULEB128(writer, opcode);
     switch (@intToEnum(std.wasm.PrefixedOpcode, opcode)) {
-        .memory_fill => try emit.emitMemFill(),
+        // bulk-memory opcodes
+        .data_drop => {
+            const segment = emit.mir.extra[extra_index + 1];
+            try leb128.writeULEB128(writer, segment);
+        },
+        .memory_init => {
+            const segment = emit.mir.extra[extra_index + 1];
+            try leb128.writeULEB128(writer, segment);
+            try leb128.writeULEB128(writer, @as(u32, 0)); // memory index
+        },
+        .memory_fill => {
+            try leb128.writeULEB128(writer, @as(u32, 0)); // memory index
+        },
+        .memory_copy => {
+            try leb128.writeULEB128(writer, @as(u32, 0)); // dst memory index
+            try leb128.writeULEB128(writer, @as(u32, 0)); // src memory index
+        },
+
+        // nontrapping-float-to-int-conversion opcodes
+        .i32_trunc_sat_f32_s,
+        .i32_trunc_sat_f32_u,
+        .i32_trunc_sat_f64_s,
+        .i32_trunc_sat_f64_u,
+        .i64_trunc_sat_f32_s,
+        .i64_trunc_sat_f32_u,
+        .i64_trunc_sat_f64_s,
+        .i64_trunc_sat_f64_u,
+        => {}, // opcode already written
         else => |tag| return emit.fail("TODO: Implement extension instruction: {s}\n", .{@tagName(tag)}),
+    }
+}
+
+fn emitSimd(emit: *Emit, inst: Mir.Inst.Index) !void {
+    const extra_index = emit.mir.instructions.items(.data)[inst].payload;
+    const opcode = emit.mir.extra[extra_index];
+    const writer = emit.code.writer();
+    try emit.code.append(0xFD);
+    try leb128.writeULEB128(writer, opcode);
+    switch (@intToEnum(std.wasm.SimdOpcode, opcode)) {
+        .v128_store,
+        .v128_load,
+        .v128_load8_splat,
+        .v128_load16_splat,
+        .v128_load32_splat,
+        .v128_load64_splat,
+        => {
+            const mem_arg = emit.mir.extraData(Mir.MemArg, extra_index + 1).data;
+            try encodeMemArg(mem_arg, writer);
+        },
+        .v128_const => {
+            const simd_value = emit.mir.extra[extra_index + 1 ..][0..4];
+            try writer.writeAll(std.mem.asBytes(simd_value));
+        },
+        .i8x16_splat,
+        .i16x8_splat,
+        .i32x4_splat,
+        .i64x2_splat,
+        .f32x4_splat,
+        .f64x2_splat,
+        => {}, // opcode already written
+        else => |tag| return emit.fail("TODO: Implement simd instruction: {s}\n", .{@tagName(tag)}),
     }
 }
 

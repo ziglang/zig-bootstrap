@@ -136,7 +136,7 @@ pub fn print(
         .address_space_type => return writer.writeAll("std.builtin.AddressSpace"),
         .float_mode_type => return writer.writeAll("std.builtin.FloatMode"),
         .reduce_op_type => return writer.writeAll("std.builtin.ReduceOp"),
-        .call_options_type => return writer.writeAll("std.builtin.CallOptions"),
+        .modifier_type => return writer.writeAll("std.builtin.CallModifier"),
         .prefetch_options_type => return writer.writeAll("std.builtin.PrefetchOptions"),
         .export_options_type => return writer.writeAll("std.builtin.ExportOptions"),
         .extern_options_type => return writer.writeAll("std.builtin.ExternOptions"),
@@ -225,9 +225,7 @@ pub fn print(
         .one => return writer.writeAll("1"),
         .void_value => return writer.writeAll("{}"),
         .unreachable_value => return writer.writeAll("unreachable"),
-        .the_only_possible_value => {
-            val = ty.onePossibleValue().?;
-        },
+        .the_only_possible_value => return writer.writeAll("0"),
         .bool_true => return writer.writeAll("true"),
         .bool_false => return writer.writeAll("false"),
         .ty => return val.castTag(.ty).?.data.print(writer, mod),

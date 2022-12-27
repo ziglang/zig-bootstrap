@@ -229,7 +229,7 @@ pub const EAI = enum(c_int) {
 pub extern "c" fn fallocate64(fd: fd_t, mode: c_int, offset: off_t, len: off_t) c_int;
 pub extern "c" fn fopen64(noalias filename: [*:0]const u8, noalias modes: [*:0]const u8) ?*FILE;
 pub extern "c" fn fstat64(fd: fd_t, buf: *Stat) c_int;
-pub extern "c" fn fstatat64(dirfd: fd_t, path: [*:0]const u8, stat_buf: *Stat, flags: u32) c_int;
+pub extern "c" fn fstatat64(dirfd: fd_t, noalias path: [*:0]const u8, noalias stat_buf: *Stat, flags: u32) c_int;
 pub extern "c" fn ftruncate64(fd: c_int, length: off_t) c_int;
 pub extern "c" fn getrlimit64(resource: rlimit_resource, rlim: *rlimit) c_int;
 pub extern "c" fn lseek64(fd: fd_t, offset: i64, whence: c_int) i64;
@@ -320,9 +320,7 @@ pub const pthread_rwlock_t = switch (native_abi) {
         size: [56]u8 align(@alignOf(usize)) = [_]u8{0} ** 56,
     },
 };
-pub usingnamespace if (native_abi == .android) struct {
-    pub const pthread_key_t = c_int;
-} else struct {};
+pub const pthread_key_t = c_uint;
 pub const sem_t = extern struct {
     __size: [__SIZEOF_SEM_T]u8 align(@alignOf(usize)),
 };

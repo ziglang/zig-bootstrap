@@ -607,7 +607,6 @@ const DocData = struct {
             is_test: bool = false,
             is_extern: bool = false,
         },
-        BoundFn: struct { name: []const u8 },
         Opaque: struct {
             name: []const u8,
             src: usize, // index into astNodes
@@ -638,9 +637,9 @@ const DocData = struct {
             inline for (comptime std.meta.fields(Type)) |case| {
                 if (@field(Type, case.name) == active_tag) {
                     const current_value = @field(self, case.name);
-                    inline for (comptime std.meta.fields(case.field_type)) |f| {
+                    inline for (comptime std.meta.fields(case.type)) |f| {
                         try jsw.arrayElem();
-                        if (f.field_type == std.builtin.Type.Pointer.Size) {
+                        if (f.type == std.builtin.Type.Pointer.Size) {
                             try jsw.emitNumber(@enumToInt(@field(current_value, f.name)));
                         } else {
                             try std.json.stringify(@field(current_value, f.name), opts, w);
@@ -1511,26 +1510,6 @@ fn walkInstruction(
 
         //     return operand;
         // },
-        .overflow_arithmetic_ptr => {
-            const un_node = data[inst_index].un_node;
-
-            const elem_type_ref = try self.walkRef(file, parent_scope, parent_src, un_node.operand, false);
-            const type_slot_index = self.types.items.len;
-            try self.types.append(self.arena, .{
-                .Pointer = .{
-                    .size = .One,
-                    .child = elem_type_ref.expr,
-                    .is_mutable = true,
-                    .is_volatile = false,
-                    .is_allowzero = false,
-                },
-            });
-
-            return DocData.WalkResult{
-                .typeRef = .{ .type = @enumToInt(Ref.type_type) },
-                .expr = .{ .type = type_slot_index },
-            };
-        },
         .ptr_type => {
             const ptr = data[inst_index].ptr_type;
             const extra = file.zir.extraData(Zir.Inst.PtrType, ptr.payload_index);

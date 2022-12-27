@@ -150,7 +150,6 @@ pub fn copyFileAbsolute(source_path: []const u8, dest_path: []const u8, args: Co
     return Dir.copyFile(my_cwd, source_path, my_cwd, dest_path, args);
 }
 
-/// TODO update this API to avoid a getrandom syscall for every operation.
 pub const AtomicFile = struct {
     file: File,
     // TODO either replace this with rand_buf or use []u16 on Windows
@@ -1795,6 +1794,9 @@ pub const Dir = struct {
             .OBJECT_NAME_NOT_FOUND => return error.FileNotFound,
             .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
             .NOT_A_DIRECTORY => return error.NotDir,
+            // This can happen if the directory has 'List folder contents' permission set to 'Deny'
+            // and the directory is trying to be opened for iteration.
+            .ACCESS_DENIED => return error.AccessDenied,
             .INVALID_PARAMETER => unreachable,
             else => return w.unexpectedStatus(rc),
         }
@@ -2598,14 +2600,32 @@ pub const Dir = struct {
         return file.stat();
     }
 
-    pub const StatFileError = File.OpenError || StatError;
+    pub const StatFileError = File.OpenError || File.StatError || os.FStatAtError;
 
-    // TODO: improve this to use the fstatat syscall instead of making 2 syscalls here.
-    pub fn statFile(self: Dir, sub_path: []const u8) StatFileError!File.Stat {
-        var file = try self.openFile(sub_path, .{});
-        defer file.close();
-
-        return file.stat();
+    /// Returns metadata for a file inside the directory.
+    ///
+    /// On Windows, this requires three syscalls. On other operating systems, it
+    /// only takes one.
+    ///
+    /// Symlinks are followed.
+    ///
+    /// `sub_path` may be absolute, in which case `self` is ignored.
+    pub fn statFile(self: Dir, sub_path: []const u8) StatFileError!Stat {
+        switch (builtin.os.tag) {
+            .windows => {
+                var file = try self.openFile(sub_path, .{});
+                defer file.close();
+                return file.stat();
+            },
+            .wasi => {
+                const st = try os.fstatatWasi(self.fd, sub_path, os.wasi.LOOKUP_SYMLINK_FOLLOW);
+                return Stat.fromSystem(st);
+            },
+            else => {
+                const st = try os.fstatat(self.fd, sub_path, 0);
+                return Stat.fromSystem(st);
+            },
+        }
     }
 
     const Permissions = File.Permissions;

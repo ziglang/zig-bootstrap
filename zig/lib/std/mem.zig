@@ -300,7 +300,7 @@ pub fn zeroes(comptime T: type) T {
             if (comptime meta.containerLayout(T) == .Extern) {
                 // The C language specification states that (global) unions
                 // should be zero initialized to the first named member.
-                return @unionInit(T, info.fields[0].name, zeroes(info.fields[0].field_type));
+                return @unionInit(T, info.fields[0].name, zeroes(info.fields[0].type));
             }
 
             @compileError("Can't set a " ++ @typeName(T) ++ " to zero.");
@@ -308,7 +308,6 @@ pub fn zeroes(comptime T: type) T {
         .ErrorUnion,
         .ErrorSet,
         .Fn,
-        .BoundFn,
         .Type,
         .NoReturn,
         .Undefined,
@@ -436,7 +435,7 @@ pub fn zeroInit(comptime T: type, init: anytype) T {
 
                     inline for (struct_info.fields) |field| {
                         if (field.default_value) |default_value_ptr| {
-                            const default_value = @ptrCast(*align(1) const field.field_type, default_value_ptr).*;
+                            const default_value = @ptrCast(*align(1) const field.type, default_value_ptr).*;
                             @field(value, field.name) = default_value;
                         }
                     }
@@ -453,9 +452,9 @@ pub fn zeroInit(comptime T: type, init: anytype) T {
                             @compileError("Encountered an initializer for `" ++ field.name ++ "`, but it is not a field of " ++ @typeName(T));
                         }
 
-                        switch (@typeInfo(field.field_type)) {
+                        switch (@typeInfo(field.type)) {
                             .Struct => {
-                                @field(value, field.name) = zeroInit(field.field_type, @field(init, field.name));
+                                @field(value, field.name) = zeroInit(field.type, @field(init, field.name));
                             },
                             else => {
                                 @field(value, field.name) = @field(init, field.name);
@@ -2191,6 +2190,156 @@ test "splitBackwards (reset)" {
     try testing.expect(it.next() == null);
 }
 
+/// Returns an iterator with a sliding window of slices for `buffer`.
+/// The sliding window has length `size` and on every iteration moves
+/// forward by `advance`.
+///
+/// Extract data for moving average with:
+/// `window(u8, "abcdefg", 3, 1)` will return slices
+/// "abc", "bcd", "cde", "def", "efg", null, in that order.
+///
+/// Chunk or split every N items with:
+/// `window(u8, "abcdefg", 3, 3)` will return slices
+/// "abc", "def", "g", null, in that order.
+///
+/// Pick every even index with:
+/// `window(u8, "abcdefg", 1, 2)` will return slices
+/// "a", "c", "e", "g" null, in that order.
+///
+/// The `size` and `advance` must be not be zero.
+pub fn window(comptime T: type, buffer: []const T, size: usize, advance: usize) WindowIterator(T) {
+    assert(size != 0);
+    assert(advance != 0);
+    return .{
+        .index = 0,
+        .buffer = buffer,
+        .size = size,
+        .advance = advance,
+    };
+}
+
+test "window" {
+    {
+        // moving average size 3
+        var it = window(u8, "abcdefg", 3, 1);
+        try testing.expectEqualSlices(u8, it.next().?, "abc");
+        try testing.expectEqualSlices(u8, it.next().?, "bcd");
+        try testing.expectEqualSlices(u8, it.next().?, "cde");
+        try testing.expectEqualSlices(u8, it.next().?, "def");
+        try testing.expectEqualSlices(u8, it.next().?, "efg");
+        try testing.expectEqual(it.next(), null);
+
+        // multibyte
+        var it16 = window(u16, std.unicode.utf8ToUtf16LeStringLiteral("abcdefg"), 3, 1);
+        try testing.expectEqualSlices(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("abc"));
+        try testing.expectEqualSlices(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("bcd"));
+        try testing.expectEqualSlices(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("cde"));
+        try testing.expectEqualSlices(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("def"));
+        try testing.expectEqualSlices(u16, it16.next().?, std.unicode.utf8ToUtf16LeStringLiteral("efg"));
+        try testing.expectEqual(it16.next(), null);
+    }
+
+    {
+        // chunk/split every 3
+        var it = window(u8, "abcdefg", 3, 3);
+        try testing.expectEqualSlices(u8, it.next().?, "abc");
+        try testing.expectEqualSlices(u8, it.next().?, "def");
+        try testing.expectEqualSlices(u8, it.next().?, "g");
+        try testing.expectEqual(it.next(), null);
+    }
+
+    {
+        // pick even
+        var it = window(u8, "abcdefg", 1, 2);
+        try testing.expectEqualSlices(u8, it.next().?, "a");
+        try testing.expectEqualSlices(u8, it.next().?, "c");
+        try testing.expectEqualSlices(u8, it.next().?, "e");
+        try testing.expectEqualSlices(u8, it.next().?, "g");
+        try testing.expectEqual(it.next(), null);
+    }
+
+    {
+        // empty
+        var it = window(u8, "", 1, 1);
+        try testing.expectEqualSlices(u8, it.next().?, "");
+        try testing.expectEqual(it.next(), null);
+
+        it = window(u8, "", 10, 1);
+        try testing.expectEqualSlices(u8, it.next().?, "");
+        try testing.expectEqual(it.next(), null);
+
+        it = window(u8, "", 1, 10);
+        try testing.expectEqualSlices(u8, it.next().?, "");
+        try testing.expectEqual(it.next(), null);
+
+        it = window(u8, "", 10, 10);
+        try testing.expectEqualSlices(u8, it.next().?, "");
+        try testing.expectEqual(it.next(), null);
+    }
+
+    {
+        // first
+        var it = window(u8, "abcdefg", 3, 3);
+        try testing.expectEqualSlices(u8, it.first(), "abc");
+        it.reset();
+        try testing.expectEqualSlices(u8, it.next().?, "abc");
+    }
+
+    {
+        // reset
+        var it = window(u8, "abcdefg", 3, 3);
+        try testing.expectEqualSlices(u8, it.next().?, "abc");
+        try testing.expectEqualSlices(u8, it.next().?, "def");
+        try testing.expectEqualSlices(u8, it.next().?, "g");
+        try testing.expectEqual(it.next(), null);
+
+        it.reset();
+        try testing.expectEqualSlices(u8, it.next().?, "abc");
+        try testing.expectEqualSlices(u8, it.next().?, "def");
+        try testing.expectEqualSlices(u8, it.next().?, "g");
+        try testing.expectEqual(it.next(), null);
+    }
+}
+
+pub fn WindowIterator(comptime T: type) type {
+    return struct {
+        buffer: []const T,
+        index: ?usize,
+        size: usize,
+        advance: usize,
+
+        const Self = @This();
+
+        /// Returns a slice of the first window. This never fails.
+        /// Call this only to get the first window and then use `next` to get
+        /// all subsequent windows.
+        pub fn first(self: *Self) []const T {
+            assert(self.index.? == 0);
+            return self.next().?;
+        }
+
+        /// Returns a slice of the next window, or null if window is at end.
+        pub fn next(self: *Self) ?[]const T {
+            const start = self.index orelse return null;
+            const next_index = start + self.advance;
+            const end = if (start + self.size < self.buffer.len and next_index < self.buffer.len) blk: {
+                self.index = next_index;
+                break :blk start + self.size;
+            } else blk: {
+                self.index = null;
+                break :blk self.buffer.len;
+            };
+
+            return self.buffer[start..end];
+        }
+
+        /// Resets the iterator to the initial window.
+        pub fn reset(self: *Self) void {
+            self.index = 0;
+        }
+    };
+}
+
 pub fn startsWith(comptime T: type, haystack: []const T, needle: []const T) bool {
     return if (needle.len > haystack.len) false else eql(T, haystack[0..needle.len], needle);
 }
@@ -2866,6 +3015,55 @@ test "reverse" {
     try testing.expect(eql(i32, &arr, &[_]i32{ 4, 2, 1, 3, 5 }));
 }
 
+fn ReverseIterator(comptime T: type) type {
+    const info: struct { Child: type, Pointer: type } = blk: {
+        switch (@typeInfo(T)) {
+            .Pointer => |info| switch (info.size) {
+                .Slice => break :blk .{
+                    .Child = info.child,
+                    .Pointer = @Type(.{ .Pointer = .{
+                        .size = .Many,
+                        .is_const = info.is_const,
+                        .is_volatile = info.is_volatile,
+                        .alignment = info.alignment,
+                        .address_space = info.address_space,
+                        .child = info.child,
+                        .is_allowzero = info.is_allowzero,
+                        .sentinel = info.sentinel,
+                    } }),
+                },
+                else => {},
+            },
+            else => {},
+        }
+        @compileError("reverse iterator expects slice, found " ++ @typeName(T));
+    };
+    return struct {
+        ptr: info.Pointer,
+        index: usize,
+        pub fn next(self: *@This()) ?info.Child {
+            if (self.index == 0) return null;
+            self.index -= 1;
+            return self.ptr[self.index];
+        }
+    };
+}
+
+/// Iterate over a slice in reverse.
+pub fn reverseIterator(slice: anytype) ReverseIterator(@TypeOf(slice)) {
+    return .{ .ptr = slice.ptr, .index = slice.len };
+}
+
+test "reverseIterator" {
+    const slice: []const i32 = &[_]i32{ 5, 3, 1, 2 };
+    var it = reverseIterator(slice);
+    try testing.expectEqual(@as(?i32, 2), it.next());
+    try testing.expectEqual(@as(?i32, 1), it.next());
+    try testing.expectEqual(@as(?i32, 3), it.next());
+    try testing.expectEqual(@as(?i32, 5), it.next());
+    try testing.expectEqual(@as(?i32, null), it.next());
+}
+
 /// In-place rotation of the values in an array ([0 1 2 3] becomes [1 2 3 0] if we rotate by 1)
 /// Assumes 0 <= amount <= items.len
 pub fn rotate(comptime T: type, items: []T, amount: usize) void {
@@ -3093,7 +3291,7 @@ pub fn nativeToBig(comptime T: type, x: T) T {
 /// - The delta required to align the pointer is not a multiple of the pointee's
 ///   type.
 pub fn alignPointerOffset(ptr: anytype, align_to: usize) ?usize {
-    assert(align_to != 0 and @popCount(align_to) == 1);
+    assert(isValidAlign(align_to));
 
     const T = @TypeOf(ptr);
     const info = @typeInfo(T);
@@ -3106,13 +3304,13 @@ pub fn alignPointerOffset(ptr: anytype, align_to: usize) ?usize {
 
     // Calculate the aligned base address with an eye out for overflow.
     const addr = @ptrToInt(ptr);
-    var new_addr: usize = undefined;
-    if (@addWithOverflow(usize, addr, align_to - 1, &new_addr)) return null;
-    new_addr &= ~@as(usize, align_to - 1);
+    var ov = @addWithOverflow(addr, align_to - 1);
+    if (ov[1] != 0) return null;
+    ov[0] &= ~@as(usize, align_to - 1);
 
     // The delta is expressed in terms of bytes, turn it into a number of child
     // type elements.
-    const delta = new_addr - addr;
+    const delta = ov[0] - addr;
     const pointee_size = @sizeOf(info.Pointer.child);
     if (delta % pointee_size != 0) return null;
     return delta / pointee_size;
@@ -3553,6 +3751,7 @@ pub fn alignForwardLog2(addr: usize, log2_alignment: u8) usize {
 /// The alignment must be a power of 2 and greater than 0.
 /// Asserts that rounding up the address does not cause integer overflow.
 pub fn alignForwardGeneric(comptime T: type, addr: T, alignment: T) T {
+    assert(isValidAlignGeneric(T, alignment));
     return alignBackwardGeneric(T, addr + (alignment - 1), alignment);
 }
 
@@ -3648,7 +3847,7 @@ test "alignForward" {
 /// Round an address down to the previous (or current) aligned address.
 /// Unlike `alignBackward`, `alignment` can be any positive number, not just a power of 2.
 pub fn alignBackwardAnyAlign(i: usize, alignment: usize) usize {
-    if (@popCount(alignment) == 1)
+    if (isValidAlign(alignment))
         return alignBackward(i, alignment);
     assert(alignment != 0);
     return i - @mod(i, alignment);
@@ -3663,7 +3862,7 @@ pub fn alignBackward(addr: usize, alignment: usize) usize {
 /// Round an address down to the previous (or current) aligned address.
 /// The alignment must be a power of 2 and greater than 0.
 pub fn alignBackwardGeneric(comptime T: type, addr: T, alignment: T) T {
-    assert(@popCount(alignment) == 1);
+    assert(isValidAlignGeneric(T, alignment));
     // 000010000 // example alignment
     // 000001111 // subtract 1
     // 111110000 // binary not
@@ -3673,11 +3872,17 @@ pub fn alignBackwardGeneric(comptime T: type, addr: T, alignment: T) T {
 /// Returns whether `alignment` is a valid alignment, meaning it is
 /// a positive power of 2.
 pub fn isValidAlign(alignment: usize) bool {
-    return @popCount(alignment) == 1;
+    return isValidAlignGeneric(usize, alignment);
+}
+
+/// Returns whether `alignment` is a valid alignment, meaning it is
+/// a positive power of 2.
+pub fn isValidAlignGeneric(comptime T: type, alignment: T) bool {
+    return alignment > 0 and std.math.isPowerOfTwo(alignment);
 }
 
 pub fn isAlignedAnyAlign(i: usize, alignment: usize) bool {
-    if (@popCount(alignment) == 1)
+    if (isValidAlign(alignment))
         return isAligned(i, alignment);
     assert(alignment != 0);
     return 0 == @mod(i, alignment);

@@ -19,6 +19,7 @@ const introspect = @import("introspect.zig");
 const LibCInstallation = @import("libc_installation.zig").LibCInstallation;
 const wasi_libc = @import("wasi_libc.zig");
 const translate_c = @import("translate_c.zig");
+const clang = @import("clang.zig");
 const Cache = @import("Cache.zig");
 const target_util = @import("target.zig");
 const ThreadPool = @import("ThreadPool.zig");
@@ -85,6 +86,7 @@ const normal_usage =
     \\  dlltool          Use Zig as a drop-in dlltool.exe
     \\  lib              Use Zig as a drop-in lib.exe
     \\  ranlib           Use Zig as a drop-in ranlib
+    \\  objcopy          Use Zig as a drop-in objcopy
     \\
     \\  env              Print lib path, std path, cache directory, and version
     \\  help             Print this help and exit
@@ -286,6 +288,8 @@ pub fn mainArgs(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
         return cmdBuild(gpa, arena, cmd_args);
     } else if (mem.eql(u8, cmd, "fmt")) {
         return cmdFmt(gpa, arena, cmd_args);
+    } else if (mem.eql(u8, cmd, "objcopy")) {
+        return @import("objcopy.zig").cmdObjCopy(gpa, arena, cmd_args);
     } else if (mem.eql(u8, cmd, "libc")) {
         return cmdLibC(gpa, cmd_args);
     } else if (mem.eql(u8, cmd, "init-exe")) {
@@ -1691,6 +1695,16 @@ fn buildOutputType(
                             linker_compress_debug_sections = std.meta.stringToEnum(link.CompressDebugSections, it.only_arg) orelse {
                                 fatal("expected [none|zlib] after --compress-debug-sections, found '{s}'", .{it.only_arg});
                             };
+                        }
+                    },
+                    .install_name => {
+                        install_name = it.only_arg;
+                    },
+                    .undefined => {
+                        if (mem.eql(u8, "dynamic_lookup", it.only_arg)) {
+                            linker_allow_shlib_undefined = true;
+                        } else {
+                            fatal("unsupported -undefined option '{s}'", .{it.only_arg});
                         }
                     },
                 }
@@ -3427,7 +3441,7 @@ fn updateModule(gpa: Allocator, comp: *Compilation, hook: AfterUpdateHook) !void
 
     if (errors.list.len != 0) {
         const ttyconf: std.debug.TTY.Config = switch (comp.color) {
-            .auto => std.debug.detectTTYConfig(),
+            .auto => std.debug.detectTTYConfig(std.io.getStdErr()),
             .on => .escape_codes,
             .off => .no_color,
         };
@@ -3549,7 +3563,7 @@ fn cmdTranslateC(comp: *Compilation, arena: Allocator, enable_cache: bool) !void
 
         const c_headers_dir_path = try comp.zig_lib_directory.join(arena, &[_][]const u8{"include"});
         const c_headers_dir_path_z = try arena.dupeZ(u8, c_headers_dir_path);
-        var clang_errors: []translate_c.ClangErrMsg = &[0]translate_c.ClangErrMsg{};
+        var clang_errors: []clang.ErrorMsg = &[0]clang.ErrorMsg{};
         var tree = translate_c.translate(
             comp.gpa,
             new_argv.ptr,
@@ -4248,7 +4262,7 @@ pub fn cmdFmt(gpa: Allocator, arena: Allocator, args: []const []const u8) !void 
 
                 try Compilation.AllErrors.addZir(arena_instance.allocator(), &errors, &file);
                 const ttyconf: std.debug.TTY.Config = switch (color) {
-                    .auto => std.debug.detectTTYConfig(),
+                    .auto => std.debug.detectTTYConfig(std.io.getStdErr()),
                     .on => .escape_codes,
                     .off => .no_color,
                 };
@@ -4461,7 +4475,7 @@ fn fmtPathFile(
 
             try Compilation.AllErrors.addZir(arena_instance.allocator(), &errors, &file);
             const ttyconf: std.debug.TTY.Config = switch (fmt.color) {
-                .auto => std.debug.detectTTYConfig(),
+                .auto => std.debug.detectTTYConfig(std.io.getStdErr()),
                 .on => .escape_codes,
                 .off => .no_color,
             };
@@ -4582,7 +4596,7 @@ fn printErrsMsgToStdErr(
         };
 
         const ttyconf: std.debug.TTY.Config = switch (color) {
-            .auto => std.debug.detectTTYConfig(),
+            .auto => std.debug.detectTTYConfig(std.io.getStdErr()),
             .on => .escape_codes,
             .off => .no_color,
         };
@@ -4787,6 +4801,8 @@ pub const ClangArgIterator = struct {
         weak_framework,
         headerpad_max_install_names,
         compress_debug_sections,
+        install_name,
+        undefined,
     };
 
     const Args = struct {
@@ -5172,7 +5188,7 @@ pub fn cmdAstCheck(
         var errors = std.ArrayList(Compilation.AllErrors.Message).init(arena);
         try Compilation.AllErrors.addZir(arena, &errors, &file);
         const ttyconf: std.debug.TTY.Config = switch (color) {
-            .auto => std.debug.detectTTYConfig(),
+            .auto => std.debug.detectTTYConfig(std.io.getStdErr()),
             .on => .escape_codes,
             .off => .no_color,
         };
@@ -5297,7 +5313,7 @@ pub fn cmdChangelist(
     if (file.zir.hasCompileErrors()) {
         var errors = std.ArrayList(Compilation.AllErrors.Message).init(arena);
         try Compilation.AllErrors.addZir(arena, &errors, &file);
-        const ttyconf = std.debug.detectTTYConfig();
+        const ttyconf = std.debug.detectTTYConfig(std.io.getStdErr());
         for (errors.items) |full_err_msg| {
             full_err_msg.renderToStdErr(ttyconf);
         }
@@ -5336,7 +5352,7 @@ pub fn cmdChangelist(
     if (file.zir.hasCompileErrors()) {
         var errors = std.ArrayList(Compilation.AllErrors.Message).init(arena);
         try Compilation.AllErrors.addZir(arena, &errors, &file);
-        const ttyconf = std.debug.detectTTYConfig();
+        const ttyconf = std.debug.detectTTYConfig(std.io.getStdErr());
         for (errors.items) |full_err_msg| {
             full_err_msg.renderToStdErr(ttyconf);
         }

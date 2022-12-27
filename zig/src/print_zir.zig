@@ -185,7 +185,6 @@ const Writer = struct {
             .size_of,
             .bit_size_of,
             .typeof_log2_int_type,
-            .log2_int_type,
             .ptr_to_int,
             .compile_error,
             .set_eval_branch_quota,
@@ -230,7 +229,6 @@ const Writer = struct {
             .validate_struct_init_ty,
             .make_ptr_const,
             .validate_deref,
-            .overflow_arithmetic_ptr,
             .check_comptime_control_flow,
             => try self.writeUnNode(stream, inst),
 
@@ -465,6 +463,7 @@ const Writer = struct {
             .frame,
             .frame_address,
             .breakpoint,
+            .c_va_start,
             => try self.writeExtNode(stream, extended),
 
             .builtin_src => {
@@ -504,6 +503,8 @@ const Writer = struct {
             .error_to_int,
             .int_to_error,
             .reify,
+            .c_va_copy,
+            .c_va_end,
             => {
                 const inst_data = self.code.extraData(Zir.Inst.UnNode, extended.operand).data;
                 const src = LazySrcLoc.nodeOffset(inst_data.node);
@@ -518,6 +519,7 @@ const Writer = struct {
             .wasm_memory_grow,
             .prefetch,
             .addrspace_cast,
+            .c_va_arg,
             => {
                 const inst_data = self.code.extraData(Zir.Inst.BinNode, extended.operand).data;
                 const src = LazySrcLoc.nodeOffset(inst_data.node);
@@ -801,7 +803,7 @@ const Writer = struct {
         try self.writeFlag(stream, "nosuspend ", extra.flags.is_nosuspend);
         try self.writeFlag(stream, "comptime ", extra.flags.is_comptime);
 
-        try self.writeInstRef(stream, extra.options);
+        try self.writeInstRef(stream, extra.modifier);
         try stream.writeAll(", ");
         try self.writeInstRef(stream, extra.callee);
         try stream.writeAll(", ");
@@ -1149,14 +1151,12 @@ const Writer = struct {
     }
 
     fn writeOverflowArithmetic(self: *Writer, stream: anytype, extended: Zir.Inst.Extended.InstData) !void {
-        const extra = self.code.extraData(Zir.Inst.OverflowArithmetic, extended.operand).data;
+        const extra = self.code.extraData(Zir.Inst.BinNode, extended.operand).data;
         const src = LazySrcLoc.nodeOffset(extra.node);
 
         try self.writeInstRef(stream, extra.lhs);
         try stream.writeAll(", ");
         try self.writeInstRef(stream, extra.rhs);
-        try stream.writeAll(", ");
-        try self.writeInstRef(stream, extra.ptr);
         try stream.writeAll(")) ");
         try self.writeSrc(stream, src);
     }
@@ -1170,7 +1170,7 @@ const Writer = struct {
         if (extra.data.flags.ensure_result_used) {
             try stream.writeAll("nodiscard ");
         }
-        try stream.print(".{s}, ", .{@tagName(@intToEnum(std.builtin.CallOptions.Modifier, extra.data.flags.packed_modifier))});
+        try stream.print(".{s}, ", .{@tagName(@intToEnum(std.builtin.CallModifier, extra.data.flags.packed_modifier))});
         try self.writeInstRef(stream, extra.data.callee);
         try stream.writeAll(", [");
 
@@ -1312,7 +1312,7 @@ const Writer = struct {
                 type_len: u32 = 0,
                 align_len: u32 = 0,
                 init_len: u32 = 0,
-                field_type: Zir.Inst.Ref = .none,
+                type: Zir.Inst.Ref = .none,
                 name: u32,
                 is_comptime: bool,
             };
@@ -1353,7 +1353,7 @@ const Writer = struct {
                     if (has_type_body) {
                         fields[field_i].type_len = self.code.extra[extra_index];
                     } else {
-                        fields[field_i].field_type = @intToEnum(Zir.Inst.Ref, self.code.extra[extra_index]);
+                        fields[field_i].type = @intToEnum(Zir.Inst.Ref, self.code.extra[extra_index]);
                     }
                     extra_index += 1;
 
@@ -1384,8 +1384,8 @@ const Writer = struct {
                 } else {
                     try stream.print("@\"{d}\": ", .{i});
                 }
-                if (field.field_type != .none) {
-                    try self.writeInstRef(stream, field.field_type);
+                if (field.type != .none) {
+                    try self.writeInstRef(stream, field.type);
                 }
 
                 if (field.type_len > 0) {

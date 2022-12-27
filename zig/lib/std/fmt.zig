@@ -1724,7 +1724,7 @@ pub const ParseIntError = error{
 ///     ) !void;
 ///
 pub fn Formatter(comptime format_fn: anytype) type {
-    const Data = @typeInfo(@TypeOf(format_fn)).Fn.args[0].arg_type.?;
+    const Data = @typeInfo(@TypeOf(format_fn)).Fn.params[0].type.?;
     return struct {
         data: Data,
         pub fn format(
@@ -2198,8 +2198,9 @@ test "slice" {
 }
 
 test "escape non-printable" {
-    try expectFmt("abc", "{s}", .{fmtSliceEscapeLower("abc")});
+    try expectFmt("abc 123", "{s}", .{fmtSliceEscapeLower("abc 123")});
     try expectFmt("ab\\xffc", "{s}", .{fmtSliceEscapeLower("ab\xffc")});
+    try expectFmt("abc 123", "{s}", .{fmtSliceEscapeUpper("abc 123")});
     try expectFmt("ab\\xFFc", "{s}", .{fmtSliceEscapeUpper("ab\xffc")});
 }
 

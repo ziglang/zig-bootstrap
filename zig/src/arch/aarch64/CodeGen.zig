@@ -477,7 +477,7 @@ pub fn addExtraAssumeCapacity(self: *Self, extra: anytype) u32 {
     const fields = std.meta.fields(@TypeOf(extra));
     const result = @intCast(u32, self.mir_extra.items.len);
     inline for (fields) |field| {
-        self.mir_extra.appendAssumeCapacity(switch (field.field_type) {
+        self.mir_extra.appendAssumeCapacity(switch (field.type) {
             u32 => @field(extra, field.name),
             i32 => @bitCast(u32, @field(extra, field.name)),
             else => @compileError("bad field type"),
@@ -873,6 +873,12 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
 
             .is_named_enum_value => return self.fail("TODO implement is_named_enum_value", .{}),
             .error_set_has_value => return self.fail("TODO implement error_set_has_value", .{}),
+            .vector_store_elem => return self.fail("TODO implement vector_store_elem", .{}),
+
+            .c_va_arg => return self.fail("TODO implement c_va_arg", .{}),
+            .c_va_copy => return self.fail("TODO implement c_va_copy", .{}),
+            .c_va_end => return self.fail("TODO implement c_va_end", .{}),
+            .c_va_start => return self.fail("TODO implement c_va_start", .{}),
 
             .wasm_memory_size => unreachable,
             .wasm_memory_grow => unreachable,
@@ -4037,9 +4043,24 @@ fn airStructFieldVal(self: *Self, inst: Air.Inst.Index) !void {
 
 fn airFieldParentPtr(self: *Self, inst: Air.Inst.Index) !void {
     const ty_pl = self.air.instructions.items(.data)[inst].ty_pl;
-    const extra = self.air.extraData(Air.StructField, ty_pl.payload).data;
-    _ = extra;
-    return self.fail("TODO implement codegen airFieldParentPtr", .{});
+    const extra = self.air.extraData(Air.FieldParentPtr, ty_pl.payload).data;
+    const result: MCValue = if (self.liveness.isUnused(inst)) .dead else result: {
+        const field_ptr = try self.resolveInst(extra.field_ptr);
+        const struct_ty = self.air.getRefType(ty_pl.ty).childType();
+        const struct_field_offset = @intCast(u32, struct_ty.structFieldOffset(extra.field_index, self.target.*));
+        switch (field_ptr) {
+            .ptr_stack_offset => |off| {
+                break :result MCValue{ .ptr_stack_offset = off + struct_field_offset };
+            },
+            else => {
+                const lhs_bind: ReadArg.Bind = .{ .mcv = field_ptr };
+                const rhs_bind: ReadArg.Bind = .{ .mcv = .{ .immediate = struct_field_offset } };
+
+                break :result try self.addSub(.sub, lhs_bind, rhs_bind, Type.usize, Type.usize, null);
+            },
+        }
+    };
+    return self.finishAir(inst, result, .{ extra.field_ptr, .none, .none });
 }
 
 fn airArg(self: *Self, inst: Air.Inst.Index) !void {
@@ -4110,7 +4131,7 @@ fn airFence(self: *Self) !void {
     //return self.finishAirBookkeeping();
 }
 
-fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallOptions.Modifier) !void {
+fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier) !void {
     if (modifier == .always_tail) return self.fail("TODO implement tail calls for aarch64", .{});
     const pl_op = self.air.instructions.items(.data)[inst].pl_op;
     const callee = pl_op.operand;
@@ -6200,7 +6221,6 @@ fn genTypedValue(self: *Self, arg_tv: TypedValue) InnerError!MCValue {
         .NoReturn => unreachable,
         .Undefined => unreachable,
         .Null => unreachable,
-        .BoundFn => unreachable,
         .Opaque => unreachable,
 
         else => {},

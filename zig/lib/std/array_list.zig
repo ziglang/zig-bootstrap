@@ -97,8 +97,7 @@ pub fn ArrayListAligned(comptime T: type, comptime alignment: ?u29) type {
         }
 
         /// The caller owns the returned memory. Empties this ArrayList,
-        /// however its capacity may or may not be cleared and deinit() is
-        /// still required to clean up its memory.
+        /// Its capacity is cleared, making deinit() safe but unnecessary to call.
         pub fn toOwnedSlice(self: *Self) Allocator.Error!Slice {
             const allocator = self.allocator;
 
@@ -112,7 +111,7 @@ pub fn ArrayListAligned(comptime T: type, comptime alignment: ?u29) type {
             const new_memory = try allocator.alignedAlloc(T, alignment, self.items.len);
             mem.copy(T, new_memory, self.items);
             @memset(@ptrCast([*]u8, self.items.ptr), undefined, self.items.len * @sizeOf(T));
-            self.items.len = 0;
+            self.clearAndFree();
             return new_memory;
         }
 
@@ -533,9 +532,8 @@ pub fn ArrayListAlignedUnmanaged(comptime T: type, comptime alignment: ?u29) typ
             return .{ .items = self.items, .capacity = self.capacity, .allocator = allocator };
         }
 
-        /// The caller owns the returned memory. Empties this ArrayList,
-        /// however its capacity may or may not be cleared and deinit() is
-        /// still required to clean up its memory.
+        /// The caller owns the returned memory. Empties this ArrayList.
+        /// Its capacity is cleared, making deinit() safe but unnecessary to call.
         pub fn toOwnedSlice(self: *Self, allocator: Allocator) Allocator.Error!Slice {
             const old_memory = self.allocatedSlice();
             if (allocator.resize(old_memory, self.items.len)) {
@@ -547,7 +545,7 @@ pub fn ArrayListAlignedUnmanaged(comptime T: type, comptime alignment: ?u29) typ
             const new_memory = try allocator.alignedAlloc(T, alignment, self.items.len);
             mem.copy(T, new_memory, self.items);
             @memset(@ptrCast([*]u8, self.items.ptr), undefined, self.items.len * @sizeOf(T));
-            self.items.len = 0;
+            self.clearAndFree(allocator);
             return new_memory;
         }
 

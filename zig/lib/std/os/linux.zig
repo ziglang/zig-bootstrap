@@ -263,7 +263,7 @@ pub fn fork() usize {
 /// the compiler is not aware of how vfork affects control flow and you may
 /// see different results in optimized builds.
 pub inline fn vfork() usize {
-    return @call(.{ .modifier = .always_inline }, syscall0, .{.vfork});
+    return @call(.always_inline, syscall0, .{.vfork});
 }
 
 pub fn futimens(fd: i32, times: *const [2]timespec) usize {
@@ -1244,7 +1244,7 @@ pub fn sendmmsg(fd: i32, msgvec: [*]mmsghdr_const, vlen: u32, flags: u32) usize 
             var size: i32 = 0;
             const msg_iovlen = @intCast(usize, msg.msg_hdr.msg_iovlen); // kernel side this is treated as unsigned
             for (msg.msg_hdr.msg_iov[0..msg_iovlen]) |iov| {
-                if (iov.iov_len > std.math.maxInt(i32) or @addWithOverflow(i32, size, @intCast(i32, iov.iov_len), &size)) {
+                if (iov.iov_len > std.math.maxInt(i32) or @addWithOverflow(size, @intCast(i32, iov.iov_len))[1] != 0) {
                     // batch-send all messages up to the current message
                     if (next_unsent < i) {
                         const batch_size = i - next_unsent;

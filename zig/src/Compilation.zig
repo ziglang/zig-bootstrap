@@ -31,6 +31,7 @@ const clangMain = @import("main.zig").clangMain;
 const Module = @import("Module.zig");
 const Cache = @import("Cache.zig");
 const translate_c = @import("translate_c.zig");
+const clang = @import("clang.zig");
 const c_codegen = @import("codegen/c.zig");
 const ThreadPool = @import("ThreadPool.zig");
 const WaitGroup = @import("WaitGroup.zig");
@@ -428,29 +429,29 @@ pub const AllErrors = struct {
             switch (msg) {
                 .src => |src| {
                     try counting_stderr.writeByteNTimes(' ', indent);
-                    ttyconf.setColor(stderr, .Bold);
+                    try ttyconf.setColor(stderr, .Bold);
                     try counting_stderr.print("{s}:{d}:{d}: ", .{
                         src.src_path,
                         src.line + 1,
                         src.column + 1,
                     });
-                    ttyconf.setColor(stderr, color);
+                    try ttyconf.setColor(stderr, color);
                     try counting_stderr.writeAll(kind);
                     try counting_stderr.writeAll(": ");
                     // This is the length of the part before the error message:
                     // e.g. "file.zig:4:5: error: "
                     const prefix_len = @intCast(usize, counting_stderr.context.bytes_written);
-                    ttyconf.setColor(stderr, .Reset);
-                    ttyconf.setColor(stderr, .Bold);
+                    try ttyconf.setColor(stderr, .Reset);
+                    try ttyconf.setColor(stderr, .Bold);
                     if (src.count == 1) {
                         try src.writeMsg(stderr, prefix_len);
                         try stderr.writeByte('\n');
                     } else {
                         try src.writeMsg(stderr, prefix_len);
-                        ttyconf.setColor(stderr, .Dim);
+                        try ttyconf.setColor(stderr, .Dim);
                         try stderr.print(" ({d} times)\n", .{src.count});
                     }
-                    ttyconf.setColor(stderr, .Reset);
+                    try ttyconf.setColor(stderr, .Reset);
                     if (src.source_line) |line| {
                         for (line) |b| switch (b) {
                             '\t' => try stderr.writeByte(' '),
@@ -462,19 +463,19 @@ pub const AllErrors = struct {
                         // -1 since span.main includes the caret
                         const after_caret = src.span.end - src.span.main -| 1;
                         try stderr.writeByteNTimes(' ', src.column - before_caret);
-                        ttyconf.setColor(stderr, .Green);
+                        try ttyconf.setColor(stderr, .Green);
                         try stderr.writeByteNTimes('~', before_caret);
                         try stderr.writeByte('^');
                         try stderr.writeByteNTimes('~', after_caret);
                         try stderr.writeByte('\n');
-                        ttyconf.setColor(stderr, .Reset);
+                        try ttyconf.setColor(stderr, .Reset);
                     }
                     for (src.notes) |note| {
                         try note.renderToWriter(ttyconf, stderr, "note", .Cyan, indent);
                     }
                     if (src.reference_trace.len != 0) {
-                        ttyconf.setColor(stderr, .Reset);
-                        ttyconf.setColor(stderr, .Dim);
+                        try ttyconf.setColor(stderr, .Reset);
+                        try ttyconf.setColor(stderr, .Dim);
                         try stderr.print("referenced by:\n", .{});
                         for (src.reference_trace) |reference| {
                             switch (reference) {
@@ -498,23 +499,23 @@ pub const AllErrors = struct {
                             }
                         }
                         try stderr.writeByte('\n');
-                        ttyconf.setColor(stderr, .Reset);
+                        try ttyconf.setColor(stderr, .Reset);
                     }
                 },
                 .plain => |plain| {
-                    ttyconf.setColor(stderr, color);
+                    try ttyconf.setColor(stderr, color);
                     try stderr.writeByteNTimes(' ', indent);
                     try stderr.writeAll(kind);
                     try stderr.writeAll(": ");
-                    ttyconf.setColor(stderr, .Reset);
+                    try ttyconf.setColor(stderr, .Reset);
                     if (plain.count == 1) {
                         try stderr.print("{s}\n", .{plain.msg});
                     } else {
                         try stderr.print("{s}", .{plain.msg});
-                        ttyconf.setColor(stderr, .Dim);
+                        try ttyconf.setColor(stderr, .Dim);
                         try stderr.print(" ({d} times)\n", .{plain.count});
                     }
-                    ttyconf.setColor(stderr, .Reset);
+                    try ttyconf.setColor(stderr, .Reset);
                     for (plain.notes) |note| {
                         try note.renderToWriter(ttyconf, stderr, "note", .Cyan, indent + 4);
                     }
@@ -571,7 +572,7 @@ pub const AllErrors = struct {
         self.arena.promote(gpa).deinit();
     }
 
-    fn add(
+    pub fn add(
         module: *Module,
         arena: *std.heap.ArenaAllocator,
         errors: *std.ArrayList(Message),
@@ -2749,6 +2750,9 @@ pub fn totalErrorCount(self: *Compilation) usize {
             const decl = module.declPtr(key);
             if (decl.getFileScope().okToReportErrors()) {
                 total += 1;
+                if (module.cimport_errors.get(key)) |errors| {
+                    total += errors.len;
+                }
             }
         }
         if (module.emit_h) |emit_h| {
@@ -2858,6 +2862,23 @@ pub fn getAllErrorsAlloc(self: *Compilation) !AllErrors {
                 // We'll try again once parsing succeeds.
                 if (decl.getFileScope().okToReportErrors()) {
                     try AllErrors.add(module, &arena, &errors, entry.value_ptr.*.*);
+                    if (module.cimport_errors.get(entry.key_ptr.*)) |cimport_errors| for (cimport_errors) |c_error| {
+                        if (c_error.path) |some|
+                            try errors.append(.{
+                                .src = .{
+                                    .src_path = try arena_allocator.dupe(u8, std.mem.span(some)),
+                                    .span = .{ .start = c_error.offset, .end = c_error.offset + 1, .main = c_error.offset },
+                                    .msg = try arena_allocator.dupe(u8, std.mem.span(c_error.msg)),
+                                    .line = c_error.line,
+                                    .column = c_error.column,
+                                    .source_line = if (c_error.source_line) |line| try arena_allocator.dupe(u8, std.mem.span(line)) else null,
+                                },
+                            })
+                        else
+                            try errors.append(.{
+                                .plain = .{ .msg = try arena_allocator.dupe(u8, std.mem.span(c_error.msg)) },
+                            });
+                    };
                 }
             }
         }
@@ -3524,7 +3545,7 @@ test "cImport" {
 
 const CImportResult = struct {
     out_zig_path: []u8,
-    errors: []translate_c.ClangErrMsg,
+    errors: []clang.ErrorMsg,
 };
 
 /// Caller owns returned memory.
@@ -3540,7 +3561,6 @@ pub fn cImport(comp: *Compilation, c_src: []const u8) !CImportResult {
     const cimport_zig_basename = "cimport.zig";
 
     var man = comp.obtainCObjectCacheManifest();
-    man.want_shared_lock = false;
     defer man.deinit();
 
     man.hash.add(@as(u16, 0xb945)); // Random number to distinguish translate-c from compiling C objects
@@ -3600,7 +3620,7 @@ pub fn cImport(comp: *Compilation, c_src: []const u8) !CImportResult {
 
         const c_headers_dir_path = try comp.zig_lib_directory.join(arena, &[_][]const u8{"include"});
         const c_headers_dir_path_z = try arena.dupeZ(u8, c_headers_dir_path);
-        var clang_errors: []translate_c.ClangErrMsg = &[0]translate_c.ClangErrMsg{};
+        var clang_errors: []clang.ErrorMsg = &[0]clang.ErrorMsg{};
         var tree = translate_c.translate(
             comp.gpa,
             new_argv.ptr,
@@ -3654,7 +3674,6 @@ pub fn cImport(comp: *Compilation, c_src: []const u8) !CImportResult {
     // possible we had a hit and the manifest is dirty, for example if the file mtime changed but
     // the contents were the same, we hit the cache but the manifest is dirty and we need to update
     // it to prevent doing a full file content comparison the next time around.
-    man.want_shared_lock = true;
     man.writeManifest() catch |err| {
         log.warn("failed to write cache manifest for C import: {s}", .{@errorName(err)});
     };
@@ -3667,7 +3686,7 @@ pub fn cImport(comp: *Compilation, c_src: []const u8) !CImportResult {
     }
     return CImportResult{
         .out_zig_path = out_zig_path,
-        .errors = &[0]translate_c.ClangErrMsg{},
+        .errors = &[0]clang.ErrorMsg{},
     };
 }
 
@@ -3829,7 +3848,6 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: *std.P
     }
 
     var man = comp.obtainCObjectCacheManifest();
-    man.want_shared_lock = false;
     defer man.deinit();
 
     man.hash.add(comp.clang_preprocessor_mode);
@@ -4125,7 +4143,6 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: *std.P
     // possible we had a hit and the manifest is dirty, for example if the file mtime changed but
     // the contents were the same, we hit the cache but the manifest is dirty and we need to update
     // it to prevent doing a full file content comparison the next time around.
-    man.want_shared_lock = true;
     man.writeManifest() catch |err| {
         log.warn("failed to write cache manifest when compiling '{s}': {s}", .{ c_object.src.src_path, @errorName(err) });
     };

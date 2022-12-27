@@ -287,9 +287,6 @@ pub const Type = opaque {
     pub const getUndef = LLVMGetUndef;
     extern fn LLVMGetUndef(Ty: *Type) *Value;
 
-    pub const pointerType = LLVMPointerType;
-    extern fn LLVMPointerType(ElementType: *Type, AddressSpace: c_uint) *Type;
-
     pub const arrayType = LLVMArrayType;
     extern fn LLVMArrayType(ElementType: *Type, ElementCount: c_uint) *Type;
 
@@ -965,6 +962,9 @@ pub const Builder = opaque {
 
     pub const buildAllocaInAddressSpace = ZigLLVMBuildAllocaInAddressSpace;
     extern fn ZigLLVMBuildAllocaInAddressSpace(B: *Builder, Ty: *Type, AddressSpace: c_uint, Name: [*:0]const u8) *Value;
+
+    pub const buildVAArg = LLVMBuildVAArg;
+    extern fn LLVMBuildVAArg(*Builder, List: *Value, Ty: *Type, Name: [*:0]const u8) *Value;
 };
 
 pub const MDString = opaque {

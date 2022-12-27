@@ -120,11 +120,17 @@ string(REGEX REPLACE "\\\\" "\\\\\\\\" ZIG_LIBC_INCLUDE_DIR_ESCAPED "${ZIG_LIBC_
 set(ZIG_TARGET_TRIPLE "native" CACHE STRING "arch-os-abi to output binaries for")
 set(ZIG_TARGET_MCPU "native" CACHE STRING "-mcpu parameter to output binaries for")
 set(ZIG_SINGLE_THREADED off CACHE BOOL "limit the zig compiler to use only 1 thread")
+set(ZIG_AR_WORKAROUND off CACHE BOOL "append 'ar' subcommand to CMAKE_AR")
 
 if("${ZIG_TARGET_TRIPLE}" STREQUAL "native")
     set(ZIG_USE_LLVM_CONFIG ON CACHE BOOL "use llvm-config to find LLVM libraries")
 else()
     set(ZIG_USE_LLVM_CONFIG OFF CACHE BOOL "use llvm-config to find LLVM libraries")
+endif()
+
+if(ZIG_AR_WORKAROUND)
+  string(REPLACE "<CMAKE_AR>" "<CMAKE_AR> ar" CMAKE_C_ARCHIVE_CREATE ${CMAKE_C_ARCHIVE_CREATE})
+  string(REPLACE "<CMAKE_AR>" "<CMAKE_AR> ar" CMAKE_CXX_ARCHIVE_CREATE ${CMAKE_CXX_ARCHIVE_CREATE})
 endif()
 
 find_package(llvm 15)
@@ -181,16 +187,6 @@ set(ZIG_CONFIG_ZIG_OUT "${CMAKE_BINARY_DIR}/config.zig")
 
 set(ZIG_WASM2C_SOURCES
     "${CMAKE_SOURCE_DIR}/stage1/wasm2c.c"
-    "${CMAKE_SOURCE_DIR}/stage1/zstd/lib/decompress/huf_decompress.c"
-    "${CMAKE_SOURCE_DIR}/stage1/zstd/lib/decompress/zstd_ddict.c"
-    "${CMAKE_SOURCE_DIR}/stage1/zstd/lib/decompress/zstd_decompress.c"
-    "${CMAKE_SOURCE_DIR}/stage1/zstd/lib/decompress/zstd_decompress_block.c"
-    "${CMAKE_SOURCE_DIR}/stage1/zstd/lib/common/entropy_common.c"
-    "${CMAKE_SOURCE_DIR}/stage1/zstd/lib/common/error_private.c"
-    "${CMAKE_SOURCE_DIR}/stage1/zstd/lib/common/fse_decompress.c"
-    "${CMAKE_SOURCE_DIR}/stage1/zstd/lib/common/pool.c"
-    "${CMAKE_SOURCE_DIR}/stage1/zstd/lib/common/xxhash.c"
-    "${CMAKE_SOURCE_DIR}/stage1/zstd/lib/common/zstd_common.c"
 )
 set(ZIG_CPP_SOURCES
     # These are planned to stay even when we are self-hosted.
@@ -476,6 +472,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/compiler_rt/truncxfhf2.zig"
     "${CMAKE_SOURCE_DIR}/lib/compiler_rt/truncxfsf2.zig"
     "${CMAKE_SOURCE_DIR}/lib/compiler_rt/udivmod.zig"
+    "${CMAKE_SOURCE_DIR}/lib/compiler_rt/udivmodei4.zig"
     "${CMAKE_SOURCE_DIR}/lib/compiler_rt/udivmodti4.zig"
     "${CMAKE_SOURCE_DIR}/lib/compiler_rt/udivti3.zig"
     "${CMAKE_SOURCE_DIR}/lib/compiler_rt/umodti3.zig"
@@ -589,10 +586,13 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/link/MachO/DwarfInfo.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/Dylib.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/Object.zig"
+    "${CMAKE_SOURCE_DIR}/src/link/MachO/Relocation.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/Trie.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/ZldAtom.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/bind.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/dead_strip.zig"
+    "${CMAKE_SOURCE_DIR}/src/link/MachO/fat.zig"
+    "${CMAKE_SOURCE_DIR}/src/link/MachO/load_commands.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/thunks.zig"
     "${CMAKE_SOURCE_DIR}/src/link/MachO/zld.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Plan9.zig"
@@ -710,7 +710,11 @@ target_link_libraries(zigcpp LINK_PUBLIC
 
 if(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "AMD64")
   set(HOST_TARGET_ARCH "x86_64")
+elseif(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "amd64")
+  set(HOST_TARGET_ARCH "x86_64")
 elseif(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "arm64")
+  set(HOST_TARGET_ARCH "aarch64")
+elseif(CMAKE_HOST_SYSTEM_PROCESSOR STREQUAL "ARM64")
   set(HOST_TARGET_ARCH "aarch64")
 else()
   string(TOLOWER "${CMAKE_HOST_SYSTEM_PROCESSOR}" HOST_TARGET_ARCH)
@@ -723,7 +727,7 @@ endif()
 set(HOST_TARGET_TRIPLE "${HOST_TARGET_ARCH}-${HOST_TARGET_OS}")
 
 if(MSVC)
-  set(ZIG_WASM2C_COMPILE_FLAGS "/std:c99 /O2")
+  set(ZIG_WASM2C_COMPILE_FLAGS "")
   set(ZIG1_COMPILE_FLAGS "/std:c99 /Os")
   set(ZIG2_COMPILE_FLAGS "/std:c99 /O0")
   set(ZIG2_LINK_FLAGS "/STACK:16777216")
@@ -738,29 +742,30 @@ else()
   endif()
 endif()
 
-set(ZIG1_WASM_ZST_SOURCE "${CMAKE_SOURCE_DIR}/stage1/zig1.wasm.zst")
+set(ZIG1_WASM_MODULE "${CMAKE_SOURCE_DIR}/stage1/zig1.wasm")
 set(ZIG1_C_SOURCE "${CMAKE_BINARY_DIR}/zig1.c")
 set(ZIG2_C_SOURCE "${CMAKE_BINARY_DIR}/zig2.c")
 set(ZIG_COMPILER_RT_C_SOURCE "${CMAKE_BINARY_DIR}/compiler_rt.c")
 
 add_executable(zig-wasm2c ${ZIG_WASM2C_SOURCES})
-set_target_properties(zig-wasm2c PROPERTIES COMPILE_FLAGS ${ZIG_WASM2C_COMPILE_FLAGS})
-target_include_directories(zig-wasm2c PUBLIC "${CMAKE_SOURCE_DIR}/stage1/zstd/lib")
-target_compile_definitions(zig-wasm2c PRIVATE ZSTD_DISABLE_ASM)
+set_target_properties(zig-wasm2c PROPERTIES COMPILE_FLAGS "${ZIG_WASM2C_COMPILE_FLAGS}")
 
 add_custom_command(
   OUTPUT "${ZIG1_C_SOURCE}"
-  COMMAND zig-wasm2c "${ZIG1_WASM_ZST_SOURCE}" "${ZIG1_C_SOURCE}"
-  DEPENDS zig-wasm2c "${ZIG1_WASM_ZST_SOURCE}"
-  COMMENT STATUS "Converting ${ZIG1_WASM_ZST_SOURCE} to ${ZIG1_C_SOURCE}"
+  COMMAND zig-wasm2c "${ZIG1_WASM_MODULE}" "${ZIG1_C_SOURCE}"
+  DEPENDS zig-wasm2c "${ZIG1_WASM_MODULE}"
+  COMMENT STATUS "Converting ${ZIG1_WASM_MODULE} to ${ZIG1_C_SOURCE}"
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
 )
 
 add_executable(zig1 ${ZIG1_C_SOURCE} "${CMAKE_SOURCE_DIR}/stage1/wasi.c")
 set_target_properties(zig1 PROPERTIES COMPILE_FLAGS ${ZIG1_COMPILE_FLAGS})
-target_link_libraries(zig1 LINK_PUBLIC m)
-target_include_directories(zig1 PUBLIC "${CMAKE_SOURCE_DIR}/stage1/zstd/lib")
-target_compile_definitions(zig1 PRIVATE ZSTD_DISABLE_ASM)
+
+if(MSVC)
+  target_link_options(zig1 PRIVATE /STACK:0x10000000)
+else()
+  target_link_libraries(zig1 LINK_PUBLIC m)
+endif()
 
 set(BUILD_ZIG2_ARGS
   "${CMAKE_SOURCE_DIR}/lib"
