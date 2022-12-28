@@ -28,7 +28,7 @@ FOR /F "tokens=2,3 delims=-" %%i IN ("%TARGET%") DO (
 set OUTDIR=out-win
 set ROOTDIR=%~dp0
 set "ROOTDIR_CMAKE=%ROOTDIR:\=/%"
-set ZIG_VERSION=0.11.0-dev.78+28288dcbb
+set ZIG_VERSION=0.11.0-dev.971+19056cb68
 
 set JOBS_ARG=
 
@@ -41,7 +41,8 @@ cmake "%ROOTDIR%/zlib" ^
   -G "Ninja" ^
   -DCMAKE_INSTALL_PREFIX="%ROOTDIR%/%OUTDIR%/host" ^
   -DCMAKE_PREFIX_PATH="%ROOTDIR%/%OUTDIR%/host" ^
-  -DCMAKE_BUILD_TYPE=Release
+  -DCMAKE_BUILD_TYPE=Release ^
+  -DCMAKE_USER_MAKE_RULES_OVERRIDE="%ROOTDIR%/zig/cmake/c_flag_overrides.cmake"
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
 cmake --build . %JOBS_ARG% --target install
@@ -85,8 +86,8 @@ cmake "%ROOTDIR%/zig" ^
   -DZIG_ENABLE_ZSTD=OFF ^
   -DZIG_ENABLE_LIBCPP=OFF ^
   -DZIG_TARGET_TRIPLE=x86_64-windows-msvc ^
-  -DZIG_TARGET_MCPU=baseline ^
-  -DZIG_VERSION="%ZIG_VERSION%"
+  -DZIG_TARGET_MCPU=baseline
+
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 cmake --build . %JOBS_ARG% --target install
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
@@ -241,8 +242,7 @@ cd "%ROOTDIR%\zig"
   -Dstrip ^
   -Dtarget="%TARGET%" ^
   -Dcpu="%MCPU%" ^
-  -Dversion-string="%ZIG_VERSION%" ^
-  -Denable-stage1
+  -Dversion-string="%ZIG_VERSION%"
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 
 popd
