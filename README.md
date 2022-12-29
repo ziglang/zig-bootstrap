@@ -111,7 +111,7 @@ is more portable across Linux distributions.
 | `powerpc64-linux-gnu`      | [#113](https://github.com/ziglang/zig-bootstrap/issues/113) |
 | `powerpc64-linux-musl`     | not tested     |
 | `powerpc-linux-gnu`        | [#114](https://github.com/ziglang/zig-bootstrap/issues/114) |
-| `powerpc-linux-musl`       | not tested     |
+| `powerpc-linux-musl`       | OK             |
 | `riscv64-linux-gnu`        | [#115](https://github.com/ziglang/zig-bootstrap/issues/115) |
 | `riscv64-linux-musl`       | OK             |
 | `s390x-linux-gnu`          | [#116](https://github.com/ziglang/zig-bootstrap/issues/116) |
