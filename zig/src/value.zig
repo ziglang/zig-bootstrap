@@ -71,7 +71,7 @@ pub const Value = extern union {
         address_space_type,
         float_mode_type,
         reduce_op_type,
-        modifier_type,
+        call_options_type,
         prefetch_options_type,
         export_options_type,
         extern_options_type,
@@ -264,7 +264,7 @@ pub const Value = extern union {
                 .address_space_type,
                 .float_mode_type,
                 .reduce_op_type,
-                .modifier_type,
+                .call_options_type,
                 .prefetch_options_type,
                 .export_options_type,
                 .extern_options_type,
@@ -338,7 +338,7 @@ pub const Value = extern union {
         }
 
         pub fn Data(comptime t: Tag) type {
-            return std.meta.fieldInfo(t.Type(), .data).type;
+            return std.meta.fieldInfo(t.Type(), .data).field_type;
         }
     };
 
@@ -467,7 +467,7 @@ pub const Value = extern union {
             .address_space_type,
             .float_mode_type,
             .reduce_op_type,
-            .modifier_type,
+            .call_options_type,
             .prefetch_options_type,
             .export_options_type,
             .extern_options_type,
@@ -723,7 +723,7 @@ pub const Value = extern union {
             .address_space_type => return out_stream.writeAll("std.builtin.AddressSpace"),
             .float_mode_type => return out_stream.writeAll("std.builtin.FloatMode"),
             .reduce_op_type => return out_stream.writeAll("std.builtin.ReduceOp"),
-            .modifier_type => return out_stream.writeAll("std.builtin.CallModifier"),
+            .call_options_type => return out_stream.writeAll("std.builtin.CallOptions"),
             .prefetch_options_type => return out_stream.writeAll("std.builtin.PrefetchOptions"),
             .export_options_type => return out_stream.writeAll("std.builtin.ExportOptions"),
             .extern_options_type => return out_stream.writeAll("std.builtin.ExternOptions"),
@@ -941,8 +941,8 @@ pub const Value = extern union {
             .comptime_int_type => Type.initTag(.comptime_int),
             .comptime_float_type => Type.initTag(.comptime_float),
             .noreturn_type => Type.initTag(.noreturn),
-            .null_type => Type.initTag(.null),
-            .undefined_type => Type.initTag(.undefined),
+            .null_type => Type.initTag(.@"null"),
+            .undefined_type => Type.initTag(.@"undefined"),
             .fn_noreturn_no_args_type => Type.initTag(.fn_noreturn_no_args),
             .fn_void_no_args_type => Type.initTag(.fn_void_no_args),
             .fn_naked_noreturn_no_args_type => Type.initTag(.fn_naked_noreturn_no_args),
@@ -963,7 +963,7 @@ pub const Value = extern union {
             .address_space_type => Type.initTag(.address_space),
             .float_mode_type => Type.initTag(.float_mode),
             .reduce_op_type => Type.initTag(.reduce_op),
-            .modifier_type => Type.initTag(.modifier),
+            .call_options_type => Type.initTag(.call_options),
             .prefetch_options_type => Type.initTag(.prefetch_options),
             .export_options_type => Type.initTag(.export_options),
             .extern_options_type => Type.initTag(.extern_options),
@@ -1072,13 +1072,11 @@ pub const Value = extern union {
                     .enum_simple => Module.EnumFull.ValueMap{},
                     else => unreachable,
                 };
-                if (values.entries.len == 0) {
+                break :field_index if (values.entries.len == 0)
                     // auto-numbered enum
-                    break :field_index @intCast(u32, val.toUnsignedInt(mod.getTarget()));
-                }
-                var buffer: Type.Payload.Bits = undefined;
-                const int_tag_ty = ty.intTagType(&buffer);
-                break :field_index @intCast(u32, values.getIndexContext(val, .{ .ty = int_tag_ty, .mod = mod }).?);
+                    @intCast(u32, val.toUnsignedInt(mod.getTarget()))
+                else
+                    @intCast(u32, values.getIndexContext(val, .{ .ty = ty, .mod = mod }).?);
             },
         };
 
@@ -1378,7 +1376,6 @@ pub const Value = extern union {
                 var enum_buffer: Payload.U64 = undefined;
                 const int_val = val.enumToInt(ty, &enum_buffer);
 
-                if (abi_size == 0) return;
                 if (abi_size <= @sizeOf(u64)) {
                     const int: u64 = switch (int_val.tag()) {
                         .zero => 0,
@@ -1449,12 +1446,12 @@ pub const Value = extern union {
         const target = mod.getTarget();
         const endian = target.cpu.arch.endian();
         switch (ty.zigTypeTag()) {
-            .Void => return Value.void,
+            .Void => return Value.@"void",
             .Bool => {
                 if (buffer[0] == 0) {
-                    return Value.false;
+                    return Value.@"false";
                 } else {
-                    return Value.true;
+                    return Value.@"true";
                 }
             },
             .Int, .Enum => {
@@ -1554,16 +1551,16 @@ pub const Value = extern union {
         const target = mod.getTarget();
         const endian = target.cpu.arch.endian();
         switch (ty.zigTypeTag()) {
-            .Void => return Value.void,
+            .Void => return Value.@"void",
             .Bool => {
                 const byte = switch (endian) {
                     .Big => buffer[buffer.len - bit_offset / 8 - 1],
                     .Little => buffer[bit_offset / 8],
                 };
                 if (((byte >> @intCast(u3, bit_offset % 8)) & 1) == 0) {
-                    return Value.false;
+                    return Value.@"false";
                 } else {
-                    return Value.true;
+                    return Value.@"true";
                 }
             },
             .Int, .Enum => {
@@ -1572,7 +1569,6 @@ pub const Value = extern union {
                 const abi_size = @intCast(usize, ty.abiSize(target));
 
                 const bits = int_info.bits;
-                if (bits == 0) return Value.zero;
                 if (bits <= 64) switch (int_info.signedness) { // Fast path for integers <= u64
                     .signed => return Value.Tag.int_i64.create(arena, std.mem.readVarPackedInt(i64, buffer, bit_offset, bits, endian, .signed)),
                     .unsigned => return Value.Tag.int_u64.create(arena, std.mem.readVarPackedInt(u64, buffer, bit_offset, bits, endian, .unsigned)),
@@ -1690,8 +1686,22 @@ pub const Value = extern union {
                 @panic("TODO implement i64 Value clz");
             },
             .int_big_positive => {
+                // TODO: move this code into std lib big ints
                 const bigint = val.castTag(.int_big_positive).?.asBigInt();
-                return bigint.clz(ty_bits);
+                // Limbs are stored in little-endian order but we need
+                // to iterate big-endian.
+                var total_limb_lz: u64 = 0;
+                var i: usize = bigint.limbs.len;
+                const bits_per_limb = @sizeOf(std.math.big.Limb) * 8;
+                while (i != 0) {
+                    i -= 1;
+                    const limb = bigint.limbs[i];
+                    const this_limb_lz = @clz(limb);
+                    total_limb_lz += this_limb_lz;
+                    if (this_limb_lz != bits_per_limb) break;
+                }
+                const total_limb_bits = bigint.limbs.len * bits_per_limb;
+                return total_limb_lz + ty_bits - total_limb_bits;
             },
             .int_big_negative => {
                 @panic("TODO implement int_big_negative Value clz");
@@ -1700,12 +1710,6 @@ pub const Value = extern union {
             .the_only_possible_value => {
                 assert(ty_bits == 0);
                 return ty_bits;
-            },
-
-            .lazy_align, .lazy_size => {
-                var bigint_buf: BigIntSpace = undefined;
-                const bigint = val.toBigIntAdvanced(&bigint_buf, target, null) catch unreachable;
-                return bigint.clz(ty_bits);
             },
 
             else => unreachable,
@@ -1726,8 +1730,16 @@ pub const Value = extern union {
                 @panic("TODO implement i64 Value ctz");
             },
             .int_big_positive => {
+                // TODO: move this code into std lib big ints
                 const bigint = val.castTag(.int_big_positive).?.asBigInt();
-                return bigint.ctz();
+                // Limbs are stored in little-endian order.
+                var result: u64 = 0;
+                for (bigint.limbs) |limb| {
+                    const limb_tz = @ctz(limb);
+                    result += limb_tz;
+                    if (limb_tz != @sizeOf(std.math.big.Limb) * 8) break;
+                }
+                return result;
             },
             .int_big_negative => {
                 @panic("TODO implement int_big_negative Value ctz");
@@ -1736,12 +1748,6 @@ pub const Value = extern union {
             .the_only_possible_value => {
                 assert(ty_bits == 0);
                 return ty_bits;
-            },
-
-            .lazy_align, .lazy_size => {
-                var bigint_buf: BigIntSpace = undefined;
-                const bigint = val.toBigIntAdvanced(&bigint_buf, target, null) catch unreachable;
-                return bigint.ctz();
             },
 
             else => unreachable,
@@ -1760,8 +1766,17 @@ pub const Value = extern union {
                 const info = ty.intInfo(target);
 
                 var buffer: Value.BigIntSpace = undefined;
-                const int = val.toBigInt(&buffer, target);
-                return @intCast(u64, int.popCount(info.bits));
+                const operand_bigint = val.toBigInt(&buffer, target);
+
+                var limbs_buffer: [4]std.math.big.Limb = undefined;
+                var result_bigint = BigIntMutable{
+                    .limbs = &limbs_buffer,
+                    .positive = undefined,
+                    .len = undefined,
+                };
+                result_bigint.popCount(operand_bigint, info.bits);
+
+                return result_bigint.toConst().to(u64) catch unreachable;
             },
         }
     }
@@ -2046,11 +2061,7 @@ pub const Value = extern union {
         if (ty.zigTypeTag() == .Vector) {
             var i: usize = 0;
             while (i < ty.vectorLen()) : (i += 1) {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                if (!compareScalar(lhs_elem, op, rhs_elem, ty.scalarType(), mod)) {
+                if (!compareScalar(lhs.indexVectorlike(i), op, rhs.indexVectorlike(i), ty.scalarType(), mod)) {
                     return false;
                 }
             }
@@ -2087,15 +2098,6 @@ pub const Value = extern union {
         op: std.math.CompareOperator,
         opt_sema: ?*Sema,
     ) Module.CompileError!bool {
-        if (lhs.isInf()) {
-            switch (op) {
-                .neq => return true,
-                .eq => return false,
-                .gt, .gte => return !lhs.isNegativeInf(),
-                .lt, .lte => return lhs.isNegativeInf(),
-            }
-        }
-
         switch (lhs.tag()) {
             .repeated => return lhs.castTag(.repeated).?.data.compareAllWithZeroAdvanced(op, opt_sema),
             .aggregate => {
@@ -2104,11 +2106,11 @@ pub const Value = extern union {
                 }
                 return true;
             },
-            .float_16 => if (std.math.isNan(lhs.castTag(.float_16).?.data)) return op == .neq,
-            .float_32 => if (std.math.isNan(lhs.castTag(.float_32).?.data)) return op == .neq,
-            .float_64 => if (std.math.isNan(lhs.castTag(.float_64).?.data)) return op == .neq,
-            .float_80 => if (std.math.isNan(lhs.castTag(.float_80).?.data)) return op == .neq,
-            .float_128 => if (std.math.isNan(lhs.castTag(.float_128).?.data)) return op == .neq,
+            .float_16 => if (std.math.isNan(lhs.castTag(.float_16).?.data)) return op != .neq,
+            .float_32 => if (std.math.isNan(lhs.castTag(.float_32).?.data)) return op != .neq,
+            .float_64 => if (std.math.isNan(lhs.castTag(.float_64).?.data)) return op != .neq,
+            .float_80 => if (std.math.isNan(lhs.castTag(.float_80).?.data)) return op != .neq,
+            .float_128 => if (std.math.isNan(lhs.castTag(.float_128).?.data)) return op != .neq,
             else => {},
         }
         return (try orderAgainstZeroAdvanced(lhs, opt_sema)).compare(op);
@@ -2207,7 +2209,7 @@ pub const Value = extern union {
                 const b_field_vals = b.castTag(.aggregate).?.data;
                 assert(a_field_vals.len == b_field_vals.len);
 
-                if (ty.isSimpleTupleOrAnonStruct()) {
+                if (ty.isTupleOrAnonStruct()) {
                     const types = ty.tupleFields().types;
                     assert(types.len == a_field_vals.len);
                     for (types) |field_ty, i| {
@@ -2418,6 +2420,7 @@ pub const Value = extern union {
         if (val.tag() == .runtime_value) return;
 
         switch (zig_ty_tag) {
+            .BoundFn => unreachable, // TODO remove this from the language
             .Opaque => unreachable, // Cannot hash opaque types
 
             .Void,
@@ -2564,6 +2567,7 @@ pub const Value = extern union {
         if (val.tag() == .runtime_value) return;
 
         switch (ty.zigTypeTag()) {
+            .BoundFn => unreachable, // TODO remove this from the language
             .Opaque => unreachable, // Cannot hash opaque types
             .Void,
             .NoReturn,
@@ -2799,6 +2803,27 @@ pub const Value = extern union {
         };
     }
 
+    /// Index into a vector-like `Value`. Asserts `index` is a valid index for `val`.
+    /// Some scalar values are considered vector-like to avoid needing to allocate
+    /// a new `repeated` each time a constant is used.
+    pub fn indexVectorlike(val: Value, index: usize) Value {
+        return switch (val.tag()) {
+            .aggregate => val.castTag(.aggregate).?.data[index],
+
+            .repeated => val.castTag(.repeated).?.data,
+            // These values will implicitly be treated as `repeated`.
+            .zero,
+            .one,
+            .bool_false,
+            .bool_true,
+            .int_i64,
+            .int_u64,
+            => val,
+
+            else => unreachable,
+        };
+    }
+
     /// Asserts the value is a single-item pointer to an array, or an array,
     /// or an unknown-length pointer, and returns the element value at the index.
     pub fn elemValue(val: Value, mod: *Module, arena: Allocator, index: usize) !Value {
@@ -2874,20 +2899,11 @@ pub const Value = extern union {
             // to have only one possible value itself.
             .the_only_possible_value => return val,
 
-            .opt_payload_ptr => return val.castTag(.opt_payload_ptr).?.data.container_ptr.elemValueAdvanced(mod, index, arena, buffer),
-            .eu_payload_ptr => return val.castTag(.eu_payload_ptr).?.data.container_ptr.elemValueAdvanced(mod, index, arena, buffer),
-
-            .opt_payload => return val.castTag(.opt_payload).?.data.elemValueAdvanced(mod, index, arena, buffer),
-            .eu_payload => return val.castTag(.eu_payload).?.data.elemValueAdvanced(mod, index, arena, buffer),
-
-            // These values will implicitly be treated as `repeated`.
-            .zero,
-            .one,
-            .bool_false,
-            .bool_true,
-            .int_i64,
-            .int_u64,
-            => return val,
+            // pointer to integer casted to pointer of array
+            .int_u64, .int_i64 => {
+                assert(index == 0);
+                return val;
+            },
 
             else => unreachable,
         }
@@ -2905,16 +2921,8 @@ pub const Value = extern union {
             .field_ptr => val.castTag(.field_ptr).?.data.container_ptr.isVariable(mod),
             .eu_payload_ptr => val.castTag(.eu_payload_ptr).?.data.container_ptr.isVariable(mod),
             .opt_payload_ptr => val.castTag(.opt_payload_ptr).?.data.container_ptr.isVariable(mod),
-            .decl_ref => {
-                const decl = mod.declPtr(val.castTag(.decl_ref).?.data);
-                assert(decl.has_tv);
-                return decl.val.isVariable(mod);
-            },
-            .decl_ref_mut => {
-                const decl = mod.declPtr(val.castTag(.decl_ref_mut).?.data.decl_index);
-                assert(decl.has_tv);
-                return decl.val.isVariable(mod);
-            },
+            .decl_ref => mod.declPtr(val.castTag(.decl_ref).?.data).val.isVariable(mod),
+            .decl_ref_mut => mod.declPtr(val.castTag(.decl_ref_mut).?.data.decl_index).val.isVariable(mod),
 
             .variable => true,
             else => false,
@@ -2996,7 +3004,7 @@ pub const Value = extern union {
             .the_only_possible_value => return ty.onePossibleValue().?,
 
             .empty_struct_value => {
-                if (ty.isSimpleTupleOrAnonStruct()) {
+                if (ty.isTupleOrAnonStruct()) {
                     const tuple = ty.tupleFields();
                     return tuple.values[index];
                 }
@@ -3168,21 +3176,18 @@ pub const Value = extern union {
         };
     }
 
-    pub fn intToFloat(val: Value, arena: Allocator, int_ty: Type, float_ty: Type, mod: *Module) !Value {
-        return intToFloatAdvanced(val, arena, int_ty, float_ty, mod, null) catch |err| switch (err) {
+    pub fn intToFloat(val: Value, arena: Allocator, int_ty: Type, float_ty: Type, target: Target) !Value {
+        return intToFloatAdvanced(val, arena, int_ty, float_ty, target, null) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,
             else => unreachable,
         };
     }
 
-    pub fn intToFloatAdvanced(val: Value, arena: Allocator, int_ty: Type, float_ty: Type, mod: *Module, opt_sema: ?*Sema) !Value {
-        const target = mod.getTarget();
+    pub fn intToFloatAdvanced(val: Value, arena: Allocator, int_ty: Type, float_ty: Type, target: Target, opt_sema: ?*Sema) !Value {
         if (int_ty.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, int_ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var buf: Value.ElemValueBuffer = undefined;
-                const elem_val = val.elemValueBuffer(mod, i, &buf);
-                scalar.* = try intToFloatScalar(elem_val, arena, float_ty.scalarType(), target, opt_sema);
+                scalar.* = try intToFloatScalar(val.indexVectorlike(i), arena, float_ty.scalarType(), target, opt_sema);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -3261,7 +3266,8 @@ pub const Value = extern union {
     }
 
     pub const OverflowArithmeticResult = struct {
-        overflow_bit: Value,
+        /// TODO: Rename to `overflow_bit` and make of type `u1`.
+        overflowed: Value,
         wrapped_result: Value,
     };
 
@@ -3287,17 +3293,12 @@ pub const Value = extern union {
         rhs: Value,
         ty: Type,
         arena: Allocator,
-        mod: *Module,
+        target: Target,
     ) !Value {
-        const target = mod.getTarget();
         if (ty.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try intAddSatScalar(lhs_elem, rhs_elem, ty.scalarType(), arena, target);
+                scalar.* = try intAddSatScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), ty.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -3336,17 +3337,12 @@ pub const Value = extern union {
         rhs: Value,
         ty: Type,
         arena: Allocator,
-        mod: *Module,
+        target: Target,
     ) !Value {
-        const target = mod.getTarget();
         if (ty.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try intSubSatScalar(lhs_elem, rhs_elem, ty.scalarType(), arena, target);
+                scalar.* = try intSubSatScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), ty.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -3384,23 +3380,18 @@ pub const Value = extern union {
         rhs: Value,
         ty: Type,
         arena: Allocator,
-        mod: *Module,
+        target: Target,
     ) !OverflowArithmeticResult {
-        const target = mod.getTarget();
         if (ty.zigTypeTag() == .Vector) {
             const overflowed_data = try arena.alloc(Value, ty.vectorLen());
             const result_data = try arena.alloc(Value, ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                const of_math_result = try intMulWithOverflowScalar(lhs_elem, rhs_elem, ty.scalarType(), arena, target);
-                overflowed_data[i] = of_math_result.overflow_bit;
+                const of_math_result = try intMulWithOverflowScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), ty.scalarType(), arena, target);
+                overflowed_data[i] = of_math_result.overflowed;
                 scalar.* = of_math_result.wrapped_result;
             }
             return OverflowArithmeticResult{
-                .overflow_bit = try Value.Tag.aggregate.create(arena, overflowed_data),
+                .overflowed = try Value.Tag.aggregate.create(arena, overflowed_data),
                 .wrapped_result = try Value.Tag.aggregate.create(arena, result_data),
             };
         }
@@ -3437,7 +3428,7 @@ pub const Value = extern union {
         }
 
         return OverflowArithmeticResult{
-            .overflow_bit = boolToInt(overflowed),
+            .overflowed = makeBool(overflowed),
             .wrapped_result = try fromBigInt(arena, result_bigint.toConst()),
         };
     }
@@ -3448,20 +3439,16 @@ pub const Value = extern union {
         rhs: Value,
         ty: Type,
         arena: Allocator,
-        mod: *Module,
+        target: Target,
     ) !Value {
         if (ty.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try numberMulWrapScalar(lhs_elem, rhs_elem, ty.scalarType(), arena, mod);
+                scalar.* = try numberMulWrapScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), ty.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
-        return numberMulWrapScalar(lhs, rhs, ty, arena, mod);
+        return numberMulWrapScalar(lhs, rhs, ty, arena, target);
     }
 
     /// Supports both floats and ints; handles undefined.
@@ -3470,19 +3457,19 @@ pub const Value = extern union {
         rhs: Value,
         ty: Type,
         arena: Allocator,
-        mod: *Module,
+        target: Target,
     ) !Value {
         if (lhs.isUndef() or rhs.isUndef()) return Value.initTag(.undef);
 
         if (ty.zigTypeTag() == .ComptimeInt) {
-            return intMul(lhs, rhs, ty, arena, mod);
+            return intMul(lhs, rhs, ty, arena, target);
         }
 
         if (ty.isAnyFloat()) {
-            return floatMul(lhs, rhs, ty, arena, mod);
+            return floatMul(lhs, rhs, ty, arena, target);
         }
 
-        const overflow_result = try intMulWithOverflow(lhs, rhs, ty, arena, mod);
+        const overflow_result = try intMulWithOverflow(lhs, rhs, ty, arena, target);
         return overflow_result.wrapped_result;
     }
 
@@ -3492,17 +3479,12 @@ pub const Value = extern union {
         rhs: Value,
         ty: Type,
         arena: Allocator,
-        mod: *Module,
+        target: Target,
     ) !Value {
-        const target = mod.getTarget();
         if (ty.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try intMulSatScalar(lhs_elem, rhs_elem, ty.scalarType(), arena, target);
+                scalar.* = try intMulSatScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), ty.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -3569,14 +3551,11 @@ pub const Value = extern union {
     }
 
     /// operands must be (vectors of) integers; handles undefined scalars.
-    pub fn bitwiseNot(val: Value, ty: Type, arena: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn bitwiseNot(val: Value, ty: Type, arena: Allocator, target: Target) !Value {
         if (ty.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var buf: Value.ElemValueBuffer = undefined;
-                const elem_val = val.elemValueBuffer(mod, i, &buf);
-                scalar.* = try bitwiseNotScalar(elem_val, ty.scalarType(), arena, target);
+                scalar.* = try bitwiseNotScalar(val.indexVectorlike(i), ty.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -3608,16 +3587,11 @@ pub const Value = extern union {
     }
 
     /// operands must be (vectors of) integers; handles undefined scalars.
-    pub fn bitwiseAnd(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn bitwiseAnd(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, target: Target) !Value {
         if (ty.zigTypeTag() == .Vector) {
             const result_data = try allocator.alloc(Value, ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try bitwiseAndScalar(lhs_elem, rhs_elem, allocator, target);
+                scalar.* = try bitwiseAndScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), allocator, target);
             }
             return Value.Tag.aggregate.create(allocator, result_data);
         }
@@ -3645,46 +3619,37 @@ pub const Value = extern union {
     }
 
     /// operands must be (vectors of) integers; handles undefined scalars.
-    pub fn bitwiseNand(lhs: Value, rhs: Value, ty: Type, arena: Allocator, mod: *Module) !Value {
+    pub fn bitwiseNand(lhs: Value, rhs: Value, ty: Type, arena: Allocator, target: Target) !Value {
         if (ty.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try bitwiseNandScalar(lhs_elem, rhs_elem, ty.scalarType(), arena, mod);
+                scalar.* = try bitwiseNandScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), ty.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
-        return bitwiseNandScalar(lhs, rhs, ty, arena, mod);
+        return bitwiseNandScalar(lhs, rhs, ty, arena, target);
     }
 
     /// operands must be integers; handles undefined.
-    pub fn bitwiseNandScalar(lhs: Value, rhs: Value, ty: Type, arena: Allocator, mod: *Module) !Value {
+    pub fn bitwiseNandScalar(lhs: Value, rhs: Value, ty: Type, arena: Allocator, target: Target) !Value {
         if (lhs.isUndef() or rhs.isUndef()) return Value.initTag(.undef);
 
-        const anded = try bitwiseAnd(lhs, rhs, ty, arena, mod);
+        const anded = try bitwiseAnd(lhs, rhs, ty, arena, target);
 
         const all_ones = if (ty.isSignedInt())
             try Value.Tag.int_i64.create(arena, -1)
         else
-            try ty.maxInt(arena, mod.getTarget());
+            try ty.maxInt(arena, target);
 
-        return bitwiseXor(anded, all_ones, ty, arena, mod);
+        return bitwiseXor(anded, all_ones, ty, arena, target);
     }
 
     /// operands must be (vectors of) integers; handles undefined scalars.
-    pub fn bitwiseOr(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn bitwiseOr(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, target: Target) !Value {
         if (ty.zigTypeTag() == .Vector) {
             const result_data = try allocator.alloc(Value, ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try bitwiseOrScalar(lhs_elem, rhs_elem, allocator, target);
+                scalar.* = try bitwiseOrScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), allocator, target);
             }
             return Value.Tag.aggregate.create(allocator, result_data);
         }
@@ -3711,16 +3676,11 @@ pub const Value = extern union {
     }
 
     /// operands must be (vectors of) integers; handles undefined scalars.
-    pub fn bitwiseXor(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn bitwiseXor(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, target: Target) !Value {
         if (ty.zigTypeTag() == .Vector) {
             const result_data = try allocator.alloc(Value, ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try bitwiseXorScalar(lhs_elem, rhs_elem, allocator, target);
+                scalar.* = try bitwiseXorScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), allocator, target);
             }
             return Value.Tag.aggregate.create(allocator, result_data);
         }
@@ -3747,16 +3707,11 @@ pub const Value = extern union {
         return fromBigInt(arena, result_bigint.toConst());
     }
 
-    pub fn intDiv(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn intDiv(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, target: Target) !Value {
         if (ty.zigTypeTag() == .Vector) {
             const result_data = try allocator.alloc(Value, ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try intDivScalar(lhs_elem, rhs_elem, allocator, target);
+                scalar.* = try intDivScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), allocator, target);
             }
             return Value.Tag.aggregate.create(allocator, result_data);
         }
@@ -3788,16 +3743,11 @@ pub const Value = extern union {
         return fromBigInt(allocator, result_q.toConst());
     }
 
-    pub fn intDivFloor(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn intDivFloor(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, target: Target) !Value {
         if (ty.zigTypeTag() == .Vector) {
             const result_data = try allocator.alloc(Value, ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try intDivFloorScalar(lhs_elem, rhs_elem, allocator, target);
+                scalar.* = try intDivFloorScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), allocator, target);
             }
             return Value.Tag.aggregate.create(allocator, result_data);
         }
@@ -3829,16 +3779,11 @@ pub const Value = extern union {
         return fromBigInt(allocator, result_q.toConst());
     }
 
-    pub fn intMod(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn intMod(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, target: Target) !Value {
         if (ty.zigTypeTag() == .Vector) {
             const result_data = try allocator.alloc(Value, ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try intModScalar(lhs_elem, rhs_elem, allocator, target);
+                scalar.* = try intModScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), allocator, target);
             }
             return Value.Tag.aggregate.create(allocator, result_data);
         }
@@ -3894,27 +3839,11 @@ pub const Value = extern union {
         };
     }
 
-    pub fn isNegativeInf(val: Value) bool {
-        return switch (val.tag()) {
-            .float_16 => std.math.isNegativeInf(val.castTag(.float_16).?.data),
-            .float_32 => std.math.isNegativeInf(val.castTag(.float_32).?.data),
-            .float_64 => std.math.isNegativeInf(val.castTag(.float_64).?.data),
-            .float_80 => std.math.isNegativeInf(val.castTag(.float_80).?.data),
-            .float_128 => std.math.isNegativeInf(val.castTag(.float_128).?.data),
-            else => false,
-        };
-    }
-
-    pub fn floatRem(lhs: Value, rhs: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn floatRem(lhs: Value, rhs: Value, float_type: Type, arena: Allocator, target: Target) !Value {
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try floatRemScalar(lhs_elem, rhs_elem, float_type.scalarType(), arena, target);
+                scalar.* = try floatRemScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), float_type.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -3952,16 +3881,11 @@ pub const Value = extern union {
         }
     }
 
-    pub fn floatMod(lhs: Value, rhs: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn floatMod(lhs: Value, rhs: Value, float_type: Type, arena: Allocator, target: Target) !Value {
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try floatModScalar(lhs_elem, rhs_elem, float_type.scalarType(), arena, target);
+                scalar.* = try floatModScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), float_type.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -3999,16 +3923,11 @@ pub const Value = extern union {
         }
     }
 
-    pub fn intMul(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn intMul(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, target: Target) !Value {
         if (ty.zigTypeTag() == .Vector) {
             const result_data = try allocator.alloc(Value, ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try intMulScalar(lhs_elem, rhs_elem, allocator, target);
+                scalar.* = try intMulScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), allocator, target);
             }
             return Value.Tag.aggregate.create(allocator, result_data);
         }
@@ -4036,14 +3955,11 @@ pub const Value = extern union {
         return fromBigInt(allocator, result_bigint.toConst());
     }
 
-    pub fn intTrunc(val: Value, ty: Type, allocator: Allocator, signedness: std.builtin.Signedness, bits: u16, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn intTrunc(val: Value, ty: Type, allocator: Allocator, signedness: std.builtin.Signedness, bits: u16, target: Target) !Value {
         if (ty.zigTypeTag() == .Vector) {
             const result_data = try allocator.alloc(Value, ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var buf: Value.ElemValueBuffer = undefined;
-                const elem_val = val.elemValueBuffer(mod, i, &buf);
-                scalar.* = try intTruncScalar(elem_val, allocator, signedness, bits, target);
+                scalar.* = try intTruncScalar(val.indexVectorlike(i), allocator, signedness, bits, target);
             }
             return Value.Tag.aggregate.create(allocator, result_data);
         }
@@ -4057,17 +3973,12 @@ pub const Value = extern union {
         allocator: Allocator,
         signedness: std.builtin.Signedness,
         bits: Value,
-        mod: *Module,
+        target: Target,
     ) !Value {
-        const target = mod.getTarget();
         if (ty.zigTypeTag() == .Vector) {
             const result_data = try allocator.alloc(Value, ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var buf: Value.ElemValueBuffer = undefined;
-                const elem_val = val.elemValueBuffer(mod, i, &buf);
-                var bits_buf: Value.ElemValueBuffer = undefined;
-                const bits_elem = bits.elemValueBuffer(mod, i, &bits_buf);
-                scalar.* = try intTruncScalar(elem_val, allocator, signedness, @intCast(u16, bits_elem.toUnsignedInt(target)), target);
+                scalar.* = try intTruncScalar(val.indexVectorlike(i), allocator, signedness, @intCast(u16, bits.indexVectorlike(i).toUnsignedInt(target)), target);
             }
             return Value.Tag.aggregate.create(allocator, result_data);
         }
@@ -4090,16 +4001,11 @@ pub const Value = extern union {
         return fromBigInt(allocator, result_bigint.toConst());
     }
 
-    pub fn shl(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn shl(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, target: Target) !Value {
         if (ty.zigTypeTag() == .Vector) {
             const result_data = try allocator.alloc(Value, ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try shlScalar(lhs_elem, rhs_elem, allocator, target);
+                scalar.* = try shlScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), allocator, target);
             }
             return Value.Tag.aggregate.create(allocator, result_data);
         }
@@ -4130,23 +4036,18 @@ pub const Value = extern union {
         rhs: Value,
         ty: Type,
         allocator: Allocator,
-        mod: *Module,
+        target: Target,
     ) !OverflowArithmeticResult {
-        const target = mod.getTarget();
         if (ty.zigTypeTag() == .Vector) {
             const overflowed_data = try allocator.alloc(Value, ty.vectorLen());
             const result_data = try allocator.alloc(Value, ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                const of_math_result = try shlWithOverflowScalar(lhs_elem, rhs_elem, ty.scalarType(), allocator, target);
-                overflowed_data[i] = of_math_result.overflow_bit;
+                const of_math_result = try shlWithOverflowScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), ty.scalarType(), allocator, target);
+                overflowed_data[i] = of_math_result.overflowed;
                 scalar.* = of_math_result.wrapped_result;
             }
             return OverflowArithmeticResult{
-                .overflow_bit = try Value.Tag.aggregate.create(allocator, overflowed_data),
+                .overflowed = try Value.Tag.aggregate.create(allocator, overflowed_data),
                 .wrapped_result = try Value.Tag.aggregate.create(allocator, result_data),
             };
         }
@@ -4179,7 +4080,7 @@ pub const Value = extern union {
             result_bigint.truncate(result_bigint.toConst(), info.signedness, info.bits);
         }
         return OverflowArithmeticResult{
-            .overflow_bit = boolToInt(overflowed),
+            .overflowed = makeBool(overflowed),
             .wrapped_result = try fromBigInt(allocator, result_bigint.toConst()),
         };
     }
@@ -4189,17 +4090,12 @@ pub const Value = extern union {
         rhs: Value,
         ty: Type,
         arena: Allocator,
-        mod: *Module,
+        target: Target,
     ) !Value {
-        const target = mod.getTarget();
         if (ty.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try shlSatScalar(lhs_elem, rhs_elem, ty.scalarType(), arena, target);
+                scalar.* = try shlSatScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), ty.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -4238,20 +4134,16 @@ pub const Value = extern union {
         rhs: Value,
         ty: Type,
         arena: Allocator,
-        mod: *Module,
+        target: Target,
     ) !Value {
         if (ty.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try shlTruncScalar(lhs_elem, rhs_elem, ty.scalarType(), arena, mod);
+                scalar.* = try shlTruncScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), ty.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
-        return shlTruncScalar(lhs, rhs, ty, arena, mod);
+        return shlTruncScalar(lhs, rhs, ty, arena, target);
     }
 
     pub fn shlTruncScalar(
@@ -4259,24 +4151,19 @@ pub const Value = extern union {
         rhs: Value,
         ty: Type,
         arena: Allocator,
-        mod: *Module,
+        target: Target,
     ) !Value {
-        const shifted = try lhs.shl(rhs, ty, arena, mod);
-        const int_info = ty.intInfo(mod.getTarget());
-        const truncated = try shifted.intTrunc(ty, arena, int_info.signedness, int_info.bits, mod);
+        const shifted = try lhs.shl(rhs, ty, arena, target);
+        const int_info = ty.intInfo(target);
+        const truncated = try shifted.intTrunc(ty, arena, int_info.signedness, int_info.bits, target);
         return truncated;
     }
 
-    pub fn shr(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn shr(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, target: Target) !Value {
         if (ty.zigTypeTag() == .Vector) {
             const result_data = try allocator.alloc(Value, ty.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try shrScalar(lhs_elem, rhs_elem, allocator, target);
+                scalar.* = try shrScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), allocator, target);
             }
             return Value.Tag.aggregate.create(allocator, result_data);
         }
@@ -4318,15 +4205,12 @@ pub const Value = extern union {
         val: Value,
         float_type: Type,
         arena: Allocator,
-        mod: *Module,
+        target: Target,
     ) !Value {
-        const target = mod.getTarget();
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var buf: Value.ElemValueBuffer = undefined;
-                const elem_val = val.elemValueBuffer(mod, i, &buf);
-                scalar.* = try floatNegScalar(elem_val, float_type.scalarType(), arena, target);
+                scalar.* = try floatNegScalar(val.indexVectorlike(i), float_type.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -4354,17 +4238,12 @@ pub const Value = extern union {
         rhs: Value,
         float_type: Type,
         arena: Allocator,
-        mod: *Module,
+        target: Target,
     ) !Value {
-        const target = mod.getTarget();
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try floatDivScalar(lhs_elem, rhs_elem, float_type.scalarType(), arena, target);
+                scalar.* = try floatDivScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), float_type.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -4413,17 +4292,12 @@ pub const Value = extern union {
         rhs: Value,
         float_type: Type,
         arena: Allocator,
-        mod: *Module,
+        target: Target,
     ) !Value {
-        const target = mod.getTarget();
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try floatDivFloorScalar(lhs_elem, rhs_elem, float_type.scalarType(), arena, target);
+                scalar.* = try floatDivFloorScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), float_type.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -4472,17 +4346,12 @@ pub const Value = extern union {
         rhs: Value,
         float_type: Type,
         arena: Allocator,
-        mod: *Module,
+        target: Target,
     ) !Value {
-        const target = mod.getTarget();
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try floatDivTruncScalar(lhs_elem, rhs_elem, float_type.scalarType(), arena, target);
+                scalar.* = try floatDivTruncScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), float_type.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -4531,17 +4400,12 @@ pub const Value = extern union {
         rhs: Value,
         float_type: Type,
         arena: Allocator,
-        mod: *Module,
+        target: Target,
     ) !Value {
-        const target = mod.getTarget();
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var lhs_buf: Value.ElemValueBuffer = undefined;
-                var rhs_buf: Value.ElemValueBuffer = undefined;
-                const lhs_elem = lhs.elemValueBuffer(mod, i, &lhs_buf);
-                const rhs_elem = rhs.elemValueBuffer(mod, i, &rhs_buf);
-                scalar.* = try floatMulScalar(lhs_elem, rhs_elem, float_type.scalarType(), arena, target);
+                scalar.* = try floatMulScalar(lhs.indexVectorlike(i), rhs.indexVectorlike(i), float_type.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -4585,14 +4449,11 @@ pub const Value = extern union {
         }
     }
 
-    pub fn sqrt(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn sqrt(val: Value, float_type: Type, arena: Allocator, target: Target) Allocator.Error!Value {
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var buf: Value.ElemValueBuffer = undefined;
-                const elem_val = val.elemValueBuffer(mod, i, &buf);
-                scalar.* = try sqrtScalar(elem_val, float_type.scalarType(), arena, target);
+                scalar.* = try sqrtScalar(val.indexVectorlike(i), float_type.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -4625,14 +4486,11 @@ pub const Value = extern union {
         }
     }
 
-    pub fn sin(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn sin(val: Value, float_type: Type, arena: Allocator, target: Target) Allocator.Error!Value {
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var buf: Value.ElemValueBuffer = undefined;
-                const elem_val = val.elemValueBuffer(mod, i, &buf);
-                scalar.* = try sinScalar(elem_val, float_type.scalarType(), arena, target);
+                scalar.* = try sinScalar(val.indexVectorlike(i), float_type.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -4665,14 +4523,11 @@ pub const Value = extern union {
         }
     }
 
-    pub fn cos(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn cos(val: Value, float_type: Type, arena: Allocator, target: Target) Allocator.Error!Value {
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var buf: Value.ElemValueBuffer = undefined;
-                const elem_val = val.elemValueBuffer(mod, i, &buf);
-                scalar.* = try cosScalar(elem_val, float_type.scalarType(), arena, target);
+                scalar.* = try cosScalar(val.indexVectorlike(i), float_type.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -4705,14 +4560,11 @@ pub const Value = extern union {
         }
     }
 
-    pub fn tan(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn tan(val: Value, float_type: Type, arena: Allocator, target: Target) Allocator.Error!Value {
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var buf: Value.ElemValueBuffer = undefined;
-                const elem_val = val.elemValueBuffer(mod, i, &buf);
-                scalar.* = try tanScalar(elem_val, float_type.scalarType(), arena, target);
+                scalar.* = try tanScalar(val.indexVectorlike(i), float_type.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -4745,14 +4597,11 @@ pub const Value = extern union {
         }
     }
 
-    pub fn exp(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn exp(val: Value, float_type: Type, arena: Allocator, target: Target) Allocator.Error!Value {
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var buf: Value.ElemValueBuffer = undefined;
-                const elem_val = val.elemValueBuffer(mod, i, &buf);
-                scalar.* = try expScalar(elem_val, float_type.scalarType(), arena, target);
+                scalar.* = try expScalar(val.indexVectorlike(i), float_type.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -4785,14 +4634,11 @@ pub const Value = extern union {
         }
     }
 
-    pub fn exp2(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn exp2(val: Value, float_type: Type, arena: Allocator, target: Target) Allocator.Error!Value {
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var buf: Value.ElemValueBuffer = undefined;
-                const elem_val = val.elemValueBuffer(mod, i, &buf);
-                scalar.* = try exp2Scalar(elem_val, float_type.scalarType(), arena, target);
+                scalar.* = try exp2Scalar(val.indexVectorlike(i), float_type.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -4825,14 +4671,11 @@ pub const Value = extern union {
         }
     }
 
-    pub fn log(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn log(val: Value, float_type: Type, arena: Allocator, target: Target) Allocator.Error!Value {
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var buf: Value.ElemValueBuffer = undefined;
-                const elem_val = val.elemValueBuffer(mod, i, &buf);
-                scalar.* = try logScalar(elem_val, float_type.scalarType(), arena, target);
+                scalar.* = try logScalar(val.indexVectorlike(i), float_type.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -4865,14 +4708,11 @@ pub const Value = extern union {
         }
     }
 
-    pub fn log2(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn log2(val: Value, float_type: Type, arena: Allocator, target: Target) Allocator.Error!Value {
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var buf: Value.ElemValueBuffer = undefined;
-                const elem_val = val.elemValueBuffer(mod, i, &buf);
-                scalar.* = try log2Scalar(elem_val, float_type.scalarType(), arena, target);
+                scalar.* = try log2Scalar(val.indexVectorlike(i), float_type.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -4905,14 +4745,11 @@ pub const Value = extern union {
         }
     }
 
-    pub fn log10(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn log10(val: Value, float_type: Type, arena: Allocator, target: Target) Allocator.Error!Value {
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var buf: Value.ElemValueBuffer = undefined;
-                const elem_val = val.elemValueBuffer(mod, i, &buf);
-                scalar.* = try log10Scalar(elem_val, float_type.scalarType(), arena, target);
+                scalar.* = try log10Scalar(val.indexVectorlike(i), float_type.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -4945,14 +4782,11 @@ pub const Value = extern union {
         }
     }
 
-    pub fn fabs(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn fabs(val: Value, float_type: Type, arena: Allocator, target: Target) Allocator.Error!Value {
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var buf: Value.ElemValueBuffer = undefined;
-                const elem_val = val.elemValueBuffer(mod, i, &buf);
-                scalar.* = try fabsScalar(elem_val, float_type.scalarType(), arena, target);
+                scalar.* = try fabsScalar(val.indexVectorlike(i), float_type.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -4985,14 +4819,11 @@ pub const Value = extern union {
         }
     }
 
-    pub fn floor(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn floor(val: Value, float_type: Type, arena: Allocator, target: Target) Allocator.Error!Value {
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var buf: Value.ElemValueBuffer = undefined;
-                const elem_val = val.elemValueBuffer(mod, i, &buf);
-                scalar.* = try floorScalar(elem_val, float_type.scalarType(), arena, target);
+                scalar.* = try floorScalar(val.indexVectorlike(i), float_type.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -5025,14 +4856,11 @@ pub const Value = extern union {
         }
     }
 
-    pub fn ceil(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn ceil(val: Value, float_type: Type, arena: Allocator, target: Target) Allocator.Error!Value {
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var buf: Value.ElemValueBuffer = undefined;
-                const elem_val = val.elemValueBuffer(mod, i, &buf);
-                scalar.* = try ceilScalar(elem_val, float_type.scalarType(), arena, target);
+                scalar.* = try ceilScalar(val.indexVectorlike(i), float_type.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -5065,14 +4893,11 @@ pub const Value = extern union {
         }
     }
 
-    pub fn round(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn round(val: Value, float_type: Type, arena: Allocator, target: Target) Allocator.Error!Value {
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var buf: Value.ElemValueBuffer = undefined;
-                const elem_val = val.elemValueBuffer(mod, i, &buf);
-                scalar.* = try roundScalar(elem_val, float_type.scalarType(), arena, target);
+                scalar.* = try roundScalar(val.indexVectorlike(i), float_type.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -5105,14 +4930,11 @@ pub const Value = extern union {
         }
     }
 
-    pub fn trunc(val: Value, float_type: Type, arena: Allocator, mod: *Module) !Value {
-        const target = mod.getTarget();
+    pub fn trunc(val: Value, float_type: Type, arena: Allocator, target: Target) Allocator.Error!Value {
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var buf: Value.ElemValueBuffer = undefined;
-                const elem_val = val.elemValueBuffer(mod, i, &buf);
-                scalar.* = try truncScalar(elem_val, float_type.scalarType(), arena, target);
+                scalar.* = try truncScalar(val.indexVectorlike(i), float_type.scalarType(), arena, target);
             }
             return Value.Tag.aggregate.create(arena, result_data);
         }
@@ -5151,23 +4973,16 @@ pub const Value = extern union {
         mulend2: Value,
         addend: Value,
         arena: Allocator,
-        mod: *Module,
-    ) !Value {
-        const target = mod.getTarget();
+        target: Target,
+    ) Allocator.Error!Value {
         if (float_type.zigTypeTag() == .Vector) {
             const result_data = try arena.alloc(Value, float_type.vectorLen());
             for (result_data) |*scalar, i| {
-                var mulend1_buf: Value.ElemValueBuffer = undefined;
-                const mulend1_elem = mulend1.elemValueBuffer(mod, i, &mulend1_buf);
-                var mulend2_buf: Value.ElemValueBuffer = undefined;
-                const mulend2_elem = mulend2.elemValueBuffer(mod, i, &mulend2_buf);
-                var addend_buf: Value.ElemValueBuffer = undefined;
-                const addend_elem = addend.elemValueBuffer(mod, i, &addend_buf);
                 scalar.* = try mulAddScalar(
                     float_type.scalarType(),
-                    mulend1_elem,
-                    mulend2_elem,
-                    addend_elem,
+                    mulend1.indexVectorlike(i),
+                    mulend2.indexVectorlike(i),
+                    addend.indexVectorlike(i),
                     arena,
                     target,
                 );
@@ -5490,11 +5305,7 @@ pub const Value = extern union {
     pub const @"true" = initTag(.bool_true);
 
     pub fn makeBool(x: bool) Value {
-        return if (x) Value.true else Value.false;
-    }
-
-    pub fn boolToInt(x: bool) Value {
-        return if (x) Value.one else Value.zero;
+        return if (x) Value.@"true" else Value.@"false";
     }
 
     pub const RuntimeIndex = enum(u32) {

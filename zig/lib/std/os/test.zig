@@ -22,7 +22,7 @@ const Dir = std.fs.Dir;
 const ArenaAllocator = std.heap.ArenaAllocator;
 
 test "chdir smoke test" {
-    if (native_os == .wasi) return error.SkipZigTest;
+    if (native_os == .wasi) return error.SkipZigTest; // WASI doesn't allow navigating outside of a preopen
 
     // Get current working directory path
     var old_cwd_buf: [fs.MAX_PATH_BYTES]u8 = undefined;
@@ -35,46 +35,21 @@ test "chdir smoke test" {
         const new_cwd = try os.getcwd(new_cwd_buf[0..]);
         try expect(mem.eql(u8, old_cwd, new_cwd));
     }
-
-    // Next, change current working directory to one level above
-    if (native_os != .wasi) { // WASI does not support navigating outside of Preopens
+    {
+        // Next, change current working directory to one level above
         const parent = fs.path.dirname(old_cwd) orelse unreachable; // old_cwd should be absolute
         try os.chdir(parent);
-
         // Restore cwd because process may have other tests that do not tolerate chdir.
         defer os.chdir(old_cwd) catch unreachable;
-
         var new_cwd_buf: [fs.MAX_PATH_BYTES]u8 = undefined;
         const new_cwd = try os.getcwd(new_cwd_buf[0..]);
         try expect(mem.eql(u8, parent, new_cwd));
     }
-
-    // Next, change current working directory to a temp directory one level below
-    {
-        // Create a tmp directory
-        var tmp_dir_buf: [fs.MAX_PATH_BYTES]u8 = undefined;
-        var tmp_dir_path = path: {
-            var allocator = std.heap.FixedBufferAllocator.init(&tmp_dir_buf);
-            break :path try fs.path.resolve(allocator.allocator(), &[_][]const u8{ old_cwd, "zig-test-tmp" });
-        };
-        var tmp_dir = try fs.cwd().makeOpenPath("zig-test-tmp", .{});
-
-        // Change current working directory to tmp directory
-        try os.chdir("zig-test-tmp");
-
-        var new_cwd_buf: [fs.MAX_PATH_BYTES]u8 = undefined;
-        const new_cwd = try os.getcwd(new_cwd_buf[0..]);
-        try expect(mem.eql(u8, tmp_dir_path, new_cwd));
-
-        // Restore cwd because process may have other tests that do not tolerate chdir.
-        tmp_dir.close();
-        os.chdir(old_cwd) catch unreachable;
-        try fs.cwd().deleteDir("zig-test-tmp");
-    }
 }
 
 test "open smoke test" {
-    if (native_os == .wasi) return error.SkipZigTest;
+    if (native_os == .wasi and builtin.link_libc) return error.SkipZigTest;
+    if (native_os == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/");
 
     // TODO verify file attributes using `fstat`
 
@@ -129,6 +104,7 @@ test "open smoke test" {
 
 test "openat smoke test" {
     if (native_os == .wasi and builtin.link_libc) return error.SkipZigTest;
+    if (native_os == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/");
 
     // TODO verify file attributes using `fstatat`
 
@@ -165,6 +141,7 @@ test "openat smoke test" {
 
 test "symlink with relative paths" {
     if (native_os == .wasi and builtin.link_libc) return error.SkipZigTest;
+    if (native_os == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/");
 
     const cwd = fs.cwd();
     cwd.deleteFile("file.txt") catch {};
@@ -215,10 +192,15 @@ fn testReadlink(target_path: []const u8, symlink_path: []const u8) !void {
 }
 
 test "link with relative paths" {
-    if (native_os == .wasi and builtin.link_libc) return error.SkipZigTest;
-
     switch (native_os) {
-        .wasi, .linux, .solaris => {},
+        .wasi => {
+            if (builtin.link_libc) {
+                return error.SkipZigTest;
+            } else {
+                try os.initPreopensWasi(std.heap.page_allocator, "/");
+            }
+        },
+        .linux, .solaris => {},
         else => return error.SkipZigTest,
     }
     var cwd = fs.cwd();
@@ -254,10 +236,9 @@ test "link with relative paths" {
 }
 
 test "linkat with different directories" {
-    if (native_os == .wasi and builtin.link_libc) return error.SkipZigTest;
-
     switch (native_os) {
-        .wasi, .linux, .solaris => {},
+        .wasi => if (!builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/"),
+        .linux, .solaris => {},
         else => return error.SkipZigTest,
     }
     var cwd = fs.cwd();
@@ -515,7 +496,14 @@ test "argsAlloc" {
 
 test "memfd_create" {
     // memfd_create is only supported by linux and freebsd.
-    if (native_os != .linux and native_os != .freebsd) return error.SkipZigTest;
+    switch (native_os) {
+        .linux => {},
+        .freebsd => {
+            if (comptime builtin.os.version_range.semver.max.order(.{ .major = 13, .minor = 0 }) == .lt)
+                return error.SkipZigTest;
+        },
+        else => return error.SkipZigTest,
+    }
 
     const fd = std.os.memfd_create("test", 0) catch |err| switch (err) {
         // Related: https://github.com/ziglang/zig/issues/4019
@@ -763,7 +751,7 @@ test "sigaction" {
         return error.SkipZigTest;
 
     // https://github.com/ziglang/zig/issues/7427
-    if (native_os == .linux and builtin.target.cpu.arch == .x86)
+    if (native_os == .linux and builtin.target.cpu.arch == .i386)
         return error.SkipZigTest;
 
     const S = struct {
@@ -785,8 +773,10 @@ test "sigaction" {
         }
     };
 
+    const actual_handler = if (builtin.zig_backend == .stage1) S.handler else &S.handler;
+
     var sa = os.Sigaction{
-        .handler = .{ .sigaction = &S.handler },
+        .handler = .{ .sigaction = actual_handler },
         .mask = os.empty_sigset,
         .flags = os.SA.SIGINFO | os.SA.RESETHAND,
     };
@@ -797,7 +787,7 @@ test "sigaction" {
 
     // Check that we can read it back correctly.
     try os.sigaction(os.SIG.USR1, null, &old_sa);
-    try testing.expectEqual(&S.handler, old_sa.handler.sigaction.?);
+    try testing.expectEqual(actual_handler, old_sa.handler.sigaction.?);
     try testing.expect((old_sa.flags & os.SA.SIGINFO) != 0);
 
     // Invoke the handler.
@@ -940,7 +930,8 @@ test "POSIX file locking with fcntl" {
 }
 
 test "rename smoke test" {
-    if (native_os == .wasi) return error.SkipZigTest;
+    if (native_os == .wasi and builtin.link_libc) return error.SkipZigTest;
+    if (native_os == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/");
 
     var tmp = tmpDir(.{});
     defer tmp.cleanup();
@@ -996,7 +987,8 @@ test "rename smoke test" {
 }
 
 test "access smoke test" {
-    if (native_os == .wasi) return error.SkipZigTest;
+    if (native_os == .wasi and builtin.link_libc) return error.SkipZigTest;
+    if (native_os == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/");
 
     var tmp = tmpDir(.{});
     defer tmp.cleanup();

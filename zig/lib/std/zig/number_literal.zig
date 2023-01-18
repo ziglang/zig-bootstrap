@@ -151,14 +151,12 @@ pub fn parseNumberLiteral(bytes: []const u8) Result {
         special = 0;
 
         if (float) continue;
-        if (x != 0) {
-            const res = @mulWithOverflow(x, base);
-            if (res[1] != 0) overflow = true;
-            x = res[0];
+        if (x != 0) if (@mulWithOverflow(u64, x, base, &x)) {
+            overflow = true;
+        };
+        if (@addWithOverflow(u64, x, digit, &x)) {
+            overflow = true;
         }
-        const res = @addWithOverflow(x, digit);
-        if (res[1] != 0) overflow = true;
-        x = res[0];
     }
     if (underscore) return .{ .failure = .{ .trailing_underscore = bytes.len - 1 } };
     if (special != 0) return .{ .failure = .{ .trailing_special = bytes.len - 1 } };

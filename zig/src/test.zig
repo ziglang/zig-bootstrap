@@ -20,11 +20,15 @@ const enable_wasmtime: bool = build_options.enable_wasmtime;
 const enable_darling: bool = build_options.enable_darling;
 const enable_rosetta: bool = build_options.enable_rosetta;
 const glibc_runtimes_dir: ?[]const u8 = build_options.glibc_runtimes_dir;
-const skip_stage1 = true;
+const skip_stage1 = builtin.zig_backend != .stage1 or build_options.skip_stage1;
 
 const hr = "=" ** 80;
 
 test {
+    if (build_options.have_stage1) {
+        @import("stage1.zig").os_init();
+    }
+
     const use_gpa = build_options.force_gpa or !builtin.link_libc;
     const gpa = gpa: {
         if (use_gpa) {
@@ -56,7 +60,7 @@ test {
         ctx.addTestCasesFromDir(dir);
     }
 
-    try @import("../test/cases.zig").addCases(&ctx);
+    try @import("test_cases").addCases(&ctx);
 
     try ctx.run();
 }
@@ -209,7 +213,7 @@ const TestManifestConfigDefaults = struct {
 ///
 /// build test
 const TestManifest = struct {
-    type: Type,
+    @"type": Type,
     config_map: std.StringHashMap([]const u8),
     trailing_bytes: []const u8 = "",
 
@@ -290,7 +294,7 @@ const TestManifest = struct {
         };
 
         var manifest: TestManifest = .{
-            .type = tt,
+            .@"type" = tt,
             .config_map = std.StringHashMap([]const u8).init(arena),
         };
 
@@ -316,7 +320,7 @@ const TestManifest = struct {
         key: []const u8,
         comptime T: type,
     ) ConfigValueIterator(T) {
-        const bytes = self.config_map.get(key) orelse TestManifestConfigDefaults.get(self.type, key);
+        const bytes = self.config_map.get(key) orelse TestManifestConfigDefaults.get(self.@"type", key);
         return ConfigValueIterator(T){
             .inner = std.mem.split(u8, bytes, ","),
         };
@@ -334,7 +338,7 @@ const TestManifest = struct {
         while (try it.next()) |item| {
             try out.append(item);
         }
-        return try out.toOwnedSlice();
+        return out.toOwnedSlice();
     }
 
     fn getConfigForKeyAssertSingle(self: TestManifest, key: []const u8, comptime T: type) !T {
@@ -357,7 +361,7 @@ const TestManifest = struct {
         while (it.next()) |line| {
             try out.append(line);
         }
-        return try out.toOwnedSlice();
+        return out.toOwnedSlice();
     }
 
     fn ParseFn(comptime T: type) type {
@@ -1153,7 +1157,7 @@ pub const TestContext = struct {
 
                 for (cases.items) |case_index| {
                     const case = &ctx.cases.items[case_index];
-                    switch (manifest.type) {
+                    switch (manifest.@"type") {
                         .@"error" => {
                             const errors = try manifest.trailingAlloc(ctx.arena);
                             switch (strategy) {
@@ -1175,7 +1179,7 @@ pub const TestContext = struct {
                             if (output.items.len > 0) {
                                 try output.resize(output.items.len - 1);
                             }
-                            case.addCompareOutput(src, try output.toOwnedSlice());
+                            case.addCompareOutput(src, output.toOwnedSlice());
                         },
                         .cli => @panic("TODO cli tests"),
                     }
@@ -1544,6 +1548,7 @@ pub const TestContext = struct {
             .dynamic_linker = target_info.dynamic_linker.get(),
             .link_libc = case.link_libc,
             .use_llvm = use_llvm,
+            .use_stage1 = null, // We already handled stage1 tests
             .self_exe_path = zig_exe_path,
             // TODO instead of turning off color, pass in a std.Progress.Node
             .color = .off,
@@ -1723,8 +1728,7 @@ pub const TestContext = struct {
                                         (case_msg.src.column == std.math.maxInt(u32) or
                                         actual_msg.column == case_msg.src.column) and
                                         std.mem.eql(u8, expected_msg, actual_msg.msg) and
-                                        case_msg.src.kind == .note and
-                                        actual_msg.count == case_msg.src.count)
+                                        case_msg.src.kind == .note)
                                     {
                                         handled_errors[i] = true;
                                         break;
@@ -1734,8 +1738,7 @@ pub const TestContext = struct {
                                     if (ex_tag != .plain) continue;
 
                                     if (std.mem.eql(u8, case_msg.plain.msg, plain.msg) and
-                                        case_msg.plain.kind == .note and
-                                        case_msg.plain.count == plain.count)
+                                        case_msg.plain.kind == .note)
                                     {
                                         handled_errors[i] = true;
                                         break;

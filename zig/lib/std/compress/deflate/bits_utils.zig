@@ -8,6 +8,7 @@ pub fn bitReverse(comptime T: type, value: T, N: usize) T {
 
 test "bitReverse" {
     const std = @import("std");
+    const expect = std.testing.expect;
 
     const ReverseBitsTest = struct {
         in: u16,
@@ -28,6 +29,6 @@ test "bitReverse" {
 
     for (reverse_bits_tests) |h| {
         var v = bitReverse(u16, h.in, h.bit_count);
-        try std.testing.expectEqual(h.out, v);
+        try expect(v == h.out);
     }
 }

@@ -1,3 +1,6 @@
+//! This is the userland implementation of translate-c which is used by both stage1
+//! and stage2.
+
 const std = @import("std");
 const testing = std.testing;
 const assert = std.debug.assert;
@@ -12,6 +15,8 @@ const Node = ast.Node;
 const Tag = Node.Tag;
 
 const CallingConvention = std.builtin.CallingConvention;
+
+pub const ClangErrMsg = clang.Stage2ErrorMsg;
 
 pub const Error = std.mem.Allocator.Error;
 const MacroProcessingError = Error || error{UnexpectedMacroToken};
@@ -322,6 +327,16 @@ pub const Context = struct {
 
     pattern_list: PatternList,
 
+    /// This is used to emit different code depending on whether
+    /// the output zig source code is intended to be compiled with stage1 or stage2.
+    /// Ideally we will have stage1 and stage2 support the exact same Zig language,
+    /// but for now they diverge because I would rather focus on finishing and shipping
+    /// stage2 than implementing the features in stage1.
+    /// The list of differences are currently:
+    /// * function pointers in stage1 are e.g. `fn()void`
+    ///          but in stage2 they are `*const fn()void`.
+    zig_is_stage1: bool,
+
     fn getMangle(c: *Context) u32 {
         c.mangle_count += 1;
         return c.mangle_count;
@@ -348,8 +363,9 @@ pub fn translate(
     gpa: mem.Allocator,
     args_begin: [*]?[*]const u8,
     args_end: [*]?[*]const u8,
-    errors: *[]clang.ErrorMsg,
+    errors: *[]ClangErrMsg,
     resources_path: [*:0]const u8,
+    zig_is_stage1: bool,
 ) !std.zig.Ast {
     // TODO stage2 bug
     var tmp = errors;
@@ -379,6 +395,7 @@ pub fn translate(
         .global_scope = try arena.create(Scope.Root),
         .clang_context = ast_unit.getASTContext(),
         .pattern_list = try PatternList.init(gpa),
+        .zig_is_stage1 = zig_is_stage1,
     };
     context.global_scope.* = Scope.Root.init(&context);
     defer {
@@ -418,7 +435,7 @@ pub fn translate(
         }
     }
 
-    return ast.render(gpa, context.global_scope.nodes.items);
+    return ast.render(gpa, zig_is_stage1, context.global_scope.nodes.items);
 }
 
 /// Determines whether macro is of the form: `#define FOO FOO` (Possibly with trailing tokens)
@@ -518,7 +535,7 @@ fn declVisitorNamesOnly(c: *Context, decl: *const clang.Decl) Error!void {
                     child_ty = macroqualified_ty.getModifiedType().getTypePtr();
                 },
                 else => return,
-            };
+            } else unreachable;
 
             const result = try c.unnamed_typedefs.getOrPut(c.gpa, addr);
             if (result.found_existing) {
@@ -624,7 +641,7 @@ fn visitFnDecl(c: *Context, fn_decl: *const clang.FunctionDecl) Error!void {
             },
             else => break fn_type,
         }
-    };
+    } else unreachable;
     const fn_ty = @ptrCast(*const clang.FunctionType, fn_type);
     const return_qt = fn_ty.getReturnType();
 
@@ -4730,6 +4747,9 @@ fn transType(c: *Context, scope: *Scope, ty: *const clang.Type, source_loc: clan
         .Pointer => {
             const child_qt = ty.getPointeeType();
             const is_fn_proto = qualTypeChildIsFnProto(child_qt);
+            if (c.zig_is_stage1 and is_fn_proto) {
+                return Tag.optional_type.create(c.arena, try transQualType(c, scope, child_qt, source_loc));
+            }
             const is_const = is_fn_proto or child_qt.isConstQualified();
             const is_volatile = child_qt.isVolatileQualified();
             const elem_type = try transQualType(c, scope, child_qt, source_loc);
@@ -5111,6 +5131,10 @@ pub fn failDecl(c: *Context, loc: clang.SourceLocation, name: []const u8, compti
     const str = try c.locStr(loc);
     const location_comment = try std.fmt.allocPrint(c.arena, "// {s}", .{str});
     try c.global_scope.nodes.append(try Tag.warning.create(c.arena, location_comment));
+}
+
+pub fn freeErrors(errors: []ClangErrMsg) void {
+    errors.ptr.delete(errors.len);
 }
 
 const PatternList = struct {
@@ -5732,7 +5756,7 @@ fn parseCNumLit(c: *Context, m: *MacroCtx) ParseError!Node {
                 if (mem.indexOfScalar(u8, lit_bytes, '.')) |dot_index| {
                     if (dot_index == 2) {
                         lit_bytes = try std.fmt.allocPrint(c.arena, "0x0{s}", .{lit_bytes[2..]});
-                    } else if (dot_index + 1 == lit_bytes.len or !std.ascii.isHex(lit_bytes[dot_index + 1])) {
+                    } else if (dot_index + 1 == lit_bytes.len or !std.ascii.isXDigit(lit_bytes[dot_index + 1])) {
                         // If the literal lacks a digit after the `.`, we need to
                         // add one since `0x1.p10` would be invalid syntax in Zig.
                         lit_bytes = try std.fmt.allocPrint(c.arena, "0x{s}0{s}", .{
@@ -6657,9 +6681,15 @@ fn getFnProto(c: *Context, ref: Node) ?*ast.Payload.Func {
         return null;
     if (getContainerTypeOf(c, init)) |ty_node| {
         if (ty_node.castTag(.optional_type)) |prefix| {
-            if (prefix.data.castTag(.single_pointer)) |sp| {
-                if (sp.data.elem_type.castTag(.func)) |fn_proto| {
+            if (c.zig_is_stage1) {
+                if (prefix.data.castTag(.func)) |fn_proto| {
                     return fn_proto;
+                }
+            } else {
+                if (prefix.data.castTag(.single_pointer)) |sp| {
+                    if (sp.data.elem_type.castTag(.func)) |fn_proto| {
+                        return fn_proto;
+                    }
                 }
             }
         }

@@ -7,7 +7,7 @@
 #include <__typedef_sa_family_t.h>
 
 struct sockaddr {
-    __attribute__((aligned(__BIGGEST_ALIGNMENT__))) sa_family_t sa_family;
+    _Alignas(max_align_t) sa_family_t sa_family;
     char sa_data[0];
 };
 

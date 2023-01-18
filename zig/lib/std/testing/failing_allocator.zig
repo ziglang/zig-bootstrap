@@ -47,23 +47,16 @@ pub const FailingAllocator = struct {
     }
 
     pub fn allocator(self: *FailingAllocator) mem.Allocator {
-        return .{
-            .ptr = self,
-            .vtable = &.{
-                .alloc = alloc,
-                .resize = resize,
-                .free = free,
-            },
-        };
+        return mem.Allocator.init(self, alloc, resize, free);
     }
 
     fn alloc(
-        ctx: *anyopaque,
+        self: *FailingAllocator,
         len: usize,
-        log2_ptr_align: u8,
+        ptr_align: u29,
+        len_align: u29,
         return_address: usize,
-    ) ?[*]u8 {
-        const self = @ptrCast(*FailingAllocator, @alignCast(@alignOf(FailingAllocator), ctx));
+    ) error{OutOfMemory}![]u8 {
         if (self.index == self.fail_index) {
             if (!self.has_induced_failure) {
                 mem.set(usize, &self.stack_addresses, 0);
@@ -74,42 +67,39 @@ pub const FailingAllocator = struct {
                 std.debug.captureStackTrace(return_address, &stack_trace);
                 self.has_induced_failure = true;
             }
-            return null;
+            return error.OutOfMemory;
         }
-        const result = self.internal_allocator.rawAlloc(len, log2_ptr_align, return_address) orelse
-            return null;
-        self.allocated_bytes += len;
+        const result = try self.internal_allocator.rawAlloc(len, ptr_align, len_align, return_address);
+        self.allocated_bytes += result.len;
         self.allocations += 1;
         self.index += 1;
         return result;
     }
 
     fn resize(
-        ctx: *anyopaque,
+        self: *FailingAllocator,
         old_mem: []u8,
-        log2_old_align: u8,
+        old_align: u29,
         new_len: usize,
+        len_align: u29,
         ra: usize,
-    ) bool {
-        const self = @ptrCast(*FailingAllocator, @alignCast(@alignOf(FailingAllocator), ctx));
-        if (!self.internal_allocator.rawResize(old_mem, log2_old_align, new_len, ra))
-            return false;
-        if (new_len < old_mem.len) {
-            self.freed_bytes += old_mem.len - new_len;
+    ) ?usize {
+        const r = self.internal_allocator.rawResize(old_mem, old_align, new_len, len_align, ra) orelse return null;
+        if (r < old_mem.len) {
+            self.freed_bytes += old_mem.len - r;
         } else {
-            self.allocated_bytes += new_len - old_mem.len;
+            self.allocated_bytes += r - old_mem.len;
         }
-        return true;
+        return r;
     }
 
     fn free(
-        ctx: *anyopaque,
+        self: *FailingAllocator,
         old_mem: []u8,
-        log2_old_align: u8,
+        old_align: u29,
         ra: usize,
     ) void {
-        const self = @ptrCast(*FailingAllocator, @alignCast(@alignOf(FailingAllocator), ctx));
-        self.internal_allocator.rawFree(old_mem, log2_old_align, ra);
+        self.internal_allocator.rawFree(old_mem, old_align, ra);
         self.deallocations += 1;
         self.freed_bytes += old_mem.len;
     }

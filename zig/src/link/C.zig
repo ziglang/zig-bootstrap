@@ -133,11 +133,19 @@ pub fn updateFunc(self: *C, module: *Module, func: *Module.Fn, air: Air, livenes
             .code = code.toManaged(module.gpa),
             .indent_writer = undefined, // set later so we can get a pointer to object.code
         },
-        .arena = std.heap.ArenaAllocator.init(module.gpa),
     };
 
     function.object.indent_writer = .{ .underlying_writer = function.object.code.writer() };
-    defer function.deinit(module.gpa);
+    defer {
+        function.blocks.deinit(module.gpa);
+        function.value_map.deinit();
+        function.object.code.deinit();
+        for (function.object.dg.typedefs.values()) |typedef| {
+            module.gpa.free(typedef.rendered);
+        }
+        function.object.dg.typedefs.deinit();
+        function.object.dg.fwd_decl.deinit();
+    }
 
     codegen.genFunc(&function) catch |err| switch (err) {
         error.AnalysisFail => {
@@ -282,17 +290,9 @@ pub fn flushModule(self: *C, comp: *Compilation, prog_node: *std.Progress.Node) 
         f.remaining_decls.putAssumeCapacityNoClobber(decl_index, {});
     }
 
-    {
-        var export_names = std.StringHashMapUnmanaged(void){};
-        defer export_names.deinit(gpa);
-        try export_names.ensureTotalCapacity(gpa, @intCast(u32, module.decl_exports.entries.len));
-        for (module.decl_exports.values()) |exports| for (exports.items) |@"export"|
-            try export_names.put(gpa, @"export".options.name, {});
-
-        while (f.remaining_decls.popOrNull()) |kv| {
-            const decl_index = kv.key;
-            try self.flushDecl(&f, decl_index, export_names);
-        }
+    while (f.remaining_decls.popOrNull()) |kv| {
+        const decl_index = kv.key;
+        try self.flushDecl(&f, decl_index);
     }
 
     f.all_buffers.items[typedef_index] = .{
@@ -415,12 +415,7 @@ fn flushErrDecls(self: *C, f: *Flush) FlushDeclError!void {
 }
 
 /// Assumes `decl` was in the `remaining_decls` set, and has already been removed.
-fn flushDecl(
-    self: *C,
-    f: *Flush,
-    decl_index: Module.Decl.Index,
-    export_names: std.StringHashMapUnmanaged(void),
-) FlushDeclError!void {
+fn flushDecl(self: *C, f: *Flush, decl_index: Module.Decl.Index) FlushDeclError!void {
     const module = self.base.options.module.?;
     const decl = module.declPtr(decl_index);
     // Before flushing any particular Decl we must ensure its
@@ -428,7 +423,7 @@ fn flushDecl(
     // file comes out correctly.
     for (decl.dependencies.keys()) |dep| {
         if (f.remaining_decls.swapRemove(dep)) {
-            try flushDecl(self, f, dep, export_names);
+            try flushDecl(self, f, dep);
         }
     }
 
@@ -437,8 +432,7 @@ fn flushDecl(
 
     try self.flushTypedefs(f, decl_block.typedefs);
     try f.all_buffers.ensureUnusedCapacity(gpa, 2);
-    if (!(decl.isExtern() and export_names.contains(mem.span(decl.name))))
-        f.appendBufAssumeCapacity(decl_block.fwd_decl.items);
+    f.appendBufAssumeCapacity(decl_block.fwd_decl.items);
 }
 
 pub fn flushEmitH(module: *Module) !void {

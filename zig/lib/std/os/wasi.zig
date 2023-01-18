@@ -1,7 +1,6 @@
 // wasi_snapshot_preview1 spec available (in witx format) here:
 // * typenames -- https://github.com/WebAssembly/WASI/blob/master/phases/snapshot/witx/typenames.witx
 // * module -- https://github.com/WebAssembly/WASI/blob/master/phases/snapshot/witx/wasi_snapshot_preview1.witx
-const builtin = @import("builtin");
 const std = @import("std");
 const assert = std.debug.assert;
 
@@ -158,12 +157,7 @@ pub const IOV_MAX = 1024;
 
 pub const AT = struct {
     pub const REMOVEDIR: u32 = 0x4;
-    /// When linking libc, we follow their convention and use -2 for current working directory.
-    /// However, without libc, Zig does a different convention: it assumes the
-    /// current working directory is the first preopen. This behavior can be
-    /// overridden with a public function called `wasi_cwd` in the root source
-    /// file.
-    pub const FDCWD: fd_t = if (builtin.link_libc) -2 else 3;
+    pub const FDCWD: fd_t = -2;
 };
 
 // As defined in the wasi_snapshot_preview1 spec file:
@@ -285,7 +279,7 @@ pub const E = errno_t;
 pub const event_t = extern struct {
     userdata: userdata_t,
     @"error": errno_t,
-    type: eventtype_t,
+    @"type": eventtype_t,
     fd_readwrite: eventfdreadwrite_t,
 };
 

@@ -48,7 +48,8 @@ fn testReadLink(dir: Dir, target_path: []const u8, symlink_path: []const u8) !vo
 }
 
 test "accessAbsolute" {
-    if (builtin.os.tag == .wasi) return error.SkipZigTest;
+    if (builtin.os.tag == .wasi and builtin.link_libc) return error.SkipZigTest;
+    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/");
 
     var tmp = tmpDir(.{});
     defer tmp.cleanup();
@@ -66,7 +67,8 @@ test "accessAbsolute" {
 }
 
 test "openDirAbsolute" {
-    if (builtin.os.tag == .wasi) return error.SkipZigTest;
+    if (builtin.os.tag == .wasi and builtin.link_libc) return error.SkipZigTest;
+    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/");
 
     var tmp = tmpDir(.{});
     defer tmp.cleanup();
@@ -102,7 +104,8 @@ test "openDir cwd parent .." {
 }
 
 test "readLinkAbsolute" {
-    if (builtin.os.tag == .wasi) return error.SkipZigTest;
+    if (builtin.os.tag == .wasi and builtin.link_libc) return error.SkipZigTest;
+    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/");
 
     var tmp = tmpDir(.{});
     defer tmp.cleanup();
@@ -184,6 +187,8 @@ test "Dir.Iterator" {
 }
 
 test "Dir.Iterator many entries" {
+    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/");
+
     var tmp_dir = tmpIterableDir(.{});
     defer tmp_dir.cleanup();
 
@@ -446,8 +451,8 @@ test "file operations on directories" {
     try testing.expectError(error.IsDir, tmp_dir.dir.createFile(test_dir_name, .{}));
     try testing.expectError(error.IsDir, tmp_dir.dir.deleteFile(test_dir_name));
     switch (builtin.os.tag) {
-        // NetBSD does not error when reading a directory.
-        .netbsd => {},
+        // no error when reading a directory.
+        .dragonfly, .netbsd => {},
         // Currently, WASI will return error.Unexpected (via ENOTCAPABLE) when attempting fd_read on a directory handle.
         // TODO: Re-enable on WASI once https://github.com/bytecodealliance/wasmtime/issues/1935 is resolved.
         .wasi => {},
@@ -633,7 +638,8 @@ test "rename" {
 }
 
 test "renameAbsolute" {
-    if (builtin.os.tag == .wasi) return error.SkipZigTest;
+    if (builtin.os.tag == .wasi and builtin.link_libc) return error.SkipZigTest;
+    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/");
 
     var tmp_dir = tmpDir(.{});
     defer tmp_dir.cleanup();
@@ -1126,9 +1132,7 @@ test "open file with exclusive nonblocking lock twice (absolute paths)" {
 
     const allocator = testing.allocator;
 
-    const cwd = try std.process.getCwdAlloc(allocator);
-    defer allocator.free(cwd);
-    const file_paths: [2][]const u8 = .{ cwd, "zig-test-absolute-paths.txt" };
+    const file_paths: [1][]const u8 = .{"zig-test-absolute-paths.txt"};
     const filename = try fs.path.resolve(allocator, &file_paths);
     defer allocator.free(filename);
 
@@ -1143,6 +1147,7 @@ test "open file with exclusive nonblocking lock twice (absolute paths)" {
 
 test "walker" {
     if (builtin.os.tag == .wasi and builtin.link_libc) return error.SkipZigTest;
+    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/");
 
     var tmp = tmpIterableDir(.{});
     defer tmp.cleanup();
@@ -1196,6 +1201,7 @@ test "walker" {
 
 test "walker without fully iterating" {
     if (builtin.os.tag == .wasi and builtin.link_libc) return error.SkipZigTest;
+    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/");
 
     var tmp = tmpIterableDir(.{});
     defer tmp.cleanup();
@@ -1219,6 +1225,7 @@ test "walker without fully iterating" {
 
 test ". and .. in fs.Dir functions" {
     if (builtin.os.tag == .wasi and builtin.link_libc) return error.SkipZigTest;
+    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/");
 
     var tmp = tmpDir(.{});
     defer tmp.cleanup();
@@ -1246,7 +1253,8 @@ test ". and .. in fs.Dir functions" {
 }
 
 test ". and .. in absolute functions" {
-    if (builtin.os.tag == .wasi) return error.SkipZigTest;
+    if (builtin.os.tag == .wasi and builtin.link_libc) return error.SkipZigTest;
+    if (builtin.os.tag == .wasi and !builtin.link_libc) try os.initPreopensWasi(std.heap.page_allocator, "/");
 
     var tmp = tmpDir(.{});
     defer tmp.cleanup();

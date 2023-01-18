@@ -34,7 +34,7 @@ pub const Watch = @import("fs/watch.zig").Watch;
 /// fit into a UTF-8 encoded array of this length.
 /// The byte count includes room for a null sentinel byte.
 pub const MAX_PATH_BYTES = switch (builtin.os.tag) {
-    .linux, .macos, .ios, .freebsd, .netbsd, .dragonfly, .openbsd, .haiku, .solaris => os.PATH_MAX,
+    .linux, .macos, .ios, .freebsd, .openbsd, .netbsd, .dragonfly, .haiku, .solaris => os.PATH_MAX,
     // Each UTF-16LE character may be expanded to 3 UTF-8 bytes.
     // If it would require 4 UTF-8 bytes, then there would be a surrogate
     // pair in the UTF-16LE, and we (over)account 3 bytes for it that way.
@@ -54,10 +54,10 @@ pub const MAX_PATH_BYTES = switch (builtin.os.tag) {
 /// (depending on the platform) this assumption may not hold for every configuration.
 /// The byte count does not include a null sentinel byte.
 pub const MAX_NAME_BYTES = switch (builtin.os.tag) {
-    .linux, .macos, .ios, .freebsd, .dragonfly => os.NAME_MAX,
+    .linux, .macos, .ios, .freebsd, .openbsd, .netbsd, .dragonfly => os.NAME_MAX,
     // Haiku's NAME_MAX includes the null terminator, so subtract one.
     .haiku => os.NAME_MAX - 1,
-    .netbsd, .openbsd, .solaris => os.MAXNAMLEN,
+    .solaris => os.system.MAXNAMLEN,
     // Each UTF-16LE character may be expanded to 3 UTF-8 bytes.
     // If it would require 4 UTF-8 bytes, then there would be a surrogate
     // pair in the UTF-16LE, and we (over)account 3 bytes for it that way.
@@ -150,6 +150,7 @@ pub fn copyFileAbsolute(source_path: []const u8, dest_path: []const u8, args: Co
     return Dir.copyFile(my_cwd, source_path, my_cwd, dest_path, args);
 }
 
+/// TODO update this API to avoid a getrandom syscall for every operation.
 pub const AtomicFile = struct {
     file: File,
     // TODO either replace this with rand_buf or use []u16 on Windows
@@ -1129,6 +1130,13 @@ pub const Dir = struct {
                 w.RIGHT.FD_FILESTAT_SET_TIMES |
                 w.RIGHT.FD_FILESTAT_SET_SIZE;
         }
+        if (self.fd == os.wasi.AT.FDCWD or path.isAbsolute(sub_path)) {
+            // Resolve absolute or CWD-relative paths to a path within a Preopen
+            var resolved_path_buf: [MAX_PATH_BYTES]u8 = undefined;
+            const resolved_path = try os.resolvePathWasi(sub_path, &resolved_path_buf);
+            const fd = try os.openatWasi(resolved_path.dir_fd, resolved_path.relative_path, 0x0, 0x0, fdflags, base, 0x0);
+            return File{ .handle = fd };
+        }
         const fd = try os.openatWasi(self.fd, sub_path, 0x0, 0x0, fdflags, base, 0x0);
         return File{ .handle = fd };
     }
@@ -1292,6 +1300,13 @@ pub const Dir = struct {
         }
         if (flags.exclusive) {
             oflags |= w.O.EXCL;
+        }
+        if (self.fd == os.wasi.AT.FDCWD or path.isAbsolute(sub_path)) {
+            // Resolve absolute or CWD-relative paths to a path within a Preopen
+            var resolved_path_buf: [MAX_PATH_BYTES]u8 = undefined;
+            const resolved_path = try os.resolvePathWasi(sub_path, &resolved_path_buf);
+            const fd = try os.openatWasi(resolved_path.dir_fd, resolved_path.relative_path, 0x0, oflags, 0x0, base, 0x0);
+            return File{ .handle = fd };
         }
         const fd = try os.openatWasi(self.fd, sub_path, 0x0, oflags, 0x0, base, 0x0);
         return File{ .handle = fd };
@@ -1487,7 +1502,19 @@ pub const Dir = struct {
     /// See also `Dir.realpathZ`, `Dir.realpathW`, and `Dir.realpathAlloc`.
     pub fn realpath(self: Dir, pathname: []const u8, out_buffer: []u8) ![]u8 {
         if (builtin.os.tag == .wasi) {
-            @compileError("realpath is not available on WASI");
+            if (self.fd == os.wasi.AT.FDCWD or path.isAbsolute(pathname)) {
+                var buffer: [MAX_PATH_BYTES]u8 = undefined;
+                const out_path = try os.realpath(pathname, &buffer);
+                if (out_path.len > out_buffer.len) {
+                    return error.NameTooLong;
+                }
+                mem.copy(u8, out_buffer, out_path);
+                return out_buffer[0..out_path.len];
+            } else {
+                // Unfortunately, we have no ability to look up the path for an fd_t
+                // on WASI, so we have to give up here.
+                return error.InvalidHandle;
+            }
         }
         if (builtin.os.tag == .windows) {
             const pathname_w = try os.windows.sliceToPrefixedFileW(pathname);
@@ -1684,15 +1711,16 @@ pub const Dir = struct {
         // TODO do we really need all the rights here?
         const inheriting: w.rights_t = w.RIGHT.ALL ^ w.RIGHT.SOCK_SHUTDOWN;
 
-        const result = os.openatWasi(
-            self.fd,
-            sub_path,
-            symlink_flags,
-            w.O.DIRECTORY,
-            0x0,
-            base,
-            inheriting,
-        );
+        const result = blk: {
+            if (self.fd == os.wasi.AT.FDCWD or path.isAbsolute(sub_path)) {
+                // Resolve absolute or CWD-relative paths to a path within a Preopen
+                var resolved_path_buf: [MAX_PATH_BYTES]u8 = undefined;
+                const resolved_path = try os.resolvePathWasi(sub_path, &resolved_path_buf);
+                break :blk os.openatWasi(resolved_path.dir_fd, resolved_path.relative_path, symlink_flags, w.O.DIRECTORY, 0x0, base, inheriting);
+            } else {
+                break :blk os.openatWasi(self.fd, sub_path, symlink_flags, w.O.DIRECTORY, 0x0, base, inheriting);
+            }
+        };
         const fd = result catch |err| switch (err) {
             error.FileTooBig => unreachable, // can't happen for directories
             error.IsDir => unreachable, // we're providing O.DIRECTORY
@@ -2600,32 +2628,14 @@ pub const Dir = struct {
         return file.stat();
     }
 
-    pub const StatFileError = File.OpenError || File.StatError || os.FStatAtError;
+    pub const StatFileError = File.OpenError || StatError;
 
-    /// Returns metadata for a file inside the directory.
-    ///
-    /// On Windows, this requires three syscalls. On other operating systems, it
-    /// only takes one.
-    ///
-    /// Symlinks are followed.
-    ///
-    /// `sub_path` may be absolute, in which case `self` is ignored.
-    pub fn statFile(self: Dir, sub_path: []const u8) StatFileError!Stat {
-        switch (builtin.os.tag) {
-            .windows => {
-                var file = try self.openFile(sub_path, .{});
-                defer file.close();
-                return file.stat();
-            },
-            .wasi => {
-                const st = try os.fstatatWasi(self.fd, sub_path, os.wasi.LOOKUP_SYMLINK_FOLLOW);
-                return Stat.fromSystem(st);
-            },
-            else => {
-                const st = try os.fstatat(self.fd, sub_path, 0);
-                return Stat.fromSystem(st);
-            },
-        }
+    // TODO: improve this to use the fstatat syscall instead of making 2 syscalls here.
+    pub fn statFile(self: Dir, sub_path: []const u8) StatFileError!File.Stat {
+        var file = try self.openFile(sub_path, .{});
+        defer file.close();
+
+        return file.stat();
     }
 
     const Permissions = File.Permissions;
@@ -2660,13 +2670,6 @@ pub const Dir = struct {
 pub fn cwd() Dir {
     if (builtin.os.tag == .windows) {
         return Dir{ .fd = os.windows.peb().ProcessParameters.CurrentDirectory.Handle };
-    } else if (builtin.os.tag == .wasi) {
-        if (@hasDecl(root, "wasi_cwd")) {
-            return root.wasi_cwd();
-        } else {
-            // Expect the first preopen to be current working directory.
-            return .{ .fd = 3 };
-        }
     } else {
         return Dir{ .fd = os.AT.FDCWD };
     }
@@ -2685,12 +2688,12 @@ pub fn openDirAbsolute(absolute_path: []const u8, flags: Dir.OpenDirOptions) Fil
 /// Same as `openDirAbsolute` but the path parameter is null-terminated.
 pub fn openDirAbsoluteZ(absolute_path_c: [*:0]const u8, flags: Dir.OpenDirOptions) File.OpenError!Dir {
     assert(path.isAbsoluteZ(absolute_path_c));
-    return cwd().openDirZ(absolute_path_c, flags, false);
+    return cwd().openDirZ(absolute_path_c, flags);
 }
 /// Same as `openDirAbsolute` but the path parameter is null-terminated.
 pub fn openDirAbsoluteW(absolute_path_c: [*:0]const u16, flags: Dir.OpenDirOptions) File.OpenError!Dir {
     assert(path.isAbsoluteWindowsW(absolute_path_c));
-    return cwd().openDirW(absolute_path_c, flags, false);
+    return cwd().openDirW(absolute_path_c, flags);
 }
 
 /// Opens a directory at the given path. The directory is a system resource that remains

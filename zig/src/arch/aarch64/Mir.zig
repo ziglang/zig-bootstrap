@@ -84,10 +84,6 @@ pub const Inst = struct {
         ///
         /// Payload is `LoadMemoryPie`
         load_memory_direct,
-        /// Loads the contents into a register
-        ///
-        /// Payload is `LoadMemoryPie`
-        load_memory_import,
         /// Loads the address into a register
         ///
         /// Payload is `LoadMemoryPie`
@@ -505,7 +501,7 @@ pub fn extraData(mir: Mir, comptime T: type, index: usize) struct { data: T, end
     var i: usize = index;
     var result: T = undefined;
     inline for (fields) |field| {
-        @field(result, field.name) = switch (field.type) {
+        @field(result, field.name) = switch (field.field_type) {
             u32 => mir.extra[i],
             i32 => @bitCast(i32, mir.extra[i]),
             else => @compileError("bad field type"),

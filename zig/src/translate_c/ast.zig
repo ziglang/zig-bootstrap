@@ -392,7 +392,7 @@ pub const Node = extern union {
         }
 
         pub fn Data(comptime t: Tag) type {
-            return std.meta.fieldInfo(t.Type(), .data).type;
+            return std.meta.fieldInfo(t.Type(), .data).field_type;
         }
     };
 
@@ -732,10 +732,11 @@ pub const Payload = struct {
 
 /// Converts the nodes into a Zig Ast.
 /// Caller must free the source slice.
-pub fn render(gpa: Allocator, nodes: []const Node) !std.zig.Ast {
+pub fn render(gpa: Allocator, zig_is_stage1: bool, nodes: []const Node) !std.zig.Ast {
     var ctx = Context{
         .gpa = gpa,
         .buf = std.ArrayList(u8).init(gpa),
+        .zig_is_stage1 = zig_is_stage1,
     };
     defer ctx.buf.deinit();
     defer ctx.nodes.deinit(gpa);
@@ -787,7 +788,7 @@ pub fn render(gpa: Allocator, nodes: []const Node) !std.zig.Ast {
         .source = try ctx.buf.toOwnedSliceSentinel(0),
         .tokens = ctx.tokens.toOwnedSlice(),
         .nodes = ctx.nodes.toOwnedSlice(),
-        .extra_data = try ctx.extra_data.toOwnedSlice(gpa),
+        .extra_data = ctx.extra_data.toOwnedSlice(gpa),
         .errors = &.{},
     };
 }
@@ -803,6 +804,11 @@ const Context = struct {
     nodes: std.zig.Ast.NodeList = .{},
     extra_data: std.ArrayListUnmanaged(std.zig.Ast.Node.Index) = .{},
     tokens: std.zig.Ast.TokenList = .{},
+
+    /// This is used to emit different code depending on whether
+    /// the output zig source code is intended to be compiled with stage1 or stage2.
+    /// Refer to the Context in translate_c.zig.
+    zig_is_stage1: bool,
 
     fn addTokenFmt(c: *Context, tag: TokenTag, comptime format: []const u8, args: anytype) Allocator.Error!TokenIndex {
         const start_index = c.buf.items.len;
@@ -821,7 +827,7 @@ const Context = struct {
     }
 
     fn addIdentifier(c: *Context, bytes: []const u8) Allocator.Error!TokenIndex {
-        if (std.zig.primitives.isPrimitive(bytes))
+        if (@import("../AstGen.zig").isPrimitive(bytes))
             return c.addTokenFmt(.identifier, "@\"{s}\"", .{bytes});
         return c.addTokenFmt(.identifier, "{s}", .{std.zig.fmtId(bytes)});
     }
@@ -845,7 +851,7 @@ const Context = struct {
         try c.extra_data.ensureUnusedCapacity(c.gpa, fields.len);
         const result = @intCast(u32, c.extra_data.items.len);
         inline for (fields) |field| {
-            comptime std.debug.assert(field.type == NodeIndex);
+            comptime std.debug.assert(field.field_type == NodeIndex);
             c.extra_data.appendAssumeCapacity(@field(extra, field.name));
         }
         return result;
@@ -926,7 +932,7 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
         .call => {
             const payload = node.castTag(.call).?.data;
             // Cosmetic: avoids an unnecesary address_of on most function calls.
-            const lhs = if (payload.lhs.tag() == .fn_identifier)
+            const lhs = if (!c.zig_is_stage1 and payload.lhs.tag() == .fn_identifier)
                 try c.addNode(.{
                     .tag = .identifier,
                     .main_token = try c.addIdentifier(payload.lhs.castTag(.fn_identifier).?.data),
@@ -1091,20 +1097,28 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
             // value (implicit in stage1, explicit in stage2), except in
             // the context of an address_of, which is handled there.
             const payload = node.castTag(.fn_identifier).?.data;
-            const tok = try c.addToken(.ampersand, "&");
-            const arg = try c.addNode(.{
-                .tag = .identifier,
-                .main_token = try c.addIdentifier(payload),
-                .data = undefined,
-            });
-            return c.addNode(.{
-                .tag = .address_of,
-                .main_token = tok,
-                .data = .{
-                    .lhs = arg,
-                    .rhs = undefined,
-                },
-            });
+            if (c.zig_is_stage1) {
+                return try c.addNode(.{
+                    .tag = .identifier,
+                    .main_token = try c.addIdentifier(payload),
+                    .data = undefined,
+                });
+            } else {
+                const tok = try c.addToken(.ampersand, "&");
+                const arg = try c.addNode(.{
+                    .tag = .identifier,
+                    .main_token = try c.addIdentifier(payload),
+                    .data = undefined,
+                });
+                return c.addNode(.{
+                    .tag = .address_of,
+                    .main_token = tok,
+                    .data = .{
+                        .lhs = arg,
+                        .rhs = undefined,
+                    },
+                });
+            }
         },
         .float_literal => {
             const payload = node.castTag(.float_literal).?.data;
@@ -1125,7 +1139,7 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
         .string_literal => {
             const payload = node.castTag(.string_literal).?.data;
             return c.addNode(.{
-                .tag = .string_literal,
+                .tag = .identifier,
                 .main_token = try c.addToken(.string_literal, payload),
                 .data = undefined,
             });
@@ -1133,7 +1147,7 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
         .char_literal => {
             const payload = node.castTag(.char_literal).?.data;
             return c.addNode(.{
-                .tag = .char_literal,
+                .tag = .identifier,
                 .main_token = try c.addToken(.char_literal, payload),
                 .data = undefined,
             });
@@ -1434,6 +1448,12 @@ fn renderNode(c: *Context, node: Node) Allocator.Error!NodeIndex {
         .optional_type => return renderPrefixOp(c, node, .optional_type, .question_mark, "?"),
         .address_of => {
             const payload = node.castTag(.address_of).?.data;
+            if (c.zig_is_stage1 and payload.tag() == .fn_identifier)
+                return try c.addNode(.{
+                    .tag = .identifier,
+                    .main_token = try c.addIdentifier(payload.castTag(.fn_identifier).?.data),
+                    .data = undefined,
+                });
 
             const ampersand = try c.addToken(.ampersand, "&");
             const base = if (payload.tag() == .fn_identifier)

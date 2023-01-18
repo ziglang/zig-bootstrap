@@ -9,7 +9,7 @@ const rusage = std.c.rusage;
 extern "c" fn __errno() *c_int;
 pub const _errno = __errno;
 
-pub const dl_iterate_phdr_callback = *const fn (info: *dl_phdr_info, size: usize, data: ?*anyopaque) callconv(.C) c_int;
+pub const dl_iterate_phdr_callback = std.meta.FnPtr(fn (info: *dl_phdr_info, size: usize, data: ?*anyopaque) callconv(.C) c_int);
 pub extern "c" fn dl_iterate_phdr(callback: dl_iterate_phdr_callback, data: ?*anyopaque) c_int;
 
 pub extern "c" fn _lwp_self() lwpid_t;
@@ -80,7 +80,7 @@ pub const pthread_cond_t = extern struct {
 pub const pthread_rwlock_t = extern struct {
     magic: c_uint = 0x99990009,
     interlock: switch (builtin.cpu.arch) {
-        .aarch64, .sparc, .x86_64, .x86 => u8,
+        .aarch64, .sparc, .x86_64, .i386 => u8,
         .arm, .powerpc => c_int,
         else => unreachable,
     } = 0,
@@ -97,7 +97,7 @@ const pthread_spin_t = switch (builtin.cpu.arch) {
     .aarch64, .aarch64_be, .aarch64_32 => u8,
     .mips, .mipsel, .mips64, .mips64el => u32,
     .powerpc, .powerpc64, .powerpc64le => i32,
-    .x86, .x86_64 => u8,
+    .i386, .x86_64 => u8,
     .arm, .armeb, .thumb, .thumbeb => i32,
     .sparc, .sparcel, .sparc64 => u8,
     .riscv32, .riscv64 => u32,
@@ -105,7 +105,7 @@ const pthread_spin_t = switch (builtin.cpu.arch) {
 };
 
 const padded_pthread_spin_t = switch (builtin.cpu.arch) {
-    .x86, .x86_64 => u32,
+    .i386, .x86_64 => u32,
     .sparc, .sparcel, .sparc64 => u32,
     else => pthread_spin_t,
 };
@@ -537,6 +537,7 @@ pub const KERN = struct {
 };
 
 pub const PATH_MAX = 1024;
+pub const NAME_MAX = 255;
 pub const IOV_MAX = KERN.IOV_MAX;
 
 pub const STDIN_FILENO = 0;
@@ -689,13 +690,17 @@ pub const F = struct {
     pub const SETFD = 2;
     pub const GETFL = 3;
     pub const SETFL = 4;
-
     pub const GETOWN = 5;
     pub const SETOWN = 6;
-
     pub const GETLK = 7;
     pub const SETLK = 8;
     pub const SETLKW = 9;
+    pub const CLOSEM = 10;
+    pub const MAXFD = 11;
+    pub const DUPFD_CLOEXEC = 12;
+    pub const GETNOSIGPIPE = 13;
+    pub const SETNOSIGPIPE = 14;
+    pub const GETPATH = 15;
 
     pub const RDLCK = 1;
     pub const WRLCK = 3;
@@ -971,8 +976,8 @@ pub const SIG = struct {
 
 /// Renamed from `sigaction` to `Sigaction` to avoid conflict with the syscall.
 pub const Sigaction = extern struct {
-    pub const handler_fn = *const fn (c_int) align(1) callconv(.C) void;
-    pub const sigaction_fn = *const fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void;
+    pub const handler_fn = std.meta.FnPtr(fn (c_int) align(1) callconv(.C) void);
+    pub const sigaction_fn = std.meta.FnPtr(fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void);
 
     /// signal handler
     handler: extern union {
@@ -1067,7 +1072,7 @@ pub const ucontext_t = extern struct {
     mcontext: mcontext_t,
     __pad: [
         switch (builtin.cpu.arch) {
-            .x86 => 4,
+            .i386 => 4,
             .mips, .mipsel, .mips64, .mips64el => 14,
             .arm, .armeb, .thumb, .thumbeb => 1,
             .sparc, .sparcel, .sparc64 => if (@sizeOf(usize) == 4) 43 else 8,

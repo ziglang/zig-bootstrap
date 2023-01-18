@@ -262,7 +262,7 @@ pub const Tree = struct {
         }
 
         self.source = source;
-        self.tokens = try tokens.toOwnedSlice();
+        self.tokens = tokens.toOwnedSlice();
 
         var it = TokenIterator{ .buffer = self.tokens };
         var parser = Parser{

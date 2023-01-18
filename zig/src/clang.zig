@@ -161,11 +161,12 @@ pub const ASTUnit = opaque {
     extern fn ZigClangASTUnit_getSourceManager(*ASTUnit) *SourceManager;
 
     pub const visitLocalTopLevelDecls = ZigClangASTUnit_visitLocalTopLevelDecls;
-    extern fn ZigClangASTUnit_visitLocalTopLevelDecls(
-        *ASTUnit,
-        context: ?*anyopaque,
-        Fn: ?*const fn (?*anyopaque, *const Decl) callconv(.C) bool,
-    ) bool;
+    extern fn ZigClangASTUnit_visitLocalTopLevelDecls(*ASTUnit, context: ?*anyopaque, Fn: ?VisitorFn) bool;
+
+    const VisitorFn = if (@import("builtin").zig_backend == .stage1)
+        fn (?*anyopaque, *const Decl) callconv(.C) bool
+    else
+        *const fn (?*anyopaque, *const Decl) callconv(.C) bool;
 
     pub const getLocalPreprocessingEntities_begin = ZigClangASTUnit_getLocalPreprocessingEntities_begin;
     extern fn ZigClangASTUnit_getLocalPreprocessingEntities_begin(*ASTUnit) PreprocessingRecord.iterator;
@@ -1897,13 +1898,13 @@ pub const OffsetOfNode_Kind = enum(c_int) {
     Base,
 };
 
-pub const ErrorMsg = extern struct {
+pub const Stage2ErrorMsg = extern struct {
     filename_ptr: ?[*]const u8,
     filename_len: usize,
     msg_ptr: [*]const u8,
     msg_len: usize,
     // valid until the ASTUnit is freed
-    source: ?[*:0]const u8,
+    source: ?[*]const u8,
     // 0 based
     line: c_uint,
     // 0 based
@@ -1912,14 +1913,14 @@ pub const ErrorMsg = extern struct {
     offset: c_uint,
 
     pub const delete = ZigClangErrorMsg_delete;
-    extern fn ZigClangErrorMsg_delete(ptr: [*]ErrorMsg, len: usize) void;
+    extern fn ZigClangErrorMsg_delete(ptr: [*]Stage2ErrorMsg, len: usize) void;
 };
 
 pub const LoadFromCommandLine = ZigClangLoadFromCommandLine;
 extern fn ZigClangLoadFromCommandLine(
     args_begin: [*]?[*]const u8,
     args_end: [*]?[*]const u8,
-    errors_ptr: *[*]ErrorMsg,
+    errors_ptr: *[*]Stage2ErrorMsg,
     errors_len: *usize,
     resources_path: [*:0]const u8,
 ) ?*ASTUnit;

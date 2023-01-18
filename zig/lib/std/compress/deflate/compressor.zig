@@ -254,7 +254,7 @@ pub fn Compressor(comptime WriterType: anytype) type {
 
         // Inner writer wrapped in a HuffmanBitWriter
         hm_bw: hm_bw.HuffmanBitWriter(WriterType) = undefined,
-        bulk_hasher: *const fn ([]u8, []u32) u32,
+        bulk_hasher: std.meta.FnPtr(fn ([]u8, []u32) u32),
 
         sync: bool, // requesting flush
         best_speed_enc: *fast.DeflateFast, // Encoder for best_speed
@@ -1079,7 +1079,7 @@ test "deflate" {
         try comp.close();
         comp.deinit();
 
-        try testing.expectEqualSlices(u8, dt.out, output.items);
+        try expect(mem.eql(u8, output.items, dt.out));
     }
 }
 
@@ -1104,7 +1104,7 @@ test "bulkHash4" {
             _ = bulkHash4(y, dst);
             for (dst) |got, i| {
                 var want = hash4(y[i..]);
-                try testing.expectEqual(want, got);
+                try expect(got == want);
             }
         }
     }

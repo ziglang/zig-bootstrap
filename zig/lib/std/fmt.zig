@@ -199,7 +199,7 @@ pub fn format(
         switch (missing_count) {
             0 => unreachable,
             1 => @compileError("unused argument in '" ++ fmt ++ "'"),
-            else => @compileError(comptimePrint("{d}", .{missing_count}) ++ " unused arguments in '" ++ fmt ++ "'"),
+            else => @compileError((comptime comptimePrint("{d}", .{missing_count})) ++ " unused arguments in '" ++ fmt ++ "'"),
         }
     }
 }
@@ -454,7 +454,7 @@ fn stripOptionalOrErrorUnionSpec(comptime fmt: []const u8) []const u8 {
         fmt[1..];
 }
 
-pub fn invalidFmtError(comptime fmt: []const u8, value: anytype) void {
+fn invalidFmtErr(comptime fmt: []const u8, value: anytype) void {
     @compileError("invalid format string '" ++ fmt ++ "' for type '" ++ @typeName(@TypeOf(value)) ++ "'");
 }
 
@@ -486,11 +486,11 @@ pub fn formatType(
             return formatValue(value, actual_fmt, options, writer);
         },
         .Void => {
-            if (actual_fmt.len != 0) invalidFmtError(fmt, value);
+            if (actual_fmt.len != 0) invalidFmtErr(fmt, value);
             return formatBuf("void", options, writer);
         },
         .Bool => {
-            if (actual_fmt.len != 0) invalidFmtError(fmt, value);
+            if (actual_fmt.len != 0) invalidFmtErr(fmt, value);
             return formatBuf(if (value) "true" else "false", options, writer);
         },
         .Optional => {
@@ -514,14 +514,14 @@ pub fn formatType(
             }
         },
         .ErrorSet => {
-            if (actual_fmt.len != 0) invalidFmtError(fmt, value);
+            if (actual_fmt.len != 0) invalidFmtErr(fmt, value);
             try writer.writeAll("error.");
             return writer.writeAll(@errorName(value));
         },
         .Enum => |enumInfo| {
             try writer.writeAll(@typeName(T));
             if (enumInfo.is_exhaustive) {
-                if (actual_fmt.len != 0) invalidFmtError(fmt, value);
+                if (actual_fmt.len != 0) invalidFmtErr(fmt, value);
                 try writer.writeAll(".");
                 try writer.writeAll(@tagName(value));
                 return;
@@ -542,7 +542,7 @@ pub fn formatType(
             try writer.writeAll(")");
         },
         .Union => |info| {
-            if (actual_fmt.len != 0) invalidFmtError(fmt, value);
+            if (actual_fmt.len != 0) invalidFmtErr(fmt, value);
             try writer.writeAll(@typeName(T));
             if (max_depth == 0) {
                 return writer.writeAll("{ ... }");
@@ -562,7 +562,7 @@ pub fn formatType(
             }
         },
         .Struct => |info| {
-            if (actual_fmt.len != 0) invalidFmtError(fmt, value);
+            if (actual_fmt.len != 0) invalidFmtErr(fmt, value);
             if (info.is_tuple) {
                 // Skip the type and field names when formatting tuples.
                 if (max_depth == 0) {
@@ -618,7 +618,7 @@ pub fn formatType(
                         }
                         return;
                     }
-                    invalidFmtError(fmt, value);
+                    invalidFmtErr(fmt, value);
                 },
                 .Enum, .Union, .Struct => {
                     return formatType(value.*, actual_fmt, options, writer, max_depth);
@@ -640,7 +640,7 @@ pub fn formatType(
                         else => {},
                     }
                 }
-                invalidFmtError(fmt, value);
+                invalidFmtErr(fmt, value);
             },
             .Slice => {
                 if (actual_fmt.len == 0)
@@ -703,20 +703,20 @@ pub fn formatType(
             try writer.writeAll(" }");
         },
         .Fn => {
-            if (actual_fmt.len != 0) invalidFmtError(fmt, value);
+            if (actual_fmt.len != 0) invalidFmtErr(fmt, value);
             return format(writer, "{s}@{x}", .{ @typeName(T), @ptrToInt(value) });
         },
         .Type => {
-            if (actual_fmt.len != 0) invalidFmtError(fmt, value);
+            if (actual_fmt.len != 0) invalidFmtErr(fmt, value);
             return formatBuf(@typeName(value), options, writer);
         },
         .EnumLiteral => {
-            if (actual_fmt.len != 0) invalidFmtError(fmt, value);
+            if (actual_fmt.len != 0) invalidFmtErr(fmt, value);
             const buffer = [_]u8{'.'} ++ @tagName(value);
             return formatBuf(buffer, options, writer);
         },
         .Null => {
-            if (actual_fmt.len != 0) invalidFmtError(fmt, value);
+            if (actual_fmt.len != 0) invalidFmtErr(fmt, value);
             return formatBuf("null", options, writer);
         },
         else => @compileError("unable to format type '" ++ @typeName(T) ++ "'"),
@@ -786,7 +786,7 @@ pub fn formatIntValue(
         radix = 8;
         case = .lower;
     } else {
-        invalidFmtError(fmt, value);
+        invalidFmtErr(fmt, value);
     }
 
     return formatInt(int_value, radix, case, options, writer);
@@ -815,7 +815,7 @@ fn formatFloatValue(
             error.NoSpaceLeft => unreachable,
         };
     } else {
-        invalidFmtError(fmt, value);
+        invalidFmtErr(fmt, value);
     }
 
     return formatBuf(buf_stream.getWritten(), options, writer);
@@ -827,7 +827,7 @@ fn formatSliceHexImpl(comptime case: Case) type {
     const charset = "0123456789" ++ if (case == .upper) "ABCDEF" else "abcdef";
 
     return struct {
-        pub fn formatSliceHexImpl(
+        pub fn f(
             bytes: []const u8,
             comptime fmt: []const u8,
             options: std.fmt.FormatOptions,
@@ -846,8 +846,8 @@ fn formatSliceHexImpl(comptime case: Case) type {
     };
 }
 
-const formatSliceHexLower = formatSliceHexImpl(.lower).formatSliceHexImpl;
-const formatSliceHexUpper = formatSliceHexImpl(.upper).formatSliceHexImpl;
+const formatSliceHexLower = formatSliceHexImpl(.lower).f;
+const formatSliceHexUpper = formatSliceHexImpl(.upper).f;
 
 /// Return a Formatter for a []const u8 where every byte is formatted as a pair
 /// of lowercase hexadecimal digits.
@@ -865,7 +865,7 @@ fn formatSliceEscapeImpl(comptime case: Case) type {
     const charset = "0123456789" ++ if (case == .upper) "ABCDEF" else "abcdef";
 
     return struct {
-        pub fn formatSliceEscapeImpl(
+        pub fn f(
             bytes: []const u8,
             comptime fmt: []const u8,
             options: std.fmt.FormatOptions,
@@ -891,8 +891,8 @@ fn formatSliceEscapeImpl(comptime case: Case) type {
     };
 }
 
-const formatSliceEscapeLower = formatSliceEscapeImpl(.lower).formatSliceEscapeImpl;
-const formatSliceEscapeUpper = formatSliceEscapeImpl(.upper).formatSliceEscapeImpl;
+const formatSliceEscapeLower = formatSliceEscapeImpl(.lower).f;
+const formatSliceEscapeUpper = formatSliceEscapeImpl(.upper).f;
 
 /// Return a Formatter for a []const u8 where every non-printable ASCII
 /// character is escaped as \xNN, where NN is the character in lowercase
@@ -910,7 +910,7 @@ pub fn fmtSliceEscapeUpper(bytes: []const u8) std.fmt.Formatter(formatSliceEscap
 
 fn formatSizeImpl(comptime radix: comptime_int) type {
     return struct {
-        fn formatSizeImpl(
+        fn f(
             value: u64,
             comptime fmt: []const u8,
             options: FormatOptions,
@@ -958,8 +958,8 @@ fn formatSizeImpl(comptime radix: comptime_int) type {
     };
 }
 
-const formatSizeDec = formatSizeImpl(1000).formatSizeImpl;
-const formatSizeBin = formatSizeImpl(1024).formatSizeImpl;
+const formatSizeDec = formatSizeImpl(1000).f;
+const formatSizeBin = formatSizeImpl(1024).f;
 
 /// Return a Formatter for a u64 value representing a file size.
 /// This formatter represents the number as multiple of 1000 and uses the SI
@@ -1429,29 +1429,12 @@ pub fn formatInt(
 
     var a: MinInt = abs_value;
     var index: usize = buf.len;
-
-    // TODO isComptime here because of https://github.com/ziglang/zig/issues/13335.
-    if (base == 10 and !isComptime()) {
-        while (a >= 100) : (a = @divTrunc(a, 100)) {
-            index -= 2;
-            buf[index..][0..2].* = digits2(@intCast(usize, a % 100));
-        }
-
-        if (a < 10) {
-            index -= 1;
-            buf[index] = '0' + @intCast(u8, a);
-        } else {
-            index -= 2;
-            buf[index..][0..2].* = digits2(@intCast(usize, a));
-        }
-    } else {
-        while (true) {
-            const digit = a % base;
-            index -= 1;
-            buf[index] = digitToChar(@intCast(u8, digit), case);
-            a /= base;
-            if (a == 0) break;
-        }
+    while (true) {
+        const digit = a % base;
+        index -= 1;
+        buf[index] = digitToChar(@intCast(u8, digit), case);
+        a /= base;
+        if (a == 0) break;
     }
 
     if (value_info.signedness == .signed) {
@@ -1471,25 +1454,10 @@ pub fn formatInt(
     return formatBuf(buf[index..], options, writer);
 }
 
-// TODO: Remove once https://github.com/ziglang/zig/issues/868 is resolved.
-fn isComptime() bool {
-    var a: u8 = 0;
-    return @typeInfo(@TypeOf(.{a})).Struct.fields[0].is_comptime;
-}
-
 pub fn formatIntBuf(out_buf: []u8, value: anytype, base: u8, case: Case, options: FormatOptions) usize {
     var fbs = std.io.fixedBufferStream(out_buf);
     formatInt(value, base, case, options, fbs.writer()) catch unreachable;
     return fbs.pos;
-}
-
-// Converts values in the range [0, 100) to a string.
-fn digits2(value: usize) [2]u8 {
-    return ("0001020304050607080910111213141516171819" ++
-        "2021222324252627282930313233343536373839" ++
-        "4041424344454647484950515253545556575859" ++
-        "6061626364656667686970717273747576777879" ++
-        "8081828384858687888990919293949596979899")[value * 2 ..][0..2].*;
 }
 
 const FormatDurationData = struct {
@@ -1724,7 +1692,7 @@ pub const ParseIntError = error{
 ///     ) !void;
 ///
 pub fn Formatter(comptime format_fn: anytype) type {
-    const Data = @typeInfo(@TypeOf(format_fn)).Fn.params[0].type.?;
+    const Data = @typeInfo(@TypeOf(format_fn)).Fn.args[0].arg_type.?;
     return struct {
         data: Data,
         pub fn format(
@@ -2198,9 +2166,8 @@ test "slice" {
 }
 
 test "escape non-printable" {
-    try expectFmt("abc 123", "{s}", .{fmtSliceEscapeLower("abc 123")});
+    try expectFmt("abc", "{s}", .{fmtSliceEscapeLower("abc")});
     try expectFmt("ab\\xffc", "{s}", .{fmtSliceEscapeLower("ab\xffc")});
-    try expectFmt("abc 123", "{s}", .{fmtSliceEscapeUpper("abc 123")});
     try expectFmt("ab\\xFFc", "{s}", .{fmtSliceEscapeUpper("ab\xffc")});
 }
 
@@ -2210,7 +2177,7 @@ test "pointer" {
         try expectFmt("pointer: i32@deadbeef\n", "pointer: {}\n", .{value});
         try expectFmt("pointer: i32@deadbeef\n", "pointer: {*}\n", .{value});
     }
-    const FnPtr = *align(1) const fn () void;
+    const FnPtr = if (builtin.zig_backend == .stage1) fn () void else *align(1) const fn () void;
     {
         const value = @intToPtr(FnPtr, 0xdeadbeef);
         try expectFmt("pointer: fn() void@deadbeef\n", "pointer: {}\n", .{value});
@@ -2267,6 +2234,10 @@ test "struct" {
 }
 
 test "enum" {
+    if (builtin.zig_backend == .stage1) {
+        // stage1 starts the typename with 'std' which might also be desireable for stage2
+        return error.SkipZigTest;
+    }
     const Enum = enum {
         One,
         Two,
@@ -2282,6 +2253,10 @@ test "enum" {
 }
 
 test "non-exhaustive enum" {
+    if (builtin.zig_backend == .stage1) {
+        // stage1 fails to return fully qualified namespaces.
+        return error.SkipZigTest;
+    }
     const Enum = enum(u16) {
         One = 0x000f,
         Two = 0xbeef,
@@ -2455,6 +2430,10 @@ test "custom" {
 }
 
 test "struct" {
+    if (builtin.zig_backend == .stage1) {
+        // stage1 fails to return fully qualified namespaces.
+        return error.SkipZigTest;
+    }
     const S = struct {
         a: u32,
         b: anyerror,
@@ -2473,6 +2452,10 @@ test "struct" {
 }
 
 test "union" {
+    if (builtin.zig_backend == .stage1) {
+        // stage1 fails to return fully qualified namespaces.
+        return error.SkipZigTest;
+    }
     const TU = union(enum) {
         float: f32,
         int: u32,
@@ -2503,6 +2486,10 @@ test "union" {
 }
 
 test "enum" {
+    if (builtin.zig_backend == .stage1) {
+        // stage1 fails to return fully qualified namespaces.
+        return error.SkipZigTest;
+    }
     const E = enum {
         One,
         Two,
@@ -2515,6 +2502,10 @@ test "enum" {
 }
 
 test "struct.self-referential" {
+    if (builtin.zig_backend == .stage1) {
+        // stage1 fails to return fully qualified namespaces.
+        return error.SkipZigTest;
+    }
     const S = struct {
         const SelfType = @This();
         a: ?*SelfType,
@@ -2529,6 +2520,10 @@ test "struct.self-referential" {
 }
 
 test "struct.zero-size" {
+    if (builtin.zig_backend == .stage1) {
+        // stage1 fails to return fully qualified namespaces.
+        return error.SkipZigTest;
+    }
     const A = struct {
         fn foo() void {}
     };
@@ -2606,6 +2601,10 @@ test "formatFloatValue with comptime_float" {
 }
 
 test "formatType max_depth" {
+    if (builtin.zig_backend == .stage1) {
+        // stage1 fails to return fully qualified namespaces.
+        return error.SkipZigTest;
+    }
     const Vec2 = struct {
         const SelfType = @This();
         x: f32,
@@ -2690,6 +2689,12 @@ test "positional/alignment/width/precision" {
 test "vector" {
     if (builtin.target.cpu.arch == .riscv64) {
         // https://github.com/ziglang/zig/issues/4486
+        return error.SkipZigTest;
+    }
+
+    if (builtin.zig_backend == .stage1) {
+        // Regressed in LLVM 14:
+        // https://github.com/llvm/llvm-project/issues/55522
         return error.SkipZigTest;
     }
 

@@ -9,12 +9,9 @@
 #include <wasi/libc.h>
 
 #ifdef _REENTRANT
-void __wasilibc_cwd_lock(void);
-void __wasilibc_cwd_unlock(void);
-#else
-#define __wasilibc_cwd_lock() (void)0
-#define __wasilibc_cwd_unlock() (void)0
+#error "chdir doesn't yet support multiple threads"
 #endif
+
 extern char *__wasilibc_cwd;
 static int __wasilibc_cwd_mallocd = 0;
 
@@ -46,10 +43,10 @@ int chdir(const char *path)
     //
     // If `relative_buf` is equal to "." or `abs` is equal to the empty string,
     // however, we skip that part and the middle slash.
-    size_t abs_len = strlen(abs);
+    size_t len = strlen(abs) + 1;
     int copy_relative = strcmp(relative_buf, ".") != 0;
     int mid = copy_relative && abs[0] != 0;
-    char *new_cwd = malloc(1 + abs_len + mid + (copy_relative ? strlen(relative_buf) : 0) + 1);
+    char *new_cwd = malloc(len + (copy_relative ? strlen(relative_buf) + mid: 0)+1);
     if (new_cwd == NULL) {
         errno = ENOMEM;
         return -1;
@@ -57,16 +54,14 @@ int chdir(const char *path)
     new_cwd[0] = '/';
     strcpy(new_cwd + 1, abs);
     if (mid)
-        new_cwd[1 + abs_len] = '/';
+        new_cwd[len] = '/';
     if (copy_relative)
-        strcpy(new_cwd + 1 + abs_len + mid, relative_buf);
+        strcpy(new_cwd + 1 + mid + strlen(abs), relative_buf);
 
     // And set our new malloc'd buffer into the global cwd, freeing the
     // previous one if necessary.
-    __wasilibc_cwd_lock();
     char *prev_cwd = __wasilibc_cwd;
     __wasilibc_cwd = new_cwd;
-    __wasilibc_cwd_unlock();
     if (__wasilibc_cwd_mallocd)
         free(prev_cwd);
     __wasilibc_cwd_mallocd = 1;
@@ -82,13 +77,11 @@ static const char *make_absolute(const char *path) {
         return path;
     }
 
-#ifndef _REENTRANT
     // If the path is empty, or points to the current directory, then return
     // the current directory.
     if (path[0] == 0 || !strcmp(path, ".") || !strcmp(path, "./")) {
         return __wasilibc_cwd;
     }
-#endif
 
     // If the path starts with `./` then we won't be appending that to the cwd.
     if (path[0] == '.' && path[1] == '/')
@@ -97,30 +90,18 @@ static const char *make_absolute(const char *path) {
     // Otherwise we'll take the current directory, add a `/`, and then add the
     // input `path`. Note that this doesn't do any normalization (like removing
     // `/./`).
-    __wasilibc_cwd_lock();
     size_t cwd_len = strlen(__wasilibc_cwd);
-    size_t path_len = path ? strlen(path) : 0;
-    __wasilibc_cwd_unlock();
+    size_t path_len = strlen(path);
     int need_slash = __wasilibc_cwd[cwd_len - 1] == '/' ? 0 : 1;
     size_t alloc_len = cwd_len + path_len + 1 + need_slash;
     if (alloc_len > make_absolute_len) {
         char *tmp = realloc(make_absolute_buf, alloc_len);
-        if (tmp == NULL) {
-            __wasilibc_cwd_unlock();
+        if (tmp == NULL)
             return NULL;
-        }
         make_absolute_buf = tmp;
         make_absolute_len = alloc_len;
     }
     strcpy(make_absolute_buf, __wasilibc_cwd);
-    __wasilibc_cwd_unlock();
-
-#ifdef _REENTRANT
-    if (path[0] == 0 || !strcmp(path, ".") || !strcmp(path, "./")) {
-        return make_absolute_buf;
-    }
-#endif
-
     if (need_slash)
         strcpy(make_absolute_buf + cwd_len, "/");
     strcpy(make_absolute_buf + cwd_len + need_slash, path);

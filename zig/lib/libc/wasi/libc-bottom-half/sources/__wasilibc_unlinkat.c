@@ -1,3 +1,4 @@
+#include <common/errno.h>
 #include <wasi/api.h>
 #include <wasi/libc.h>
 #include <errno.h>

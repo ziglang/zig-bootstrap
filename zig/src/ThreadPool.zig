@@ -15,7 +15,10 @@ const Runnable = struct {
     runFn: RunProto,
 };
 
-const RunProto = *const fn (*Runnable) void;
+const RunProto = switch (builtin.zig_backend) {
+    .stage1 => fn (*Runnable) void,
+    else => *const fn (*Runnable) void,
+};
 
 pub fn init(pool: *ThreadPool, allocator: std.mem.Allocator) !void {
     pool.* = .{
@@ -71,7 +74,7 @@ fn join(pool: *ThreadPool, spawned: usize) void {
 
 pub fn spawn(pool: *ThreadPool, comptime func: anytype, args: anytype) !void {
     if (builtin.single_threaded) {
-        @call(.auto, func, args);
+        @call(.{}, func, args);
         return;
     }
 
@@ -84,7 +87,7 @@ pub fn spawn(pool: *ThreadPool, comptime func: anytype, args: anytype) !void {
         fn runFn(runnable: *Runnable) void {
             const run_node = @fieldParentPtr(RunQueue.Node, "data", runnable);
             const closure = @fieldParentPtr(@This(), "run_node", run_node);
-            @call(.auto, func, closure.arguments);
+            @call(.{}, func, closure.arguments);
 
             // The thread pool's allocator is protected by the mutex.
             const mutex = &closure.pool.mutex;

@@ -1,8 +1,6 @@
 #define _GNU_SOURCE
 #include "pthread_impl.h"
-#ifdef __wasilibc_unmodified_upstream
 #include <sys/mman.h>
-#endif
 
 static void dummy1(pthread_t t)
 {
@@ -23,11 +21,7 @@ static int __pthread_timedjoin_np(pthread_t t, void **res, const struct timespec
 	if (r == ETIMEDOUT || r == EINVAL) return r;
 	__tl_sync(t);
 	if (res) *res = t->result;
-#ifdef __wasilibc_unmodified_upstream
 	if (t->map_base) __munmap(t->map_base, t->map_size);
-#else
-	if (t->map_base) free(t->map_base);
-#endif
 	return 0;
 }
 

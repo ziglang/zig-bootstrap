@@ -2,7 +2,7 @@ fn myFn(_: usize) void {
     return;
 }
 pub export fn entry() void {
-    @call(.always_tail, myFn, .{0});
+    @call(.{ .modifier = .always_tail }, myFn, .{0});
 }
 
 // error

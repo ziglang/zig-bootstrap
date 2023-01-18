@@ -14,10 +14,10 @@ const Auto = struct {
     }
 };
 test {
+    if (builtin.zig_backend == .stage1) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const a: Auto = .{ .offset = 16, .capacity = Auto.capacity };
     try std.testing.expect(a.capacity() == 32);

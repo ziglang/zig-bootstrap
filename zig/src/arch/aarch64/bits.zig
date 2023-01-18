@@ -4,15 +4,13 @@ const DW = std.dwarf;
 const assert = std.debug.assert;
 const testing = std.testing;
 
-/// Disjoint sets of registers. Every register must belong to
-/// exactly one register class.
 pub const RegisterClass = enum {
     general_purpose,
     stack_pointer,
     floating_point,
 };
 
-/// Registers in the AArch64 instruction set
+/// General purpose registers in the AArch64 instruction set
 pub const Register = enum(u8) {
     // zig fmt: off
     // 64-bit general-purpose registers

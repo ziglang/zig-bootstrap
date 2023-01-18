@@ -58,8 +58,7 @@ fn collectRoots(zld: *Zld, roots: *AtomTable) !void {
                 const sym = zld.getSymbol(global);
                 if (sym.undf()) continue;
 
-                const file = global.getFile() orelse continue; // synthetic globals are atomless
-                const object = zld.objects.items[file];
+                const object = zld.objects.items[global.getFile().?];
                 const atom_index = object.getAtomIndexForSymbol(global.sym_index).?; // panic here means fatal error
                 _ = try roots.getOrPut(atom_index);
 
@@ -108,7 +107,7 @@ fn collectRoots(zld: *Zld, roots: *AtomTable) !void {
                 };
                 const source_sect = object.getSourceSection(sect_id);
                 if (source_sect.isDontDeadStrip()) break :blk true;
-                switch (source_sect.type()) {
+                switch (source_sect.@"type"()) {
                     macho.S_MOD_INIT_FUNC_POINTERS,
                     macho.S_MOD_TERM_FUNC_POINTERS,
                     => break :blk true,

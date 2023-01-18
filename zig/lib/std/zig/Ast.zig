@@ -125,7 +125,7 @@ pub fn extraData(tree: Ast, index: usize, comptime T: type) T {
     const fields = std.meta.fields(T);
     var result: T = undefined;
     inline for (fields) |field, i| {
-        comptime assert(field.type == Node.Index);
+        comptime assert(field.field_type == Node.Index);
         @field(result, field.name) = tree.extra_data[index + i];
     }
     return result;
@@ -559,7 +559,7 @@ pub fn firstToken(tree: Ast, node: Node.Index) TokenIndex {
         .container_field,
         => {
             const name_token = main_tokens[n];
-            if (token_tags[name_token] != .keyword_comptime and name_token > 0 and token_tags[name_token - 1] == .keyword_comptime) {
+            if (name_token > 0 and token_tags[name_token - 1] == .keyword_comptime) {
                 end_offset += 1;
             }
             return name_token - end_offset;
@@ -617,7 +617,7 @@ pub fn firstToken(tree: Ast, node: Node.Index) TokenIndex {
         .tagged_union_enum_tag_trailing,
         => {
             const main_token = main_tokens[n];
-            switch (token_tags[main_token -| 1]) {
+            switch (token_tags[main_token - 1]) {
                 .keyword_packed, .keyword_extern => end_offset += 1,
                 else => {},
             }
@@ -633,8 +633,8 @@ pub fn firstToken(tree: Ast, node: Node.Index) TokenIndex {
             return switch (token_tags[main_token]) {
                 .asterisk,
                 .asterisk_asterisk,
-                => switch (token_tags[main_token -| 1]) {
-                    .l_bracket => main_token -| 1,
+                => switch (token_tags[main_token - 1]) {
+                    .l_bracket => main_token - 1,
                     else => main_token,
                 },
                 .l_bracket => main_token,
@@ -1320,39 +1320,33 @@ pub fn containerField(tree: Ast, node: Node.Index) full.ContainerField {
     assert(tree.nodes.items(.tag)[node] == .container_field);
     const data = tree.nodes.items(.data)[node];
     const extra = tree.extraData(data.rhs, Node.ContainerField);
-    const main_token = tree.nodes.items(.main_token)[node];
     return tree.fullContainerField(.{
-        .main_token = main_token,
+        .name_token = tree.nodes.items(.main_token)[node],
         .type_expr = data.lhs,
         .value_expr = extra.value_expr,
         .align_expr = extra.align_expr,
-        .tuple_like = tree.tokens.items(.tag)[main_token + 1] != .colon,
     });
 }
 
 pub fn containerFieldInit(tree: Ast, node: Node.Index) full.ContainerField {
     assert(tree.nodes.items(.tag)[node] == .container_field_init);
     const data = tree.nodes.items(.data)[node];
-    const main_token = tree.nodes.items(.main_token)[node];
     return tree.fullContainerField(.{
-        .main_token = main_token,
+        .name_token = tree.nodes.items(.main_token)[node],
         .type_expr = data.lhs,
         .value_expr = data.rhs,
         .align_expr = 0,
-        .tuple_like = tree.tokens.items(.tag)[main_token + 1] != .colon,
     });
 }
 
 pub fn containerFieldAlign(tree: Ast, node: Node.Index) full.ContainerField {
     assert(tree.nodes.items(.tag)[node] == .container_field_align);
     const data = tree.nodes.items(.data)[node];
-    const main_token = tree.nodes.items(.main_token)[node];
     return tree.fullContainerField(.{
-        .main_token = main_token,
+        .name_token = tree.nodes.items(.main_token)[node],
         .type_expr = data.lhs,
         .value_expr = 0,
         .align_expr = data.rhs,
-        .tuple_like = tree.tokens.items(.tag)[main_token + 1] != .colon,
     });
 }
 
@@ -1950,14 +1944,10 @@ fn fullContainerField(tree: Ast, info: full.ContainerField.Components) full.Cont
         .ast = info,
         .comptime_token = null,
     };
-    if (token_tags[info.main_token] == .keyword_comptime) {
-        // comptime type = init,
-        // ^
-        result.comptime_token = info.main_token;
-    } else if (info.main_token > 0 and token_tags[info.main_token - 1] == .keyword_comptime) {
-        // comptime name: type = init,
-        // ^
-        result.comptime_token = info.main_token - 1;
+    // comptime name: type = init,
+    // ^
+    if (info.name_token > 0 and token_tags[info.name_token - 1] == .keyword_comptime) {
+        result.comptime_token = info.name_token - 1;
     }
     return result;
 }
@@ -2008,13 +1998,15 @@ fn fullStructInit(tree: Ast, info: full.StructInit.Components) full.StructInit {
 
 fn fullPtrType(tree: Ast, info: full.PtrType.Components) full.PtrType {
     const token_tags = tree.tokens.items(.tag);
+    // TODO: looks like stage1 isn't quite smart enough to handle enum
+    // literals in some places here
     const Size = std.builtin.Type.Pointer.Size;
     const size: Size = switch (token_tags[info.main_token]) {
         .asterisk,
         .asterisk_asterisk,
         => switch (token_tags[info.main_token + 1]) {
             .r_bracket, .colon => .Many,
-            .identifier => if (token_tags[info.main_token -| 1] == .l_bracket) Size.C else .One,
+            .identifier => if (token_tags[info.main_token - 1] == .l_bracket) Size.C else .One,
             else => .One,
         },
         .l_bracket => Size.Slice,
@@ -2059,9 +2051,6 @@ fn fullContainerDecl(tree: Ast, info: full.ContainerDecl.Components) full.Contai
         .ast = info,
         .layout_token = null,
     };
-
-    if (info.main_token == 0) return result;
-
     switch (token_tags[info.main_token - 1]) {
         .keyword_extern, .keyword_packed => result.layout_token = info.main_token - 1,
         else => {},
@@ -2191,9 +2180,9 @@ fn fullCall(tree: Ast, info: full.Call.Components) full.Call {
         .ast = info,
         .async_token = null,
     };
-    const first_token = tree.firstToken(info.fn_expr);
-    if (first_token != 0 and token_tags[first_token - 1] == .keyword_async) {
-        result.async_token = first_token - 1;
+    const maybe_async_token = tree.firstToken(info.fn_expr) - 1;
+    if (token_tags[maybe_async_token] == .keyword_async) {
+        result.async_token = maybe_async_token;
     }
     return result;
 }
@@ -2267,26 +2256,14 @@ pub const full = struct {
         ast: Components,
 
         pub const Components = struct {
-            main_token: TokenIndex,
+            name_token: TokenIndex,
             type_expr: Node.Index,
             value_expr: Node.Index,
             align_expr: Node.Index,
-            tuple_like: bool,
         };
 
         pub fn firstToken(cf: ContainerField) TokenIndex {
-            return cf.comptime_token orelse cf.ast.main_token;
-        }
-
-        pub fn convertToNonTupleLike(cf: *ContainerField, nodes: NodeList.Slice) void {
-            if (!cf.ast.tuple_like) return;
-            if (cf.ast.type_expr == 0) return;
-            if (nodes.items(.tag)[cf.ast.type_expr] != .identifier) return;
-
-            const ident = nodes.items(.main_token)[cf.ast.type_expr];
-            cf.ast.tuple_like = false;
-            cf.ast.main_token = ident;
-            cf.ast.type_expr = 0;
+            return cf.comptime_token orelse cf.ast.name_token;
         }
     };
 

@@ -33,7 +33,7 @@ const syscall_bits = switch (native_arch) {
 };
 
 const arch_bits = switch (native_arch) {
-    .x86 => @import("linux/x86.zig"),
+    .i386 => @import("linux/i386.zig"),
     .x86_64 => @import("linux/x86_64.zig"),
     .aarch64 => @import("linux/arm64.zig"),
     .arm, .thumb => @import("linux/arm-eabi.zig"),
@@ -94,7 +94,7 @@ pub const SECCOMP = @import("linux/seccomp.zig");
 
 pub const syscalls = @import("linux/syscalls.zig");
 pub const SYS = switch (@import("builtin").cpu.arch) {
-    .x86 => syscalls.X86,
+    .i386 => syscalls.X86,
     .x86_64 => syscalls.X64,
     .aarch64 => syscalls.Arm64,
     .arm, .thumb => syscalls.Arm,
@@ -263,7 +263,7 @@ pub fn fork() usize {
 /// the compiler is not aware of how vfork affects control flow and you may
 /// see different results in optimized builds.
 pub inline fn vfork() usize {
-    return @call(.always_inline, syscall0, .{.vfork});
+    return @call(.{ .modifier = .always_inline }, syscall0, .{.vfork});
 }
 
 pub fn futimens(fd: i32, times: *const [2]timespec) usize {
@@ -936,10 +936,16 @@ pub fn flock(fd: fd_t, operation: i32) usize {
     return syscall2(.flock, @bitCast(usize, @as(isize, fd)), @bitCast(usize, @as(isize, operation)));
 }
 
-var vdso_clock_gettime = @ptrCast(?*const anyopaque, &init_vdso_clock_gettime);
+var vdso_clock_gettime = if (builtin.zig_backend == .stage1)
+    @ptrCast(?*const anyopaque, init_vdso_clock_gettime)
+else
+    @ptrCast(?*const anyopaque, &init_vdso_clock_gettime);
 
 // We must follow the C calling convention when we call into the VDSO
-const vdso_clock_gettime_ty = *align(1) const fn (i32, *timespec) callconv(.C) usize;
+const vdso_clock_gettime_ty = if (builtin.zig_backend == .stage1)
+    fn (i32, *timespec) callconv(.C) usize
+else
+    *align(1) const fn (i32, *timespec) callconv(.C) usize;
 
 pub fn clock_gettime(clk_id: i32, tp: *timespec) usize {
     if (@hasDecl(VDSO, "CGT_SYM")) {
@@ -1145,8 +1151,8 @@ pub fn sigaction(sig: u6, noalias act: ?*const Sigaction, noalias oact: ?*Sigact
     const mask_size = @sizeOf(@TypeOf(ksa.mask));
 
     if (act) |new| {
-        const restore_rt_ptr = &restore_rt;
-        const restore_ptr = &restore;
+        const restore_rt_ptr = if (builtin.zig_backend == .stage1) restore_rt else &restore_rt;
+        const restore_ptr = if (builtin.zig_backend == .stage1) restore else &restore;
         const restorer_fn = if ((new.flags & SA.SIGINFO) != 0) restore_rt_ptr else restore_ptr;
         ksa = k_sigaction{
             .handler = new.handler.handler,
@@ -1192,42 +1198,42 @@ pub fn sigismember(set: *const sigset_t, sig: u6) bool {
 }
 
 pub fn getsockname(fd: i32, noalias addr: *sockaddr, noalias len: *socklen_t) usize {
-    if (native_arch == .x86) {
+    if (native_arch == .i386) {
         return socketcall(SC.getsockname, &[3]usize{ @bitCast(usize, @as(isize, fd)), @ptrToInt(addr), @ptrToInt(len) });
     }
     return syscall3(.getsockname, @bitCast(usize, @as(isize, fd)), @ptrToInt(addr), @ptrToInt(len));
 }
 
 pub fn getpeername(fd: i32, noalias addr: *sockaddr, noalias len: *socklen_t) usize {
-    if (native_arch == .x86) {
+    if (native_arch == .i386) {
         return socketcall(SC.getpeername, &[3]usize{ @bitCast(usize, @as(isize, fd)), @ptrToInt(addr), @ptrToInt(len) });
     }
     return syscall3(.getpeername, @bitCast(usize, @as(isize, fd)), @ptrToInt(addr), @ptrToInt(len));
 }
 
 pub fn socket(domain: u32, socket_type: u32, protocol: u32) usize {
-    if (native_arch == .x86) {
+    if (native_arch == .i386) {
         return socketcall(SC.socket, &[3]usize{ domain, socket_type, protocol });
     }
     return syscall3(.socket, domain, socket_type, protocol);
 }
 
 pub fn setsockopt(fd: i32, level: u32, optname: u32, optval: [*]const u8, optlen: socklen_t) usize {
-    if (native_arch == .x86) {
+    if (native_arch == .i386) {
         return socketcall(SC.setsockopt, &[5]usize{ @bitCast(usize, @as(isize, fd)), level, optname, @ptrToInt(optval), @intCast(usize, optlen) });
     }
     return syscall5(.setsockopt, @bitCast(usize, @as(isize, fd)), level, optname, @ptrToInt(optval), @intCast(usize, optlen));
 }
 
 pub fn getsockopt(fd: i32, level: u32, optname: u32, noalias optval: [*]u8, noalias optlen: *socklen_t) usize {
-    if (native_arch == .x86) {
+    if (native_arch == .i386) {
         return socketcall(SC.getsockopt, &[5]usize{ @bitCast(usize, @as(isize, fd)), level, optname, @ptrToInt(optval), @ptrToInt(optlen) });
     }
     return syscall5(.getsockopt, @bitCast(usize, @as(isize, fd)), level, optname, @ptrToInt(optval), @ptrToInt(optlen));
 }
 
 pub fn sendmsg(fd: i32, msg: *const std.x.os.Socket.Message, flags: c_int) usize {
-    if (native_arch == .x86) {
+    if (native_arch == .i386) {
         return socketcall(SC.sendmsg, &[3]usize{ @bitCast(usize, @as(isize, fd)), @ptrToInt(msg), @bitCast(usize, @as(isize, flags)) });
     }
     return syscall3(.sendmsg, @bitCast(usize, @as(isize, fd)), @ptrToInt(msg), @bitCast(usize, @as(isize, flags)));
@@ -1244,7 +1250,7 @@ pub fn sendmmsg(fd: i32, msgvec: [*]mmsghdr_const, vlen: u32, flags: u32) usize 
             var size: i32 = 0;
             const msg_iovlen = @intCast(usize, msg.msg_hdr.msg_iovlen); // kernel side this is treated as unsigned
             for (msg.msg_hdr.msg_iov[0..msg_iovlen]) |iov| {
-                if (iov.iov_len > std.math.maxInt(i32) or @addWithOverflow(size, @intCast(i32, iov.iov_len))[1] != 0) {
+                if (iov.iov_len > std.math.maxInt(i32) or @addWithOverflow(i32, size, @intCast(i32, iov.iov_len), &size)) {
                     // batch-send all messages up to the current message
                     if (next_unsent < i) {
                         const batch_size = i - next_unsent;
@@ -1274,49 +1280,49 @@ pub fn sendmmsg(fd: i32, msgvec: [*]mmsghdr_const, vlen: u32, flags: u32) usize 
 }
 
 pub fn connect(fd: i32, addr: *const anyopaque, len: socklen_t) usize {
-    if (native_arch == .x86) {
+    if (native_arch == .i386) {
         return socketcall(SC.connect, &[3]usize{ @bitCast(usize, @as(isize, fd)), @ptrToInt(addr), len });
     }
     return syscall3(.connect, @bitCast(usize, @as(isize, fd)), @ptrToInt(addr), len);
 }
 
 pub fn recvmsg(fd: i32, msg: *std.x.os.Socket.Message, flags: c_int) usize {
-    if (native_arch == .x86) {
+    if (native_arch == .i386) {
         return socketcall(SC.recvmsg, &[3]usize{ @bitCast(usize, @as(isize, fd)), @ptrToInt(msg), @bitCast(usize, @as(isize, flags)) });
     }
     return syscall3(.recvmsg, @bitCast(usize, @as(isize, fd)), @ptrToInt(msg), @bitCast(usize, @as(isize, flags)));
 }
 
 pub fn recvfrom(fd: i32, noalias buf: [*]u8, len: usize, flags: u32, noalias addr: ?*sockaddr, noalias alen: ?*socklen_t) usize {
-    if (native_arch == .x86) {
+    if (native_arch == .i386) {
         return socketcall(SC.recvfrom, &[6]usize{ @bitCast(usize, @as(isize, fd)), @ptrToInt(buf), len, flags, @ptrToInt(addr), @ptrToInt(alen) });
     }
     return syscall6(.recvfrom, @bitCast(usize, @as(isize, fd)), @ptrToInt(buf), len, flags, @ptrToInt(addr), @ptrToInt(alen));
 }
 
 pub fn shutdown(fd: i32, how: i32) usize {
-    if (native_arch == .x86) {
+    if (native_arch == .i386) {
         return socketcall(SC.shutdown, &[2]usize{ @bitCast(usize, @as(isize, fd)), @bitCast(usize, @as(isize, how)) });
     }
     return syscall2(.shutdown, @bitCast(usize, @as(isize, fd)), @bitCast(usize, @as(isize, how)));
 }
 
 pub fn bind(fd: i32, addr: *const sockaddr, len: socklen_t) usize {
-    if (native_arch == .x86) {
+    if (native_arch == .i386) {
         return socketcall(SC.bind, &[3]usize{ @bitCast(usize, @as(isize, fd)), @ptrToInt(addr), @intCast(usize, len) });
     }
     return syscall3(.bind, @bitCast(usize, @as(isize, fd)), @ptrToInt(addr), @intCast(usize, len));
 }
 
 pub fn listen(fd: i32, backlog: u32) usize {
-    if (native_arch == .x86) {
+    if (native_arch == .i386) {
         return socketcall(SC.listen, &[2]usize{ @bitCast(usize, @as(isize, fd)), backlog });
     }
     return syscall2(.listen, @bitCast(usize, @as(isize, fd)), backlog);
 }
 
 pub fn sendto(fd: i32, buf: [*]const u8, len: usize, flags: u32, addr: ?*const sockaddr, alen: socklen_t) usize {
-    if (native_arch == .x86) {
+    if (native_arch == .i386) {
         return socketcall(SC.sendto, &[6]usize{ @bitCast(usize, @as(isize, fd)), @ptrToInt(buf), len, flags, @ptrToInt(addr), @intCast(usize, alen) });
     }
     return syscall6(.sendto, @bitCast(usize, @as(isize, fd)), @ptrToInt(buf), len, flags, @ptrToInt(addr), @intCast(usize, alen));
@@ -1343,21 +1349,21 @@ pub fn sendfile(outfd: i32, infd: i32, offset: ?*i64, count: usize) usize {
 }
 
 pub fn socketpair(domain: i32, socket_type: i32, protocol: i32, fd: *[2]i32) usize {
-    if (native_arch == .x86) {
+    if (native_arch == .i386) {
         return socketcall(SC.socketpair, &[4]usize{ @intCast(usize, domain), @intCast(usize, socket_type), @intCast(usize, protocol), @ptrToInt(fd) });
     }
     return syscall4(.socketpair, @intCast(usize, domain), @intCast(usize, socket_type), @intCast(usize, protocol), @ptrToInt(fd));
 }
 
 pub fn accept(fd: i32, noalias addr: ?*sockaddr, noalias len: ?*socklen_t) usize {
-    if (native_arch == .x86) {
+    if (native_arch == .i386) {
         return socketcall(SC.accept, &[4]usize{ fd, addr, len, 0 });
     }
     return accept4(fd, addr, len, 0);
 }
 
 pub fn accept4(fd: i32, noalias addr: ?*sockaddr, noalias len: ?*socklen_t, flags: u32) usize {
-    if (native_arch == .x86) {
+    if (native_arch == .i386) {
         return socketcall(SC.accept4, &[4]usize{ @bitCast(usize, @as(isize, fd)), @ptrToInt(addr), @ptrToInt(len), flags });
     }
     return syscall4(.accept4, @bitCast(usize, @as(isize, fd)), @ptrToInt(addr), @ptrToInt(len), flags);
@@ -3139,8 +3145,8 @@ pub const all_mask: sigset_t = [_]u32{0xffffffff} ** @typeInfo(sigset_t).Array.l
 pub const app_mask: sigset_t = [2]u32{ 0xfffffffc, 0x7fffffff } ++ [_]u32{0xffffffff} ** 30;
 
 const k_sigaction_funcs = struct {
-    const handler = ?*const fn (c_int) align(1) callconv(.C) void;
-    const restorer = *const fn () callconv(.C) void;
+    const handler = ?std.meta.FnPtr(fn (c_int) align(1) callconv(.C) void);
+    const restorer = std.meta.FnPtr(fn () callconv(.C) void);
 };
 
 pub const k_sigaction = switch (native_arch) {
@@ -3166,8 +3172,8 @@ pub const k_sigaction = switch (native_arch) {
 
 /// Renamed from `sigaction` to `Sigaction` to avoid conflict with the syscall.
 pub const Sigaction = extern struct {
-    pub const handler_fn = *const fn (c_int) align(1) callconv(.C) void;
-    pub const sigaction_fn = *const fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void;
+    pub const handler_fn = std.meta.FnPtr(fn (c_int) align(1) callconv(.C) void);
+    pub const sigaction_fn = std.meta.FnPtr(fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void);
 
     handler: extern union {
         handler: ?handler_fn,
@@ -3175,7 +3181,7 @@ pub const Sigaction = extern struct {
     },
     mask: sigset_t,
     flags: c_uint,
-    restorer: ?*const fn () callconv(.C) void = null,
+    restorer: ?std.meta.FnPtr(fn () callconv(.C) void) = null,
 };
 
 pub const empty_sigset = [_]u32{0} ** @typeInfo(sigset_t).Array.len;
@@ -3304,16 +3310,29 @@ pub const mmsghdr_const = extern struct {
 pub const epoll_data = extern union {
     ptr: usize,
     fd: i32,
-    u32: u32,
-    u64: u64,
+    @"u32": u32,
+    @"u64": u64,
 };
 
-pub const epoll_event = extern struct {
-    events: u32,
-    data: epoll_data align(switch (native_arch) {
-        .x86_64 => 4,
-        else => @alignOf(epoll_data),
-    }),
+pub const epoll_event = switch (builtin.zig_backend) {
+    // stage1 crashes with the align(4) field so we have this workaround
+    .stage1 => switch (native_arch) {
+        .x86_64 => packed struct {
+            events: u32,
+            data: epoll_data,
+        },
+        else => extern struct {
+            events: u32,
+            data: epoll_data,
+        },
+    },
+    else => extern struct {
+        events: u32,
+        data: epoll_data align(switch (native_arch) {
+            .x86_64 => 4,
+            else => @alignOf(epoll_data),
+        }),
+    },
 };
 
 pub const VFS_CAP_REVISION_MASK = 0xFF000000;
@@ -3455,12 +3474,12 @@ pub fn CPU_COUNT(set: cpu_set_t) cpu_count_t {
 }
 
 pub const MINSIGSTKSZ = switch (native_arch) {
-    .x86, .x86_64, .arm, .mipsel => 2048,
+    .i386, .x86_64, .arm, .mipsel => 2048,
     .aarch64 => 5120,
     else => @compileError("MINSIGSTKSZ not defined for this architecture"),
 };
 pub const SIGSTKSZ = switch (native_arch) {
-    .x86, .x86_64, .arm, .mipsel => 8192,
+    .i386, .x86_64, .arm, .mipsel => 8192,
     .aarch64 => 16384,
     else => @compileError("SIGSTKSZ not defined for this architecture"),
 };
@@ -5105,7 +5124,7 @@ pub const nlmsghdr = extern struct {
     len: u32,
 
     /// Message content
-    type: NetlinkMessageType,
+    @"type": NetlinkMessageType,
 
     /// Additional flags
     flags: u16,
@@ -5122,7 +5141,7 @@ pub const ifinfomsg = extern struct {
     __pad1: u8 = 0,
 
     /// ARPHRD_*
-    type: c_ushort,
+    @"type": c_ushort,
 
     /// Link index
     index: c_int,
@@ -5139,7 +5158,7 @@ pub const rtattr = extern struct {
     len: c_ushort,
 
     /// Type of option
-    type: IFLA,
+    @"type": IFLA,
 
     pub const ALIGNTO = 4;
 };
@@ -5494,7 +5513,6 @@ pub const PERF = struct {
         RAW,
         BREAKPOINT,
         MAX,
-        _,
     };
 
     pub const COUNT = struct {
@@ -5628,7 +5646,7 @@ pub const AUDIT = struct {
         const LE = 0x40000000;
 
         pub const current: AUDIT.ARCH = switch (native_arch) {
-            .x86 => .X86,
+            .i386 => .I386,
             .x86_64 => .X86_64,
             .aarch64 => .AARCH64,
             .arm, .thumb => .ARM,
@@ -5647,7 +5665,7 @@ pub const AUDIT = struct {
         ARMEB = toAudit(.armeb),
         CSKY = toAudit(.csky),
         HEXAGON = @enumToInt(std.elf.EM.HEXAGON),
-        X86 = toAudit(.x86),
+        I386 = toAudit(.i386),
         M68K = toAudit(.m68k),
         MIPS = toAudit(.mips),
         MIPSEL = toAudit(.mips) | LE,

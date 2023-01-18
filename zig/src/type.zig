@@ -80,8 +80,8 @@ pub const Type = extern union {
             .comptime_int => return .ComptimeInt,
             .comptime_float => return .ComptimeFloat,
             .noreturn => return .NoReturn,
-            .null => return .Null,
-            .undefined => return .Undefined,
+            .@"null" => return .Null,
+            .@"undefined" => return .Undefined,
 
             .fn_noreturn_no_args => return .Fn,
             .fn_void_no_args => return .Fn,
@@ -129,6 +129,7 @@ pub const Type = extern union {
             .empty_struct,
             .empty_struct_literal,
             .@"struct",
+            .call_options,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -146,7 +147,6 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .modifier,
             => return .Enum,
 
             .@"union",
@@ -177,15 +177,15 @@ pub const Type = extern union {
             .Float,
             .ComptimeFloat,
             .ComptimeInt,
+            .Vector, // TODO some vectors require is_equality_cmp==true
             => true,
-
-            .Vector => ty.elemType2().isSelfComparable(is_equality_cmp),
 
             .Bool,
             .Type,
             .Void,
             .ErrorSet,
             .Fn,
+            .BoundFn,
             .Opaque,
             .AnyFrame,
             .Enum,
@@ -567,9 +567,9 @@ pub const Type = extern union {
             .comptime_int,
             .comptime_float,
             .noreturn,
-            .null,
-            .undefined,
-            .anyopaque,
+            .@"null",
+            .@"undefined",
+            .@"anyopaque",
             .@"anyframe",
             .enum_literal,
             => |a_tag| {
@@ -748,8 +748,6 @@ pub const Type = extern union {
                     return false;
                 if (info_a.host_size != info_b.host_size)
                     return false;
-                if (info_a.vector_index != info_b.vector_index)
-                    return false;
                 if (info_a.@"allowzero" != info_b.@"allowzero")
                     return false;
                 if (info_a.mutable != info_b.mutable)
@@ -817,7 +815,7 @@ pub const Type = extern union {
                 return a_struct_obj == b_struct_obj;
             },
             .tuple, .empty_struct_literal => {
-                if (!b.isSimpleTuple()) return false;
+                if (!b.isTuple()) return false;
 
                 const a_tuple = a.tupleFields();
                 const b_tuple = b.tupleFields();
@@ -888,6 +886,7 @@ pub const Type = extern union {
 
             // we can't compare these based on tags because it wouldn't detect if,
             // for example, a was resolved into .@"struct" but b was one of these tags.
+            .call_options,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -916,7 +915,6 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .modifier,
             => unreachable, // needed to resolve the type before now
 
             .@"union", .union_safety_tagged, .union_tagged => {
@@ -975,12 +973,12 @@ pub const Type = extern union {
             .comptime_int => std.hash.autoHash(hasher, std.builtin.TypeId.ComptimeInt),
             .comptime_float => std.hash.autoHash(hasher, std.builtin.TypeId.ComptimeFloat),
             .noreturn => std.hash.autoHash(hasher, std.builtin.TypeId.NoReturn),
-            .null => std.hash.autoHash(hasher, std.builtin.TypeId.Null),
-            .undefined => std.hash.autoHash(hasher, std.builtin.TypeId.Undefined),
+            .@"null" => std.hash.autoHash(hasher, std.builtin.TypeId.Null),
+            .@"undefined" => std.hash.autoHash(hasher, std.builtin.TypeId.Undefined),
 
-            .anyopaque => {
+            .@"anyopaque" => {
                 std.hash.autoHash(hasher, std.builtin.TypeId.Opaque);
-                std.hash.autoHash(hasher, Tag.anyopaque);
+                std.hash.autoHash(hasher, Tag.@"anyopaque");
             },
 
             .@"anyframe" => {
@@ -1128,7 +1126,6 @@ pub const Type = extern union {
                 std.hash.autoHash(hasher, info.@"addrspace");
                 std.hash.autoHash(hasher, info.bit_offset);
                 std.hash.autoHash(hasher, info.host_size);
-                std.hash.autoHash(hasher, info.vector_index);
                 std.hash.autoHash(hasher, info.@"allowzero");
                 std.hash.autoHash(hasher, info.mutable);
                 std.hash.autoHash(hasher, info.@"volatile");
@@ -1198,6 +1195,7 @@ pub const Type = extern union {
             },
 
             // we can't hash these based on tags because they wouldn't match the expanded version.
+            .call_options,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -1225,7 +1223,6 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .modifier,
             => unreachable, // needed to resolve the type before now
 
             .@"union", .union_safety_tagged, .union_tagged => {
@@ -1313,8 +1310,8 @@ pub const Type = extern union {
             .comptime_int,
             .comptime_float,
             .noreturn,
-            .null,
-            .undefined,
+            .@"null",
+            .@"undefined",
             .fn_noreturn_no_args,
             .fn_void_no_args,
             .fn_naked_noreturn_no_args,
@@ -1337,7 +1334,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .modifier,
+            .call_options,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -1470,7 +1467,6 @@ pub const Type = extern union {
                     .@"addrspace" = payload.@"addrspace",
                     .bit_offset = payload.bit_offset,
                     .host_size = payload.host_size,
-                    .vector_index = payload.vector_index,
                     .@"allowzero" = payload.@"allowzero",
                     .mutable = payload.mutable,
                     .@"volatile" = payload.@"volatile",
@@ -1558,10 +1554,10 @@ pub const Type = extern union {
     ) @TypeOf(writer).Error!void {
         _ = options;
         comptime assert(unused_format_string.len == 0);
-        if (true) {
-            // This is disabled to work around a bug where this function
-            // recursively causes more generic function instantiations
-            // resulting in an infinite loop in the compiler.
+        if (@import("builtin").zig_backend != .stage1) {
+            // This is disabled to work around a stage2 bug where this function recursively
+            // causes more generic function instantiations resulting in an infinite loop
+            // in the compiler.
             try writer.writeAll("[TODO fix internal compiler bug regarding dump]");
             return;
         }
@@ -1611,8 +1607,8 @@ pub const Type = extern union {
                 => return writer.writeAll(@tagName(t)),
 
                 .enum_literal => return writer.writeAll("@Type(.EnumLiteral)"),
-                .null => return writer.writeAll("@Type(.Null)"),
-                .undefined => return writer.writeAll("@Type(.Undefined)"),
+                .@"null" => return writer.writeAll("@Type(.Null)"),
+                .@"undefined" => return writer.writeAll("@Type(.Undefined)"),
 
                 .empty_struct, .empty_struct_literal => return writer.writeAll("struct {}"),
 
@@ -1670,7 +1666,7 @@ pub const Type = extern union {
                 .address_space => return writer.writeAll("std.builtin.AddressSpace"),
                 .float_mode => return writer.writeAll("std.builtin.FloatMode"),
                 .reduce_op => return writer.writeAll("std.builtin.ReduceOp"),
-                .modifier => return writer.writeAll("std.builtin.CallModifier"),
+                .call_options => return writer.writeAll("std.builtin.CallOptions"),
                 .prefetch_options => return writer.writeAll("std.builtin.PrefetchOptions"),
                 .export_options => return writer.writeAll("std.builtin.ExportOptions"),
                 .extern_options => return writer.writeAll("std.builtin.ExternOptions"),
@@ -1859,16 +1855,11 @@ pub const Type = extern union {
                         .C => try writer.writeAll("[*c]"),
                         .Slice => try writer.writeAll("[]"),
                     }
-                    if (payload.@"align" != 0 or payload.host_size != 0 or payload.vector_index != .none) {
+                    if (payload.@"align" != 0 or payload.host_size != 0) {
                         try writer.print("align({d}", .{payload.@"align"});
 
                         if (payload.bit_offset != 0 or payload.host_size != 0) {
                             try writer.print(":{d}:{d}", .{ payload.bit_offset, payload.host_size });
-                        }
-                        if (payload.vector_index == .runtime) {
-                            try writer.writeAll(":?");
-                        } else if (payload.vector_index != .none) {
-                            try writer.print(":{d}", .{@enumToInt(payload.vector_index)});
                         }
                         try writer.writeAll(") ");
                     }
@@ -1953,7 +1944,7 @@ pub const Type = extern union {
             .address_space => unreachable,
             .float_mode => unreachable,
             .reduce_op => unreachable,
-            .modifier => unreachable,
+            .call_options => unreachable,
             .prefetch_options => unreachable,
             .export_options => unreachable,
             .extern_options => unreachable,
@@ -1999,8 +1990,8 @@ pub const Type = extern union {
             => try writer.writeAll(@tagName(t)),
 
             .enum_literal => try writer.writeAll("@TypeOf(.enum_literal)"),
-            .null => try writer.writeAll("@TypeOf(null)"),
-            .undefined => try writer.writeAll("@TypeOf(undefined)"),
+            .@"null" => try writer.writeAll("@TypeOf(null)"),
+            .@"undefined" => try writer.writeAll("@TypeOf(undefined)"),
             .empty_struct_literal => try writer.writeAll("@TypeOf(.{})"),
 
             .empty_struct => {
@@ -2194,16 +2185,11 @@ pub const Type = extern union {
                     .C => try writer.writeAll("[*c]"),
                     .Slice => try writer.writeAll("[]"),
                 }
-                if (info.@"align" != 0 or info.host_size != 0 or info.vector_index != .none) {
+                if (info.@"align" != 0 or info.host_size != 0) {
                     try writer.print("align({d}", .{info.@"align"});
 
                     if (info.bit_offset != 0 or info.host_size != 0) {
                         try writer.print(":{d}:{d}", .{ info.bit_offset, info.host_size });
-                    }
-                    if (info.vector_index == .runtime) {
-                        try writer.writeAll(":?");
-                    } else if (info.vector_index != .none) {
-                        try writer.print(":{d}", .{@enumToInt(info.vector_index)});
                     }
                     try writer.writeAll(") ");
                 }
@@ -2307,8 +2293,8 @@ pub const Type = extern union {
             .comptime_int => return Value.initTag(.comptime_int_type),
             .comptime_float => return Value.initTag(.comptime_float_type),
             .noreturn => return Value.initTag(.noreturn_type),
-            .null => return Value.initTag(.null_type),
-            .undefined => return Value.initTag(.undefined_type),
+            .@"null" => return Value.initTag(.null_type),
+            .@"undefined" => return Value.initTag(.undefined_type),
             .fn_noreturn_no_args => return Value.initTag(.fn_noreturn_no_args_type),
             .fn_void_no_args => return Value.initTag(.fn_void_no_args_type),
             .fn_naked_noreturn_no_args => return Value.initTag(.fn_naked_noreturn_no_args_type),
@@ -2326,7 +2312,7 @@ pub const Type = extern union {
             .address_space => return Value.initTag(.address_space_type),
             .float_mode => return Value.initTag(.float_mode_type),
             .reduce_op => return Value.initTag(.reduce_op_type),
-            .modifier => return Value.initTag(.modifier_type),
+            .call_options => return Value.initTag(.call_options_type),
             .prefetch_options => return Value.initTag(.prefetch_options_type),
             .export_options => return Value.initTag(.export_options_type),
             .extern_options => return Value.initTag(.extern_options_type),
@@ -2400,7 +2386,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .modifier,
+            .call_options,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -2447,8 +2433,8 @@ pub const Type = extern union {
             .comptime_int,
             .comptime_float,
             .noreturn,
-            .null,
-            .undefined,
+            .@"null",
+            .@"undefined",
             .enum_literal,
             .empty_struct,
             .empty_struct_literal,
@@ -2637,16 +2623,16 @@ pub const Type = extern union {
             .anyopaque,
             .anyerror,
             .noreturn,
-            .null,
+            .@"null",
             .@"anyframe",
-            .undefined,
+            .@"undefined",
             .atomic_order,
             .atomic_rmw_op,
             .calling_convention,
             .address_space,
             .float_mode,
             .reduce_op,
-            .modifier,
+            .call_options,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -2888,7 +2874,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .modifier,
+            .call_options,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -3123,7 +3109,6 @@ pub const Type = extern union {
                 for (tuple.types) |field_ty, i| {
                     const val = tuple.values[i];
                     if (val.tag() != .unreachable_value) continue; // comptime field
-                    if (!(field_ty.hasRuntimeBits())) continue;
 
                     switch (try field_ty.abiAlignmentAdvanced(target, strat)) {
                         .scalar => |field_align| big_align = @max(big_align, field_align),
@@ -3157,8 +3142,8 @@ pub const Type = extern union {
             .type,
             .comptime_int,
             .comptime_float,
-            .null,
-            .undefined,
+            .@"null",
+            .@"undefined",
             .enum_literal,
             .type_info,
             => return AbiAlignmentAdvanced{ .scalar = 0 },
@@ -3273,7 +3258,7 @@ pub const Type = extern union {
             .inferred_alloc_mut => unreachable,
             .var_args_param => unreachable,
             .generic_poison => unreachable,
-            .modifier => unreachable, // missing call to resolveTypeFields
+            .call_options => unreachable, // missing call to resolveTypeFields
             .prefetch_options => unreachable, // missing call to resolveTypeFields
             .export_options => unreachable, // missing call to resolveTypeFields
             .extern_options => unreachable, // missing call to resolveTypeFields
@@ -3283,8 +3268,8 @@ pub const Type = extern union {
             .type,
             .comptime_int,
             .comptime_float,
-            .null,
-            .undefined,
+            .@"null",
+            .@"undefined",
             .enum_literal,
             .single_const_pointer_to_comptime_int,
             .empty_struct_literal,
@@ -3490,10 +3475,7 @@ pub const Type = extern union {
                     return AbiSizeAdvanced{ .scalar = 0 };
                 }
 
-                if (!(child_type.hasRuntimeBitsAdvanced(false, strat) catch |err| switch (err) {
-                    error.NeedLazy => return AbiSizeAdvanced{ .val = try Value.Tag.lazy_size.create(strat.lazy, ty) },
-                    else => |e| return e,
-                })) return AbiSizeAdvanced{ .scalar = 1 };
+                if (!child_type.hasRuntimeBits()) return AbiSizeAdvanced{ .scalar = 1 };
 
                 if (ty.optionalReprIsPayload()) {
                     return abiSizeAdvanced(child_type, target, strat);
@@ -3522,10 +3504,7 @@ pub const Type = extern union {
                 // in abiAlignmentAdvanced.
                 const data = ty.castTag(.error_union).?.data;
                 const code_size = abiSize(Type.anyerror, target);
-                if (!(data.payload.hasRuntimeBitsAdvanced(false, strat) catch |err| switch (err) {
-                    error.NeedLazy => return AbiSizeAdvanced{ .val = try Value.Tag.lazy_size.create(strat.lazy, ty) },
-                    else => |e| return e,
-                })) {
+                if (!data.payload.hasRuntimeBits()) {
                     // Same as anyerror.
                     return AbiSizeAdvanced{ .scalar = code_size };
                 }
@@ -3612,8 +3591,8 @@ pub const Type = extern union {
             .comptime_int => unreachable,
             .comptime_float => unreachable,
             .noreturn => unreachable,
-            .null => unreachable,
-            .undefined => unreachable,
+            .@"null" => unreachable,
+            .@"undefined" => unreachable,
             .enum_literal => unreachable,
             .single_const_pointer_to_comptime_int => unreachable,
             .empty_struct => unreachable,
@@ -3775,7 +3754,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .modifier,
+            .call_options,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -3886,7 +3865,6 @@ pub const Type = extern union {
                     payload.@"addrspace" != .generic or
                     payload.bit_offset != 0 or
                     payload.host_size != 0 or
-                    payload.vector_index != .none or
                     payload.@"allowzero" or
                     payload.@"volatile")
                 {
@@ -3899,7 +3877,6 @@ pub const Type = extern union {
                                 .@"addrspace" = payload.@"addrspace",
                                 .bit_offset = payload.bit_offset,
                                 .host_size = payload.host_size,
-                                .vector_index = payload.vector_index,
                                 .@"allowzero" = payload.@"allowzero",
                                 .mutable = payload.mutable,
                                 .@"volatile" = payload.@"volatile",
@@ -4097,6 +4074,7 @@ pub const Type = extern union {
             => return true,
 
             .Opaque => return is_extern,
+            .BoundFn,
             .ComptimeFloat,
             .ComptimeInt,
             .EnumLiteral,
@@ -4216,7 +4194,7 @@ pub const Type = extern union {
             .optional_single_const_pointer => ty.castPointer().?.data,
 
             .anyframe_T => ty.castTag(.anyframe_T).?.data,
-            .@"anyframe" => Type.void,
+            .@"anyframe" => Type.@"void",
 
             else => unreachable,
         };
@@ -4303,7 +4281,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .modifier,
+            .call_options,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -4330,7 +4308,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .modifier,
+            .call_options,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -4536,7 +4514,6 @@ pub const Type = extern union {
             .mut_slice,
             .tuple,
             .empty_struct_literal,
-            .@"struct",
             => return null,
 
             .pointer => return self.castTag(.pointer).?.data.sentinel,
@@ -4609,7 +4586,7 @@ pub const Type = extern union {
     }
 
     /// Asserts the type is an integer, enum, error set, or vector of one of them.
-    pub fn intInfo(self: Type, target: Target) std.builtin.Type.Int {
+    pub fn intInfo(self: Type, target: Target) struct { signedness: std.builtin.Signedness, bits: u16 } {
         var ty = self;
         while (true) switch (ty.tag()) {
             .int_unsigned => return .{
@@ -5014,7 +4991,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .modifier,
+            .call_options,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -5035,7 +5012,7 @@ pub const Type = extern union {
                 var buf: Payload.ElemType = undefined;
                 const child_ty = ty.optionalChild(&buf);
                 if (child_ty.isNoReturn()) {
-                    return Value.null;
+                    return Value.@"null";
                 } else {
                     return null;
                 }
@@ -5117,8 +5094,8 @@ pub const Type = extern union {
             .empty_struct, .empty_struct_literal => return Value.initTag(.empty_struct_value),
             .void => return Value.initTag(.void_value),
             .noreturn => return Value.initTag(.unreachable_value),
-            .null => return Value.initTag(.null_value),
-            .undefined => return Value.initTag(.undef),
+            .@"null" => return Value.initTag(.null_value),
+            .@"undefined" => return Value.initTag(.undef),
 
             .int_unsigned, .int_signed => {
                 if (ty.cast(Payload.Bits).?.data == 0) {
@@ -5181,15 +5158,15 @@ pub const Type = extern union {
             .anyerror,
             .noreturn,
             .@"anyframe",
-            .null,
-            .undefined,
+            .@"null",
+            .@"undefined",
             .atomic_order,
             .atomic_rmw_op,
             .calling_convention,
             .address_space,
             .float_mode,
             .reduce_op,
-            .modifier,
+            .call_options,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -5507,7 +5484,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .modifier,
+            .call_options,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -5589,7 +5566,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .modifier,
+            .call_options,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -5692,6 +5669,7 @@ pub const Type = extern union {
         switch (ty.tag()) {
             .@"struct" => {
                 const struct_obj = ty.castTag(.@"struct").?.data;
+                assert(struct_obj.layout != .Packed);
                 const field = struct_obj.fields.values()[index];
                 if (field.is_comptime) {
                     return field.default_val;
@@ -5902,7 +5880,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .modifier,
+            .call_options,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -5950,7 +5928,7 @@ pub const Type = extern union {
             .address_space,
             .float_mode,
             .reduce_op,
-            .modifier,
+            .call_options,
             .prefetch_options,
             .export_options,
             .extern_options,
@@ -6006,8 +5984,8 @@ pub const Type = extern union {
         comptime_float,
         noreturn,
         @"anyframe",
-        null,
-        undefined,
+        @"null",
+        @"undefined",
         enum_literal,
         atomic_order,
         atomic_rmw_op,
@@ -6015,7 +5993,7 @@ pub const Type = extern union {
         address_space,
         float_mode,
         reduce_op,
-        modifier,
+        call_options,
         prefetch_options,
         export_options,
         extern_options,
@@ -6131,8 +6109,8 @@ pub const Type = extern union {
                 .comptime_float,
                 .noreturn,
                 .enum_literal,
-                .null,
-                .undefined,
+                .@"null",
+                .@"undefined",
                 .fn_noreturn_no_args,
                 .fn_void_no_args,
                 .fn_naked_noreturn_no_args,
@@ -6155,7 +6133,7 @@ pub const Type = extern union {
                 .address_space,
                 .float_mode,
                 .reduce_op,
-                .modifier,
+                .call_options,
                 .prefetch_options,
                 .export_options,
                 .extern_options,
@@ -6223,14 +6201,13 @@ pub const Type = extern union {
         }
 
         pub fn Data(comptime t: Tag) type {
-            return std.meta.fieldInfo(t.Type(), .data).type;
+            return std.meta.fieldInfo(t.Type(), .data).field_type;
         }
     };
 
     pub fn isTuple(ty: Type) bool {
         return switch (ty.tag()) {
             .tuple, .empty_struct_literal => true,
-            .@"struct" => ty.castTag(.@"struct").?.data.is_tuple,
             else => false,
         };
     }
@@ -6245,26 +6222,10 @@ pub const Type = extern union {
     pub fn isTupleOrAnonStruct(ty: Type) bool {
         return switch (ty.tag()) {
             .tuple, .empty_struct_literal, .anon_struct => true,
-            .@"struct" => ty.castTag(.@"struct").?.data.is_tuple,
             else => false,
         };
     }
 
-    pub fn isSimpleTuple(ty: Type) bool {
-        return switch (ty.tag()) {
-            .tuple, .empty_struct_literal => true,
-            else => false,
-        };
-    }
-
-    pub fn isSimpleTupleOrAnonStruct(ty: Type) bool {
-        return switch (ty.tag()) {
-            .tuple, .empty_struct_literal, .anon_struct => true,
-            else => false,
-        };
-    }
-
-    // Only allowed for simple tuple types
     pub fn tupleFields(ty: Type) Payload.Tuple.Data {
         return switch (ty.tag()) {
             .tuple => ty.castTag(.tuple).?.data,
@@ -6388,17 +6349,10 @@ pub const Type = extern union {
                 /// When host_size=pointee_abi_size and bit_offset=0, this must be
                 /// represented with host_size=0 instead.
                 host_size: u16 = 0,
-                vector_index: VectorIndex = .none,
                 @"allowzero": bool = false,
                 mutable: bool = true, // TODO rename this to const, not mutable
                 @"volatile": bool = false,
                 size: std.builtin.Type.Pointer.Size = .One,
-
-                pub const VectorIndex = enum(u32) {
-                    none = std.math.maxInt(u32),
-                    runtime = std.math.maxInt(u32) - 1,
-                    _,
-                };
 
                 pub fn alignment(data: Data, target: Target) u32 {
                     if (data.@"align" != 0) return data.@"align";
@@ -6513,7 +6467,7 @@ pub const Type = extern union {
     pub const @"type" = initTag(.type);
     pub const @"anyerror" = initTag(.anyerror);
     pub const @"anyopaque" = initTag(.anyopaque);
-    pub const @"null" = initTag(.null);
+    pub const @"null" = initTag(.@"null");
 
     pub const err_int = Type.u16;
 
@@ -6554,8 +6508,7 @@ pub const Type = extern union {
         }
 
         if (d.@"align" == 0 and d.@"addrspace" == .generic and
-            d.bit_offset == 0 and d.host_size == 0 and d.vector_index == .none and
-            !d.@"allowzero" and !d.@"volatile")
+            d.bit_offset == 0 and d.host_size == 0 and !d.@"allowzero" and !d.@"volatile")
         {
             if (d.sentinel) |sent| {
                 if (!d.mutable and d.pointee_type.eql(Type.u8, mod)) {
@@ -6580,7 +6533,9 @@ pub const Type = extern union {
                     else => {},
                 }
             } else {
+                // TODO stage1 type inference bug
                 const T = Type.Tag;
+
                 const type_payload = try arena.create(Type.Payload.ElemType);
                 type_payload.* = .{
                     .base = .{
@@ -6659,7 +6614,7 @@ pub const Type = extern union {
         mod: *Module,
     ) Allocator.Error!Type {
         assert(error_set.zigTypeTag() == .ErrorSet);
-        if (error_set.eql(Type.anyerror, mod) and
+        if (error_set.eql(Type.@"anyerror", mod) and
             payload.eql(Type.void, mod))
         {
             return Type.initTag(.anyerror_void_error_union);
@@ -6753,7 +6708,7 @@ pub const CType = enum {
                     .long, .ulong => return target.cpu.arch.ptrBitWidth(),
                     .longlong, .ulonglong, .double => return 64,
                     .longdouble => switch (target.cpu.arch) {
-                        .x86 => switch (target.abi) {
+                        .i386 => switch (target.abi) {
                             .android => return 64,
                             else => return 80,
                         },
@@ -6841,7 +6796,7 @@ pub const CType = enum {
                     .long, .ulong => return target.cpu.arch.ptrBitWidth(),
                     .longlong, .ulonglong, .double => return 64,
                     .longdouble => switch (target.cpu.arch) {
-                        .x86 => switch (target.abi) {
+                        .i386 => switch (target.abi) {
                             .android => return 64,
                             else => return 80,
                         },
@@ -6895,7 +6850,7 @@ pub const CType = enum {
             },
 
             .windows, .uefi => switch (target.cpu.arch) {
-                .x86 => switch (self) {
+                .i386 => switch (self) {
                     .short, .ushort => return 16,
                     .int, .uint, .float => return 32,
                     .long, .ulong => return 32,
@@ -6931,7 +6886,7 @@ pub const CType = enum {
                 .short, .ushort => return 16,
                 .int, .uint, .float => return 32,
                 .long, .ulong => switch (target.cpu.arch) {
-                    .x86, .arm, .aarch64_32 => return 32,
+                    .i386, .arm, .aarch64_32 => return 32,
                     .x86_64 => switch (target.abi) {
                         .gnux32, .muslx32 => return 32,
                         else => return 64,
@@ -6940,7 +6895,7 @@ pub const CType = enum {
                 },
                 .longlong, .ulonglong, .double => return 64,
                 .longdouble => switch (target.cpu.arch) {
-                    .x86 => switch (target.abi) {
+                    .i386 => switch (target.abi) {
                         .android => return 64,
                         else => return 80,
                     },
@@ -6999,7 +6954,7 @@ pub const CType = enum {
                 .short, .ushort => return 2,
                 else => return 1,
             },
-            .x86 => switch (target.os.tag) {
+            .i386 => switch (target.os.tag) {
                 .windows, .uefi => switch (self) {
                     .longlong, .ulonglong, .double => return 8,
                     .longdouble => switch (target.abi) {
@@ -7040,7 +6995,7 @@ pub const CType = enum {
 
                 .arc,
                 .csky,
-                .x86,
+                .i386,
                 .xcore,
                 .dxil,
                 .loongarch32,
@@ -7137,7 +7092,7 @@ pub const CType = enum {
                 .double => return 4,
                 .longlong, .ulonglong => return 8,
             },
-            .x86 => switch (target.os.tag) {
+            .i386 => switch (target.os.tag) {
                 .windows, .uefi => switch (self) {
                     .longdouble => switch (target.abi) {
                         .gnu, .gnuilp32, .cygnus => return 4,
@@ -7190,7 +7145,7 @@ pub const CType = enum {
                 .bpfeb,
                 .hexagon,
                 .hsail64,
-                .x86,
+                .i386,
                 .loongarch64,
                 .m68k,
                 .mips,

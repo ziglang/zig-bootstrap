@@ -20,7 +20,7 @@ pub const want_ppc_abi = builtin.cpu.arch.isPPC() or builtin.cpu.arch.isPPC64();
 
 // Libcalls that involve u128 on Windows x86-64 are expected by LLVM to use the
 // calling convention of @Vector(2, u64), rather than what's standard.
-pub const want_windows_v2u64_abi = builtin.os.tag == .windows and builtin.cpu.arch == .x86_64 and @import("builtin").object_format != .c;
+pub const want_windows_v2u64_abi = builtin.os.tag == .windows and builtin.cpu.arch == .x86_64;
 
 /// This governs whether to use these symbol names for f16/f32 conversions
 /// rather than the standard names:
@@ -48,7 +48,7 @@ pub const gnu_f16_abi = switch (builtin.cpu.arch) {
     .x86_64,
     => false,
 
-    .x86 => true,
+    .i386 => true,
 
     .arm, .armeb, .thumb, .thumbeb => switch (builtin.abi) {
         .eabi, .eabihf => false,
@@ -79,7 +79,7 @@ pub fn panic(msg: []const u8, error_return_trace: ?*std.builtin.StackTrace, _: ?
 pub const F16T = switch (builtin.cpu.arch) {
     .aarch64, .aarch64_be, .aarch64_32 => f16,
     .riscv64 => if (builtin.zig_backend == .stage1) u16 else f16,
-    .x86, .x86_64 => f16,
+    .i386, .x86_64 => f16,
     else => u16,
 };
 

@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: BSD-2-Clause
 
+#include <common/errno.h>
+
 #include <sys/socket.h>
 
 #include <assert.h>
@@ -25,7 +27,7 @@ ssize_t send(int socket, const void *buffer, size_t length, int flags) {
   size_t so_datalen;
   __wasi_errno_t error = __wasi_sock_send(socket, si_data, si_data_len, si_flags, &so_datalen);
   if (error != 0) {
-    errno = error;
+    errno = errno_fixup_socket(socket, error);
     return -1;
   }
   return so_datalen;

@@ -79,7 +79,7 @@ pub fn analyze(gpa: Allocator, air: Air) Allocator.Error!Liveness {
     return Liveness{
         .tomb_bits = a.tomb_bits,
         .special = a.special,
-        .extra = try a.extra.toOwnedSlice(gpa),
+        .extra = a.extra.toOwnedSlice(gpa),
     };
 }
 
@@ -212,15 +212,6 @@ pub fn categorizeOperand(
             return .write;
         },
 
-        .vector_store_elem => {
-            const o = air_datas[inst].vector_store_elem;
-            const extra = air.extraData(Air.Bin, o.payload).data;
-            if (o.vector_ptr == operand_ref) return matchOperandSmallIndex(l, inst, 0, .write);
-            if (extra.lhs == operand_ref) return matchOperandSmallIndex(l, inst, 1, .none);
-            if (extra.rhs == operand_ref) return matchOperandSmallIndex(l, inst, 2, .none);
-            return .write;
-        },
-
         .arg,
         .alloc,
         .ret_ptr,
@@ -238,7 +229,6 @@ pub fn categorizeOperand(
         .wasm_memory_size,
         .err_return_trace,
         .save_err_return_trace_index,
-        .c_va_start,
         => return .none,
 
         .fence => return .write,
@@ -280,8 +270,6 @@ pub fn categorizeOperand(
         .splat,
         .error_set_has_value,
         .addrspace_cast,
-        .c_va_arg,
-        .c_va_copy,
         => {
             const o = air_datas[inst].ty_op;
             if (o.operand == operand_ref) return matchOperandSmallIndex(l, inst, 0, .none);
@@ -325,7 +313,6 @@ pub fn categorizeOperand(
         .trunc_float,
         .neg,
         .cmp_lt_errors_len,
-        .c_va_end,
         => {
             const o = air_datas[inst].un_op;
             if (o == operand_ref) return matchOperandSmallIndex(l, inst, 0, .none);
@@ -514,41 +501,6 @@ pub fn categorizeOperand(
             return .complex;
         },
         .block => {
-            const extra = air.extraData(Air.Block, air_datas[inst].ty_pl.payload);
-            const body = air.extra[extra.end..][0..extra.data.body_len];
-
-            if (body.len == 1 and air_tags[body[0]] == .cond_br) {
-                // Peephole optimization for "panic-like" conditionals, which have
-                // one empty branch and another which calls a `noreturn` function.
-                // This allows us to infer that safety checks do not modify memory,
-                // as far as control flow successors are concerned.
-
-                const inst_data = air_datas[body[0]].pl_op;
-                const cond_extra = air.extraData(Air.CondBr, inst_data.payload);
-                if (inst_data.operand == operand_ref and operandDies(l, body[0], 0))
-                    return .tomb;
-
-                if (cond_extra.data.then_body_len != 1 or cond_extra.data.else_body_len != 1)
-                    return .complex;
-
-                var operand_live: bool = true;
-                for (air.extra[cond_extra.end..][0..2]) |cond_inst| {
-                    if (l.categorizeOperand(air, cond_inst, operand) == .tomb)
-                        operand_live = false;
-
-                    switch (air_tags[cond_inst]) {
-                        .br => { // Breaks immediately back to block
-                            const br = air_datas[cond_inst].br;
-                            if (br.block_inst != inst)
-                                return .complex;
-                        },
-                        .call => {}, // Calls a noreturn function
-                        else => return .complex,
-                    }
-                }
-                return if (operand_live) .none else .tomb;
-            }
-
             return .complex;
         },
         .@"try" => {
@@ -642,7 +594,7 @@ pub fn getSwitchBr(l: Liveness, gpa: Allocator, inst: Air.Inst.Index, cases_len:
         deaths.appendAssumeCapacity(else_deaths);
     }
     return SwitchBrTable{
-        .deaths = try deaths.toOwnedSlice(),
+        .deaths = deaths.toOwnedSlice(),
     };
 }
 
@@ -722,7 +674,7 @@ const Analysis = struct {
         const fields = std.meta.fields(@TypeOf(extra));
         const result = @intCast(u32, a.extra.items.len);
         inline for (fields) |field| {
-            a.extra.appendAssumeCapacity(switch (field.type) {
+            a.extra.appendAssumeCapacity(switch (field.field_type) {
                 u32 => @field(extra, field.name),
                 else => @compileError("bad field type"),
             });
@@ -837,12 +789,6 @@ fn analyzeInst(
             return trackOperands(a, new_set, inst, main_tomb, .{ o.lhs, o.rhs, .none });
         },
 
-        .vector_store_elem => {
-            const o = inst_datas[inst].vector_store_elem;
-            const extra = a.air.extraData(Air.Bin, o.payload).data;
-            return trackOperands(a, new_set, inst, main_tomb, .{ o.vector_ptr, extra.lhs, extra.rhs });
-        },
-
         .arg,
         .alloc,
         .ret_ptr,
@@ -861,7 +807,6 @@ fn analyzeInst(
         .wasm_memory_size,
         .err_return_trace,
         .save_err_return_trace_index,
-        .c_va_start,
         => return trackOperands(a, new_set, inst, main_tomb, .{ .none, .none, .none }),
 
         .not,
@@ -903,8 +848,6 @@ fn analyzeInst(
         .splat,
         .error_set_has_value,
         .addrspace_cast,
-        .c_va_arg,
-        .c_va_copy,
         => {
             const o = inst_datas[inst].ty_op;
             return trackOperands(a, new_set, inst, main_tomb, .{ o.operand, .none, .none });
@@ -943,7 +886,6 @@ fn analyzeInst(
         .neg_optimized,
         .cmp_lt_errors_len,
         .set_err_return_trace,
-        .c_va_end,
         => {
             const operand = inst_datas[inst].un_op;
             return trackOperands(a, new_set, inst, main_tomb, .{ operand, .none, .none });

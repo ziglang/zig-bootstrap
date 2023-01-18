@@ -7,6 +7,7 @@ const std = @import("std");
 const assert = std.debug.assert;
 const bits = @import("bits.zig");
 const abi = @import("abi.zig");
+const leb128 = std.leb;
 const link = @import("../../link.zig");
 const log = std.log.scoped(.codegen);
 const math = std.math;
@@ -17,6 +18,7 @@ const Air = @import("../../Air.zig");
 const Allocator = mem.Allocator;
 const CodeGen = @import("CodeGen.zig");
 const DebugInfoOutput = @import("../../codegen.zig").DebugInfoOutput;
+const DW = std.dwarf;
 const Encoder = bits.Encoder;
 const ErrorMsg = Module.ErrorMsg;
 const MCValue = @import("CodeGen.zig").MCValue;
@@ -1003,7 +1005,7 @@ fn mirLeaPic(emit: *Emit, inst: Mir.Inst.Index) InnerError!void {
         };
         const atom = macho_file.getAtomForSymbol(.{ .sym_index = relocation.atom_index, .file = null }).?;
         try atom.addRelocation(macho_file, .{
-            .type = reloc_type,
+            .@"type" = reloc_type,
             .target = .{ .sym_index = relocation.sym_index, .file = null },
             .offset = @intCast(u32, end_offset - 4),
             .addend = 0,
@@ -1013,7 +1015,7 @@ fn mirLeaPic(emit: *Emit, inst: Mir.Inst.Index) InnerError!void {
     } else if (emit.bin_file.cast(link.File.Coff)) |coff_file| {
         const atom = coff_file.getAtomForSymbol(.{ .sym_index = relocation.atom_index, .file = null }).?;
         try atom.addRelocation(coff_file, .{
-            .type = switch (ops.flags) {
+            .@"type" = switch (ops.flags) {
                 0b00 => .got,
                 0b01 => .direct,
                 0b10 => .import,
@@ -1143,7 +1145,7 @@ fn mirCallExtern(emit: *Emit, inst: Mir.Inst.Index) InnerError!void {
         const atom = macho_file.getAtomForSymbol(.{ .sym_index = relocation.atom_index, .file = null }).?;
         const target = macho_file.getGlobalByIndex(relocation.sym_index);
         try atom.addRelocation(macho_file, .{
-            .type = @enumToInt(std.macho.reloc_type_x86_64.X86_64_RELOC_BRANCH),
+            .@"type" = @enumToInt(std.macho.reloc_type_x86_64.X86_64_RELOC_BRANCH),
             .target = target,
             .offset = offset,
             .addend = 0,
@@ -1155,7 +1157,7 @@ fn mirCallExtern(emit: *Emit, inst: Mir.Inst.Index) InnerError!void {
         const atom = coff_file.getAtomForSymbol(.{ .sym_index = relocation.atom_index, .file = null }).?;
         const target = coff_file.getGlobalByIndex(relocation.sym_index);
         try atom.addRelocation(coff_file, .{
-            .type = .direct,
+            .@"type" = .direct,
             .target = target,
             .offset = offset,
             .addend = 0,
@@ -1182,7 +1184,18 @@ fn dbgAdvancePCAndLine(emit: *Emit, line: u32, column: u32) InnerError!void {
     log.debug("  (advance pc={d} and line={d})", .{ delta_line, delta_pc });
     switch (emit.debug_output) {
         .dwarf => |dw| {
-            try dw.advancePCAndLine(delta_line, delta_pc);
+            // TODO Look into using the DWARF special opcodes to compress this data.
+            // It lets you emit single-byte opcodes that add different numbers to
+            // both the PC and the line number at the same time.
+            const dbg_line = &dw.dbg_line;
+            try dbg_line.ensureUnusedCapacity(11);
+            dbg_line.appendAssumeCapacity(DW.LNS.advance_pc);
+            leb128.writeULEB128(dbg_line.writer(), delta_pc) catch unreachable;
+            if (delta_line != 0) {
+                dbg_line.appendAssumeCapacity(DW.LNS.advance_line);
+                leb128.writeILEB128(dbg_line.writer(), delta_line) catch unreachable;
+            }
+            dbg_line.appendAssumeCapacity(DW.LNS.copy);
             emit.prev_di_line = line;
             emit.prev_di_column = column;
             emit.prev_di_pc = emit.code.items.len;
@@ -1231,11 +1244,8 @@ fn mirDbgPrologueEnd(emit: *Emit, inst: Mir.Inst.Index) InnerError!void {
     assert(tag == .dbg_prologue_end);
     switch (emit.debug_output) {
         .dwarf => |dw| {
-            try dw.setPrologueEnd();
-            log.debug("mirDbgPrologueEnd (line={d}, col={d})", .{
-                emit.prev_di_line,
-                emit.prev_di_column,
-            });
+            try dw.dbg_line.append(DW.LNS.set_prologue_end);
+            log.debug("mirDbgPrologueEnd (line={d}, col={d})", .{ emit.prev_di_line, emit.prev_di_column });
             try emit.dbgAdvancePCAndLine(emit.prev_di_line, emit.prev_di_column);
         },
         .plan9 => {},
@@ -1248,11 +1258,8 @@ fn mirDbgEpilogueBegin(emit: *Emit, inst: Mir.Inst.Index) InnerError!void {
     assert(tag == .dbg_epilogue_begin);
     switch (emit.debug_output) {
         .dwarf => |dw| {
-            try dw.setEpilogueBegin();
-            log.debug("mirDbgEpilogueBegin (line={d}, col={d})", .{
-                emit.prev_di_line,
-                emit.prev_di_column,
-            });
+            try dw.dbg_line.append(DW.LNS.set_epilogue_begin);
+            log.debug("mirDbgEpilogueBegin (line={d}, col={d})", .{ emit.prev_di_line, emit.prev_di_column });
             try emit.dbgAdvancePCAndLine(emit.prev_di_line, emit.prev_di_column);
         },
         .plan9 => {},

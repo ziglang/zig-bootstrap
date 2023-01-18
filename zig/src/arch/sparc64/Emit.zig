@@ -10,6 +10,8 @@ const ErrorMsg = Module.ErrorMsg;
 const Liveness = @import("../../Liveness.zig");
 const log = std.log.scoped(.sparcv9_emit);
 const DebugInfoOutput = @import("../../codegen.zig").DebugInfoOutput;
+const DW = std.dwarf;
+const leb128 = std.leb;
 
 const Emit = @This();
 const Mir = @import("Mir.zig");
@@ -166,7 +168,7 @@ fn mirDbgLine(emit: *Emit, inst: Mir.Inst.Index) !void {
 fn mirDebugPrologueEnd(emit: *Emit) !void {
     switch (emit.debug_output) {
         .dwarf => |dbg_out| {
-            try dbg_out.setPrologueEnd();
+            try dbg_out.dbg_line.append(DW.LNS.set_prologue_end);
             try emit.dbgAdvancePCAndLine(emit.prev_di_line, emit.prev_di_column);
         },
         .plan9 => {},
@@ -177,7 +179,7 @@ fn mirDebugPrologueEnd(emit: *Emit) !void {
 fn mirDebugEpilogueBegin(emit: *Emit) !void {
     switch (emit.debug_output) {
         .dwarf => |dbg_out| {
-            try dbg_out.setEpilogueBegin();
+            try dbg_out.dbg_line.append(DW.LNS.set_epilogue_begin);
             try emit.dbgAdvancePCAndLine(emit.prev_di_line, emit.prev_di_column);
         },
         .plan9 => {},
@@ -466,7 +468,18 @@ fn dbgAdvancePCAndLine(emit: *Emit, line: u32, column: u32) !void {
     const delta_pc: usize = emit.code.items.len - emit.prev_di_pc;
     switch (emit.debug_output) {
         .dwarf => |dbg_out| {
-            try dbg_out.advancePCAndLine(delta_line, delta_pc);
+            // TODO Look into using the DWARF special opcodes to compress this data.
+            // It lets you emit single-byte opcodes that add different numbers to
+            // both the PC and the line number at the same time.
+            try dbg_out.dbg_line.ensureUnusedCapacity(11);
+            dbg_out.dbg_line.appendAssumeCapacity(DW.LNS.advance_pc);
+            leb128.writeULEB128(dbg_out.dbg_line.writer(), delta_pc) catch unreachable;
+            if (delta_line != 0) {
+                dbg_out.dbg_line.appendAssumeCapacity(DW.LNS.advance_line);
+                leb128.writeILEB128(dbg_out.dbg_line.writer(), delta_line) catch unreachable;
+            }
+            dbg_out.dbg_line.appendAssumeCapacity(DW.LNS.copy);
+            emit.prev_di_pc = emit.code.items.len;
             emit.prev_di_line = line;
             emit.prev_di_column = column;
             emit.prev_di_pc = emit.code.items.len;

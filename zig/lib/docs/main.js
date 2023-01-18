@@ -2660,6 +2660,7 @@ var zigAnalysis;
       "Enum",
       "Union",
       "Fn",
+      "BoundFn",
       "Opaque",
       "Frame",
       "AnyFrame",

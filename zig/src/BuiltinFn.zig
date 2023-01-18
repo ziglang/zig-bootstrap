@@ -30,10 +30,6 @@ pub const Tag = enum {
     compile_log,
     ctz,
     c_undef,
-    c_va_arg,
-    c_va_copy,
-    c_va_end,
-    c_va_start,
     div_exact,
     div_floor,
     div_trunc,
@@ -154,7 +150,7 @@ pub const list = list: {
             "@addWithOverflow",
             .{
                 .tag = .add_with_overflow,
-                .param_count = 2,
+                .param_count = 4,
             },
         },
         .{
@@ -356,30 +352,6 @@ pub const list = list: {
             .{
                 .tag = .c_undef,
                 .param_count = 1,
-            },
-        },
-        .{
-            "@cVaArg", .{
-                .tag = .c_va_arg,
-                .param_count = 2,
-            },
-        },
-        .{
-            "@cVaCopy", .{
-                .tag = .c_va_copy,
-                .param_count = 1,
-            },
-        },
-        .{
-            "@cVaEnd", .{
-                .tag = .c_va_end,
-                .param_count = 1,
-            },
-        },
-        .{
-            "@cVaStart", .{
-                .tag = .c_va_start,
-                .param_count = 0,
             },
         },
         .{
@@ -636,7 +608,7 @@ pub const list = list: {
             "@mulWithOverflow",
             .{
                 .tag = .mul_with_overflow,
-                .param_count = 2,
+                .param_count = 4,
             },
         },
         .{
@@ -741,7 +713,7 @@ pub const list = list: {
             "@shlWithOverflow",
             .{
                 .tag = .shl_with_overflow,
-                .param_count = 2,
+                .param_count = 4,
             },
         },
         .{
@@ -889,7 +861,7 @@ pub const list = list: {
             "@subWithOverflow",
             .{
                 .tag = .sub_with_overflow,
-                .param_count = 2,
+                .param_count = 4,
             },
         },
         .{

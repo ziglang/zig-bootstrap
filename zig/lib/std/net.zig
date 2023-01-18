@@ -149,7 +149,6 @@ pub const Address = extern union {
         options: std.fmt.FormatOptions,
         out_stream: anytype,
     ) !void {
-        if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
         switch (self.any.family) {
             os.AF.INET => try self.in.format(fmt, options, out_stream),
             os.AF.INET6 => try self.in6.format(fmt, options, out_stream),
@@ -275,7 +274,7 @@ pub const Ip4Address = extern struct {
         options: std.fmt.FormatOptions,
         out_stream: anytype,
     ) !void {
-        if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
+        _ = fmt;
         _ = options;
         const bytes = @ptrCast(*const [4]u8, &self.sa.addr);
         try std.fmt.format(out_stream, "{}.{}.{}.{}:{}", .{
@@ -321,15 +320,11 @@ pub const Ip6Address = extern struct {
             if (scope_id) {
                 if (c >= '0' and c <= '9') {
                     const digit = c - '0';
-                    {
-                        const ov = @mulWithOverflow(result.sa.scope_id, 10);
-                        if (ov[1] != 0) return error.Overflow;
-                        result.sa.scope_id = ov[0];
+                    if (@mulWithOverflow(u32, result.sa.scope_id, 10, &result.sa.scope_id)) {
+                        return error.Overflow;
                     }
-                    {
-                        const ov = @addWithOverflow(result.sa.scope_id, digit);
-                        if (ov[1] != 0) return error.Overflow;
-                        result.sa.scope_id = ov[0];
+                    if (@addWithOverflow(u32, result.sa.scope_id, digit, &result.sa.scope_id)) {
+                        return error.Overflow;
                     }
                 } else {
                     return error.InvalidCharacter;
@@ -381,15 +376,11 @@ pub const Ip6Address = extern struct {
                 return result;
             } else {
                 const digit = try std.fmt.charToDigit(c, 16);
-                {
-                    const ov = @mulWithOverflow(x, 16);
-                    if (ov[1] != 0) return error.Overflow;
-                    x = ov[0];
+                if (@mulWithOverflow(u16, x, 16, &x)) {
+                    return error.Overflow;
                 }
-                {
-                    const ov = @addWithOverflow(x, digit);
-                    if (ov[1] != 0) return error.Overflow;
-                    x = ov[0];
+                if (@addWithOverflow(u16, x, digit, &x)) {
+                    return error.Overflow;
                 }
                 saw_any_digits = true;
             }
@@ -500,15 +491,11 @@ pub const Ip6Address = extern struct {
                 return result;
             } else {
                 const digit = try std.fmt.charToDigit(c, 16);
-                {
-                    const ov = @mulWithOverflow(x, 16);
-                    if (ov[1] != 0) return error.Overflow;
-                    x = ov[0];
+                if (@mulWithOverflow(u16, x, 16, &x)) {
+                    return error.Overflow;
                 }
-                {
-                    const ov = @addWithOverflow(x, digit);
-                    if (ov[1] != 0) return error.Overflow;
-                    x = ov[0];
+                if (@addWithOverflow(u16, x, digit, &x)) {
+                    return error.Overflow;
                 }
                 saw_any_digits = true;
             }
@@ -576,7 +563,7 @@ pub const Ip6Address = extern struct {
         options: std.fmt.FormatOptions,
         out_stream: anytype,
     ) !void {
-        if (fmt.len != 0) std.fmt.invalidFmtError(fmt, self);
+        _ = fmt;
         _ = options;
         const port = mem.bigToNative(u16, self.sa.port);
         if (mem.eql(u8, self.sa.addr[0..12], &[_]u8{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0xff, 0xff })) {
@@ -837,7 +824,7 @@ pub fn getAddressList(allocator: mem.Allocator, name: []const u8, port: u16) !*A
 
         result.addrs = try arena.alloc(Address, lookup_addrs.items.len);
         if (canon.items.len != 0) {
-            result.canon_name = try canon.toOwnedSlice();
+            result.canon_name = canon.toOwnedSlice();
         }
 
         for (lookup_addrs.items) |lookup_addr, i| {
@@ -882,21 +869,21 @@ fn linuxLookupName(
         } else {
             try linuxLookupNameFromHosts(addrs, canon, name, family, port);
             if (addrs.items.len == 0) {
-                try linuxLookupNameFromDnsSearch(addrs, canon, name, family, port);
-            }
-            if (addrs.items.len == 0) {
-                // RFC 6761 Section 6.3
+                // RFC 6761 Section 6.3.3
                 // Name resolution APIs and libraries SHOULD recognize localhost
                 // names as special and SHOULD always return the IP loopback address
                 // for address queries and negative responses for all other query
                 // types.
 
-                // Check for equal to "localhost" or ends in ".localhost"
-                if (mem.endsWith(u8, name, "localhost") and (name.len == "localhost".len or name[name.len - "localhost".len] == '.')) {
+                // Check for equal to "localhost(.)" or ends in ".localhost(.)"
+                const localhost = if (name[name.len - 1] == '.') "localhost." else "localhost";
+                if (mem.endsWith(u8, name, localhost) and (name.len == localhost.len or name[name.len - localhost.len] == '.')) {
                     try addrs.append(LookupAddr{ .addr = .{ .in = Ip4Address.parse("127.0.0.1", port) catch unreachable } });
                     try addrs.append(LookupAddr{ .addr = .{ .in6 = Ip6Address.parse("::1", port) catch unreachable } });
                     return;
                 }
+
+                try linuxLookupNameFromDnsSearch(addrs, canon, name, family, port);
             }
         }
     } else {
@@ -1204,7 +1191,7 @@ pub fn isValidHostName(hostname: []const u8) bool {
     if (hostname.len >= 254) return false;
     if (!std.unicode.utf8ValidateSlice(hostname)) return false;
     for (hostname) |byte| {
-        if (!std.ascii.isASCII(byte) or byte == '.' or byte == '-' or std.ascii.isAlphanumeric(byte)) {
+        if (byte >= 0x80 or byte == '.' or byte == '-' or std.ascii.isAlNum(byte)) {
             continue;
         }
         return false;

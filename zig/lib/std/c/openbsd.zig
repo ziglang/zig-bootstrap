@@ -7,7 +7,7 @@ const iovec_const = std.os.iovec_const;
 extern "c" fn __errno() *c_int;
 pub const _errno = __errno;
 
-pub const dl_iterate_phdr_callback = *const fn (info: *dl_phdr_info, size: usize, data: ?*anyopaque) callconv(.C) c_int;
+pub const dl_iterate_phdr_callback = std.meta.FnPtr(fn (info: *dl_phdr_info, size: usize, data: ?*anyopaque) callconv(.C) c_int);
 pub extern "c" fn dl_iterate_phdr(callback: dl_iterate_phdr_callback, data: ?*anyopaque) c_int;
 
 pub extern "c" fn arc4random_buf(buf: [*]u8, len: usize) void;
@@ -417,6 +417,7 @@ pub const AI = struct {
 };
 
 pub const PATH_MAX = 1024;
+pub const NAME_MAX = 255;
 pub const IOV_MAX = 1024;
 
 pub const STDIN_FILENO = 0;
@@ -1026,8 +1027,8 @@ pub const SIG = struct {
 
 /// Renamed from `sigaction` to `Sigaction` to avoid conflict with the syscall.
 pub const Sigaction = extern struct {
-    pub const handler_fn = *const fn (c_int) align(1) callconv(.C) void;
-    pub const sigaction_fn = *const fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void;
+    pub const handler_fn = std.meta.FnPtr(fn (c_int) align(1) callconv(.C) void);
+    pub const sigaction_fn = std.meta.FnPtr(fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void);
 
     /// signal handler
     handler: extern union {
@@ -1247,7 +1248,7 @@ pub const E = enum(u16) {
 };
 
 const _MAX_PAGE_SHIFT = switch (builtin.cpu.arch) {
-    .x86 => 12,
+    .i386 => 12,
     .sparc64 => 13,
 };
 pub const MINSIGSTKSZ = 1 << _MAX_PAGE_SHIFT;

@@ -87,19 +87,15 @@ pub fn timingSafeAdd(comptime T: type, a: []const T, b: []const T, result: []T, 
     if (endian == .Little) {
         var i: usize = 0;
         while (i < len) : (i += 1) {
-            const ov1 = @addWithOverflow(a[i], b[i]);
-            const ov2 = @addWithOverflow(ov1[0], carry);
-            result[i] = ov2[0];
-            carry = ov1[1] | ov2[1];
+            const tmp = @boolToInt(@addWithOverflow(u8, a[i], b[i], &result[i]));
+            carry = tmp | @boolToInt(@addWithOverflow(u8, result[i], carry, &result[i]));
         }
     } else {
         var i: usize = len;
         while (i != 0) {
             i -= 1;
-            const ov1 = @addWithOverflow(a[i], b[i]);
-            const ov2 = @addWithOverflow(ov1[0], carry);
-            result[i] = ov2[0];
-            carry = ov1[1] | ov2[1];
+            const tmp = @boolToInt(@addWithOverflow(u8, a[i], b[i], &result[i]));
+            carry = tmp | @boolToInt(@addWithOverflow(u8, result[i], carry, &result[i]));
         }
     }
     return @bitCast(bool, carry);
@@ -114,19 +110,15 @@ pub fn timingSafeSub(comptime T: type, a: []const T, b: []const T, result: []T, 
     if (endian == .Little) {
         var i: usize = 0;
         while (i < len) : (i += 1) {
-            const ov1 = @subWithOverflow(a[i], b[i]);
-            const ov2 = @subWithOverflow(ov1[0], borrow);
-            result[i] = ov2[0];
-            borrow = ov1[1] | ov2[1];
+            const tmp = @boolToInt(@subWithOverflow(u8, a[i], b[i], &result[i]));
+            borrow = tmp | @boolToInt(@subWithOverflow(u8, result[i], borrow, &result[i]));
         }
     } else {
         var i: usize = len;
         while (i != 0) {
             i -= 1;
-            const ov1 = @subWithOverflow(a[i], b[i]);
-            const ov2 = @subWithOverflow(ov1[0], borrow);
-            result[i] = ov2[0];
-            borrow = ov1[1] | ov2[1];
+            const tmp = @boolToInt(@subWithOverflow(u8, a[i], b[i], &result[i]));
+            borrow = tmp | @boolToInt(@subWithOverflow(u8, result[i], borrow, &result[i]));
         }
     }
     return @bitCast(bool, borrow);

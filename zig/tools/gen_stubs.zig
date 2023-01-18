@@ -2,7 +2,7 @@
 //! ./gen_stubs /path/to/musl/build-all >libc.S
 //!
 //! The directory 'build-all' is expected to contain these subdirectories:
-//! arm  x86  mips  mips64  powerpc  powerpc64  riscv64  x86_64
+//! arm  i386  mips  mips64  powerpc  powerpc64  riscv64  x86_64
 //!
 //! ...each with 'lib/libc.so' inside of them.
 //!
@@ -30,7 +30,7 @@ const native_endian = @import("builtin").target.cpu.arch.endian();
 
 const arches: [7]std.Target.Cpu.Arch = blk: {
     var result: [7]std.Target.Cpu.Arch = undefined;
-    for (.{ .riscv64, .mips, .x86, .x86_64, .powerpc, .powerpc64, .aarch64 }) |arch| {
+    for (.{ .riscv64, .mips, .i386, .x86_64, .powerpc, .powerpc64, .aarch64 }) |arch| {
         result[archIndex(arch)] = arch;
     }
     break :blk result;
@@ -56,7 +56,7 @@ const MultiSym = struct {
     fn is32Only(ms: MultiSym) bool {
         return ms.present[archIndex(.riscv64)] == false and
             ms.present[archIndex(.mips)] == true and
-            ms.present[archIndex(.x86)] == true and
+            ms.present[archIndex(.i386)] == true and
             ms.present[archIndex(.x86_64)] == false and
             ms.present[archIndex(.powerpc)] == true and
             ms.present[archIndex(.powerpc64)] == false and
@@ -97,7 +97,7 @@ const MultiSym = struct {
         const map = .{
             .{ .riscv64, 8 },
             .{ .mips, 4 },
-            .{ .x86, 4 },
+            .{ .i386, 4 },
             .{ .x86_64, 8 },
             .{ .powerpc, 4 },
             .{ .powerpc64, 8 },
@@ -118,7 +118,7 @@ const MultiSym = struct {
         const map = .{
             .{ .riscv64, 16 },
             .{ .mips, 8 },
-            .{ .x86, 8 },
+            .{ .i386, 8 },
             .{ .x86_64, 16 },
             .{ .powerpc, 8 },
             .{ .powerpc64, 16 },
@@ -139,7 +139,7 @@ const MultiSym = struct {
         const map = .{
             .{ .riscv64, 2 },
             .{ .mips, 1 },
-            .{ .x86, 1 },
+            .{ .i386, 1 },
             .{ .x86_64, 2 },
             .{ .powerpc, 1 },
             .{ .powerpc64, 2 },
@@ -555,7 +555,7 @@ fn archIndex(arch: std.Target.Cpu.Arch) u8 {
         // zig fmt: off
         .riscv64   => 0,
         .mips      => 1,
-        .x86      => 2,
+        .i386      => 2,
         .x86_64    => 3,
         .powerpc   => 4,
         .powerpc64 => 5,
@@ -865,14 +865,12 @@ const blacklisted_symbols = [_][]const u8{
     "__ucmpsi2",
     "__ucmpti2",
     "__udivdi3",
-    "__udivei4",
     "__udivmoddi4",
     "__udivmodsi4",
     "__udivmodti4",
     "__udivsi3",
     "__udivti3",
     "__umoddi3",
-    "__umodei4",
     "__umodsi3",
     "__umodti3",
     "__unorddf2",

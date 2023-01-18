@@ -1,4 +1,6 @@
 const CodeSignature = @This();
+const Compilation = @import("../../Compilation.zig");
+const WaitGroup = @import("../../WaitGroup.zig");
 
 const std = @import("std");
 const assert = std.debug.assert;
@@ -7,14 +9,10 @@ const log = std.log.scoped(.link);
 const macho = std.macho;
 const mem = std.mem;
 const testing = std.testing;
-
 const Allocator = mem.Allocator;
-const Compilation = @import("../../Compilation.zig");
 const Sha256 = std.crypto.hash.sha2.Sha256;
-const ThreadPool = @import("../../ThreadPool.zig");
-const WaitGroup = @import("../../WaitGroup.zig");
 
-const hash_size = Sha256.digest_length;
+const hash_size: u8 = 32;
 
 const Blob = union(enum) {
     code_directory: *CodeDirectory,
@@ -111,7 +109,7 @@ const CodeDirectory = struct {
     fn size(self: CodeDirectory) u32 {
         const code_slots = self.inner.nCodeSlots * hash_size;
         const special_slots = self.inner.nSpecialSlots * hash_size;
-        return @sizeOf(macho.CodeDirectory) + @intCast(u32, self.ident.len + 1 + special_slots + code_slots);
+        return @sizeOf(macho.CodeDirectory) + @intCast(u32, self.ident.len + 1) + special_slots + code_slots;
     }
 
     fn write(self: CodeDirectory, writer: anytype) !void {
@@ -289,7 +287,33 @@ pub fn writeAdhocSignature(
     self.code_directory.inner.nCodeSlots = total_pages;
 
     // Calculate hash for each page (in file) and write it to the buffer
-    try self.parallelHash(gpa, comp.thread_pool, opts.file, opts.file_size);
+    var wg: WaitGroup = .{};
+    {
+        const buffer = try gpa.alloc(u8, self.page_size * total_pages);
+        defer gpa.free(buffer);
+
+        const results = try gpa.alloc(fs.File.PReadError!usize, total_pages);
+        defer gpa.free(results);
+        {
+            wg.reset();
+            defer wg.wait();
+
+            var i: usize = 0;
+            while (i < total_pages) : (i += 1) {
+                const fstart = i * self.page_size;
+                const fsize = if (fstart + self.page_size > opts.file_size)
+                    opts.file_size - fstart
+                else
+                    self.page_size;
+                const out_hash = &self.code_directory.code_slots.items[i];
+                wg.start();
+                try comp.thread_pool.spawn(workerSha256Hash, .{
+                    opts.file, fstart, buffer[fstart..][0..fsize], out_hash, &results[i], &wg,
+                });
+            }
+        }
+        for (results) |result| _ = try result;
+    }
 
     try blobs.append(.{ .code_directory = &self.code_directory });
     header.length += @sizeOf(macho.BlobIndex);
@@ -328,7 +352,7 @@ pub fn writeAdhocSignature(
     }
 
     self.code_directory.inner.hashOffset =
-        @sizeOf(macho.CodeDirectory) + @intCast(u32, self.code_directory.ident.len + 1 + self.code_directory.inner.nSpecialSlots * hash_size);
+        @sizeOf(macho.CodeDirectory) + @intCast(u32, self.code_directory.ident.len + 1) + self.code_directory.inner.nSpecialSlots * hash_size;
     self.code_directory.inner.length = self.code_directory.size();
     header.length += self.code_directory.size();
 
@@ -348,60 +372,17 @@ pub fn writeAdhocSignature(
     }
 }
 
-fn parallelHash(
-    self: *CodeSignature,
-    gpa: Allocator,
-    pool: *ThreadPool,
-    file: fs.File,
-    file_size: u32,
-) !void {
-    var wg: WaitGroup = .{};
-
-    const total_num_chunks = mem.alignForward(file_size, self.page_size) / self.page_size;
-    assert(self.code_directory.code_slots.items.len >= total_num_chunks);
-
-    const buffer = try gpa.alloc(u8, self.page_size * total_num_chunks);
-    defer gpa.free(buffer);
-
-    const results = try gpa.alloc(fs.File.PReadError!usize, total_num_chunks);
-    defer gpa.free(results);
-
-    {
-        wg.reset();
-        defer wg.wait();
-
-        var i: usize = 0;
-        while (i < total_num_chunks) : (i += 1) {
-            const fstart = i * self.page_size;
-            const fsize = if (fstart + self.page_size > file_size)
-                file_size - fstart
-            else
-                self.page_size;
-            wg.start();
-            try pool.spawn(worker, .{
-                file,
-                fstart,
-                buffer[fstart..][0..fsize],
-                &self.code_directory.code_slots.items[i],
-                &results[i],
-                &wg,
-            });
-        }
-    }
-    for (results) |result| _ = try result;
-}
-
-fn worker(
+fn workerSha256Hash(
     file: fs.File,
     fstart: usize,
     buffer: []u8,
-    out: *[hash_size]u8,
+    hash: *[hash_size]u8,
     err: *fs.File.PReadError!usize,
     wg: *WaitGroup,
 ) void {
     defer wg.finish();
     err.* = file.preadAll(buffer, fstart);
-    Sha256.hash(buffer, out, .{});
+    Sha256.hash(buffer, hash, .{});
 }
 
 pub fn size(self: CodeSignature) u32 {

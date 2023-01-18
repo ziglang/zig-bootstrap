@@ -387,10 +387,10 @@ fn callFn(comptime f: anytype, args: anytype) switch (Impl) {
 
     switch (@typeInfo(@typeInfo(@TypeOf(f)).Fn.return_type.?)) {
         .NoReturn => {
-            @call(.auto, f, args);
+            @call(.{}, f, args);
         },
         .Void => {
-            @call(.auto, f, args);
+            @call(.{}, f, args);
             return default_value;
         },
         .Int => |info| {
@@ -398,7 +398,7 @@ fn callFn(comptime f: anytype, args: anytype) switch (Impl) {
                 @compileError(bad_fn_ret);
             }
 
-            const status = @call(.auto, f, args);
+            const status = @call(.{}, f, args);
             if (Impl != PosixThreadImpl) {
                 return status;
             }
@@ -411,7 +411,7 @@ fn callFn(comptime f: anytype, args: anytype) switch (Impl) {
                 @compileError(bad_fn_ret);
             }
 
-            @call(.auto, f, args) catch |err| {
+            @call(.{}, f, args) catch |err| {
                 std.debug.print("error: {s}\n", .{@errorName(err)});
                 if (@errorReturnTrace()) |trace| {
                     std.debug.dumpStackTrace(trace.*);
@@ -753,7 +753,7 @@ const LinuxThreadImpl = struct {
         /// https://github.com/ifduyue/musl/search?q=__unmapself
         fn freeAndExit(self: *ThreadCompletion) noreturn {
             switch (target.cpu.arch) {
-                .x86 => asm volatile (
+                .i386 => asm volatile (
                     \\  movl $91, %%eax
                     \\  movl %[ptr], %%ebx
                     \\  movl %[len], %%ecx
@@ -959,10 +959,10 @@ const LinuxThreadImpl = struct {
             else => |e| return e,
         };
 
-        // Prepare the TLS segment and prepare a user_desc struct when needed on x86
+        // Prepare the TLS segment and prepare a user_desc struct when needed on i386
         var tls_ptr = os.linux.tls.prepareTLS(mapped[tls_offset..]);
-        var user_desc: if (target.cpu.arch == .x86) os.linux.user_desc else void = undefined;
-        if (target.cpu.arch == .x86) {
+        var user_desc: if (target.cpu.arch == .i386) os.linux.user_desc else void = undefined;
+        if (target.cpu.arch == .i386) {
             defer tls_ptr = @ptrToInt(&user_desc);
             user_desc = .{
                 .entry_number = os.linux.tls.tls_image.gdt_entry_number,

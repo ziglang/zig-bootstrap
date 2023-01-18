@@ -191,7 +191,9 @@ pub fn extract(
 }
 
 test "vector patterns" {
-    if (builtin.zig_backend == .stage2_llvm and builtin.cpu.arch == .aarch64) {
+    if ((builtin.zig_backend == .stage1 or builtin.zig_backend == .stage2_llvm) and
+        builtin.cpu.arch == .aarch64)
+    {
         // https://github.com/ziglang/zig/issues/12012
         return error.SkipZigTest;
     }
@@ -417,7 +419,7 @@ test "vector prefix scan" {
         return error.SkipZigTest;
     }
 
-    if (builtin.zig_backend == .stage2_llvm) {
+    if (builtin.zig_backend == .stage1 or builtin.zig_backend == .stage2_llvm) {
         // Regressed in LLVM 14:
         // https://github.com/llvm/llvm-project/issues/55522
         return error.SkipZigTest;

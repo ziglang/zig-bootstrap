@@ -115,10 +115,16 @@ pub fn stringToEnum(comptime T: type, str: []const u8) ?T {
     // - https://github.com/ziglang/zig/issues/3863
     if (@typeInfo(T).Enum.fields.len <= 100) {
         const kvs = comptime build_kvs: {
-            const EnumKV = struct { []const u8, T };
+            // In order to generate an array of structs that play nice with anonymous
+            // list literals, we need to give them "0" and "1" field names.
+            // TODO https://github.com/ziglang/zig/issues/4335
+            const EnumKV = struct {
+                @"0": []const u8,
+                @"1": T,
+            };
             var kvs_array: [@typeInfo(T).Enum.fields.len]EnumKV = undefined;
             inline for (@typeInfo(T).Enum.fields) |enumField, i| {
-                kvs_array[i] = .{ enumField.name, @field(T, enumField.name) };
+                kvs_array[i] = .{ .@"0" = enumField.name, .@"1" = @field(T, enumField.name) };
             }
             break :build_kvs kvs_array[0..];
         };
@@ -142,6 +148,22 @@ test "std.meta.stringToEnum" {
     try testing.expect(E1.A == stringToEnum(E1, "A").?);
     try testing.expect(E1.B == stringToEnum(E1, "B").?);
     try testing.expect(null == stringToEnum(E1, "C"));
+}
+
+/// Deprecated, use `@bitSizeOf()`.
+/// TODO Remove this after zig 0.10.0 is released.
+pub fn bitCount(comptime T: type) comptime_int {
+    return switch (@typeInfo(T)) {
+        .Bool => 1,
+        .Int => |info| info.bits,
+        .Float => |info| info.bits,
+        else => @compileError("Expected bool, int or float type, found '" ++ @typeName(T) ++ "'"),
+    };
+}
+
+test "std.meta.bitCount" {
+    try testing.expect(bitCount(u8) == 8);
+    try testing.expect(bitCount(f32) == 32);
 }
 
 /// Returns the alignment of type T.
@@ -339,7 +361,11 @@ pub fn assumeSentinel(p: anytype, comptime sentinel_val: Elem(@TypeOf(p))) Senti
     const ReturnType = Sentinel(T, sentinel_val);
     switch (@typeInfo(T)) {
         .Pointer => |info| switch (info.size) {
-            .Slice, .Many, .One => return @ptrCast(ReturnType, p),
+            .Slice => if (@import("builtin").zig_backend == .stage1)
+                return @bitCast(ReturnType, p)
+            else
+                return @ptrCast(ReturnType, p),
+            .Many, .One => return @ptrCast(ReturnType, p),
             .C => {},
         },
         .Optional => |info| switch (@typeInfo(info.child)) {
@@ -371,12 +397,16 @@ test "std.meta.assumeSentinel" {
 pub fn containerLayout(comptime T: type) Type.ContainerLayout {
     return switch (@typeInfo(T)) {
         .Struct => |info| info.layout,
+        .Enum => |info| info.layout,
         .Union => |info| info.layout,
-        else => @compileError("expected struct or union type, found '" ++ @typeName(T) ++ "'"),
+        else => @compileError("Expected struct, enum or union type, found '" ++ @typeName(T) ++ "'"),
     };
 }
 
 test "std.meta.containerLayout" {
+    const E1 = enum {
+        A,
+    };
     const S1 = struct {};
     const S2 = packed struct {};
     const S3 = extern struct {};
@@ -390,6 +420,7 @@ test "std.meta.containerLayout" {
         a: u8,
     };
 
+    try testing.expect(containerLayout(E1) == .Auto);
     try testing.expect(containerLayout(S1) == .Auto);
     try testing.expect(containerLayout(S2) == .Packed);
     try testing.expect(containerLayout(S3) == .Extern);
@@ -517,8 +548,8 @@ test "std.meta.fields" {
     try testing.expect(mem.eql(u8, e2f[0].name, "A"));
     try testing.expect(mem.eql(u8, sf[0].name, "a"));
     try testing.expect(mem.eql(u8, uf[0].name, "a"));
-    try testing.expect(comptime sf[0].type == u8);
-    try testing.expect(comptime uf[0].type == u8);
+    try testing.expect(comptime sf[0].field_type == u8);
+    try testing.expect(comptime uf[0].field_type == u8);
 }
 
 pub fn fieldInfo(comptime T: type, comptime field: FieldEnum(T)) switch (@typeInfo(T)) {
@@ -552,8 +583,8 @@ test "std.meta.fieldInfo" {
     try testing.expect(mem.eql(u8, e2f.name, "A"));
     try testing.expect(mem.eql(u8, sf.name, "a"));
     try testing.expect(mem.eql(u8, uf.name, "a"));
-    try testing.expect(comptime sf.type == u8);
-    try testing.expect(comptime uf.type == u8);
+    try testing.expect(comptime sf.field_type == u8);
+    try testing.expect(comptime uf.field_type == u8);
 }
 
 pub fn fieldNames(comptime T: type) *const [fields(T).len][]const u8 {
@@ -626,17 +657,6 @@ test "std.meta.tags" {
 pub fn FieldEnum(comptime T: type) type {
     const field_infos = fields(T);
 
-    if (field_infos.len == 0) {
-        return @Type(.{
-            .Enum = .{
-                .tag_type = u0,
-                .fields = &.{},
-                .decls = &.{},
-                .is_exhaustive = true,
-            },
-        });
-    }
-
     if (@typeInfo(T) == .Union) {
         if (@typeInfo(T).Union.tag_type) |tag_type| {
             for (std.enums.values(tag_type)) |v, i| {
@@ -658,6 +678,7 @@ pub fn FieldEnum(comptime T: type) type {
     }
     return @Type(.{
         .Enum = .{
+            .layout = .Auto,
             .tag_type = std.math.IntFittingRange(0, field_infos.len - 1),
             .fields = &enumFields,
             .decls = &decls,
@@ -669,6 +690,10 @@ pub fn FieldEnum(comptime T: type) type {
 fn expectEqualEnum(expected: anytype, actual: @TypeOf(expected)) !void {
     // TODO: https://github.com/ziglang/zig/issues/7419
     // testing.expectEqual(@typeInfo(expected).Enum, @typeInfo(actual).Enum);
+    try testing.expectEqual(
+        @typeInfo(expected).Enum.layout,
+        @typeInfo(actual).Enum.layout,
+    );
     try testing.expectEqual(
         @typeInfo(expected).Enum.tag_type,
         @typeInfo(actual).Enum.tag_type,
@@ -703,7 +728,6 @@ fn expectEqualEnum(expected: anytype, actual: @TypeOf(expected)) !void {
 }
 
 test "std.meta.FieldEnum" {
-    try expectEqualEnum(enum {}, FieldEnum(struct {}));
     try expectEqualEnum(enum { a }, FieldEnum(struct { a: u8 }));
     try expectEqualEnum(enum { a, b, c }, FieldEnum(struct { a: u8, b: void, c: f32 }));
     try expectEqualEnum(enum { a, b, c }, FieldEnum(union { a: u8, b: void, c: f32 }));
@@ -729,6 +753,7 @@ pub fn DeclEnum(comptime T: type) type {
     }
     return @Type(.{
         .Enum = .{
+            .layout = .Auto,
             .tag_type = std.math.IntFittingRange(0, fieldInfos.len - 1),
             .fields = &enumDecls,
             .decls = &decls,
@@ -819,7 +844,7 @@ pub fn TagPayload(comptime U: type, comptime tag: Tag(U)) type {
 
     inline for (info.fields) |field_info| {
         if (comptime mem.eql(u8, field_info.name, @tagName(tag)))
-            return field_info.type;
+            return field_info.field_type;
     }
 
     unreachable;
@@ -1072,9 +1097,9 @@ pub fn ArgsTuple(comptime Function: type) type {
     if (function_info.is_var_args)
         @compileError("Cannot create ArgsTuple for variadic function");
 
-    var argument_field_list: [function_info.params.len]type = undefined;
-    inline for (function_info.params) |arg, i| {
-        const T = arg.type.?;
+    var argument_field_list: [function_info.args.len]type = undefined;
+    inline for (function_info.args) |arg, i| {
+        const T = arg.arg_type.?;
         argument_field_list[i] = T;
     }
 
@@ -1099,7 +1124,7 @@ fn CreateUniqueTuple(comptime N: comptime_int, comptime types: [N]type) type {
         var num_buf: [128]u8 = undefined;
         tuple_fields[i] = .{
             .name = std.fmt.bufPrint(&num_buf, "{d}", .{i}) catch unreachable,
-            .type = T,
+            .field_type = T,
             .default_value = null,
             .is_comptime = false,
             .alignment = if (@sizeOf(T) > 0) @alignOf(T) else 0,
@@ -1134,8 +1159,8 @@ const TupleTester = struct {
             @compileError("Argument count mismatch");
 
         inline for (fields_list) |fld, i| {
-            if (expected[i] != fld.type) {
-                @compileError("Field " ++ fld.name ++ " expected to be type " ++ @typeName(expected[i]) ++ ", but was type " ++ @typeName(fld.type));
+            if (expected[i] != fld.field_type) {
+                @compileError("Field " ++ fld.name ++ " expected to be type " ++ @typeName(expected[i]) ++ ", but was type " ++ @typeName(fld.field_type));
             }
         }
     }
@@ -1196,4 +1221,28 @@ pub fn isError(error_union: anytype) bool {
 test "isError" {
     try std.testing.expect(isError(math.absInt(@as(i8, -128))));
     try std.testing.expect(!isError(math.absInt(@as(i8, -127))));
+}
+
+/// This function returns a function pointer for a given function signature.
+/// It's a helper to make code compatible to both stage1 and stage2.
+///
+/// **WARNING:** This function is deprecated and will be removed together with stage1.
+pub fn FnPtr(comptime Fn: type) type {
+    return if (@import("builtin").zig_backend != .stage1)
+        *const Fn
+    else
+        Fn;
+}
+
+test "FnPtr" {
+    var func: FnPtr(fn () i64) = undefined;
+
+    // verify that we can perform runtime exchange
+    // and not have a function body in stage2:
+
+    func = std.time.timestamp;
+    _ = func();
+
+    func = std.time.milliTimestamp;
+    _ = func();
 }

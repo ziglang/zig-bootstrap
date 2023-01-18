@@ -165,14 +165,14 @@ const test_targets = blk: {
 
         .{
             .target = .{
-                .cpu_arch = .x86,
+                .cpu_arch = .i386,
                 .os_tag = .linux,
                 .abi = .none,
             },
         },
         .{
             .target = .{
-                .cpu_arch = .x86,
+                .cpu_arch = .i386,
                 .os_tag = .linux,
                 .abi = .musl,
             },
@@ -180,7 +180,7 @@ const test_targets = blk: {
         },
         .{
             .target = .{
-                .cpu_arch = .x86,
+                .cpu_arch = .i386,
                 .os_tag = .linux,
                 .abi = .gnu,
             },
@@ -241,22 +241,24 @@ const test_targets = blk: {
         //    .link_libc = true,
         //},
 
-        .{
-            .target = .{
-                .cpu_arch = .mips,
-                .os_tag = .linux,
-                .abi = .none,
-            },
-        },
+        // https://github.com/ziglang/zig/issues/13782
+        //.{
+        //    .target = .{
+        //        .cpu_arch = .mips,
+        //        .os_tag = .linux,
+        //        .abi = .none,
+        //    },
+        //},
 
-        .{
-            .target = .{
-                .cpu_arch = .mips,
-                .os_tag = .linux,
-                .abi = .musl,
-            },
-            .link_libc = true,
-        },
+        // https://github.com/ziglang/zig/issues/13782
+        //.{
+        //    .target = .{
+        //        .cpu_arch = .mips,
+        //        .os_tag = .linux,
+        //        .abi = .musl,
+        //    },
+        //    .link_libc = true,
+        //},
 
         // https://github.com/ziglang/zig/issues/4927
         //.{
@@ -295,21 +297,23 @@ const test_targets = blk: {
         //    .link_libc = true,
         //},
 
-        .{
-            .target = .{
-                .cpu_arch = .powerpc,
-                .os_tag = .linux,
-                .abi = .none,
-            },
-        },
-        .{
-            .target = .{
-                .cpu_arch = .powerpc,
-                .os_tag = .linux,
-                .abi = .musl,
-            },
-            .link_libc = true,
-        },
+        // https://github.com/ziglang/zig/issues/13782
+        //.{
+        //    .target = .{
+        //        .cpu_arch = .powerpc,
+        //        .os_tag = .linux,
+        //        .abi = .none,
+        //    },
+        //},
+        // https://github.com/ziglang/zig/issues/13782
+        //.{
+        //    .target = .{
+        //        .cpu_arch = .powerpc,
+        //        .os_tag = .linux,
+        //        .abi = .musl,
+        //    },
+        //    .link_libc = true,
+        //},
         // https://github.com/ziglang/zig/issues/2256
         //.{
         //    .target = .{
@@ -389,7 +393,7 @@ const test_targets = blk: {
 
         .{
             .target = .{
-                .cpu_arch = .x86,
+                .cpu_arch = .i386,
                 .os_tag = .windows,
                 .abi = .msvc,
             },
@@ -405,7 +409,7 @@ const test_targets = blk: {
 
         .{
             .target = .{
-                .cpu_arch = .x86,
+                .cpu_arch = .i386,
                 .os_tag = .windows,
                 .abi = .gnu,
             },
@@ -682,6 +686,13 @@ pub fn addPkgTests(
         } else false;
         if (!want_this_mode) continue;
 
+        if (test_target.backend) |backend| {
+            if (backend == .stage2_c and builtin.os.tag == .windows) {
+                // https://github.com/ziglang/zig/issues/12415
+                continue;
+            }
+        }
+
         const libc_prefix = if (test_target.target.getOs().requiresLibC())
             ""
         else if (test_target.link_libc)
@@ -713,18 +724,20 @@ pub fn addPkgTests(
         these_tests.addIncludePath("test");
         if (test_target.backend) |backend| switch (backend) {
             .stage1 => {
-                @panic("stage1 testing requested");
+                these_tests.use_stage1 = true;
             },
             .stage2_llvm => {
+                these_tests.use_stage1 = false;
                 these_tests.use_llvm = true;
             },
             .stage2_c => {
+                these_tests.use_stage1 = false;
                 these_tests.use_llvm = false;
             },
             else => {
+                these_tests.use_stage1 = false;
                 these_tests.use_llvm = false;
-                // TODO: force self-hosted linkers to avoid LLD creeping in
-                // until the auto-select mechanism deems them worthy
+                // TODO: force self-hosted linkers to avoid LLD creeping in until the auto-select mechanism deems them worthy
                 these_tests.use_lld = false;
             },
         };
@@ -983,7 +996,7 @@ pub const StackTracesContext = struct {
                     }
                     try buf.appendSlice("\n");
                 }
-                break :got_result try buf.toOwnedSlice();
+                break :got_result buf.toOwnedSlice();
             };
 
             if (!mem.eql(u8, self.expect_output, got)) {
@@ -1034,7 +1047,6 @@ pub const StandaloneContext = struct {
         requires_stage2: bool = false,
         use_emulation: bool = false,
         requires_symlinks: bool = false,
-        extra_argv: []const []const u8 = &.{},
     }) void {
         const b = self.b;
 
@@ -1054,8 +1066,6 @@ pub const StandaloneContext = struct {
 
         zig_args.append("--build-file") catch unreachable;
         zig_args.append(b.pathFromRoot(build_file)) catch unreachable;
-
-        zig_args.appendSlice(features.extra_argv) catch unreachable;
 
         zig_args.append("test") catch unreachable;
 
@@ -1282,7 +1292,7 @@ const c_abi_targets = [_]CrossTarget{
         .abi = .musl,
     },
     .{
-        .cpu_arch = .x86,
+        .cpu_arch = .i386,
         .os_tag = .linux,
         .abi = .musl,
     },
@@ -1345,6 +1355,8 @@ pub fn addCAbiTests(b: *build.Builder, skip_non_native: bool) *build.Step {
             "test-c-abi",
             triple_prefix,
         }));
+
+        test_step.use_stage1 = false;
 
         step.dependOn(&test_step.step);
     }

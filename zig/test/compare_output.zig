@@ -504,10 +504,9 @@ pub fn addCases(cases: *tests.CompareOutputContext) void {
         \\    const allocator = logging_allocator.allocator();
         \\
         \\    var a = try allocator.alloc(u8, 10);
-        \\    try std.testing.expect(allocator.resize(a, 5));
-        \\    a = a[0..5];
+        \\    a = allocator.shrink(a, 5);
         \\    try std.testing.expect(a.len == 5);
-        \\    try std.testing.expect(!allocator.resize(a, 20));
+        \\    try std.testing.expect(allocator.resize(a, 20) == null);
         \\    allocator.free(a);
         \\}
         \\
@@ -523,9 +522,9 @@ pub fn addCases(cases: *tests.CompareOutputContext) void {
         \\    nosuspend stdout.print(level_txt ++ prefix2 ++ format ++ "\n", args) catch return;
         \\}
     ,
-        \\debug: alloc - success - len: 10, ptr_align: 0
-        \\debug: shrink - success - 10 to 5, buf_align: 0
-        \\error: expand - failure - 5 to 20, buf_align: 0
+        \\debug: alloc - success - len: 10, ptr_align: 1, len_align: 0
+        \\debug: shrink - success - 10 to 5, len_align: 0, buf_align: 1
+        \\error: expand - failure - 5 to 20, len_align: 0, buf_align: 1
         \\debug: free - len: 5
         \\
     );

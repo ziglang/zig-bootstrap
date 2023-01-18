@@ -3,6 +3,13 @@ const builtin = @import("builtin");
 pub const panic = @import("compiler_rt/common.zig").panic;
 
 comptime {
+    _ = @import("compiler_rt/atomics.zig");
+
+    // macOS has these functions inside libSystem.
+    if (builtin.cpu.arch.isAARCH64() and !builtin.os.tag.isDarwin()) {
+        _ = @import("compiler_rt/aarch64_outline_atomics.zig");
+    }
+
     _ = @import("compiler_rt/addf3.zig");
     _ = @import("compiler_rt/addhf3.zig");
     _ = @import("compiler_rt/addsf3.zig");
@@ -108,11 +115,11 @@ comptime {
     _ = @import("compiler_rt/sqrt.zig");
     _ = @import("compiler_rt/tan.zig");
     _ = @import("compiler_rt/trunc.zig");
+    _ = @import("compiler_rt/stack_probe.zig");
     _ = @import("compiler_rt/divti3.zig");
     _ = @import("compiler_rt/modti3.zig");
     _ = @import("compiler_rt/multi3.zig");
     _ = @import("compiler_rt/udivti3.zig");
-    _ = @import("compiler_rt/udivmodei4.zig");
     _ = @import("compiler_rt/udivmodti4.zig");
     _ = @import("compiler_rt/umodti3.zig");
 
@@ -209,19 +216,9 @@ comptime {
     _ = @import("compiler_rt/aullrem.zig");
     _ = @import("compiler_rt/clear_cache.zig");
 
-    if (@import("builtin").object_format != .c) {
-        _ = @import("compiler_rt/atomics.zig");
-        _ = @import("compiler_rt/stack_probe.zig");
-
-        // macOS has these functions inside libSystem.
-        if (builtin.cpu.arch.isAARCH64() and !builtin.os.tag.isDarwin()) {
-            _ = @import("compiler_rt/aarch64_outline_atomics.zig");
-        }
-
-        _ = @import("compiler_rt/memcpy.zig");
-        _ = @import("compiler_rt/memset.zig");
-        _ = @import("compiler_rt/memmove.zig");
-        _ = @import("compiler_rt/memcmp.zig");
-        _ = @import("compiler_rt/bcmp.zig");
-    }
+    _ = @import("compiler_rt/memcpy.zig");
+    _ = @import("compiler_rt/memset.zig");
+    _ = @import("compiler_rt/memmove.zig");
+    _ = @import("compiler_rt/memcmp.zig");
+    _ = @import("compiler_rt/bcmp.zig");
 }

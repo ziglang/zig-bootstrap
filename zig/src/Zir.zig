@@ -71,7 +71,7 @@ pub fn extraData(code: Zir, comptime T: type, index: usize) struct { data: T, en
     var i: usize = index;
     var result: T = undefined;
     inline for (fields) |field| {
-        @field(result, field.name) = switch (field.type) {
+        @field(result, field.name) = switch (field.field_type) {
             u32 => code.extra[i],
             Inst.Ref => @intToEnum(Inst.Ref, code.extra[i]),
             i32 => @bitCast(i32, code.extra[i]),
@@ -539,6 +539,9 @@ pub const Inst = struct {
         /// Obtains the return type of the in-scope function.
         /// Uses the `node` union field.
         ret_type,
+        /// Create a pointer type for overflow arithmetic.
+        /// TODO remove when doing https://github.com/ziglang/zig/issues/10248
+        overflow_arithmetic_ptr,
         /// Create a pointer type which can have a sentinel, alignment, address space, and/or bit range.
         /// Uses the `ptr_type` union field.
         ptr_type,
@@ -597,6 +600,9 @@ pub const Inst = struct {
         /// Returns the integer type for the RHS of a shift operation.
         /// Uses the `un_node` field.
         typeof_log2_int_type,
+        /// Given an integer type, returns the integer type for the RHS of a shift operation.
+        /// Uses the `un_node` field.
+        log2_int_type,
         /// Asserts control-flow will not reach this instruction (`unreachable`).
         /// Uses the `unreachable` union field.
         @"unreachable",
@@ -1115,6 +1121,7 @@ pub const Inst = struct {
                 .err_union_code,
                 .err_union_code_ptr,
                 .ptr_type,
+                .overflow_arithmetic_ptr,
                 .enum_literal,
                 .merge_error_sets,
                 .error_union_type,
@@ -1125,6 +1132,7 @@ pub const Inst = struct {
                 .slice_sentinel,
                 .import,
                 .typeof_log2_int_type,
+                .log2_int_type,
                 .resolve_inferred_alloc,
                 .set_eval_branch_quota,
                 .switch_capture,
@@ -1414,6 +1422,7 @@ pub const Inst = struct {
                 .err_union_code,
                 .err_union_code_ptr,
                 .ptr_type,
+                .overflow_arithmetic_ptr,
                 .enum_literal,
                 .merge_error_sets,
                 .error_union_type,
@@ -1424,6 +1433,7 @@ pub const Inst = struct {
                 .slice_sentinel,
                 .import,
                 .typeof_log2_int_type,
+                .log2_int_type,
                 .switch_capture,
                 .switch_capture_ref,
                 .switch_capture_multi,
@@ -1654,6 +1664,7 @@ pub const Inst = struct {
                 .ret_err_value_code = .str_tok,
                 .ret_ptr = .node,
                 .ret_type = .node,
+                .overflow_arithmetic_ptr = .un_node,
                 .ptr_type = .ptr_type,
                 .slice_start = .pl_node,
                 .slice_end = .pl_node,
@@ -1667,6 +1678,7 @@ pub const Inst = struct {
                 .negate_wrap = .un_node,
                 .typeof = .un_node,
                 .typeof_log2_int_type = .un_node,
+                .log2_int_type = .un_node,
                 .@"unreachable" = .@"unreachable",
                 .xor = .pl_node,
                 .optional_type = .un_node,
@@ -1904,19 +1916,19 @@ pub const Inst = struct {
         /// The AST node is the builtin call.
         typeof_peer,
         /// Implements the `@addWithOverflow` builtin.
-        /// `operand` is payload index to `BinNode`.
+        /// `operand` is payload index to `OverflowArithmetic`.
         /// `small` is unused.
         add_with_overflow,
         /// Implements the `@subWithOverflow` builtin.
-        /// `operand` is payload index to `BinNode`.
+        /// `operand` is payload index to `OverflowArithmetic`.
         /// `small` is unused.
         sub_with_overflow,
         /// Implements the `@mulWithOverflow` builtin.
-        /// `operand` is payload index to `BinNode`.
+        /// `operand` is payload index to `OverflowArithmetic`.
         /// `small` is unused.
         mul_with_overflow,
         /// Implements the `@shlWithOverflow` builtin.
-        /// `operand` is payload index to `BinNode`.
+        /// `operand` is payload index to `OverflowArithmetic`.
         /// `small` is unused.
         shl_with_overflow,
         /// `operand` is payload index to `UnNode`.
@@ -1981,18 +1993,6 @@ pub const Inst = struct {
         /// Implement the builtin `@addrSpaceCast`
         /// `Operand` is payload index to `BinNode`. `lhs` is dest type, `rhs` is operand.
         addrspace_cast,
-        /// Implement builtin `@cVaArg`.
-        /// `operand` is payload index to `BinNode`.
-        c_va_arg,
-        /// Implement builtin `@cVaStart`.
-        /// `operand` is payload index to `UnNode`.
-        c_va_copy,
-        /// Implement builtin `@cVaStart`.
-        /// `operand` is payload index to `UnNode`.
-        c_va_end,
-        /// Implement builtin `@cVaStart`.
-        /// `operand` is `src_node: i32`.
-        c_va_start,
 
         pub const InstData = struct {
             opcode: Extended,
@@ -2070,7 +2070,7 @@ pub const Inst = struct {
         address_space_type,
         float_mode_type,
         reduce_op_type,
-        modifier_type,
+        call_options_type,
         prefetch_options_type,
         export_options_type,
         extern_options_type,
@@ -2345,9 +2345,9 @@ pub const Inst = struct {
                 .ty = Type.initTag(.type),
                 .val = Value.initTag(.reduce_op_type),
             },
-            .modifier_type = .{
+            .call_options_type = .{
                 .ty = Type.initTag(.type),
-                .val = Value.initTag(.modifier_type),
+                .val = Value.initTag(.call_options_type),
             },
             .prefetch_options_type = .{
                 .ty = Type.initTag(.type),
@@ -2367,7 +2367,7 @@ pub const Inst = struct {
             },
 
             .undef = .{
-                .ty = Type.initTag(.undefined),
+                .ty = Type.initTag(.@"undefined"),
                 .val = Value.initTag(.undef),
             },
             .zero = .{
@@ -2395,7 +2395,7 @@ pub const Inst = struct {
                 .val = Value.initTag(.unreachable_value),
             },
             .null_value = .{
-                .ty = Type.initTag(.null),
+                .ty = Type.initTag(.@"null"),
                 .val = Value.initTag(.null_value),
             },
             .bool_true = .{
@@ -2832,7 +2832,7 @@ pub const Inst = struct {
         callee: Ref,
 
         pub const Flags = packed struct {
-            /// std.builtin.CallModifier in packed form
+            /// std.builtin.CallOptions.Modifier in packed form
             pub const PackedModifier = u3;
             pub const PackedArgsLen = u27;
 
@@ -2844,7 +2844,7 @@ pub const Inst = struct {
             comptime {
                 if (@sizeOf(Flags) != 4 or @bitSizeOf(Flags) != 32)
                     @compileError("Layout of Call.Flags needs to be updated!");
-                if (@bitSizeOf(std.builtin.CallModifier) != @bitSizeOf(PackedModifier))
+                if (@bitSizeOf(std.builtin.CallOptions.Modifier) != @bitSizeOf(PackedModifier))
                     @compileError("Call.Flags.PackedModifier needs to be updated!");
             }
         };
@@ -2860,7 +2860,7 @@ pub const Inst = struct {
         // Note: Flags *must* come first so that unusedResultExpr
         // can find it when it goes to modify them.
         flags: Flags,
-        modifier: Ref,
+        options: Ref,
         callee: Ref,
         args: Ref,
 
@@ -3166,7 +3166,7 @@ pub const Inst = struct {
     ///      0b0X00: whether corresponding field is comptime
     ///      0bX000: whether corresponding field has a type expression
     /// 9. fields: { // for every fields_len
-    ///        field_name: u32, // if !is_tuple
+    ///        field_name: u32,
     ///        doc_comment: u32, // 0 if no doc comment
     ///        field_type: Ref, // if corresponding bit is not set. none means anytype.
     ///        field_type_body_len: u32, // if corresponding bit is set
@@ -3186,10 +3186,9 @@ pub const Inst = struct {
             has_backing_int: bool,
             known_non_opv: bool,
             known_comptime_only: bool,
-            is_tuple: bool,
             name_strategy: NameStrategy,
             layout: std.builtin.Type.ContainerLayout,
-            _: u5 = undefined,
+            _: u6 = undefined,
         };
     };
 
@@ -3416,6 +3415,13 @@ pub const Inst = struct {
     pub const FieldTypeRef = struct {
         container_type: Ref,
         field_name: Ref,
+    };
+
+    pub const OverflowArithmetic = struct {
+        node: i32,
+        lhs: Ref,
+        rhs: Ref,
+        ptr: Ref,
     };
 
     pub const Cmpxchg = struct {

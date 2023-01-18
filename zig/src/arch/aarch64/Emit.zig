@@ -10,6 +10,8 @@ const link = @import("../../link.zig");
 const Module = @import("../../Module.zig");
 const ErrorMsg = Module.ErrorMsg;
 const assert = std.debug.assert;
+const DW = std.dwarf;
+const leb128 = std.leb;
 const Instruction = bits.Instruction;
 const Register = bits.Register;
 const log = std.log.scoped(.aarch64_emit);
@@ -143,7 +145,6 @@ pub fn emitMir(
 
             .load_memory_got => try emit.mirLoadMemoryPie(inst),
             .load_memory_direct => try emit.mirLoadMemoryPie(inst),
-            .load_memory_import => try emit.mirLoadMemoryPie(inst),
             .load_memory_ptr_got => try emit.mirLoadMemoryPie(inst),
             .load_memory_ptr_direct => try emit.mirLoadMemoryPie(inst),
 
@@ -438,7 +439,19 @@ fn dbgAdvancePCAndLine(self: *Emit, line: u32, column: u32) !void {
     const delta_pc: usize = self.code.items.len - self.prev_di_pc;
     switch (self.debug_output) {
         .dwarf => |dw| {
-            try dw.advancePCAndLine(delta_line, delta_pc);
+            // TODO Look into using the DWARF special opcodes to compress this data.
+            // It lets you emit single-byte opcodes that add different numbers to
+            // both the PC and the line number at the same time.
+            const dbg_line = &dw.dbg_line;
+            try dbg_line.ensureUnusedCapacity(11);
+            dbg_line.appendAssumeCapacity(DW.LNS.advance_pc);
+            leb128.writeULEB128(dbg_line.writer(), delta_pc) catch unreachable;
+            if (delta_line != 0) {
+                dbg_line.appendAssumeCapacity(DW.LNS.advance_line);
+                leb128.writeILEB128(dbg_line.writer(), delta_line) catch unreachable;
+            }
+            dbg_line.appendAssumeCapacity(DW.LNS.copy);
+            self.prev_di_pc = self.code.items.len;
             self.prev_di_line = line;
             self.prev_di_column = column;
             self.prev_di_pc = self.code.items.len;
@@ -638,7 +651,7 @@ fn mirDbgLine(emit: *Emit, inst: Mir.Inst.Index) !void {
 fn mirDebugPrologueEnd(self: *Emit) !void {
     switch (self.debug_output) {
         .dwarf => |dw| {
-            try dw.setPrologueEnd();
+            try dw.dbg_line.append(DW.LNS.set_prologue_end);
             try self.dbgAdvancePCAndLine(self.prev_di_line, self.prev_di_column);
         },
         .plan9 => {},
@@ -649,7 +662,7 @@ fn mirDebugPrologueEnd(self: *Emit) !void {
 fn mirDebugEpilogueBegin(self: *Emit) !void {
     switch (self.debug_output) {
         .dwarf => |dw| {
-            try dw.setEpilogueBegin();
+            try dw.dbg_line.append(DW.LNS.set_epilogue_begin);
             try self.dbgAdvancePCAndLine(self.prev_di_line, self.prev_di_column);
         },
         .plan9 => {},
@@ -661,29 +674,26 @@ fn mirCallExtern(emit: *Emit, inst: Mir.Inst.Index) !void {
     assert(emit.mir.instructions.items(.tag)[inst] == .call_extern);
     const relocation = emit.mir.instructions.items(.data)[inst].relocation;
 
-    const offset = blk: {
-        const offset = @intCast(u32, emit.code.items.len);
-        // bl
-        try emit.writeInstruction(Instruction.bl(0));
-        break :blk offset;
-    };
-
     if (emit.bin_file.cast(link.File.MachO)) |macho_file| {
+        const offset = blk: {
+            const offset = @intCast(u32, emit.code.items.len);
+            // bl
+            try emit.writeInstruction(Instruction.bl(0));
+            break :blk offset;
+        };
         // Add relocation to the decl.
         const atom = macho_file.getAtomForSymbol(.{ .sym_index = relocation.atom_index, .file = null }).?;
         const target = macho_file.getGlobalByIndex(relocation.sym_index);
         try atom.addRelocation(macho_file, .{
-            .type = @enumToInt(std.macho.reloc_type_arm64.ARM64_RELOC_BRANCH26),
+            .@"type" = @enumToInt(std.macho.reloc_type_arm64.ARM64_RELOC_BRANCH26),
             .target = target,
             .offset = offset,
             .addend = 0,
             .pcrel = true,
             .length = 2,
         });
-    } else if (emit.bin_file.cast(link.File.Coff)) |_| {
-        unreachable; // Calling imports is handled via `.load_memory_import`
     } else {
-        return emit.fail("Implement call_extern for linking backends != {{ COFF, MachO }}", .{});
+        return emit.fail("Implement call_extern for linking backends != MachO", .{});
     }
 }
 
@@ -845,9 +855,7 @@ fn mirLoadMemoryPie(emit: *Emit, inst: Mir.Inst.Index) !void {
     try emit.writeInstruction(Instruction.adrp(reg.toX(), 0));
 
     switch (tag) {
-        .load_memory_got,
-        .load_memory_import,
-        => {
+        .load_memory_got => {
             // ldr reg, reg, offset
             try emit.writeInstruction(Instruction.ldr(
                 reg,
@@ -892,7 +900,7 @@ fn mirLoadMemoryPie(emit: *Emit, inst: Mir.Inst.Index) !void {
             .addend = 0,
             .pcrel = true,
             .length = 2,
-            .type = switch (tag) {
+            .@"type" = switch (tag) {
                 .load_memory_got,
                 .load_memory_ptr_got,
                 => @enumToInt(std.macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGE21),
@@ -908,58 +916,13 @@ fn mirLoadMemoryPie(emit: *Emit, inst: Mir.Inst.Index) !void {
             .addend = 0,
             .pcrel = false,
             .length = 2,
-            .type = switch (tag) {
+            .@"type" = switch (tag) {
                 .load_memory_got,
                 .load_memory_ptr_got,
                 => @enumToInt(std.macho.reloc_type_arm64.ARM64_RELOC_GOT_LOAD_PAGEOFF12),
                 .load_memory_direct,
                 .load_memory_ptr_direct,
                 => @enumToInt(std.macho.reloc_type_arm64.ARM64_RELOC_PAGEOFF12),
-                else => unreachable,
-            },
-        });
-    } else if (emit.bin_file.cast(link.File.Coff)) |coff_file| {
-        const atom = coff_file.getAtomForSymbol(.{ .sym_index = data.atom_index, .file = null }).?;
-        const target = switch (tag) {
-            .load_memory_got,
-            .load_memory_ptr_got,
-            .load_memory_direct,
-            .load_memory_ptr_direct,
-            => link.File.Coff.SymbolWithLoc{ .sym_index = data.sym_index, .file = null },
-            .load_memory_import => coff_file.getGlobalByIndex(data.sym_index),
-            else => unreachable,
-        };
-        try atom.addRelocation(coff_file, .{
-            .target = target,
-            .offset = offset,
-            .addend = 0,
-            .pcrel = true,
-            .length = 2,
-            .type = switch (tag) {
-                .load_memory_got,
-                .load_memory_ptr_got,
-                => .got_page,
-                .load_memory_direct,
-                .load_memory_ptr_direct,
-                => .page,
-                .load_memory_import => .import_page,
-                else => unreachable,
-            },
-        });
-        try atom.addRelocation(coff_file, .{
-            .target = target,
-            .offset = offset + 4,
-            .addend = 0,
-            .pcrel = false,
-            .length = 2,
-            .type = switch (tag) {
-                .load_memory_got,
-                .load_memory_ptr_got,
-                => .got_pageoff,
-                .load_memory_direct,
-                .load_memory_ptr_direct,
-                => .pageoff,
-                .load_memory_import => .import_pageoff,
                 else => unreachable,
             },
         });

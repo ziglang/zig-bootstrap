@@ -5,17 +5,6 @@ const tests = @import("tests.zig");
 pub fn addCases(cases: *tests.StandaloneContext) void {
     cases.add("test/standalone/hello_world/hello.zig");
     cases.addC("test/standalone/hello_world/hello_libc.zig");
-
-    cases.addBuildFile("test/standalone/options/build.zig", .{
-        .extra_argv = &.{
-            "-Dbool_true",
-            "-Dbool_false=false",
-            "-Dint=1234",
-            "-De=two",
-            "-Dstring=hello",
-        },
-    });
-
     cases.add("test/standalone/cat/main.zig");
     if (builtin.zig_backend == .stage1) { // https://github.com/ziglang/zig/issues/6025
         cases.add("test/standalone/issue_9693/main.zig");
@@ -26,7 +15,6 @@ pub fn addCases(cases: *tests.StandaloneContext) void {
     cases.add("test/standalone/main_return_error/error_u8_non_zero.zig");
     cases.add("test/standalone/noreturn_call/inline.zig");
     cases.add("test/standalone/noreturn_call/as_arg.zig");
-    cases.addBuildFile("test/standalone/test_runner_path/build.zig", .{ .requires_stage2 = true });
     cases.addBuildFile("test/standalone/main_pkg_path/build.zig", .{});
     cases.addBuildFile("test/standalone/shared_library/build.zig", .{});
     cases.addBuildFile("test/standalone/mix_o_files/build.zig", .{});
@@ -61,10 +49,6 @@ pub fn addCases(cases: *tests.StandaloneContext) void {
         (builtin.os.tag != .windows or builtin.cpu.arch != .aarch64))
     {
         cases.addBuildFile("test/standalone/load_dynamic_library/build.zig", .{});
-    }
-
-    if (builtin.os.tag == .windows) {
-        cases.addBuildFile("test/standalone/windows_spawn/build.zig", .{});
     }
 
     cases.addBuildFile("test/standalone/c_compiler/build.zig", .{

@@ -2,8 +2,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 
 test "fixed" {
-    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
-
     var s: S = .{
         .a = 1,
         .b = .{

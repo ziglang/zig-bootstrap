@@ -8,7 +8,7 @@ fn CreateUnion(comptime T: type) type {
             .fields = &[_]std.builtin.Type.UnionField{
                 .{
                     .name = "field",
-                    .type = T,
+                    .field_type = T,
                     .alignment = @alignOf(T),
                 },
             },

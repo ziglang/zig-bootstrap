@@ -2,6 +2,8 @@
 //
 // SPDX-License-Identifier: BSD-2-Clause
 
+#include <common/errno.h>
+
 #include <sys/socket.h>
 
 #include <assert.h>
@@ -33,7 +35,7 @@ ssize_t recv(int socket, void *restrict buffer, size_t length, int flags) {
                                           &ro_datalen,
                                           &ro_flags);
   if (error != 0) {
-    errno = error;
+    errno = errno_fixup_socket(socket, error);
     return -1;
   }
   return ro_datalen;

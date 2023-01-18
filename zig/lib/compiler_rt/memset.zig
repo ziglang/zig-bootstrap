@@ -1,12 +1,9 @@
 const std = @import("std");
 const common = @import("./common.zig");
-const builtin = @import("builtin");
 
 comptime {
-    if (builtin.object_format != .c) {
-        @export(memset, .{ .name = "memset", .linkage = common.linkage });
-        @export(__memset, .{ .name = "__memset", .linkage = common.linkage });
-    }
+    @export(memset, .{ .name = "memset", .linkage = common.linkage });
+    @export(__memset, .{ .name = "__memset", .linkage = common.linkage });
 }
 
 pub fn memset(dest: ?[*]u8, c: u8, len: usize) callconv(.C) ?[*]u8 {

@@ -1569,7 +1569,6 @@ pub const CreateProcessError = error{
     AccessDenied,
     InvalidName,
     NameTooLong,
-    InvalidExe,
     Unexpected,
 };
 
@@ -1604,30 +1603,6 @@ pub fn CreateProcessW(
             .INVALID_PARAMETER => unreachable,
             .INVALID_NAME => return error.InvalidName,
             .FILENAME_EXCED_RANGE => return error.NameTooLong,
-            // These are all the system errors that are mapped to ENOEXEC by
-            // the undocumented _dosmaperr (old CRT) or __acrt_errno_map_os_error
-            // (newer CRT) functions. Their code can be found in crt/src/dosmap.c (old SDK)
-            // or urt/misc/errno.cpp (newer SDK) in the Windows SDK.
-            .BAD_FORMAT,
-            .INVALID_STARTING_CODESEG, // MIN_EXEC_ERROR in errno.cpp
-            .INVALID_STACKSEG,
-            .INVALID_MODULETYPE,
-            .INVALID_EXE_SIGNATURE,
-            .EXE_MARKED_INVALID,
-            .BAD_EXE_FORMAT,
-            .ITERATED_DATA_EXCEEDS_64k,
-            .INVALID_MINALLOCSIZE,
-            .DYNLINK_FROM_INVALID_RING,
-            .IOPL_NOT_ENABLED,
-            .INVALID_SEGDPL,
-            .AUTODATASEG_EXCEEDS_64k,
-            .RING2SEG_MUST_BE_MOVABLE,
-            .RELOC_CHAIN_XEEDS_SEGLIM,
-            .INFLOOP_IN_RELOC_CHAIN, // MAX_EXEC_ERROR in errno.cpp
-            // This one is not mapped to ENOEXEC but it is possible, for example
-            // when calling CreateProcessW on a plain text file with a .exe extension
-            .EXE_MACHINE_TYPE_MISMATCH,
-            => return error.InvalidExe,
             else => |err| return unexpectedError(err),
         }
     }
@@ -1778,7 +1753,7 @@ pub fn UnlockFile(
 
 pub fn teb() *TEB {
     return switch (native_arch) {
-        .x86 => asm volatile (
+        .i386 => asm volatile (
             \\ movl %%fs:0x18, %[ptr]
             : [ptr] "=r" (-> *TEB),
         ),
@@ -1825,23 +1800,6 @@ pub fn nanoSecondsToFileTime(ns: i128) FILETIME {
         .dwHighDateTime = @truncate(u32, adjusted >> 32),
         .dwLowDateTime = @truncate(u32, adjusted),
     };
-}
-
-/// Compares two WTF16 strings using RtlEqualUnicodeString
-pub fn eqlIgnoreCaseWTF16(a: []const u16, b: []const u16) bool {
-    const a_bytes = @intCast(u16, a.len * 2);
-    const a_string = UNICODE_STRING{
-        .Length = a_bytes,
-        .MaximumLength = a_bytes,
-        .Buffer = @intToPtr([*]u16, @ptrToInt(a.ptr)),
-    };
-    const b_bytes = @intCast(u16, b.len * 2);
-    const b_string = UNICODE_STRING{
-        .Length = b_bytes,
-        .MaximumLength = b_bytes,
-        .Buffer = @intToPtr([*]u16, @ptrToInt(b.ptr)),
-    };
-    return ntdll.RtlEqualUnicodeString(&a_string, &b_string, TRUE) == TRUE;
 }
 
 pub const PathSpace = struct {
@@ -2025,7 +1983,7 @@ pub fn loadWinsockExtensionFunction(comptime T: type, sock: ws2_32.SOCKET, guid:
         ws2_32.SIO_GET_EXTENSION_FUNCTION_POINTER,
         @ptrCast(*const anyopaque, &guid),
         @sizeOf(GUID),
-        @intToPtr(?*anyopaque, @ptrToInt(function)),
+        &function,
         @sizeOf(T),
         &num_bytes,
         null,
@@ -2098,7 +2056,7 @@ pub const STD_OUTPUT_HANDLE = maxInt(DWORD) - 11 + 1;
 /// The standard error device. Initially, this is the active console screen buffer, CONOUT$.
 pub const STD_ERROR_HANDLE = maxInt(DWORD) - 12 + 1;
 
-pub const WINAPI: std.builtin.CallingConvention = if (native_arch == .x86)
+pub const WINAPI: std.builtin.CallingConvention = if (native_arch == .i386)
     .Stdcall
 else
     .C;
@@ -2738,7 +2696,7 @@ pub const MEM_RESERVE_PLACEHOLDERS = 0x2;
 pub const MEM_DECOMMIT = 0x4000;
 pub const MEM_RELEASE = 0x8000;
 
-pub const PTHREAD_START_ROUTINE = *const fn (LPVOID) callconv(.C) DWORD;
+pub const PTHREAD_START_ROUTINE = std.meta.FnPtr(fn (LPVOID) callconv(.C) DWORD);
 pub const LPTHREAD_START_ROUTINE = PTHREAD_START_ROUTINE;
 
 pub const WIN32_FIND_DATAW = extern struct {
@@ -2911,7 +2869,7 @@ pub const IMAGE_TLS_DIRECTORY = extern struct {
 pub const IMAGE_TLS_DIRECTORY64 = IMAGE_TLS_DIRECTORY;
 pub const IMAGE_TLS_DIRECTORY32 = IMAGE_TLS_DIRECTORY;
 
-pub const PIMAGE_TLS_CALLBACK = ?*const fn (PVOID, DWORD, PVOID) callconv(.C) void;
+pub const PIMAGE_TLS_CALLBACK = ?std.meta.FnPtr(fn (PVOID, DWORD, PVOID) callconv(.C) void);
 
 pub const PROV_RSA_FULL = 1;
 
@@ -2964,14 +2922,14 @@ pub const RTL_QUERY_REGISTRY_TABLE = extern struct {
     DefaultLength: ULONG,
 };
 
-pub const RTL_QUERY_REGISTRY_ROUTINE = ?*const fn (
+pub const RTL_QUERY_REGISTRY_ROUTINE = ?std.meta.FnPtr(fn (
     PWSTR,
     ULONG,
     ?*anyopaque,
     ULONG,
     ?*anyopaque,
     ?*anyopaque,
-) callconv(WINAPI) NTSTATUS;
+) callconv(WINAPI) NTSTATUS);
 
 /// Path is a full path
 pub const RTL_REGISTRY_ABSOLUTE = 0;
@@ -3068,7 +3026,7 @@ pub const FILE_ACTION_MODIFIED = 0x00000003;
 pub const FILE_ACTION_RENAMED_OLD_NAME = 0x00000004;
 pub const FILE_ACTION_RENAMED_NEW_NAME = 0x00000005;
 
-pub const LPOVERLAPPED_COMPLETION_ROUTINE = ?*const fn (DWORD, DWORD, *OVERLAPPED) callconv(.C) void;
+pub const LPOVERLAPPED_COMPLETION_ROUTINE = ?std.meta.FnPtr(fn (DWORD, DWORD, *OVERLAPPED) callconv(.C) void);
 
 pub const FILE_NOTIFY_CHANGE_CREATION = 64;
 pub const FILE_NOTIFY_CHANGE_SIZE = 8;
@@ -3121,7 +3079,7 @@ pub const RTL_CRITICAL_SECTION = extern struct {
 pub const CRITICAL_SECTION = RTL_CRITICAL_SECTION;
 pub const INIT_ONCE = RTL_RUN_ONCE;
 pub const INIT_ONCE_STATIC_INIT = RTL_RUN_ONCE_INIT;
-pub const INIT_ONCE_FN = *const fn (InitOnce: *INIT_ONCE, Parameter: ?*anyopaque, Context: ?*anyopaque) callconv(.C) BOOL;
+pub const INIT_ONCE_FN = std.meta.FnPtr(fn (InitOnce: *INIT_ONCE, Parameter: ?*anyopaque, Context: ?*anyopaque) callconv(.C) BOOL);
 
 pub const RTL_RUN_ONCE = extern struct {
     Ptr: ?*anyopaque,
@@ -3201,7 +3159,7 @@ pub const EXCEPTION_RECORD = extern struct {
 };
 
 pub usingnamespace switch (native_arch) {
-    .x86 => struct {
+    .i386 => struct {
         pub const FLOATING_SAVE_AREA = extern struct {
             ControlWord: DWORD,
             StatusWord: DWORD,
@@ -3424,7 +3382,7 @@ pub const EXCEPTION_POINTERS = extern struct {
     ContextRecord: *std.os.windows.CONTEXT,
 };
 
-pub const VECTORED_EXCEPTION_HANDLER = *const fn (ExceptionInfo: *EXCEPTION_POINTERS) callconv(WINAPI) c_long;
+pub const VECTORED_EXCEPTION_HANDLER = std.meta.FnPtr(fn (ExceptionInfo: *EXCEPTION_POINTERS) callconv(WINAPI) c_long);
 
 pub const OBJECT_ATTRIBUTES = extern struct {
     Length: ULONG,
@@ -3700,21 +3658,7 @@ pub const RTL_DRIVE_LETTER_CURDIR = extern struct {
     DosPath: UNICODE_STRING,
 };
 
-pub const PPS_POST_PROCESS_INIT_ROUTINE = ?*const fn () callconv(.C) void;
-
-pub const FILE_DIRECTORY_INFORMATION = extern struct {
-    NextEntryOffset: ULONG,
-    FileIndex: ULONG,
-    CreationTime: LARGE_INTEGER,
-    LastAccessTime: LARGE_INTEGER,
-    LastWriteTime: LARGE_INTEGER,
-    ChangeTime: LARGE_INTEGER,
-    EndOfFile: LARGE_INTEGER,
-    AllocationSize: LARGE_INTEGER,
-    FileAttributes: ULONG,
-    FileNameLength: ULONG,
-    FileName: [1]WCHAR,
-};
+pub const PPS_POST_PROCESS_INIT_ROUTINE = ?std.meta.FnPtr(fn () callconv(.C) void);
 
 pub const FILE_BOTH_DIR_INFORMATION = extern struct {
     NextEntryOffset: ULONG,
@@ -3734,7 +3678,7 @@ pub const FILE_BOTH_DIR_INFORMATION = extern struct {
 };
 pub const FILE_BOTH_DIRECTORY_INFORMATION = FILE_BOTH_DIR_INFORMATION;
 
-pub const IO_APC_ROUTINE = *const fn (PVOID, *IO_STATUS_BLOCK, ULONG) callconv(.C) void;
+pub const IO_APC_ROUTINE = std.meta.FnPtr(fn (PVOID, *IO_STATUS_BLOCK, ULONG) callconv(.C) void);
 
 pub const CURDIR = extern struct {
     DosPath: UNICODE_STRING,
@@ -3806,8 +3750,8 @@ pub const ENUM_PAGE_FILE_INFORMATION = extern struct {
     PeakUsage: SIZE_T,
 };
 
-pub const PENUM_PAGE_FILE_CALLBACKW = ?*const fn (?LPVOID, *ENUM_PAGE_FILE_INFORMATION, LPCWSTR) callconv(.C) BOOL;
-pub const PENUM_PAGE_FILE_CALLBACKA = ?*const fn (?LPVOID, *ENUM_PAGE_FILE_INFORMATION, LPCSTR) callconv(.C) BOOL;
+pub const PENUM_PAGE_FILE_CALLBACKW = ?std.meta.FnPtr(fn (?LPVOID, *ENUM_PAGE_FILE_INFORMATION, LPCWSTR) callconv(.C) BOOL);
+pub const PENUM_PAGE_FILE_CALLBACKA = ?std.meta.FnPtr(fn (?LPVOID, *ENUM_PAGE_FILE_INFORMATION, LPCSTR) callconv(.C) BOOL);
 
 pub const PSAPI_WS_WATCH_INFORMATION_EX = extern struct {
     BasicInfo: PSAPI_WS_WATCH_INFORMATION,
@@ -3907,7 +3851,7 @@ pub const CTRL_CLOSE_EVENT: DWORD = 2;
 pub const CTRL_LOGOFF_EVENT: DWORD = 5;
 pub const CTRL_SHUTDOWN_EVENT: DWORD = 6;
 
-pub const HANDLER_ROUTINE = *const fn (dwCtrlType: DWORD) callconv(WINAPI) BOOL;
+pub const HANDLER_ROUTINE = std.meta.FnPtr(fn (dwCtrlType: DWORD) callconv(WINAPI) BOOL);
 
 /// Processor feature enumeration.
 pub const PF = enum(DWORD) {

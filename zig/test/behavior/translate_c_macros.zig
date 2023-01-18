@@ -8,8 +8,6 @@ const h = @cImport(@cInclude("behavior/translate_c_macros.h"));
 const latin1 = @cImport(@cInclude("behavior/translate_c_macros_not_utf8.h"));
 
 test "casting to void with a macro" {
-    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
-
     h.IGNORE_ME_1(42);
     h.IGNORE_ME_2(42);
     h.IGNORE_ME_3(42);
@@ -26,7 +24,6 @@ test "initializer list expression" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     try expectEqual(h.Color{
         .r = 200,
@@ -38,15 +35,12 @@ test "initializer list expression" {
 
 test "sizeof in macros" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     try expect(@as(c_int, @sizeOf(u32)) == h.MY_SIZEOF(u32));
     try expect(@as(c_int, @sizeOf(u32)) == h.MY_SIZEOF2(u32));
 }
 
 test "reference to a struct type" {
-    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
-
     try expect(@sizeOf(h.struct_Foo) == h.SIZE_OF_FOO);
 }
 
@@ -55,7 +49,6 @@ test "cast negative integer to pointer" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     try expectEqual(@intToPtr(?*anyopaque, @bitCast(usize, @as(isize, -1))), h.MAP_FAILED);
 }
@@ -65,7 +58,6 @@ test "casting to union with a macro" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const l: c_long = 42;
     const d: f64 = 2.0;
@@ -82,7 +74,6 @@ test "casting or calling a value with a paren-surrounded macro" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const l: c_long = 42;
     const casted = h.CAST_OR_CALL_WITH_PARENS(c_int, l);
@@ -102,7 +93,6 @@ test "nested comma operator" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     try expectEqual(@as(c_int, 3), h.NESTED_COMMA_OPERATOR);
     try expectEqual(@as(c_int, 3), h.NESTED_COMMA_OPERATOR_LHS);
@@ -113,7 +103,6 @@ test "cast functions" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const S = struct {
         fn foo() void {}
@@ -127,7 +116,6 @@ test "large integer macro" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     try expectEqual(@as(c_ulonglong, 18446744073709550592), h.LARGE_INT);
 }
@@ -137,7 +125,6 @@ test "string literal macro with embedded tab character" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     try expectEqualStrings("hello\t", h.EMBEDDED_TAB);
 }
@@ -147,7 +134,6 @@ test "string and char literals that are not UTF-8 encoded. Issue #12784" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     try expectEqual(@as(u8, '\xA9'), latin1.UNPRINTABLE_CHAR);
     try expectEqualStrings("\xA9\xA9\xA9", latin1.UNPRINTABLE_STRING);
@@ -158,7 +144,6 @@ test "Macro that uses division operator. Issue #13162" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     try expectEqual(@as(c_int, 42), h.DIVIDE_CONSTANT(@as(c_int, 42_000)));
     try expectEqual(@as(c_uint, 42), h.DIVIDE_CONSTANT(@as(c_uint, 42_000)));
@@ -192,7 +177,6 @@ test "Macro that uses remainder operator. Issue #13346" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     try expectEqual(@as(c_int, 2_010), h.REMAINDER_CONSTANT(@as(c_int, 42_010)));
     try expectEqual(@as(c_uint, 2_030), h.REMAINDER_CONSTANT(@as(c_uint, 42_030)));

@@ -37,10 +37,6 @@ pub const aead = struct {
 pub const auth = struct {
     pub const hmac = @import("crypto/hmac.zig");
     pub const siphash = @import("crypto/siphash.zig");
-    pub const aegis = struct {
-        pub const Aegis128LMac = @import("crypto/aegis.zig").Aegis128LMac;
-        pub const Aegis256Mac = @import("crypto/aegis.zig").Aegis256Mac;
-    };
 };
 
 /// Core functions, that should rarely be used directly by applications.
@@ -91,8 +87,7 @@ pub const kdf = struct {
 
 /// MAC functions requiring single-use secret keys.
 pub const onetimeauth = struct {
-    pub const Ghash = @import("crypto/ghash_polyval.zig").Ghash;
-    pub const Polyval = @import("crypto/ghash_polyval.zig").Polyval;
+    pub const Ghash = @import("crypto/ghash.zig").Ghash;
     pub const Poly1305 = @import("crypto/poly1305.zig").Poly1305;
 };
 
@@ -177,6 +172,9 @@ const std = @import("std.zig");
 pub const errors = @import("crypto/errors.zig");
 
 test {
+    const please_windows_dont_oom = @import("builtin").os.tag == .windows;
+    if (please_windows_dont_oom) return error.SkipZigTest;
+
     _ = aead.aegis.Aegis128L;
     _ = aead.aegis.Aegis256;
 

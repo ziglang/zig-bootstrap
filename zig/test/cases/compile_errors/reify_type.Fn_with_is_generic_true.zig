@@ -5,7 +5,7 @@ const Foo = @Type(.{
         .is_generic = true,
         .is_var_args = false,
         .return_type = u0,
-        .params = &.{},
+        .args = &.{},
     },
 });
 comptime { _ = Foo; }

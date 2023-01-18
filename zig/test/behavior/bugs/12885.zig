@@ -11,12 +11,14 @@ const Foo = @Type(.{
     .ErrorSet = &info.args,
 });
 test "ErrorSet comptime_field_ptr" {
+    if (@import("builtin").zig_backend == .stage1) return error.SkipZigTest;
+
     try expect(Foo == error{bar});
 }
 
 const fn_info = .{
-    .params = [_]builtin.Type.Fn.Param{
-        .{ .is_generic = false, .is_noalias = false, .type = u8 },
+    .args = [_]builtin.Type.Fn.Param{
+        .{ .is_generic = false, .is_noalias = false, .arg_type = u8 },
     },
 };
 const Bar = @Type(.{
@@ -26,7 +28,7 @@ const Bar = @Type(.{
         .is_generic = false,
         .is_var_args = false,
         .return_type = void,
-        .params = &fn_info.params,
+        .args = &fn_info.args,
     },
 });
 test "fn comptime_field_ptr" {

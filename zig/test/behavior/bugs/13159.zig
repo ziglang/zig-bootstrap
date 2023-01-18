@@ -1,4 +1,3 @@
-const builtin = @import("builtin");
 const std = @import("std");
 const expect = std.testing.expect;
 
@@ -10,7 +9,6 @@ const Bar = packed struct {
 };
 
 test {
-    if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     var foo = Bar.Baz.fizz;
     try expect(foo == .fizz);
 }

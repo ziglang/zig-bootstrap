@@ -387,7 +387,7 @@ pub const LibCInstallation = struct {
                 else => return error.FileSystem,
             };
 
-            self.include_dir = try result_buf.toOwnedSlice();
+            self.include_dir = result_buf.toOwnedSlice();
             return;
         }
 
@@ -408,7 +408,7 @@ pub const LibCInstallation = struct {
         defer result_buf.deinit();
 
         const arch_sub_dir = switch (builtin.target.cpu.arch) {
-            .x86 => "x86",
+            .i386 => "x86",
             .x86_64 => "x64",
             .arm, .armeb => "arm",
             .aarch64 => "arm64",
@@ -434,7 +434,7 @@ pub const LibCInstallation = struct {
                 else => return error.FileSystem,
             };
 
-            self.crt_dir = try result_buf.toOwnedSlice();
+            self.crt_dir = result_buf.toOwnedSlice();
             return;
         }
         return error.LibCRuntimeNotFound;
@@ -472,7 +472,7 @@ pub const LibCInstallation = struct {
         defer result_buf.deinit();
 
         const arch_sub_dir = switch (builtin.target.cpu.arch) {
-            .x86 => "x86",
+            .i386 => "x86",
             .x86_64 => "x64",
             .arm, .armeb => "arm",
             .aarch64 => "arm64",
@@ -499,7 +499,7 @@ pub const LibCInstallation = struct {
                 else => return error.FileSystem,
             };
 
-            self.kernel32_lib_dir = try result_buf.toOwnedSlice();
+            self.kernel32_lib_dir = result_buf.toOwnedSlice();
             return;
         }
         return error.LibCKernel32LibNotFound;

@@ -328,7 +328,7 @@ pub fn generate(
 
     var mir = Mir{
         .instructions = function.mir_instructions.toOwnedSlice(),
-        .extra = try function.mir_extra.toOwnedSlice(bin_file.allocator),
+        .extra = function.mir_extra.toOwnedSlice(bin_file.allocator),
     };
     defer mir.deinit(bin_file.allocator);
 
@@ -386,7 +386,7 @@ pub fn addExtraAssumeCapacity(self: *Self, extra: anytype) u32 {
     const fields = std.meta.fields(@TypeOf(extra));
     const result = @intCast(u32, self.mir_extra.items.len);
     inline for (fields) |field| {
-        self.mir_extra.appendAssumeCapacity(switch (field.type) {
+        self.mir_extra.appendAssumeCapacity(switch (field.field_type) {
             u32 => @field(extra, field.name),
             i32 => @bitCast(u32, @field(extra, field.name)),
             else => @compileError("bad field type"),
@@ -783,12 +783,6 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
 
             .is_named_enum_value => return self.fail("TODO implement is_named_enum_value", .{}),
             .error_set_has_value => return self.fail("TODO implement error_set_has_value", .{}),
-            .vector_store_elem => return self.fail("TODO implement vector_store_elem", .{}),
-
-            .c_va_arg => return self.fail("TODO implement c_va_arg", .{}),
-            .c_va_copy => return self.fail("TODO implement c_va_copy", .{}),
-            .c_va_end => return self.fail("TODO implement c_va_end", .{}),
-            .c_va_start => return self.fail("TODO implement c_va_start", .{}),
 
             .wasm_memory_size => unreachable,
             .wasm_memory_grow => unreachable,
@@ -4035,35 +4029,86 @@ fn genInlineMemsetCode(
     // end:
 }
 
-fn genArgDbgInfo(self: Self, inst: Air.Inst.Index, arg_index: u32) error{OutOfMemory}!void {
+/// Adds a Type to the .debug_info at the current position. The bytes will be populated later,
+/// after codegen for this symbol is done.
+fn addDbgInfoTypeReloc(self: *Self, ty: Type) error{OutOfMemory}!void {
+    switch (self.debug_output) {
+        .dwarf => |dw| {
+            assert(ty.hasRuntimeBits());
+            const dbg_info = &dw.dbg_info;
+            const index = dbg_info.items.len;
+            try dbg_info.resize(index + 4); // DW.AT.type,  DW.FORM.ref4
+            const mod = self.bin_file.options.module.?;
+            const atom = switch (self.bin_file.tag) {
+                .elf => &mod.declPtr(self.mod_fn.owner_decl).link.elf.dbg_info_atom,
+                .macho => unreachable,
+                else => unreachable,
+            };
+            try dw.addTypeRelocGlobal(atom, ty, @intCast(u32, index));
+        },
+        .plan9 => {},
+        .none => {},
+    }
+}
+
+fn genArgDbgInfo(self: *Self, inst: Air.Inst.Index, arg_index: u32) error{OutOfMemory}!void {
     const mcv = self.args[arg_index];
     const ty = self.air.instructions.items(.data)[inst].ty;
     const name = self.mod_fn.getParamName(self.bin_file.options.module.?, arg_index);
+    const name_with_null = name.ptr[0 .. name.len + 1];
 
-    switch (self.debug_output) {
-        .dwarf => |dw| {
-            const loc: link.File.Dwarf.DeclState.DbgInfoLoc = switch (mcv) {
-                .register => |reg| .{ .register = reg.dwarfLocOp() },
-                .stack_offset,
-                .stack_argument_offset,
-                => blk: {
+    switch (mcv) {
+        .register => |reg| {
+            switch (self.debug_output) {
+                .dwarf => |dw| {
+                    const dbg_info = &dw.dbg_info;
+                    try dbg_info.ensureUnusedCapacity(3);
+                    dbg_info.appendAssumeCapacity(@enumToInt(link.File.Dwarf.AbbrevKind.parameter));
+                    dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT.location, DW.FORM.exprloc
+                        1, // ULEB128 dwarf expression length
+                        reg.dwarfLocOp(),
+                    });
+                    try dbg_info.ensureUnusedCapacity(5 + name_with_null.len);
+                    try self.addDbgInfoTypeReloc(ty); // DW.AT.type,  DW.FORM.ref4
+                    dbg_info.appendSliceAssumeCapacity(name_with_null); // DW.AT.name, DW.FORM.string
+                },
+                .plan9 => {},
+                .none => {},
+            }
+        },
+        .stack_offset,
+        .stack_argument_offset,
+        => {
+            switch (self.debug_output) {
+                .dwarf => |dw| {
                     const adjusted_stack_offset = switch (mcv) {
                         .stack_offset => |offset| -@intCast(i32, offset),
                         .stack_argument_offset => |offset| @intCast(i32, self.saved_regs_stack_space + offset),
                         else => unreachable,
                     };
-                    break :blk .{ .stack = .{
-                        .fp_register = DW.OP.breg11,
-                        .offset = adjusted_stack_offset,
-                    } };
-                },
-                else => unreachable, // not a possible argument
 
-            };
-            try dw.genArgDbgInfo(name, ty, self.bin_file.tag, self.mod_fn.owner_decl, loc);
+                    const dbg_info = &dw.dbg_info;
+                    try dbg_info.append(@enumToInt(link.File.Dwarf.AbbrevKind.parameter));
+
+                    // Get length of the LEB128 stack offset
+                    var counting_writer = std.io.countingWriter(std.io.null_writer);
+                    leb128.writeILEB128(counting_writer.writer(), adjusted_stack_offset) catch unreachable;
+
+                    // DW.AT.location, DW.FORM.exprloc
+                    // ULEB128 dwarf expression length
+                    try leb128.writeULEB128(dbg_info.writer(), counting_writer.bytes_written + 1);
+                    try dbg_info.append(DW.OP.breg11);
+                    try leb128.writeILEB128(dbg_info.writer(), adjusted_stack_offset);
+
+                    try dbg_info.ensureUnusedCapacity(5 + name_with_null.len);
+                    try self.addDbgInfoTypeReloc(ty); // DW.AT.type,  DW.FORM.ref4
+                    dbg_info.appendSliceAssumeCapacity(name_with_null); // DW.AT.name, DW.FORM.string
+                },
+                .plan9 => {},
+                .none => {},
+            }
         },
-        .plan9 => {},
-        .none => {},
+        else => unreachable, // not a possible argument
     }
 }
 
@@ -4103,7 +4148,7 @@ fn airFence(self: *Self) !void {
     //return self.finishAirBookkeeping();
 }
 
-fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier) !void {
+fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallOptions.Modifier) !void {
     if (modifier == .always_tail) return self.fail("TODO implement tail calls for arm", .{});
     const pl_op = self.air.instructions.items(.data)[inst].pl_op;
     const callee = pl_op.operand;
@@ -6162,6 +6207,7 @@ fn genTypedValue(self: *Self, arg_tv: TypedValue) InnerError!MCValue {
         .NoReturn => unreachable,
         .Undefined => unreachable,
         .Null => unreachable,
+        .BoundFn => unreachable,
         .Opaque => unreachable,
 
         else => {},

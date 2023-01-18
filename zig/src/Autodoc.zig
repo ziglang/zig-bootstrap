@@ -146,46 +146,46 @@ pub fn generateZirData(self: *Autodoc) !void {
                     .c_ulonglong_type,
                     .c_longdouble_type,
                     => .{
-                        .Int = .{ .name = try tmpbuf.toOwnedSlice() },
+                        .Int = .{ .name = tmpbuf.toOwnedSlice() },
                     },
                     .f16_type,
                     .f32_type,
                     .f64_type,
                     .f128_type,
                     => .{
-                        .Float = .{ .name = try tmpbuf.toOwnedSlice() },
+                        .Float = .{ .name = tmpbuf.toOwnedSlice() },
                     },
                     .comptime_int_type => .{
-                        .ComptimeInt = .{ .name = try tmpbuf.toOwnedSlice() },
+                        .ComptimeInt = .{ .name = tmpbuf.toOwnedSlice() },
                     },
                     .comptime_float_type => .{
-                        .ComptimeFloat = .{ .name = try tmpbuf.toOwnedSlice() },
+                        .ComptimeFloat = .{ .name = tmpbuf.toOwnedSlice() },
                     },
 
                     .anyopaque_type => .{
-                        .ComptimeExpr = .{ .name = try tmpbuf.toOwnedSlice() },
+                        .ComptimeExpr = .{ .name = tmpbuf.toOwnedSlice() },
                     },
                     .bool_type => .{
-                        .Bool = .{ .name = try tmpbuf.toOwnedSlice() },
+                        .Bool = .{ .name = tmpbuf.toOwnedSlice() },
                     },
 
                     .noreturn_type => .{
-                        .NoReturn = .{ .name = try tmpbuf.toOwnedSlice() },
+                        .NoReturn = .{ .name = tmpbuf.toOwnedSlice() },
                     },
                     .void_type => .{
-                        .Void = .{ .name = try tmpbuf.toOwnedSlice() },
+                        .Void = .{ .name = tmpbuf.toOwnedSlice() },
                     },
                     .type_info_type => .{
-                        .ComptimeExpr = .{ .name = try tmpbuf.toOwnedSlice() },
+                        .ComptimeExpr = .{ .name = tmpbuf.toOwnedSlice() },
                     },
                     .type_type => .{
-                        .Type = .{ .name = try tmpbuf.toOwnedSlice() },
+                        .Type = .{ .name = tmpbuf.toOwnedSlice() },
                     },
                     .anyerror_type => .{
-                        .ErrorSet = .{ .name = try tmpbuf.toOwnedSlice() },
+                        .ErrorSet = .{ .name = tmpbuf.toOwnedSlice() },
                     },
                     .calling_convention_inline, .calling_convention_c, .calling_convention_type => .{
-                        .EnumLiteral = .{ .name = try tmpbuf.toOwnedSlice() },
+                        .EnumLiteral = .{ .name = tmpbuf.toOwnedSlice() },
                     },
                 },
             );
@@ -607,6 +607,7 @@ const DocData = struct {
             is_test: bool = false,
             is_extern: bool = false,
         },
+        BoundFn: struct { name: []const u8 },
         Opaque: struct {
             name: []const u8,
             src: usize, // index into astNodes
@@ -637,9 +638,9 @@ const DocData = struct {
             inline for (comptime std.meta.fields(Type)) |case| {
                 if (@field(Type, case.name) == active_tag) {
                     const current_value = @field(self, case.name);
-                    inline for (comptime std.meta.fields(case.type)) |f| {
+                    inline for (comptime std.meta.fields(case.field_type)) |f| {
                         try jsw.arrayElem();
-                        if (f.type == std.builtin.Type.Pointer.Size) {
+                        if (f.field_type == std.builtin.Type.Pointer.Size) {
                             try jsw.emitNumber(@enumToInt(@field(current_value, f.name)));
                         } else {
                             try std.json.stringify(@field(current_value, f.name), opts, w);
@@ -659,8 +660,8 @@ const DocData = struct {
         comptimeExpr: usize, // index in `comptimeExprs`
         void: struct {},
         @"unreachable": struct {},
-        null: struct {},
-        undefined: struct {},
+        @"null": struct {},
+        @"undefined": struct {},
         @"struct": []FieldVal,
         bool: bool,
         @"anytype": struct {},
@@ -1510,6 +1511,26 @@ fn walkInstruction(
 
         //     return operand;
         // },
+        .overflow_arithmetic_ptr => {
+            const un_node = data[inst_index].un_node;
+
+            const elem_type_ref = try self.walkRef(file, parent_scope, parent_src, un_node.operand, false);
+            const type_slot_index = self.types.items.len;
+            try self.types.append(self.arena, .{
+                .Pointer = .{
+                    .size = .One,
+                    .child = elem_type_ref.expr,
+                    .is_mutable = true,
+                    .is_volatile = false,
+                    .is_allowzero = false,
+                },
+            });
+
+            return DocData.WalkResult{
+                .typeRef = .{ .type = @enumToInt(Ref.type_type) },
+                .expr = .{ .type = type_slot_index },
+            };
+        },
         .ptr_type => {
             const ptr = data[inst_index].ptr_type;
             const extra = file.zir.extraData(Zir.Inst.PtrType, ptr.payload_index);
@@ -4196,7 +4217,7 @@ fn walkRef(
                 );
             },
             .undef => {
-                return DocData.WalkResult{ .expr = .undefined };
+                return DocData.WalkResult{ .expr = .@"undefined" };
             },
             .zero => {
                 return DocData.WalkResult{
@@ -4224,7 +4245,7 @@ fn walkRef(
                 };
             },
             .null_value => {
-                return DocData.WalkResult{ .expr = .null };
+                return DocData.WalkResult{ .expr = .@"null" };
             },
             .bool_true => {
                 return DocData.WalkResult{

@@ -128,8 +128,11 @@ pub const MCValue = union(enum) {
     /// The value is in memory at a hard-coded address.
     /// If the type is a pointer, it means the pointer address is at this memory location.
     memory: u64,
-    /// The value is in memory but requires a linker relocation fixup.
-    linker_load: codegen.LinkerLoad,
+    /// The value is in memory but requires a linker relocation fixup:
+    /// * got - the value is referenced indirectly via GOT entry index (the linker emits a got-type reloc)
+    /// * direct - the value is referenced directly via symbol index index (the linker emits a displacement reloc)
+    /// * import - the value is referenced indirectly via import entry index (the linker emits an import-type reloc)
+    linker_load: struct { @"type": enum { got, direct, import }, sym_index: u32 },
     /// The value is one of the stack variables.
     /// If the type is a pointer, it means the pointer address is in the stack at this offset.
     stack_offset: i32,
@@ -328,7 +331,7 @@ pub fn generate(
 
     var mir = Mir{
         .instructions = function.mir_instructions.toOwnedSlice(),
-        .extra = try function.mir_extra.toOwnedSlice(bin_file.allocator),
+        .extra = function.mir_extra.toOwnedSlice(bin_file.allocator),
     };
     defer mir.deinit(bin_file.allocator);
 
@@ -374,7 +377,7 @@ pub fn addExtraAssumeCapacity(self: *Self, extra: anytype) u32 {
     const fields = std.meta.fields(@TypeOf(extra));
     const result = @intCast(u32, self.mir_extra.items.len);
     inline for (fields) |field| {
-        self.mir_extra.appendAssumeCapacity(switch (field.type) {
+        self.mir_extra.appendAssumeCapacity(switch (field.field_type) {
             u32 => @field(extra, field.name),
             i32 => @bitCast(u32, @field(extra, field.name)),
             else => @compileError("bad field type"),
@@ -785,12 +788,6 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
 
             .is_named_enum_value => return self.fail("TODO implement is_named_enum_value", .{}),
             .error_set_has_value => return self.fail("TODO implement error_set_has_value", .{}),
-            .vector_store_elem => return self.fail("TODO implement vector_store_elem", .{}),
-
-            .c_va_arg => return self.fail("TODO implement c_va_arg", .{}),
-            .c_va_copy => return self.fail("TODO implement c_va_copy", .{}),
-            .c_va_end => return self.fail("TODO implement c_va_end", .{}),
-            .c_va_start => return self.fail("TODO implement c_va_start", .{}),
 
             .wasm_memory_size => unreachable,
             .wasm_memory_grow => unreachable,
@@ -2674,7 +2671,7 @@ fn loadMemPtrIntoRegister(self: *Self, reg: Register, ptr_ty: Type, ptr: MCValue
                 fn_owner_decl.link.macho.sym_index
             else
                 fn_owner_decl.link.coff.sym_index;
-            const flags: u2 = switch (load_struct.type) {
+            const flags: u2 = switch (load_struct.@"type") {
                 .got => 0b00,
                 .direct => 0b01,
                 .import => 0b10,
@@ -3821,60 +3818,41 @@ fn airArg(self: *Self, inst: Air.Inst.Index) !void {
 }
 
 fn genArgDbgInfo(self: Self, ty: Type, name: [:0]const u8, mcv: MCValue) !void {
+    const name_with_null = name.ptr[0 .. name.len + 1];
     switch (self.debug_output) {
         .dwarf => |dw| {
-            const loc: link.File.Dwarf.DeclState.DbgInfoLoc = switch (mcv) {
-                .register => |reg| .{ .register = reg.dwarfLocOp() },
-                .stack_offset => |off| .{
-                    .stack = .{
-                        // TODO handle -fomit-frame-pointer
-                        .fp_register = Register.rbp.dwarfLocOpDeref(),
-                        .offset = -off,
-                    },
+            const dbg_info = &dw.dbg_info;
+            switch (mcv) {
+                .register => |reg| {
+                    try dbg_info.ensureUnusedCapacity(3);
+                    dbg_info.appendAssumeCapacity(@enumToInt(link.File.Dwarf.AbbrevKind.parameter));
+                    dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT.location, DW.FORM.exprloc
+                        1, // ULEB128 dwarf expression length
+                        reg.dwarfLocOp(),
+                    });
+                    try dbg_info.ensureUnusedCapacity(5 + name_with_null.len);
+                    try self.addDbgInfoTypeReloc(ty); // DW.AT.type,  DW.FORM.ref4
+                    dbg_info.appendSliceAssumeCapacity(name_with_null); // DW.AT.name, DW.FORM.string
                 },
+
+                .stack_offset => |off| {
+                    try dbg_info.ensureUnusedCapacity(8);
+                    dbg_info.appendAssumeCapacity(@enumToInt(link.File.Dwarf.AbbrevKind.parameter));
+                    const fixup = dbg_info.items.len;
+                    dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT.location, DW.FORM.exprloc
+                        1, // we will backpatch it after we encode the displacement in LEB128
+                        Register.rbp.dwarfLocOpDeref(), // TODO handle -fomit-frame-pointer
+                    });
+                    leb128.writeILEB128(dbg_info.writer(), -off) catch unreachable;
+                    dbg_info.items[fixup] += @intCast(u8, dbg_info.items.len - fixup - 2);
+                    try dbg_info.ensureUnusedCapacity(5 + name_with_null.len);
+                    try self.addDbgInfoTypeReloc(ty); // DW.AT.type,  DW.FORM.ref4
+                    dbg_info.appendSliceAssumeCapacity(name_with_null); // DW.AT.name, DW.FORM.string
+
+                },
+
                 else => unreachable, // not a valid function parameter
-            };
-            try dw.genArgDbgInfo(name, ty, self.bin_file.tag, self.mod_fn.owner_decl, loc);
-        },
-        .plan9 => {},
-        .none => {},
-    }
-}
-
-fn genVarDbgInfo(
-    self: Self,
-    tag: Air.Inst.Tag,
-    ty: Type,
-    mcv: MCValue,
-    name: [:0]const u8,
-) !void {
-    const is_ptr = switch (tag) {
-        .dbg_var_ptr => true,
-        .dbg_var_val => false,
-        else => unreachable,
-    };
-
-    switch (self.debug_output) {
-        .dwarf => |dw| {
-            const loc: link.File.Dwarf.DeclState.DbgInfoLoc = switch (mcv) {
-                .register => |reg| .{ .register = reg.dwarfLocOp() },
-                .ptr_stack_offset,
-                .stack_offset,
-                => |off| .{ .stack = .{
-                    .fp_register = Register.rbp.dwarfLocOpDeref(),
-                    .offset = -off,
-                } },
-                .memory => |address| .{ .memory = address },
-                .linker_load => |linker_load| .{ .linker_load = linker_load },
-                .immediate => |x| .{ .immediate = x },
-                .undef => .undef,
-                .none => .none,
-                else => blk: {
-                    log.debug("TODO generate debug info for {}", .{mcv});
-                    break :blk .nop;
-                },
-            };
-            try dw.genVarDbgInfo(name, ty, self.bin_file.tag, self.mod_fn.owner_decl, is_ptr, loc);
+            }
         },
         .plan9 => {},
         .none => {},
@@ -3905,7 +3883,7 @@ fn airFence(self: *Self) !void {
     //return self.finishAirBookkeeping();
 }
 
-fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier) !void {
+fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallOptions.Modifier) !void {
     if (modifier == .always_tail) return self.fail("TODO implement tail calls for x86_64", .{});
     const pl_op = self.air.instructions.items(.data)[inst].pl_op;
     const callee = pl_op.operand;
@@ -4032,7 +4010,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
                 const fn_owner_decl = mod.declPtr(func.owner_decl);
                 try self.genSetReg(Type.initTag(.usize), .rax, .{
                     .linker_load = .{
-                        .type = .got,
+                        .@"type" = .got,
                         .sym_index = fn_owner_decl.link.coff.sym_index,
                     },
                 });
@@ -4056,7 +4034,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
                 const sym_index = try coff_file.getGlobalSymbol(mem.sliceTo(decl_name, 0));
                 try self.genSetReg(Type.initTag(.usize), .rax, .{
                     .linker_load = .{
-                        .type = .import,
+                        .@"type" = .import,
                         .sym_index = sym_index,
                     },
                 });
@@ -4092,7 +4070,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
                 const sym_index = fn_owner_decl.link.macho.sym_index;
                 try self.genSetReg(Type.initTag(.usize), .rax, .{
                     .linker_load = .{
-                        .type = .got,
+                        .@"type" = .got,
                         .sym_index = sym_index,
                     },
                 });
@@ -4440,9 +4418,170 @@ fn airDbgVar(self: *Self, inst: Air.Inst.Index) !void {
     const name = self.air.nullTerminatedString(pl_op.payload);
 
     const tag = self.air.instructions.items(.tag)[inst];
-    try self.genVarDbgInfo(tag, ty, mcv, name);
+    switch (tag) {
+        .dbg_var_ptr => try self.genVarDbgInfo(tag, ty.childType(), mcv, name),
+        .dbg_var_val => try self.genVarDbgInfo(tag, ty, mcv, name),
+        else => unreachable,
+    }
 
     return self.finishAir(inst, .dead, .{ operand, .none, .none });
+}
+
+fn genVarDbgInfo(
+    self: Self,
+    tag: Air.Inst.Tag,
+    ty: Type,
+    mcv: MCValue,
+    name: [:0]const u8,
+) !void {
+    const name_with_null = name.ptr[0 .. name.len + 1];
+    switch (self.debug_output) {
+        .dwarf => |dw| {
+            const dbg_info = &dw.dbg_info;
+            try dbg_info.append(@enumToInt(link.File.Dwarf.AbbrevKind.variable));
+            const endian = self.target.cpu.arch.endian();
+
+            switch (mcv) {
+                .register => |reg| {
+                    try dbg_info.ensureUnusedCapacity(2);
+                    dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT.location, DW.FORM.exprloc
+                        1, // ULEB128 dwarf expression length
+                        reg.dwarfLocOp(),
+                    });
+                },
+
+                .ptr_stack_offset,
+                .stack_offset,
+                => |off| {
+                    try dbg_info.ensureUnusedCapacity(7);
+                    const fixup = dbg_info.items.len;
+                    dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT.location, DW.FORM.exprloc
+                        1, // we will backpatch it after we encode the displacement in LEB128
+                        Register.rbp.dwarfLocOpDeref(), // TODO handle -fomit-frame-pointer
+                    });
+                    leb128.writeILEB128(dbg_info.writer(), -off) catch unreachable;
+                    dbg_info.items[fixup] += @intCast(u8, dbg_info.items.len - fixup - 2);
+                },
+
+                .memory,
+                .linker_load,
+                => {
+                    const ptr_width = @intCast(u8, @divExact(self.target.cpu.arch.ptrBitWidth(), 8));
+                    const is_ptr = switch (tag) {
+                        .dbg_var_ptr => true,
+                        .dbg_var_val => false,
+                        else => unreachable,
+                    };
+                    try dbg_info.ensureUnusedCapacity(2 + ptr_width);
+                    dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT.location, DW.FORM.exprloc
+                        1 + ptr_width + @boolToInt(is_ptr),
+                        DW.OP.addr, // literal address
+                    });
+                    const offset = @intCast(u32, dbg_info.items.len);
+                    const addr = switch (mcv) {
+                        .memory => |addr| addr,
+                        else => 0,
+                    };
+                    switch (ptr_width) {
+                        0...4 => {
+                            try dbg_info.writer().writeInt(u32, @intCast(u32, addr), endian);
+                        },
+                        5...8 => {
+                            try dbg_info.writer().writeInt(u64, addr, endian);
+                        },
+                        else => unreachable,
+                    }
+                    if (is_ptr) {
+                        // We need deref the address as we point to the value via GOT entry.
+                        try dbg_info.append(DW.OP.deref);
+                    }
+                    switch (mcv) {
+                        .linker_load => |load_struct| try dw.addExprlocReloc(
+                            load_struct.sym_index,
+                            offset,
+                            is_ptr,
+                        ),
+                        else => {},
+                    }
+                },
+
+                .immediate => |x| {
+                    try dbg_info.ensureUnusedCapacity(2);
+                    const fixup = dbg_info.items.len;
+                    dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT.location, DW.FORM.exprloc
+                        1,
+                        if (ty.isSignedInt()) DW.OP.consts else DW.OP.constu,
+                    });
+                    if (ty.isSignedInt()) {
+                        try leb128.writeILEB128(dbg_info.writer(), @bitCast(i64, x));
+                    } else {
+                        try leb128.writeULEB128(dbg_info.writer(), x);
+                    }
+                    try dbg_info.append(DW.OP.stack_value);
+                    dbg_info.items[fixup] += @intCast(u8, dbg_info.items.len - fixup - 2);
+                },
+
+                .undef => {
+                    // DW.AT.location, DW.FORM.exprloc
+                    // uleb128(exprloc_len)
+                    // DW.OP.implicit_value uleb128(len_of_bytes) bytes
+                    const abi_size = @intCast(u32, ty.abiSize(self.target.*));
+                    var implicit_value_len = std.ArrayList(u8).init(self.gpa);
+                    defer implicit_value_len.deinit();
+                    try leb128.writeULEB128(implicit_value_len.writer(), abi_size);
+                    const total_exprloc_len = 1 + implicit_value_len.items.len + abi_size;
+                    try leb128.writeULEB128(dbg_info.writer(), total_exprloc_len);
+                    try dbg_info.ensureUnusedCapacity(total_exprloc_len);
+                    dbg_info.appendAssumeCapacity(DW.OP.implicit_value);
+                    dbg_info.appendSliceAssumeCapacity(implicit_value_len.items);
+                    dbg_info.appendNTimesAssumeCapacity(0xaa, abi_size);
+                },
+
+                .none => {
+                    try dbg_info.ensureUnusedCapacity(3);
+                    dbg_info.appendSliceAssumeCapacity(&[3]u8{ // DW.AT.location, DW.FORM.exprloc
+                        2, DW.OP.lit0, DW.OP.stack_value,
+                    });
+                },
+
+                else => {
+                    try dbg_info.ensureUnusedCapacity(2);
+                    dbg_info.appendSliceAssumeCapacity(&[2]u8{ // DW.AT.location, DW.FORM.exprloc
+                        1, DW.OP.nop,
+                    });
+                    log.debug("TODO generate debug info for {}", .{mcv});
+                },
+            }
+
+            try dbg_info.ensureUnusedCapacity(5 + name_with_null.len);
+            try self.addDbgInfoTypeReloc(ty); // DW.AT.type,  DW.FORM.ref4
+            dbg_info.appendSliceAssumeCapacity(name_with_null); // DW.AT.name, DW.FORM.string
+        },
+        .plan9 => {},
+        .none => {},
+    }
+}
+
+/// Adds a Type to the .debug_info at the current position. The bytes will be populated later,
+/// after codegen for this symbol is done.
+fn addDbgInfoTypeReloc(self: Self, ty: Type) !void {
+    switch (self.debug_output) {
+        .dwarf => |dw| {
+            const dbg_info = &dw.dbg_info;
+            const index = dbg_info.items.len;
+            try dbg_info.resize(index + 4); // DW.AT.type,  DW.FORM.ref4
+            const mod = self.bin_file.options.module.?;
+            const fn_owner_decl = mod.declPtr(self.mod_fn.owner_decl);
+            const atom = switch (self.bin_file.tag) {
+                .elf => &fn_owner_decl.link.elf.dbg_info_atom,
+                .macho => &fn_owner_decl.link.macho.dbg_info_atom,
+                else => unreachable,
+            };
+            try dw.addTypeRelocGlobal(atom, ty, @intCast(u32, index));
+        },
+        .plan9 => {},
+        .none => {},
+    }
 }
 
 fn genCondBrMir(self: *Self, ty: Type, mcv: MCValue) !u32 {
@@ -6786,13 +6925,13 @@ fn lowerDeclRef(self: *Self, tv: TypedValue, decl_index: Module.Decl.Index) Inne
     } else if (self.bin_file.cast(link.File.MachO)) |_| {
         assert(decl.link.macho.sym_index != 0);
         return MCValue{ .linker_load = .{
-            .type = .got,
+            .@"type" = .got,
             .sym_index = decl.link.macho.sym_index,
         } };
     } else if (self.bin_file.cast(link.File.Coff)) |_| {
         assert(decl.link.coff.sym_index != 0);
         return MCValue{ .linker_load = .{
-            .type = .got,
+            .@"type" = .got,
             .sym_index = decl.link.coff.sym_index,
         } };
     } else if (self.bin_file.cast(link.File.Plan9)) |p9| {
@@ -6814,12 +6953,12 @@ fn lowerUnnamedConst(self: *Self, tv: TypedValue) InnerError!MCValue {
         return MCValue{ .memory = vaddr };
     } else if (self.bin_file.cast(link.File.MachO)) |_| {
         return MCValue{ .linker_load = .{
-            .type = .direct,
+            .@"type" = .direct,
             .sym_index = local_sym_index,
         } };
     } else if (self.bin_file.cast(link.File.Coff)) |_| {
         return MCValue{ .linker_load = .{
-            .type = .direct,
+            .@"type" = .direct,
             .sym_index = local_sym_index,
         } };
     } else if (self.bin_file.cast(link.File.Plan9)) |p9| {
@@ -6948,6 +7087,7 @@ fn genTypedValue(self: *Self, arg_tv: TypedValue) InnerError!MCValue {
         .NoReturn => unreachable,
         .Undefined => unreachable,
         .Null => unreachable,
+        .BoundFn => unreachable,
         .Opaque => unreachable,
 
         else => {},

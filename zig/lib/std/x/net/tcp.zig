@@ -374,11 +374,6 @@ test "tcp/client: 1ms read timeout" {
 test "tcp/client: read and write multiple vectors" {
     if (native_os.tag == .wasi) return error.SkipZigTest;
 
-    if (builtin.os.tag == .windows) {
-        // https://github.com/ziglang/zig/issues/13893
-        return error.SkipZigTest;
-    }
-
     const listener = try tcp.Listener.init(.ip, .{ .close_on_exec = true });
     defer listener.deinit();
 
@@ -430,11 +425,6 @@ test "tcp/listener: bind to unspecified ipv4 address" {
 
 test "tcp/listener: bind to unspecified ipv6 address" {
     if (native_os.tag == .wasi) return error.SkipZigTest;
-
-    if (builtin.os.tag == .windows) {
-        // https://github.com/ziglang/zig/issues/13893
-        return error.SkipZigTest;
-    }
 
     const listener = try tcp.Listener.init(.ipv6, .{ .close_on_exec = true });
     defer listener.deinit();

@@ -63,7 +63,7 @@ pub fn parseCharLiteral(slice: []const u8) ParsedCharLiteral {
 
 /// Parse an escape sequence from `slice[offset..]`. If parsing is successful,
 /// offset is updated to reflect the characters consumed.
-pub fn parseEscapeSequence(slice: []const u8, offset: *usize) ParsedCharLiteral {
+fn parseEscapeSequence(slice: []const u8, offset: *usize) ParsedCharLiteral {
     assert(slice.len > offset.*);
     assert(slice[offset.*] == '\\');
 
@@ -231,10 +231,11 @@ test "parseCharLiteral" {
     );
 }
 
-/// Parses `bytes` as a Zig string literal and writes the result to the std.io.Writer type.
+/// Parses `bytes` as a Zig string literal and appends the result to `buf`.
 /// Asserts `bytes` has '"' at beginning and end.
-pub fn parseWrite(writer: anytype, bytes: []const u8) error{OutOfMemory}!Result {
+pub fn parseAppend(buf: *std.ArrayList(u8), bytes: []const u8) error{OutOfMemory}!Result {
     assert(bytes.len >= 2 and bytes[0] == '"' and bytes[bytes.len - 1] == '"');
+    try buf.ensureUnusedCapacity(bytes.len - 2);
 
     var index: usize = 1;
     while (true) {
@@ -247,13 +248,11 @@ pub fn parseWrite(writer: anytype, bytes: []const u8) error{OutOfMemory}!Result 
                 switch (result) {
                     .success => |codepoint| {
                         if (bytes[escape_char_index] == 'u') {
-                            var buf: [4]u8 = undefined;
-                            const len = utf8Encode(codepoint, &buf) catch {
+                            buf.items.len += utf8Encode(codepoint, buf.unusedCapacitySlice()) catch {
                                 return Result{ .failure = .{ .invalid_unicode_codepoint = escape_char_index + 1 } };
                             };
-                            try writer.writeAll(buf[0..len]);
                         } else {
-                            try writer.writeByte(@intCast(u8, codepoint));
+                            buf.appendAssumeCapacity(@intCast(u8, codepoint));
                         }
                     },
                     .failure => |err| return Result{ .failure = err },
@@ -262,11 +261,11 @@ pub fn parseWrite(writer: anytype, bytes: []const u8) error{OutOfMemory}!Result 
             '\n' => return Result{ .failure = .{ .invalid_character = index } },
             '"' => return Result.success,
             else => {
-                try writer.writeByte(b);
+                try buf.append(b);
                 index += 1;
             },
         }
-    }
+    } else unreachable; // TODO should not need else unreachable on while(true)
 }
 
 /// Higher level API. Does not return extra info about parse errors.
@@ -275,7 +274,7 @@ pub fn parseAlloc(allocator: std.mem.Allocator, bytes: []const u8) ParseError![]
     var buf = std.ArrayList(u8).init(allocator);
     defer buf.deinit();
 
-    switch (try parseWrite(buf.writer(), bytes)) {
+    switch (try parseAppend(&buf, bytes)) {
         .success => return buf.toOwnedSlice(),
         .failure => return error.InvalidLiteral,
     }

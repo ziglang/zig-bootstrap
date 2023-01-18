@@ -8,7 +8,7 @@ fn NamespacedGlobals(comptime modules: anytype) type {
             .fields = &.{
                 .{
                     .name = "globals",
-                    .type = modules.mach.globals,
+                    .field_type = modules.mach.globals,
                     .default_value = null,
                     .is_comptime = false,
                     .alignment = @alignOf(modules.mach.globals),

@@ -399,14 +399,6 @@ pub fn ArrayHashMap(
             return other.promoteContext(allocator, ctx);
         }
 
-        /// Set the map to an empty state, making deinitialization a no-op, and
-        /// returning a copy of the original.
-        pub fn move(self: *Self) Self {
-            const result = self.*;
-            self.unmanaged = .{};
-            return result;
-        }
-
         /// Rebuilds the key indexes. If the underlying entries has been modified directly, users
         /// can call `reIndex` to update the indexes to account for these new entries.
         pub fn reIndex(self: *Self) !void {
@@ -1157,21 +1149,11 @@ pub fn ArrayHashMapUnmanaged(
             errdefer other.entries.deinit(allocator);
 
             if (self.index_header) |header| {
-                // TODO: I'm pretty sure this could be memcpy'd instead of
-                // doing all this work.
                 const new_header = try IndexHeader.alloc(allocator, header.bit_index);
                 other.insertAllEntriesIntoNewHeader(if (store_hash) {} else ctx, new_header);
                 other.index_header = new_header;
             }
             return other;
-        }
-
-        /// Set the map to an empty state, making deinitialization a no-op, and
-        /// returning a copy of the original.
-        pub fn move(self: *Self) Self {
-            const result = self.*;
-            self.* = .{};
-            return result;
         }
 
         /// Rebuilds the key indexes. If the underlying entries has been modified directly, users
@@ -1181,7 +1163,6 @@ pub fn ArrayHashMapUnmanaged(
                 @compileError("Cannot infer context " ++ @typeName(Context) ++ ", call reIndexContext instead.");
             return self.reIndexContext(allocator, undefined);
         }
-
         pub fn reIndexContext(self: *Self, allocator: Allocator, ctx: Context) !void {
             if (self.entries.capacity <= linear_scan_max) return;
             // We're going to rebuild the index header and replace the existing one (if any). The
@@ -1891,7 +1872,7 @@ const IndexHeader = struct {
         const len = @as(usize, 1) << @intCast(math.Log2Int(usize), new_bit_index);
         const index_size = hash_map.capacityIndexSize(new_bit_index);
         const nbytes = @sizeOf(IndexHeader) + index_size * len;
-        const bytes = try allocator.alignedAlloc(u8, @alignOf(IndexHeader), nbytes);
+        const bytes = try allocator.allocAdvanced(u8, @alignOf(IndexHeader), nbytes, .exact);
         @memset(bytes.ptr + @sizeOf(IndexHeader), 0xff, bytes.len - @sizeOf(IndexHeader));
         const result = @ptrCast(*IndexHeader, bytes.ptr);
         result.* = .{
@@ -2270,13 +2251,13 @@ test "reIndex" {
 test "auto store_hash" {
     const HasCheapEql = AutoArrayHashMap(i32, i32);
     const HasExpensiveEql = AutoArrayHashMap([32]i32, i32);
-    try testing.expect(meta.fieldInfo(HasCheapEql.Data, .hash).type == void);
-    try testing.expect(meta.fieldInfo(HasExpensiveEql.Data, .hash).type != void);
+    try testing.expect(meta.fieldInfo(HasCheapEql.Data, .hash).field_type == void);
+    try testing.expect(meta.fieldInfo(HasExpensiveEql.Data, .hash).field_type != void);
 
     const HasCheapEqlUn = AutoArrayHashMapUnmanaged(i32, i32);
     const HasExpensiveEqlUn = AutoArrayHashMapUnmanaged([32]i32, i32);
-    try testing.expect(meta.fieldInfo(HasCheapEqlUn.Data, .hash).type == void);
-    try testing.expect(meta.fieldInfo(HasExpensiveEqlUn.Data, .hash).type != void);
+    try testing.expect(meta.fieldInfo(HasCheapEqlUn.Data, .hash).field_type == void);
+    try testing.expect(meta.fieldInfo(HasExpensiveEqlUn.Data, .hash).field_type != void);
 }
 
 test "sort" {

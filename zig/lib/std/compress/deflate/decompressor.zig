@@ -334,7 +334,7 @@ pub fn Decompressor(comptime ReaderType: type) type {
 
         // Next step in the decompression,
         // and decompression state.
-        step: *const fn (*Self) Error!void,
+        step: std.meta.FnPtr(fn (*Self) Error!void),
         step_state: DecompressorState,
         final: bool,
         err: ?Error,
@@ -479,6 +479,12 @@ pub fn Decompressor(comptime ReaderType: type) type {
         }
 
         pub fn close(self: *Self) ?Error {
+            if (@import("builtin").zig_backend == .stage1) {
+                if (self.err == Error.EndOfStreamWithNoError) {
+                    return null;
+                }
+                return self.err;
+            }
             if (self.err == @as(?Error, error.EndOfStreamWithNoError)) {
                 return null;
             }
@@ -895,6 +901,7 @@ pub fn Decompressor(comptime ReaderType: type) type {
 }
 
 // tests
+const expect = std.testing.expect;
 const expectError = std.testing.expectError;
 const io = std.io;
 const testing = std.testing;
@@ -927,7 +934,7 @@ test "truncated input" {
 
         var output = [1]u8{0} ** 12;
         try expectError(error.UnexpectedEndOfStream, zr.readAll(&output));
-        try testing.expectEqualSlices(u8, t.output, output[0..t.output.len]);
+        try expect(mem.eql(u8, output[0..t.output.len], t.output));
     }
 }
 
@@ -1025,8 +1032,8 @@ test "inflate A Tale of Two Cities (1859) intro" {
 
     var got: [700]u8 = undefined;
     var got_len = try decomp.reader().read(&got);
-    try testing.expectEqual(@as(usize, 616), got_len);
-    try testing.expectEqualSlices(u8, expected, got[0..expected.len]);
+    try expect(got_len == 616);
+    try expect(mem.eql(u8, got[0..expected.len], expected));
 }
 
 test "lengths overflow" {

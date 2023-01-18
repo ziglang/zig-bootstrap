@@ -205,7 +205,7 @@ fn handleSegfaultPosix(sig: i32, info: *const os.siginfo_t, ctx_ptr: ?*const any
     };
 
     const stack_ctx: StackContext = switch (builtin.cpu.arch) {
-        .x86 => ctx: {
+        .i386 => ctx: {
             const ctx = @ptrCast(*const os.ucontext_t, @alignCast(@alignOf(os.ucontext_t), ctx_ptr));
             const ip = @intCast(usize, ctx.mcontext.gregs[os.REG.EIP]);
             const bp = @intCast(usize, ctx.mcontext.gregs[os.REG.EBP]);
@@ -549,8 +549,8 @@ const PanicSwitch = struct {
         // TODO: Tailcall is broken right now, but eventually this should be used
         // to avoid blowing up the stack.  It's ok for now though, there are no
         // cycles in the state machine so the max stack usage is bounded.
-        //@call(.always_tail, func, args);
-        @call(.auto, func, args);
+        //@call(.{.modifier = .always_tail}, func, args);
+        @call(.{}, func, args);
     }
 
     fn recover(

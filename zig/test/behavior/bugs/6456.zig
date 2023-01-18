@@ -23,7 +23,7 @@ test "issue 6456" {
             fields = fields ++ &[_]StructField{StructField{
                 .alignment = 0,
                 .name = name,
-                .type = usize,
+                .field_type = usize,
                 .default_value = &@as(?usize, null),
                 .is_comptime = false,
             }};

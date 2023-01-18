@@ -15,11 +15,14 @@ pub extern "c" fn pthread_getthreadid_np() c_int;
 pub extern "c" fn pthread_set_name_np(thread: std.c.pthread_t, name: [*:0]const u8) void;
 pub extern "c" fn pthread_get_name_np(thread: std.c.pthread_t, name: [*:0]u8, len: usize) void;
 pub extern "c" fn pipe2(fds: *[2]fd_t, flags: u32) c_int;
+pub extern "c" fn arc4random_buf(buf: [*]u8, len: usize) void;
 
 pub extern "c" fn posix_memalign(memptr: *?*anyopaque, alignment: usize, size: usize) c_int;
 pub extern "c" fn malloc_usable_size(?*const anyopaque) usize;
 
 pub extern "c" fn getpid() pid_t;
+
+pub extern "c" fn kinfo_getfile(pid: pid_t, cntp: *c_int) ?[*]kinfo_file;
 
 pub const sf_hdtr = extern struct {
     headers: [*]const iovec_const,
@@ -37,7 +40,7 @@ pub extern "c" fn sendfile(
     flags: u32,
 ) c_int;
 
-pub const dl_iterate_phdr_callback = *const fn (info: *dl_phdr_info, size: usize, data: ?*anyopaque) callconv(.C) c_int;
+pub const dl_iterate_phdr_callback = std.meta.FnPtr(fn (info: *dl_phdr_info, size: usize, data: ?*anyopaque) callconv(.C) c_int);
 pub extern "c" fn dl_iterate_phdr(callback: dl_iterate_phdr_callback, data: ?*anyopaque) c_int;
 
 pub const pthread_mutex_t = extern struct {
@@ -261,7 +264,7 @@ pub const Flock = extern struct {
     /// Lock owner.
     pid: pid_t,
     /// Lock type.
-    type: i16,
+    @"type": i16,
     /// Type of the start member.
     whence: i16,
     /// Remote system id or zero for local.
@@ -438,7 +441,7 @@ pub const kinfo_file = extern struct {
     /// A zero value is for the sentinel record at the end of an array.
     structsize: c_int,
     /// Descriptor type.
-    type: c_int,
+    @"type": c_int,
     /// Array index.
     fd: fd_t,
     /// Reference count.
@@ -456,7 +459,7 @@ pub const kinfo_file = extern struct {
             /// Socket domain.
             domain: c_int,
             /// Socket type.
-            type: c_int,
+            @"type": c_int,
             /// Socket protocol.
             protocol: c_int,
             /// Socket address.
@@ -478,7 +481,7 @@ pub const kinfo_file = extern struct {
         },
         file: extern struct {
             /// Vnode type.
-            type: i32,
+            @"type": i32,
             // Reserved for future use
             _spare1: [3]i32,
             _spare2: [30]u64,
@@ -1197,8 +1200,8 @@ const NSIG = 32;
 
 /// Renamed from `sigaction` to `Sigaction` to avoid conflict with the syscall.
 pub const Sigaction = extern struct {
-    pub const handler_fn = *const fn (c_int) align(1) callconv(.C) void;
-    pub const sigaction_fn = *const fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void;
+    pub const handler_fn = std.meta.FnPtr(fn (c_int) align(1) callconv(.C) void);
+    pub const sigaction_fn = std.meta.FnPtr(fn (c_int, *const siginfo_t, ?*const anyopaque) callconv(.C) void);
 
     /// signal handler
     handler: extern union {
@@ -1440,12 +1443,11 @@ pub const E = enum(u16) {
     CAPMODE = 94, // Not permitted in capability mode
     NOTRECOVERABLE = 95, // State not recoverable
     OWNERDEAD = 96, // Previous owner died
-    INTEGRITY = 97, // Integrity check failed
     _,
 };
 
 pub const MINSIGSTKSZ = switch (builtin.cpu.arch) {
-    .x86, .x86_64 => 2048,
+    .i386, .x86_64 => 2048,
     .arm, .aarch64 => 4096,
     else => @compileError("MINSIGSTKSZ not defined for this architecture"),
 };
@@ -1876,4 +1878,3 @@ pub const MFD = struct {
 };
 
 pub extern "c" fn memfd_create(name: [*:0]const u8, flags: c_uint) c_int;
-pub extern "c" fn copy_file_range(fd_in: fd_t, off_in: ?*off_t, fd_out: fd_t, off_out: ?*off_t, len: usize, flags: u32) usize;

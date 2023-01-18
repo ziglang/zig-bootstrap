@@ -46,7 +46,6 @@ pub fn enumToInt(tv: TypedValue, buffer: *Value.Payload.U64) Value {
 }
 
 const max_aggregate_items = 100;
-const max_string_len = 256;
 
 const FormatContext = struct {
     tv: TypedValue,
@@ -136,7 +135,7 @@ pub fn print(
         .address_space_type => return writer.writeAll("std.builtin.AddressSpace"),
         .float_mode_type => return writer.writeAll("std.builtin.FloatMode"),
         .reduce_op_type => return writer.writeAll("std.builtin.ReduceOp"),
-        .modifier_type => return writer.writeAll("std.builtin.CallModifier"),
+        .call_options_type => return writer.writeAll("std.builtin.CallOptions"),
         .prefetch_options_type => return writer.writeAll("std.builtin.PrefetchOptions"),
         .export_options_type => return writer.writeAll("std.builtin.ExportOptions"),
         .extern_options_type => return writer.writeAll("std.builtin.ExternOptions"),
@@ -159,7 +158,13 @@ pub fn print(
                     }
                     try print(.{
                         .ty = ty.structFieldType(i),
-                        .val = val.fieldValue(ty, i),
+                        .val = switch (ty.containerLayout()) {
+                            .Packed => val.castTag(.aggregate).?.data[i],
+                            else => ty.structFieldValueComptime(i) orelse b: {
+                                const vals = val.castTag(.aggregate).?.data;
+                                break :b vals[i];
+                            },
+                        },
                     }, writer, level - 1, mod);
                 }
                 if (ty.structFieldCount() > max_aggregate_items) {
@@ -167,31 +172,17 @@ pub fn print(
                 }
                 return writer.writeAll("}");
             } else {
+                try writer.writeAll(".{ ");
                 const elem_ty = ty.elemType2();
                 const len = ty.arrayLen();
-
-                if (elem_ty.eql(Type.u8, mod)) str: {
-                    const max_len = @intCast(usize, std.math.min(len, max_string_len));
-                    var buf: [max_string_len]u8 = undefined;
-
-                    var i: u32 = 0;
-                    while (i < max_len) : (i += 1) {
-                        buf[i] = std.math.cast(u8, val.fieldValue(ty, i).toUnsignedInt(target)) orelse break :str;
-                    }
-
-                    const truncated = if (len > max_string_len) " (truncated)" else "";
-                    return writer.print("\"{}{s}\"", .{ std.zig.fmtEscapes(buf[0..max_len]), truncated });
-                }
-
-                try writer.writeAll(".{ ");
-
                 const max_len = std.math.min(len, max_aggregate_items);
+
                 var i: u32 = 0;
                 while (i < max_len) : (i += 1) {
                     if (i != 0) try writer.writeAll(", ");
                     try print(.{
                         .ty = elem_ty,
-                        .val = val.fieldValue(ty, i),
+                        .val = val.castTag(.aggregate).?.data[i],
                     }, writer, level - 1, mod);
                 }
                 if (len > max_aggregate_items) {
@@ -225,7 +216,9 @@ pub fn print(
         .one => return writer.writeAll("1"),
         .void_value => return writer.writeAll("{}"),
         .unreachable_value => return writer.writeAll("unreachable"),
-        .the_only_possible_value => return writer.writeAll("0"),
+        .the_only_possible_value => {
+            val = ty.onePossibleValue().?;
+        },
         .bool_true => return writer.writeAll("true"),
         .bool_false => return writer.writeAll("false"),
         .ty => return val.castTag(.ty).?.data.print(writer, mod),
@@ -379,28 +372,11 @@ pub fn print(
                 return writer.writeAll(".{ ... }");
             }
             const payload = val.castTag(.slice).?.data;
+            try writer.writeAll(".{ ");
             const elem_ty = ty.elemType2();
             const len = payload.len.toUnsignedInt(target);
-
-            if (elem_ty.eql(Type.u8, mod)) str: {
-                const max_len = @intCast(usize, std.math.min(len, max_string_len));
-                var buf: [max_string_len]u8 = undefined;
-
-                var i: u32 = 0;
-                while (i < max_len) : (i += 1) {
-                    var elem_buf: Value.ElemValueBuffer = undefined;
-                    const elem_val = payload.ptr.elemValueBuffer(mod, i, &elem_buf);
-                    buf[i] = std.math.cast(u8, elem_val.toUnsignedInt(target)) orelse break :str;
-                }
-
-                // TODO would be nice if this had a bit of unicode awareness.
-                const truncated = if (len > max_string_len) " (truncated)" else "";
-                return writer.print("\"{}{s}\"", .{ std.zig.fmtEscapes(buf[0..max_len]), truncated });
-            }
-
-            try writer.writeAll(".{ ");
-
             const max_len = std.math.min(len, max_aggregate_items);
+
             var i: u32 = 0;
             while (i < max_len) : (i += 1) {
                 if (i != 0) try writer.writeAll(", ");

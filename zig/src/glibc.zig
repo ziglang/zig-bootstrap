@@ -174,12 +174,6 @@ pub fn buildCRTFile(comp: *Compilation, crt_file: CRTFile) !void {
     const target_ver = target.os.version_range.linux.glibc;
     const start_old_init_fini = target_ver.order(.{ .major = 2, .minor = 33 }) != .gt;
 
-    // In all cases in this function, we add the C compiler flags to
-    // cache_exempt_flags rather than extra_flags, because these arguments
-    // depend on only properties that are already covered by the cache
-    // manifest. Including these arguments in the cache could only possibly
-    // waste computation and create false negatives.
-
     switch (crt_file) {
         .crti_o => {
             var args = std.ArrayList([]const u8).init(arena);
@@ -199,7 +193,7 @@ pub fn buildCRTFile(comp: *Compilation, crt_file: CRTFile) !void {
             return comp.build_crt_file("crti", .Obj, &[1]Compilation.CSourceFile{
                 .{
                     .src_path = try start_asm_path(comp, arena, "crti.S"),
-                    .cache_exempt_flags = args.items,
+                    .extra_flags = args.items,
                 },
             });
         },
@@ -218,7 +212,7 @@ pub fn buildCRTFile(comp: *Compilation, crt_file: CRTFile) !void {
             return comp.build_crt_file("crtn", .Obj, &[1]Compilation.CSourceFile{
                 .{
                     .src_path = try start_asm_path(comp, arena, "crtn.S"),
-                    .cache_exempt_flags = args.items,
+                    .extra_flags = args.items,
                 },
             });
         },
@@ -243,7 +237,7 @@ pub fn buildCRTFile(comp: *Compilation, crt_file: CRTFile) !void {
                 const src_path = if (start_old_init_fini) "start-2.33.S" else "start.S";
                 break :blk .{
                     .src_path = try start_asm_path(comp, arena, src_path),
-                    .cache_exempt_flags = args.items,
+                    .extra_flags = args.items,
                 };
             };
             const abi_note_o: Compilation.CSourceFile = blk: {
@@ -262,7 +256,7 @@ pub fn buildCRTFile(comp: *Compilation, crt_file: CRTFile) !void {
                 });
                 break :blk .{
                     .src_path = try lib_path(comp, arena, lib_libc_glibc ++ "csu" ++ path.sep_str ++ "abi-note.S"),
-                    .cache_exempt_flags = args.items,
+                    .extra_flags = args.items,
                 };
             };
             return comp.build_crt_file("Scrt1", .Obj, &[_]Compilation.CSourceFile{ start_o, abi_note_o });
@@ -333,7 +327,7 @@ pub fn buildCRTFile(comp: *Compilation, crt_file: CRTFile) !void {
                 });
                 try add_include_dirs(comp, arena, &args);
 
-                if (target.cpu.arch == .x86) {
+                if (target.cpu.arch == .i386) {
                     // This prevents i386/sysdep.h from trying to do some
                     // silly and unnecessary inline asm hack that uses weird
                     // syntax that clang does not support.
@@ -361,7 +355,7 @@ pub fn buildCRTFile(comp: *Compilation, crt_file: CRTFile) !void {
                 });
                 files_buf[files_index] = .{
                     .src_path = try lib_path(comp, arena, dep.path),
-                    .cache_exempt_flags = args.items,
+                    .extra_flags = args.items,
                 };
                 files_index += 1;
             }
@@ -412,7 +406,7 @@ fn start_asm_path(comp: *Compilation, arena: Allocator, basename: []const u8) ![
         }
     } else if (arch == .x86_64) {
         try result.appendSlice("x86_64");
-    } else if (arch == .x86) {
+    } else if (arch == .i386) {
         try result.appendSlice("i386");
     } else if (is_aarch64) {
         try result.appendSlice("aarch64");
@@ -510,7 +504,7 @@ fn add_include_dirs_arch(
     opt_nptl: ?[]const u8,
     dir: []const u8,
 ) error{OutOfMemory}!void {
-    const is_x86 = arch == .x86 or arch == .x86_64;
+    const is_x86 = arch == .i386 or arch == .x86_64;
     const is_aarch64 = arch == .aarch64 or arch == .aarch64_be;
     const is_ppc = arch == .powerpc or arch == .powerpc64 or arch == .powerpc64le;
     const is_sparc = arch == .sparc or arch == .sparcel or arch == .sparc64;
@@ -527,7 +521,7 @@ fn add_include_dirs_arch(
                 try args.append("-I");
                 try args.append(try path.join(arena, &[_][]const u8{ dir, "x86_64" }));
             }
-        } else if (arch == .x86) {
+        } else if (arch == .i386) {
             if (opt_nptl) |nptl| {
                 try args.append("-I");
                 try args.append(try path.join(arena, &[_][]const u8{ dir, "i386", nptl }));
@@ -659,14 +653,12 @@ pub fn buildSharedObjects(comp: *Compilation) !void {
         .gpa = comp.gpa,
         .manifest_dir = try comp.global_cache_directory.handle.makeOpenPath("h", .{}),
     };
-    cache.addPrefix(.{ .path = null, .handle = fs.cwd() });
-    cache.addPrefix(comp.zig_lib_directory);
-    cache.addPrefix(comp.global_cache_directory);
     defer cache.manifest_dir.close();
 
     var man = cache.obtain();
     defer man.deinit();
     man.hash.addBytes(build_options.version);
+    man.hash.addBytes(comp.zig_lib_directory.path orelse ".");
     man.hash.add(target.cpu.arch);
     man.hash.add(target.abi);
     man.hash.add(target_version);

@@ -127,7 +127,11 @@ fn norm_zero_case(random: Random, u: f64) f64 {
     }
 }
 
+const please_windows_dont_oom = builtin.os.tag == .windows;
+
 test "normal dist sanity" {
+    if (please_windows_dont_oom) return error.SkipZigTest;
+
     var prng = std.rand.DefaultPrng.init(0);
     const random = prng.random();
 
@@ -156,7 +160,9 @@ fn exp_zero_case(random: Random, _: f64) f64 {
     return exp_r - @log(random.float(f64));
 }
 
-test "exp dist smoke test" {
+test "exp dist sanity" {
+    if (please_windows_dont_oom) return error.SkipZigTest;
+
     var prng = std.rand.DefaultPrng.init(0);
     const random = prng.random();
 
@@ -166,6 +172,8 @@ test "exp dist smoke test" {
     }
 }
 
-test {
+test "table gen" {
+    if (please_windows_dont_oom) return error.SkipZigTest;
+
     _ = NormDist;
 }

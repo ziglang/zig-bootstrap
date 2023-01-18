@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Documentation - The Zig Programming Language</title>
-    <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAgklEQVR4AWMYWuD7EllJIM4G4g4g5oIJ/odhOJ8wToOxSTXgNxDHoeiBMfA4+wGShjyYOCkG/IGqWQziEzYAoUAeiF9D5U+DxEg14DRU7jWIT5IBIOdCxf+A+CQZAAoopEB7QJwBCBwHiip8UYmRdrAlDpIMgApwQZNnNii5Dq0MBgCxxycBnwEd+wAAAABJRU5ErkJggg==">
+    <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAgklEQVR4AWMYWuD7EllJIM4G4g4g5oIJ/odhOJ8wToOxSTXgNxDHoeiBMfA4+wGShjyYOCkG/IGqWQziEzYAoUAeiF9D5U+DxEg14DRU7jWIT5IBIOdCxf+A+CQZAAoopEB7QJwBCBwHiip8UYmRdrAlDpIMgApwQZNnNii5Dq0MBgCxxycBnwEd+wAAAABJRU5ErkJggg=="/>
     <style>
       :root{
          --nav-width: 24em;
@@ -300,40 +300,6 @@
           color: #fff;
         }
       }
-
-      @media all {
-        main {
-          counter-reset: section-2;
-        }
-        h2 {
-          counter-reset: section-3;
-        }
-        h2::before {
-          counter-increment: section-2;
-          content: counter(section-2) ". ";
-          font-weight: normal;
-        }
-        h3 {
-          counter-reset: section-4;
-        }
-        h3::before {
-          counter-increment: section-3;
-          content: counter(section-2) "." counter(section-3) ". ";
-          font-weight: normal;
-        }
-        h4::before {
-          counter-increment: section-4;
-          content: counter(section-2) "." counter(section-3) "." counter(section-4) ". ";
-          font-weight: normal;
-        }
-        #zig-version::before {
-          content: "";
-        }
-        #table-of-contents::before {
-          content: "";
-        }
-      }
-    }
     </style>
 </head>
 <body>
@@ -1213,8 +1179,33 @@ test "this will be skipped" {
     return error.SkipZigTest;
 }
       {#code_end#}
-      {#header_close#}
+      <p>
+        The default test runner skips tests containing a {#link|suspend point|Async Functions#} while the
+        test is running using the default, blocking IO mode.
+        (The evented IO mode is enabled using the <kbd>--test-evented-io</kbd> command line parameter.)
+      </p>
+      {#code_begin|test|async_skip#}
+      {#backend_stage1#}
+const std = @import("std");
 
+test "async skip test" {
+    var frame = async func();
+    const result = await frame;
+    try std.testing.expect(result == 1);
+}
+
+fn func() i32 {
+    suspend {
+        resume @frame();
+    }
+    return 1;
+}
+      {#code_end#}
+      <p>
+        In the code sample above, the test would not be skipped in blocking IO mode if the {#syntax#}nosuspend{#endsyntax#}
+        keyword was used (see {#link|Async and Await#}).
+      </p>
+      {#header_close#}
       {#header_open|Report Memory Leaks#}
       <p>
         When code allocates {#link|Memory#} using the {#link|Zig Standard Library#}'s testing allocator,
@@ -2339,7 +2330,7 @@ comptime {
     assert(message.len == 5);
 }
 
-// A string literal is a single-item pointer to an array.
+// A string literal is a single-item pointer to an array literal.
 const same_message = "hello";
 
 comptime {
@@ -2449,8 +2440,8 @@ test "anonymous list literal syntax" {
 }
       {#code_end#}
       <p>
-      If there is no type in the {#link|result location|Result Location Semantics#} then an
-      anonymous list literal actually turns into a {#link|struct#} with numbered field names:
+      If there is no type in the result location then an anonymous list literal actually
+      turns into a {#link|struct#} with numbered field names:
       </p>
       {#code_begin|test|infer_list_literal#}
 const std = @import("std");
@@ -2545,7 +2536,7 @@ test "null terminated array" {
       and vectors. Zig provides the {#link|@splat#} builtin to easily convert from scalars
       to vectors, and it supports {#link|@reduce#} and array indexing syntax to convert
       from vectors to scalars. Vectors also support assignment to and from fixed-length
-      arrays with comptime-known length.
+      arrays with comptime known length.
       </p>
       <p>
       For rearranging elements within and between vectors, Zig provides the {#link|@shuffle#} and {#link|@select#} functions.
@@ -2591,7 +2582,7 @@ test "Conversion between vectors, arrays, and slices" {
     var offset: u32 = 1;
     // To extract a comptime-known length from a runtime-known offset,
     // first extract a new slice from the starting offset, then an array of
-    // comptime-known length
+    // comptime known length
     const vec3: @Vector(2, f32) = slice[offset..][0..2].*;
     try expectEqual(slice[offset], vec2[0]);
     try expectEqual(slice[offset + 1], vec2[1]);
@@ -2725,8 +2716,7 @@ const expect = @import("std").testing.expect;
 
 test "pointer slicing" {
     var array = [_]u8{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
-    var start: usize = 2;
-    const slice = array[start..4];
+    const slice = array[2..4];
     try expect(slice.len == 2);
 
     try expect(array[3] == 4);
@@ -3010,10 +3000,8 @@ test "using slices for strings" {
     const world: []const u8 = "世界";
 
     var all_together: [100]u8 = undefined;
-    // You can use slice syntax with at least one runtime-know index on an
-    // array to convert an array into a slice.
-    var start : usize = 0;
-    const all_together_slice = all_together[start..];
+    // You can use slice syntax on an array to convert an array into a slice.
+    const all_together_slice = all_together[0..];
     // String concatenation example.
     const hello_world = try fmt.bufPrint(all_together_slice, "{s} {s}", .{ hello, world });
 
@@ -3039,8 +3027,7 @@ test "slice pointer" {
     // The slice is mutable because we sliced a mutable pointer.
     try expect(@TypeOf(slice) == []u8);
 
-    // Again, slicing with comptime-known indexes will produce another pointer
-    // to an array:
+    // Again, slicing with constant indexes will produce another pointer to an array:
     const ptr2 = slice[2..3];
     try expect(ptr2.len == 1);
     try expect(ptr2[0] == 3);
@@ -3051,7 +3038,7 @@ test "slice pointer" {
 
       {#header_open|Sentinel-Terminated Slices#}
       <p>
-      The syntax {#syntax#}[:x]T{#endsyntax#} is a slice which has a runtime-known length
+      The syntax {#syntax#}[:x]T{#endsyntax#} is a slice which has a runtime known length
       and also guarantees a sentinel value at the element indexed by the length. The type does not
       guarantee that there are no sentinel elements before that. Sentinel-terminated slices allow element
       access to the {#syntax#}len{#endsyntax#} index.
@@ -3271,7 +3258,7 @@ test "default struct initialization fields" {
         .b = 5,
     };
     if (x.a + x.b != 1239) {
-        @compileError("it's even comptime-known!");
+        @compileError("it's even comptime known!");
     }
 }
       {#code_end#}
@@ -3510,7 +3497,7 @@ test "aligned struct fields" {
           that variable.</li>
           <li>If the struct is in the {#syntax#}return{#endsyntax#} expression, it gets named after
           the function it is returning from, with the parameter values serialized.</li>
-          <li>Otherwise, the struct gets a name such as <code>(filename.funcname.__struct_ID)</code>.</li>
+          <li>Otherwise, the struct gets a name such as <code>(anonymous struct at file.zig:7:38)</code>.</li>
           <li>If the struct is declared inside another struct, it gets named after both the parent
           struct and the name inferred by the previous rules, separated by a dot.</li>
       </ul>
@@ -3535,8 +3522,7 @@ fn List(comptime T: type) type {
       {#header_open|Anonymous Struct Literals#}
       <p>
       Zig allows omitting the struct type of a literal. When the result is {#link|coerced|Type Coercion#},
-      the struct literal will directly instantiate the {#link|result location|Result Location Semantics#},
-      with no copy:
+      the struct literal will directly instantiate the result location, with no copy:
       </p>
       {#code_begin|test|struct_result#}
 const std = @import("std");
@@ -3554,8 +3540,8 @@ test "anonymous struct literal" {
 }
       {#code_end#}
       <p>
-      The struct type can be inferred. Here the {#link|result location|Result Location Semantics#}
-      does not include a type, and so Zig infers the type:
+      The struct type can be inferred. Here the result location does not include a type, and
+      so Zig infers the type:
       </p>
       {#code_begin|test|struct_anon#}
 const std = @import("std");
@@ -3623,7 +3609,7 @@ const Type = enum {
     not_ok,
 };
 
-// Declare a specific enum field.
+// Declare a specific instance of the enum variant.
 const c = Type.ok;
 
 // If you want access to the ordinal value of an enum, you
@@ -3633,8 +3619,9 @@ const Value = enum(u2) {
     one,
     two,
 };
+
 // Now you can cast between u2 and Value.
-// The ordinal value starts from 0, counting up by 1 from the previous member.
+// The ordinal value starts from 0, counting up for each member.
 test "enum ordinal value" {
     try expect(@enumToInt(Value.zero) == 0);
     try expect(@enumToInt(Value.one) == 1);
@@ -3651,22 +3638,6 @@ test "set enum ordinal value" {
     try expect(@enumToInt(Value2.hundred) == 100);
     try expect(@enumToInt(Value2.thousand) == 1000);
     try expect(@enumToInt(Value2.million) == 1000000);
-}
-
-// You can also override only some values.
-const Value3 = enum(u4) {
-    a,
-    b = 8,
-    c,
-    d = 4,
-    e,
-};
-test "enum implicit ordinal values and overridden values" {
-    try expect(@enumToInt(Value3.a) == 0);
-    try expect(@enumToInt(Value3.b) == 8);
-    try expect(@enumToInt(Value3.c) == 9);
-    try expect(@enumToInt(Value3.d) == 4);
-    try expect(@enumToInt(Value3.e) == 5);
 }
 
 // Enums can have methods, the same as structs and unions.
@@ -3687,13 +3658,13 @@ test "enum method" {
     try expect(!p.isClubs());
 }
 
-// An enum can be switched upon.
+// An enum variant of different types can be switched upon.
 const Foo = enum {
     string,
     number,
     none,
 };
-test "enum switch" {
+test "enum variant switch" {
     const p = Foo.number;
     const what_is_it = switch (p) {
         Foo.string => "this is a string",
@@ -3832,7 +3803,7 @@ test "switch on non-exhaustive enum" {
       {#link|Accessing the non-active field|Wrong Union Field Access#} is
       safety-checked {#link|Undefined Behavior#}:
       </p>
-      {#code_begin|test_err|access of union field 'float' while field 'int' is active#}
+      {#code_begin|test_err|inactive union field#}
 const Payload = union {
     int: i64,
     float: f64,
@@ -3873,7 +3844,7 @@ test "simple union" {
       to use with {#link|switch#} expressions.
       Tagged unions coerce to their tag type: {#link|Type Coercion: unions and enums#}.
       </p>
-      {#code_begin|test|test_tagged_union#}
+      {#code_begin|test|test_switch_tagged_union#}
 const std = @import("std");
 const expect = std.testing.expect;
 
@@ -3899,6 +3870,14 @@ test "switch on tagged union" {
 test "get tag type" {
     try expect(std.meta.Tag(ComplexType) == ComplexTypeTag);
 }
+
+test "coerce to enum" {
+    const c1 = ComplexType{ .ok = 42 };
+    const c2 = ComplexType.not_ok;
+
+    try expect(c1 == .ok);
+    try expect(c2 == .not_ok);
+}
       {#code_end#}
       <p>In order to modify the payload of a tagged union in a switch expression,
       place a {#syntax#}*{#endsyntax#} before the variable name to make it a pointer:
@@ -3918,6 +3897,7 @@ const ComplexType = union(ComplexTypeTag) {
 
 test "modify tagged union in switch" {
     var c = ComplexType{ .ok = 42 };
+    try expect(@as(ComplexTypeTag, c) == ComplexTypeTag.ok);
 
     switch (c) {
         ComplexTypeTag.ok => |*value| value.* += 1,
@@ -4301,8 +4281,8 @@ fn isFieldOptional(comptime T: type, field_index: usize) !bool {
     const fields = @typeInfo(T).Struct.fields;
     return switch (field_index) {
         // This prong is analyzed `fields.len - 1` times with `idx` being an
-        // unique comptime-known value each time.
-        inline 0...fields.len - 1 => |idx| @typeInfo(fields[idx].type) == .Optional,
+        // unique comptime known value each time.
+        inline 0...fields.len - 1 => |idx| @typeInfo(fields[idx].field_type) == .Optional,
         else => return error.IndexOutOfBounds,
     };
 }
@@ -4319,7 +4299,7 @@ test "using @typeInfo with runtime values" {
 }
 
 // Calls to `isFieldOptional` on `Struct1` get unrolled to an equivalent
-// of this function:
+// of this function: 
 fn isFieldOptionalUnrolled(field_index: usize) !bool {
     return switch (field_index) {
         0 => false,
@@ -4396,8 +4376,8 @@ const U = union(enum) {
 
 fn getNum(u: U) u32 {
     switch (u) {
-        // Here `num` is a runtime-known value that is either
-        // `u.a` or `u.b` and `tag` is `u`'s comptime-known tag value.
+        // Here `num` is a runtime known value that is either
+        // `u.a` or `u.b` and `tag` is `u`'s comptime known tag value.
         inline else => |num, tag| {
             if (tag == .b) {
                 return @floatToInt(u32, num);
@@ -5003,20 +4983,6 @@ fn deferUnwindExample() void {
 test "defer unwinding" {
     deferUnwindExample();
 }
-      {#code_end#}
-      {#code_begin|test_err|cannot return from defer expression#}
-// Inside a defer expression the return statement is not allowed.
-fn deferInvalidExample() !void {
-    defer {
-        return error.DeferError;
-    }
-
-    return error.DeferError;
-}
-      {#code_end#}
-      {#code_begin|test|errdefer#}
-const std = @import("std");
-const print = std.debug.print;
 
 // The errdefer keyword is similar to defer, but will only execute if the
 // scope returns with an error.
@@ -5034,6 +5000,19 @@ fn deferErrorExample(is_error: bool) !void {
     errdefer {
         print("encountered an error!\n", .{});
     }
+
+    // inside a defer method the return statement
+    // is not allowed.
+    // The following lines produce the following
+    // error if uncomment
+    // ```
+    // defer.zig:73:9: error: cannot return from defer expression
+    // return error.DeferError;
+    // ```
+    //
+    //defer {
+    //    return error.DeferError;
+    //}
 
     if (is_error) {
         return error.DeferError;
@@ -5145,7 +5124,7 @@ const builtin = @import("builtin");
 const native_arch = builtin.cpu.arch;
 const expect = std.testing.expect;
 
-const WINAPI: std.builtin.CallingConvention = if (native_arch == .x86) .Stdcall else .C;
+const WINAPI: std.builtin.CallingConvention = if (native_arch == .i386) .Stdcall else .C;
 extern "kernel32" fn ExitProcess(exit_code: c_uint) callconv(WINAPI) noreturn;
 
 test "foo" {
@@ -5184,7 +5163,7 @@ export fn sub(a: i8, b: i8) i8 { return a - b; }
 // at link time, when linking statically, or at runtime, when linking
 // dynamically.
 // The callconv specifier changes the calling convention of the function.
-const WINAPI: std.builtin.CallingConvention = if (native_arch == .x86) .Stdcall else .C;
+const WINAPI: std.builtin.CallingConvention = if (native_arch == .i386) .Stdcall else .C;
 extern "kernel32" fn ExitProcess(exit_code: u32) callconv(WINAPI) noreturn;
 extern "c" fn atan2(a: f64, b: f64) f64;
 
@@ -5286,15 +5265,11 @@ test "fn type inference" {
       {#header_close#}
       {#header_open|Function Reflection#}
       {#code_begin|test|test_fn_reflection#}
-const std = @import("std");
-const math = std.math;
-const testing = std.testing;
+const expect = @import("std").testing.expect;
 
 test "fn reflection" {
-    try testing.expect(@typeInfo(@TypeOf(testing.expect)).Fn.params[0].type.? == bool);
-    try testing.expect(@typeInfo(@TypeOf(testing.tmpDir)).Fn.return_type.? == testing.TmpDir);
-
-    try testing.expect(@typeInfo(@TypeOf(math.Log2Int)).Fn.is_generic);
+    try expect(@typeInfo(@TypeOf(expect)).Fn.args[0].arg_type.? == bool);
+    try expect(@typeInfo(@TypeOf(expect)).Fn.is_var_args == false);
 }
       {#code_end#}
       {#header_close#}
@@ -5413,14 +5388,14 @@ pub fn parseU64(buf: []const u8, radix: u8) !u64 {
         }
 
         // x *= radix
-        var ov = @mulWithOverflow(x, radix);
-        if (ov[1] != 0) return error.OverFlow;
-        
+        if (@mulWithOverflow(u64, x, radix, &x)) {
+            return error.Overflow;
+        }
 
         // x += digit
-        ov = @addWithOverflow(ov[0], digit);
-        if (ov[1] != 0) return error.OverFlow;
-        x = ov[0];
+        if (@addWithOverflow(u64, x, digit, &x)) {
+            return error.Overflow;
+        }
     }
 
     return x;
@@ -5512,8 +5487,7 @@ fn doAThing(str: []u8) !void {
       <p>
       Here we know for sure that "1234" will parse successfully. So we put the
       {#syntax#}unreachable{#endsyntax#} value on the right hand side. {#syntax#}unreachable{#endsyntax#} generates
-      a panic in {#link|Debug#} and {#link|ReleaseSafe#} modes and undefined behavior in
-      {#link|ReleaseFast#} and {#link|ReleaseSmall#} modes. So, while we're debugging the
+      a panic in Debug and ReleaseSafe modes and undefined behavior in ReleaseFast mode. So, while we're debugging the
       application, if there <em>was</em> a surprise error here, the application would crash
       appropriately.
       </p>
@@ -5832,16 +5806,14 @@ test "merge error sets" {
 {#code_begin|test|inferred_error_sets#}
 // With an inferred error set
 pub fn add_inferred(comptime T: type, a: T, b: T) !T {
-    const ov = @addWithOverflow(a, b);
-    if (ov[1] != 0) return error.Overflow;
-    return ov[0];
+    var answer: T = undefined;
+    return if (@addWithOverflow(T, a, b, &answer)) error.Overflow else answer;
 }
 
 // With an explicit error set
 pub fn add_explicit(comptime T: type, a: T, b: T) Error!T {
-    const ov = @addWithOverflow(a, b);
-    if (ov[1] != 0) return error.Overflow;
-    return ov[0];
+    var answer: T = undefined;
+    return if (@addWithOverflow(T, a, b, &answer)) error.Overflow else answer;
 }
 
 const Error = error {
@@ -6294,6 +6266,10 @@ test "implicit unsigned integer to signed integer" {
 }
 
 test "float widening" {
+    // Note: there is an open issue preventing this from working on aarch64:
+    // https://github.com/ziglang/zig/issues/3282
+    if (builtin.target.cpu.arch == .aarch64) return error.SkipZigTest;
+
     var a: f16 = 12.34;
     var b: f32 = a;
     var c: f64 = b;
@@ -6312,6 +6288,7 @@ test "float widening" {
         <li>Cast {#syntax#}5{#endsyntax#} to {#syntax#}comptime_float{#endsyntax#} resulting in {#syntax#}@as(comptime_float, 10.8){#endsyntax#}, which is casted to {#syntax#}@as(f32, 10.8){#endsyntax#}</li>
       </ul>
       {#code_begin|test_err#}
+      {#backend_stage1#}
 // Compile time coercion of float to int
 test "implicit cast to comptime_int" {
     var f: f32 = 54.0 / 5;
@@ -6447,7 +6424,7 @@ test "coercion to error unions" {
 const std = @import("std");
 const expect = std.testing.expect;
 
-test "coercing large integer type to smaller one when value is comptime-known to fit" {
+test "coercing large integer type to smaller one when value is comptime known to fit" {
     const x: u64 = 255;
     const y: u8 = x;
     try expect(y == 255);
@@ -7423,6 +7400,7 @@ pub fn main() void {
       </p>
       {#code_begin|exe#}
       {#target_linux_x86_64#}
+      {#backend_stage1#}
 pub fn main() noreturn {
     const msg = "hello world\n";
     _ = syscall3(SYS_write, STDOUT_FILENO, @ptrToInt(msg), msg.len);
@@ -7515,7 +7493,7 @@ volatile (
     : "rcx", "r11"
 );{#end_syntax_block#}
       <p>
-      For x86 and x86_64 targets, the syntax is AT&amp;T syntax, rather than the more
+      For i386 and x86_64 targets, the syntax is AT&amp;T syntax, rather than the more
       popular Intel syntax. This is due to technical constraints; assembly parsing is
       provided by LLVM and its support for Intel syntax is buggy and not well tested.
       </p>
@@ -7610,15 +7588,388 @@ test "global assembly" {
       <p>TODO: @atomic rmw</p>
       <p>TODO: builtin atomic memory ordering enum</p>
       {#header_close#}
-
       {#header_open|Async Functions#}
-      <p>Async functions are being temporarily regressed and will be
-      <a href="https://github.com/ziglang/zig/issues/6025">restored before Zig
-        0.11.0 is tagged</a>. I apologize for the instability. Please use Zig 0.10.0 with
-      the <code>-fstage1</code> flag for now if you need this feature.</p>
+      <p>
+      When a function is called, a frame is pushed to the stack,
+      the function runs until it reaches a return statement, and then the frame is popped from the stack.
+      The code following the callsite does not run until the function returns.
+      </p>
+      <p>
+      An async function is a function whose execution is split into an {#syntax#}async{#endsyntax#} initiation,
+      followed by an {#syntax#}await{#endsyntax#} completion. Its frame is
+      provided explicitly by the caller, and it can be suspended and resumed any number of times.
+      </p>
+      <p>
+      The code following the {#syntax#}async{#endsyntax#} callsite runs immediately after the async
+      function first suspends. When the return value of the async function is needed,
+      the calling code can {#syntax#}await{#endsyntax#} on the async function frame.
+      This will suspend the calling code until the async function completes, at which point
+      execution resumes just after the {#syntax#}await{#endsyntax#} callsite.
+      </p>
+      <p>
+      Zig infers that a function is {#syntax#}async{#endsyntax#} when it observes that the function contains
+      a <strong>suspension point</strong>. Async functions can be called the same as normal functions. A
+      function call of an async function is a suspend point.
+      </p>
+      {#header_open|Suspend and Resume#}
+      <p>
+      At any point, a function may suspend itself. This causes control flow to
+      return to the callsite (in the case of the first suspension),
+      or resumer (in the case of subsequent suspensions).
+      </p>
+      {#code_begin|test|suspend_no_resume#}
+      {#backend_stage1#}
+const std = @import("std");
+const expect = std.testing.expect;
+
+var x: i32 = 1;
+
+test "suspend with no resume" {
+    var frame = async func();
+    try expect(x == 2);
+    _ = frame;
+}
+
+fn func() void {
+    x += 1;
+    suspend {}
+    // This line is never reached because the suspend has no matching resume.
+    x += 1;
+}
+      {#code_end#}
+      <p>
+      In the same way that each allocation should have a corresponding free,
+      Each {#syntax#}suspend{#endsyntax#} should have a corresponding {#syntax#}resume{#endsyntax#}.
+      A <strong>suspend block</strong> allows a function to put a pointer to its own
+      frame somewhere, for example into an event loop, even if that action will perform a
+      {#syntax#}resume{#endsyntax#} operation on a different thread.
+      {#link|@frame#} provides access to the async function frame pointer.
+      </p>
+      {#code_begin|test|async_suspend_block#}
+      {#backend_stage1#}
+const std = @import("std");
+const expect = std.testing.expect;
+
+var the_frame: anyframe = undefined;
+var result = false;
+
+test "async function suspend with block" {
+    _ = async testSuspendBlock();
+    try expect(!result);
+    resume the_frame;
+    try expect(result);
+}
+
+fn testSuspendBlock() void {
+    suspend {
+        comptime try expect(@TypeOf(@frame()) == *@Frame(testSuspendBlock));
+        the_frame = @frame();
+    }
+    result = true;
+}
+      {#code_end#}
+      <p>
+      {#syntax#}suspend{#endsyntax#} causes a function to be {#syntax#}async{#endsyntax#}.
+      </p>
+
+      {#header_open|Resuming from Suspend Blocks#}
+      <p>
+      Upon entering a {#syntax#}suspend{#endsyntax#} block, the async function is already considered
+      suspended, and can be resumed. For example, if you started another kernel thread,
+      and had that thread call {#syntax#}resume{#endsyntax#} on the frame pointer provided by the
+      {#link|@frame#}, the new thread would begin executing after the suspend
+      block, while the old thread continued executing the suspend block.
+      </p>
+      <p>
+      However, the async function can be directly resumed from the suspend block, in which case it
+      never returns to its resumer and continues executing.
+      </p>
+      {#code_begin|test|resume_from_suspend#}
+      {#backend_stage1#}
+const std = @import("std");
+const expect = std.testing.expect;
+
+test "resume from suspend" {
+    var my_result: i32 = 1;
+    _ = async testResumeFromSuspend(&my_result);
+    try std.testing.expect(my_result == 2);
+}
+fn testResumeFromSuspend(my_result: *i32) void {
+    suspend {
+        resume @frame();
+    }
+    my_result.* += 1;
+    suspend {}
+    my_result.* += 1;
+}
+      {#code_end#}
+      <p>
+      This is guaranteed to tail call, and therefore will not cause a new stack frame.
+      </p>
+      {#header_close#}
       {#header_close#}
 
-      {#header_open|Builtin Functions|2col#}
+      {#header_open|Async and Await#}
+      <p>
+      In the same way that every {#syntax#}suspend{#endsyntax#} has a matching
+      {#syntax#}resume{#endsyntax#}, every {#syntax#}async{#endsyntax#} has a matching {#syntax#}await{#endsyntax#}
+      in standard code.
+      </p>
+      <p>
+      However, it is possible to have an {#syntax#}async{#endsyntax#} call
+      without a matching {#syntax#}await{#endsyntax#}. Upon completion of the async function,
+      execution would continue at the most recent {#syntax#}async{#endsyntax#} callsite or {#syntax#}resume{#endsyntax#} callsite,
+      and the return value of the async function would be lost.
+      </p>
+      {#code_begin|test|async_await#}
+      {#backend_stage1#}
+const std = @import("std");
+const expect = std.testing.expect;
+
+test "async and await" {
+    // The test block is not async and so cannot have a suspend
+    // point in it. By using the nosuspend keyword, we promise that
+    // the code in amain will finish executing without suspending
+    // back to the test block.
+    nosuspend amain();
+}
+
+fn amain() void {
+    var frame = async func();
+    comptime try expect(@TypeOf(frame) == @Frame(func));
+
+    const ptr: anyframe->void = &frame;
+    const any_ptr: anyframe = ptr;
+
+    resume any_ptr;
+    await ptr;
+}
+
+fn func() void {
+    suspend {}
+}
+      {#code_end#}
+      <p>
+      The {#syntax#}await{#endsyntax#} keyword is used to coordinate with an async function's
+      {#syntax#}return{#endsyntax#} statement.
+      </p>
+      <p>
+      {#syntax#}await{#endsyntax#} is a suspend point, and takes as an operand anything that
+      coerces to {#syntax#}anyframe->T{#endsyntax#}. Calling {#syntax#}await{#endsyntax#} on
+      the frame of an async function will cause execution to continue at the
+      {#syntax#}await{#endsyntax#} callsite once the target function completes.
+      </p>
+      <p>
+      There is a common misconception that {#syntax#}await{#endsyntax#} resumes the target function.
+      It is the other way around: it suspends until the target function completes.
+      In the event that the target function has already completed, {#syntax#}await{#endsyntax#}
+      does not suspend; instead it copies the
+      return value directly from the target function's frame.
+      </p>
+      {#code_begin|test|async_await_sequence#}
+      {#backend_stage1#}
+const std = @import("std");
+const expect = std.testing.expect;
+
+var the_frame: anyframe = undefined;
+var final_result: i32 = 0;
+
+test "async function await" {
+    seq('a');
+    _ = async amain();
+    seq('f');
+    resume the_frame;
+    seq('i');
+    try expect(final_result == 1234);
+    try expect(std.mem.eql(u8, &seq_points, "abcdefghi"));
+}
+fn amain() void {
+    seq('b');
+    var f = async another();
+    seq('e');
+    final_result = await f;
+    seq('h');
+}
+fn another() i32 {
+    seq('c');
+    suspend {
+        seq('d');
+        the_frame = @frame();
+    }
+    seq('g');
+    return 1234;
+}
+
+var seq_points = [_]u8{0} ** "abcdefghi".len;
+var seq_index: usize = 0;
+
+fn seq(c: u8) void {
+    seq_points[seq_index] = c;
+    seq_index += 1;
+}
+      {#code_end#}
+      <p>
+      In general, {#syntax#}suspend{#endsyntax#} is lower level than {#syntax#}await{#endsyntax#}. Most application
+      code will use only {#syntax#}async{#endsyntax#} and {#syntax#}await{#endsyntax#}, but event loop
+      implementations will make use of {#syntax#}suspend{#endsyntax#} internally.
+      </p>
+      {#header_close#}
+
+      {#header_open|Async Function Example#}
+      <p>
+      Putting all of this together, here is an example of typical
+      {#syntax#}async{#endsyntax#}/{#syntax#}await{#endsyntax#} usage:
+      </p>
+      {#code_begin|exe|async#}
+      {#backend_stage1#}
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+
+pub fn main() void {
+    _ = async amainWrap();
+
+    // Typically we would use an event loop to manage resuming async functions,
+    // but in this example we hard code what the event loop would do,
+    // to make things deterministic.
+    resume global_file_frame;
+    resume global_download_frame;
+}
+
+fn amainWrap() void {
+    amain() catch |e| {
+        std.debug.print("{}\n", .{e});
+        if (@errorReturnTrace()) |trace| {
+            std.debug.dumpStackTrace(trace.*);
+        }
+        std.process.exit(1);
+    };
+}
+
+fn amain() !void {
+    const allocator = std.heap.page_allocator;
+    var download_frame = async fetchUrl(allocator, "https://example.com/");
+    var awaited_download_frame = false;
+    errdefer if (!awaited_download_frame) {
+        if (await download_frame) |r| allocator.free(r) else |_| {}
+    };
+
+    var file_frame = async readFile(allocator, "something.txt");
+    var awaited_file_frame = false;
+    errdefer if (!awaited_file_frame) {
+        if (await file_frame) |r| allocator.free(r) else |_| {}
+    };
+
+    awaited_file_frame = true;
+    const file_text = try await file_frame;
+    defer allocator.free(file_text);
+
+    awaited_download_frame = true;
+    const download_text = try await download_frame;
+    defer allocator.free(download_text);
+
+    std.debug.print("download_text: {s}\n", .{download_text});
+    std.debug.print("file_text: {s}\n", .{file_text});
+}
+
+var global_download_frame: anyframe = undefined;
+fn fetchUrl(allocator: Allocator, url: []const u8) ![]u8 {
+    _ = url; // this is just an example, we don't actually do it!
+    const result = try allocator.dupe(u8, "this is the downloaded url contents");
+    errdefer allocator.free(result);
+    suspend {
+        global_download_frame = @frame();
+    }
+    std.debug.print("fetchUrl returning\n", .{});
+    return result;
+}
+
+var global_file_frame: anyframe = undefined;
+fn readFile(allocator: Allocator, filename: []const u8) ![]u8 {
+    _ = filename; // this is just an example, we don't actually do it!
+    const result = try allocator.dupe(u8, "this is the file contents");
+    errdefer allocator.free(result);
+    suspend {
+        global_file_frame = @frame();
+    }
+    std.debug.print("readFile returning\n", .{});
+    return result;
+}
+      {#code_end#}
+      <p>
+      Now we remove the {#syntax#}suspend{#endsyntax#} and {#syntax#}resume{#endsyntax#} code, and
+      observe the same behavior, with one tiny difference:
+      </p>
+      {#code_begin|exe|blocking#}
+      {#backend_stage1#}
+const std = @import("std");
+const Allocator = std.mem.Allocator;
+
+pub fn main() void {
+    _ = async amainWrap();
+}
+
+fn amainWrap() void {
+    amain() catch |e| {
+        std.debug.print("{}\n", .{e});
+        if (@errorReturnTrace()) |trace| {
+            std.debug.dumpStackTrace(trace.*);
+        }
+        std.process.exit(1);
+    };
+}
+
+fn amain() !void {
+    const allocator = std.heap.page_allocator;
+    var download_frame = async fetchUrl(allocator, "https://example.com/");
+    var awaited_download_frame = false;
+    errdefer if (!awaited_download_frame) {
+        if (await download_frame) |r| allocator.free(r) else |_| {}
+    };
+
+    var file_frame = async readFile(allocator, "something.txt");
+    var awaited_file_frame = false;
+    errdefer if (!awaited_file_frame) {
+        if (await file_frame) |r| allocator.free(r) else |_| {}
+    };
+
+    awaited_file_frame = true;
+    const file_text = try await file_frame;
+    defer allocator.free(file_text);
+
+    awaited_download_frame = true;
+    const download_text = try await download_frame;
+    defer allocator.free(download_text);
+
+    std.debug.print("download_text: {s}\n", .{download_text});
+    std.debug.print("file_text: {s}\n", .{file_text});
+}
+
+fn fetchUrl(allocator: Allocator, url: []const u8) ![]u8 {
+    _ = url; // this is just an example, we don't actually do it!
+    const result = try allocator.dupe(u8, "this is the downloaded url contents");
+    errdefer allocator.free(result);
+    std.debug.print("fetchUrl returning\n", .{});
+    return result;
+}
+
+fn readFile(allocator: Allocator, filename: []const u8) ![]u8 {
+    _ = filename; // this is just an example, we don't actually do it!
+    const result = try allocator.dupe(u8, "this is the file contents");
+    errdefer allocator.free(result);
+    std.debug.print("readFile returning\n", .{});
+    return result;
+}
+      {#code_end#}
+      <p>
+      Previously, the {#syntax#}fetchUrl{#endsyntax#} and {#syntax#}readFile{#endsyntax#} functions suspended,
+      and were resumed in an order determined by the {#syntax#}main{#endsyntax#} function. Now,
+      since there are no suspend points, the order of the printed "... returning" messages
+      is determined by the order of {#syntax#}async{#endsyntax#} callsites.
+      </p>
+      {#header_close#}
+
+      {#header_close#}
+        {#header_open|Builtin Functions|2col#}
       <p>
       Builtin functions are provided by the compiler and are prefixed with <code>@</code>.
       The {#syntax#}comptime{#endsyntax#} keyword on a parameter means that the parameter must be known
@@ -7634,9 +7985,11 @@ test "global assembly" {
       </p>
       {#header_close#}
       {#header_open|@addWithOverflow#}
-      <pre>{#syntax#}@addWithOverflow(a: anytype, b: anytype) struct { @TypeOf(a, b), u1 }{#endsyntax#}</pre>
+      <pre>{#syntax#}@addWithOverflow(comptime T: type, a: T, b: T, result: *T) bool{#endsyntax#}</pre>
       <p>
-      Performs {#syntax#}a + b{#endsyntax#} and returns a tuple with the result and a possible overflow bit.
+      Performs {#syntax#}result.* = a + b{#endsyntax#}. If overflow or underflow occurs,
+          stores the overflowed bits in {#syntax#}result{#endsyntax#} and returns {#syntax#}true{#endsyntax#}.
+                  If no overflow or underflow occurs, returns {#syntax#}false{#endsyntax#}.
       </p>
       {#header_close#}
       {#header_open|@alignCast#}
@@ -7673,6 +8026,49 @@ comptime {
       Performs {#link|Type Coercion#}. This cast is allowed when the conversion is unambiguous and safe,
       and is the preferred way to convert between types, whenever possible.
       </p>
+      {#header_close#}
+
+      {#header_open|@asyncCall#}
+      <pre>{#syntax#}@asyncCall(frame_buffer: []align(@alignOf(@Frame(anyAsyncFunction))) u8, result_ptr, function_ptr, args: anytype) anyframe->T{#endsyntax#}</pre>
+      <p>
+      {#syntax#}@asyncCall{#endsyntax#} performs an {#syntax#}async{#endsyntax#} call on a function pointer,
+      which may or may not be an {#link|async function|Async Functions#}.
+      </p>
+      <p>
+      The provided {#syntax#}frame_buffer{#endsyntax#} must be large enough to fit the entire function frame.
+      This size can be determined with {#link|@frameSize#}. To provide a too-small buffer
+      invokes safety-checked {#link|Undefined Behavior#}.
+      </p>
+      <p>
+      {#syntax#}result_ptr{#endsyntax#} is optional ({#link|null#} may be provided). If provided,
+      the function call will write its result directly to the result pointer, which will be available to
+      read after {#link|await|Async and Await#} completes. Any result location provided to
+      {#syntax#}await{#endsyntax#} will copy the result from {#syntax#}result_ptr{#endsyntax#}.
+      </p>
+      {#code_begin|test|async_struct_field_fn_pointer#}
+      {#backend_stage1#}
+const std = @import("std");
+const expect = std.testing.expect;
+
+test "async fn pointer in a struct field" {
+    var data: i32 = 1;
+    const Foo = struct {
+        bar: fn (*i32) callconv(.Async) void,
+    };
+    var foo = Foo{ .bar = func };
+    var bytes: [64]u8 align(@alignOf(@Frame(func))) = undefined;
+    const f = @asyncCall(&bytes, {}, foo.bar, .{&data});
+    try expect(data == 2);
+    resume f;
+    try expect(data == 4);
+}
+
+fn func(y: *i32) void {
+    defer y.* += 2;
+    y.* += 1;
+    suspend {}
+}
+      {#code_end#}
       {#header_close#}
 
       {#header_open|@atomicLoad#}
@@ -7850,7 +8246,7 @@ comptime {
       {#header_close#}
 
       {#header_open|@call#}
-      <pre>{#syntax#}@call(modifier: std.builtin.CallModifier, function: anytype, args: anytype) anytype{#endsyntax#}</pre>
+      <pre>{#syntax#}@call(options: std.builtin.CallOptions, function: anytype, args: anytype) anytype{#endsyntax#}</pre>
       <p>
       Calls a function, in the same way that invoking an expression with parentheses does:
       </p>
@@ -7858,7 +8254,7 @@ comptime {
 const expect = @import("std").testing.expect;
 
 test "noinline function call" {
-    try expect(@call(.auto, add, .{3, 9}) == 12);
+    try expect(@call(.{}, add, .{3, 9}) == 12);
 }
 
 fn add(a: i32, b: i32) i32 {
@@ -7867,41 +8263,48 @@ fn add(a: i32, b: i32) i32 {
       {#code_end#}
       <p>
       {#syntax#}@call{#endsyntax#} allows more flexibility than normal function call syntax does. The
-      {#syntax#}CallModifier{#endsyntax#} enum is reproduced here:
+      {#syntax#}CallOptions{#endsyntax#} struct is reproduced here:
       </p>
-      {#syntax_block|zig|builtin.CallModifier struct#}
-pub const CallModifier = enum {
-    /// Equivalent to function call syntax.
-    auto,
+      {#syntax_block|zig|builtin.CallOptions struct#}
+pub const CallOptions = struct {
+    modifier: Modifier = .auto,
 
-    /// Equivalent to async keyword used with function call syntax.
-    async_kw,
+    /// Only valid when `Modifier` is `Modifier.async_kw`.
+    stack: ?[]align(std.Target.stack_align) u8 = null,
 
-    /// Prevents tail call optimization. This guarantees that the return
-    /// address will point to the callsite, as opposed to the callsite's
-    /// callsite. If the call is otherwise required to be tail-called
-    /// or inlined, a compile error is emitted instead.
-    never_tail,
+    pub const Modifier = enum {
+        /// Equivalent to function call syntax.
+        auto,
 
-    /// Guarantees that the call will not be inlined. If the call is
-    /// otherwise required to be inlined, a compile error is emitted instead.
-    never_inline,
+        /// Equivalent to async keyword used with function call syntax.
+        async_kw,
 
-    /// Asserts that the function call will not suspend. This allows a
-    /// non-async function to call an async function.
-    no_async,
+        /// Prevents tail call optimization. This guarantees that the return
+        /// address will point to the callsite, as opposed to the callsite's
+        /// callsite. If the call is otherwise required to be tail-called
+        /// or inlined, a compile error is emitted instead.
+        never_tail,
 
-    /// Guarantees that the call will be generated with tail call optimization.
-    /// If this is not possible, a compile error is emitted instead.
-    always_tail,
+        /// Guarantees that the call will not be inlined. If the call is
+        /// otherwise required to be inlined, a compile error is emitted instead.
+        never_inline,
 
-    /// Guarantees that the call will inlined at the callsite.
-    /// If this is not possible, a compile error is emitted instead.
-    always_inline,
+        /// Asserts that the function call will not suspend. This allows a
+        /// non-async function to call an async function.
+        no_async,
 
-    /// Evaluates the call at compile-time. If the call cannot be completed at
-    /// compile-time, a compile error is emitted instead.
-    compile_time,
+        /// Guarantees that the call will be generated with tail call optimization.
+        /// If this is not possible, a compile error is emitted instead.
+        always_tail,
+
+        /// Guarantees that the call will inlined at the callsite.
+        /// If this is not possible, a compile error is emitted instead.
+        always_inline,
+
+        /// Evaluates the call at compile-time. If the call cannot be completed at
+        /// compile-time, a compile error is emitted instead.
+        compile_time,
+    };
 };
       {#end_syntax_block#}
       {#header_close#}
@@ -8135,35 +8538,6 @@ test "main" {
       temporary buffer.
       </p>
       {#see_also|Import from C Header File|@cImport|@cDefine|@cInclude#}
-      {#header_close#}
-
-      {#header_open|@cVaArg#}
-      <pre>{#syntax#}@cVaArg(operand: *std.builtin.VaList, comptime T: type) T{#endsyntax#}</pre>
-      <p>
-      Implements the C macro {#syntax#}va_arg{#endsyntax#}.
-      </p>
-      {#see_also|@cVaCopy|@cVaEnd|@cVaStart#}
-      {#header_close#}
-      {#header_open|@cVaCopy#}
-      <pre>{#syntax#}@cVaCopy(src: *std.builtin.VaList) std.builtin.VaList{#endsyntax#}</pre>
-      <p>
-      Implements the C macro {#syntax#}va_copy{#endsyntax#}.
-      </p>
-      {#see_also|@cVaArg|@cVaEnd|@cVaStart#}
-      {#header_close#}
-      {#header_open|@cVaEnd#}
-      <pre>{#syntax#}@cVaEnd(src: *std.builtin.VaList) void{#endsyntax#}</pre>
-      <p>
-      Implements the C macro {#syntax#}va_end{#endsyntax#}.
-      </p>
-      {#see_also|@cVaArg|@cVaCopy|@cVaStart#}
-      {#header_close#}
-      {#header_open|@cVaStart#}
-      <pre>{#syntax#}@cVaStart() std.builtin.VaList{#endsyntax#}</pre>
-      <p>
-      Implements the C macro {#syntax#}va_start{#endsyntax#}. Only valid inside a variadic function.
-      </p>
-      {#see_also|@cVaArg|@cVaCopy|@cVaEnd#}
       {#header_close#}
 
       {#header_open|@divExact#}
@@ -8412,6 +8786,45 @@ test "decl access by string" {
       {#see_also|@intToFloat#}
       {#header_close#}
 
+      {#header_open|@frame#}
+      <pre>{#syntax#}@frame() *@Frame(func){#endsyntax#}</pre>
+      <p>
+      This function returns a pointer to the frame for a given function. This type
+      can be {#link|coerced|Type Coercion#} to {#syntax#}anyframe->T{#endsyntax#} and
+      to {#syntax#}anyframe{#endsyntax#}, where {#syntax#}T{#endsyntax#} is the return type
+      of the function in scope.
+      </p>
+      <p>
+      This function does not mark a suspension point, but it does cause the function in scope
+      to become an {#link|async function|Async Functions#}.
+      </p>
+      {#header_close#}
+
+      {#header_open|@Frame#}
+      <pre>{#syntax#}@Frame(func: anytype) type{#endsyntax#}</pre>
+      <p>
+      This function returns the frame type of a function. This works for {#link|Async Functions#}
+      as well as any function without a specific calling convention.
+      </p>
+      <p>
+      This type is suitable to be used as the return type of {#link|async|Async and Await#} which
+      allows one to, for example, heap-allocate an async function frame:
+      </p>
+      {#code_begin|test|heap_allocated_frame#}
+      {#backend_stage1#}
+const std = @import("std");
+
+test "heap allocated frame" {
+    const frame = try std.heap.page_allocator.create(@Frame(func));
+    frame.* = async func();
+}
+
+fn func() void {
+    suspend {}
+}
+      {#code_end#}
+      {#header_close#}
+
       {#header_open|@frameAddress#}
       <pre>{#syntax#}@frameAddress() usize{#endsyntax#}</pre>
       <p>
@@ -8424,6 +8837,17 @@ test "decl access by string" {
       </p>
       <p>
       This function is only valid within function scope.
+      </p>
+      {#header_close#}
+
+      {#header_open|@frameSize#}
+      <pre>{#syntax#}@frameSize(func: anytype) usize{#endsyntax#}</pre>
+      <p>
+      This is the same as {#syntax#}@sizeOf(@Frame(func)){#endsyntax#}, where {#syntax#}func{#endsyntax#}
+      may be runtime-known.
+      </p>
+      <p>
+      This function is typically used in conjunction with {#link|@asyncCall#}.
       </p>
       {#header_close#}
 
@@ -8695,9 +9119,11 @@ test "@wasmMemoryGrow" {
       {#header_close#}
 
       {#header_open|@mulWithOverflow#}
-      <pre>{#syntax#}@mulWithOverflow(a: anytype, b: anytype) struct { @TypeOf(a, b), u1 }{#endsyntax#}</pre>
+      <pre>{#syntax#}@mulWithOverflow(comptime T: type, a: T, b: T, result: *T) bool{#endsyntax#}</pre>
       <p>
-      Performs {#syntax#}a * b{#endsyntax#} and returns a tuple with the result and a possible overflow bit.
+      Performs {#syntax#}result.* = a * b{#endsyntax#}. If overflow or underflow occurs,
+          stores the overflowed bits in {#syntax#}result{#endsyntax#} and returns {#syntax#}true{#endsyntax#}.
+                  If no overflow or underflow occurs, returns {#syntax#}false{#endsyntax#}.
       </p>
       {#header_close#}
 
@@ -8971,13 +9397,15 @@ test "@setRuntimeSafety" {
       {#header_close#}
 
       {#header_open|@shlWithOverflow#}
-      <pre>{#syntax#}@shlWithOverflow(a: anytype, shift_amt: Log2T) struct { @TypeOf(a), u1 }{#endsyntax#}</pre>
+      <pre>{#syntax#}@shlWithOverflow(comptime T: type, a: T, shift_amt: Log2T, result: *T) bool{#endsyntax#}</pre>
       <p>
-      Performs {#syntax#}a << b{#endsyntax#} and returns a tuple with the result and a possible overflow bit.
+      Performs {#syntax#}result.* = a << b{#endsyntax#}. If overflow or underflow occurs,
+                 stores the overflowed bits in {#syntax#}result{#endsyntax#} and returns {#syntax#}true{#endsyntax#}.
+                         If no overflow or underflow occurs, returns {#syntax#}false{#endsyntax#}.
       </p>
       <p>
-      The type of {#syntax#}shift_amt{#endsyntax#} is an unsigned integer with {#syntax#}log2(@typeInfo(@TypeOf(a)).Int.bits){#endsyntax#} bits.
-              This is because {#syntax#}shift_amt >= @typeInfo(@TypeOf(a)).Int.bits{#endsyntax#} is undefined behavior.
+      The type of {#syntax#}shift_amt{#endsyntax#} is an unsigned integer with {#syntax#}log2(@typeInfo(T).Int.bits){#endsyntax#} bits.
+              This is because {#syntax#}shift_amt >= @typeInfo(T).Int.bits{#endsyntax#} is undefined behavior.
       </p>
       {#see_also|@shlExact|@shrExact#}
       {#header_close#}
@@ -9319,9 +9747,11 @@ fn doTheTest() !void {
       {#header_close#}
 
       {#header_open|@subWithOverflow#}
-      <pre>{#syntax#}@subWithOverflow(a: anytype, b: anytype) struct { @TypeOf(a, b), u1 }{#endsyntax#}</pre>
+      <pre>{#syntax#}@subWithOverflow(comptime T: type, a: T, b: T, result: *T) bool{#endsyntax#}</pre>
       <p>
-      Performs {#syntax#}a - b{#endsyntax#} and returns a tuple with the result and a possible overflow bit.
+      Performs {#syntax#}result.* = a - b{#endsyntax#}. If overflow or underflow occurs,
+          stores the overflowed bits in {#syntax#}result{#endsyntax#} and returns {#syntax#}true{#endsyntax#}.
+                  If no overflow or underflow occurs, returns {#syntax#}false{#endsyntax#}.
       </p>
       {#header_close#}
 
@@ -9421,6 +9851,7 @@ test "integer truncation" {
           <li>{#link|Error Union Type#}</li>
           <li>{#link|Vectors#}</li>
           <li>{#link|opaque#}</li>
+          <li>{#link|@Frame#}</li>
           <li>{#syntax#}anyframe{#endsyntax#}</li>
           <li>{#link|struct#}</li>
           <li>{#link|enum#}</li>
@@ -9428,7 +9859,12 @@ test "integer truncation" {
           <li>{#link|union#}</li>
       </ul>
       <p>
-      {#syntax#}@Type{#endsyntax#} is not available for {#link|Functions#}.
+      For these types, {#syntax#}@Type{#endsyntax#} is not available:
+      </p>
+      <ul>
+          <li>{#link|Functions#}</li>
+          <li>BoundFn</li>
+      </ul>
       {#header_close#}
       {#header_open|@typeInfo#}
       <pre>{#syntax#}@typeInfo(comptime T: type) std.builtin.Type{#endsyntax#}</pre>
@@ -9768,11 +10204,11 @@ const print = @import("std").debug.print;
 pub fn main() void {
     var byte: u8 = 255;
 
-    const ov = @addWithOverflow(byte, 10);
-    if (ov[1] != 0) {
-        print("overflowed result: {}\n", .{ov[0]});
+    var result: u8 = undefined;
+    if (@addWithOverflow(u8, byte, 10, &result)) {
+        print("overflowed result: {}\n", .{result});
     } else {
-        print("result: {}\n", .{ov[0]});
+        print("result: {}\n", .{result});
     }
 }
       {#code_end#}
@@ -9806,6 +10242,7 @@ test "wraparound addition and subtraction" {
       {#header_open|Exact Left Shift Overflow#}
       <p>At compile-time:</p>
       {#code_begin|test_err|operation caused overflow#}
+      {#backend_stage1#}
 comptime {
     const x = @shlExact(@as(u8, 0b01010101), 2);
     _ = x;
@@ -9825,6 +10262,7 @@ pub fn main() void {
       {#header_open|Exact Right Shift Overflow#}
       <p>At compile-time:</p>
       {#code_begin|test_err|exact shift shifted out 1 bits#}
+      {#backend_stage1#}
 comptime {
     const x = @shrExact(@as(u8, 0b10101010), 2);
     _ = x;
@@ -9887,7 +10325,8 @@ pub fn main() void {
       {#header_close#}
       {#header_open|Exact Division Remainder#}
       <p>At compile-time:</p>
-      {#code_begin|test_err|exact division produced remainder#}
+      {#code_begin|test_err|exact division had a remainder#}
+      {#backend_stage1#}
 comptime {
     const a: u32 = 10;
     const b: u32 = 3;
@@ -10197,6 +10636,7 @@ fn bar(f: *Foo) void {
       </p>
       <p>At compile-time:</p>
       {#code_begin|test_err|null pointer casted to type#}
+      {#backend_stage1#}
 comptime {
     const opt_ptr: ?*i32 = null;
     const ptr = @ptrCast(*i32, opt_ptr);
@@ -10703,18 +11143,18 @@ const c = @cImport({
         when linking with C code.
       </p>
       {#syntax_block|c|varytarget.h#}long FOO = __LONG_MAX__;{#end_syntax_block#}
-      {#shell_samp#}$ zig translate-c -target thumb-freestanding-gnueabihf varytarget.h|grep FOO
-pub export var FOO: c_long = 2147483647;
-$ zig translate-c -target x86_64-macos-gnu varytarget.h|grep FOO
-pub export var FOO: c_long = 9223372036854775807;{#end_shell_samp#}
+      {#shell_samp#}$ zig translate-c -target <em>thumb-freestanding-gnueabihf</em> varytarget.h|grep FOO
+pub export var FOO: c_long = <em>2147483647</em>;
+$ zig translate-c -target <em>x86_64-macos-gnu</em> varytarget.h|grep FOO
+pub export var FOO: c_long = <em>9223372036854775807</em>;{#end_shell_samp#}
       {#syntax_block|c|varycflags.h#}enum FOO { BAR };
 int do_something(enum FOO foo);
       {#end_syntax_block#}
       {#shell_samp#}$ zig translate-c varycflags.h|grep -B1 do_something
-pub const enum_FOO = c_uint;
+pub const enum_FOO = <em>c_uint</em>;
 pub extern fn do_something(foo: enum_FOO) c_int;
-$ zig translate-c -cflags -fshort-enums -- varycflags.h|grep -B1 do_something
-pub const enum_FOO = u8;
+$ zig translate-c <em>-cflags -fshort-enums --</em> varycflags.h|grep -B1 do_something
+pub const enum_FOO = <em>u8</em>;
 pub extern fn do_something(foo: enum_FOO) c_int;{#end_shell_samp#}
       {#header_close#}
       {#header_open|@cImport vs translate-c#}
@@ -10858,51 +11298,6 @@ pub const MAKELOCAL = @compileError("unable to translate C expr: unexpected toke
         <p>{#syntax#}ptr_to_struct_array[index].struct_member{#endsyntax#}</p>
       {#header_close#}
 
-      {#header_open|C Variadic Functions#}
-      <p>Zig supports extern variadic functions.</p>
-      {#code_begin|test|variadic_function#}
-      {#link_libc#}
-      {#code_verbose_cimport#}
-const std = @import("std");
-const testing = std.testing;
-
-pub extern "c" fn printf(format: [*:0]const u8, ...) c_int;
-
-test "variadic function" {
-    try testing.expect(printf("Hello, world!\n") == 14);
-    try testing.expect(@typeInfo(@TypeOf(printf)).Fn.is_var_args);
-}
-      {#code_end#}
-      <p>
-        Variadic functions can be implemented using {#link|@cVaStart#}, {#link|@cVaEnd#}, {#link|@cVaArg#} and {#link|@cVaCopy#}
-      </p>
-      {#code_begin|test|defining_variadic_function#}
-const std = @import("std");
-const testing = std.testing;
-const builtin = @import("builtin");
-
-fn add(count: c_int, ...) callconv(.C) c_int {
-    var ap = @cVaStart();
-    defer @cVaEnd(&ap);
-    var i: usize = 0;
-    var sum: c_int = 0;
-    while (i < count) : (i += 1) {
-        sum += @cVaArg(&ap, c_int);
-    }
-    return sum;
-}
-
-test "defining a variadic function" {
-    // Variadic functions are currently disabled on some targets due to miscompilations.
-    if (builtin.cpu.arch == .aarch64 and builtin.os.tag != .windows and builtin.os.tag != .macos) return error.SkipZigTest;
-    if (builtin.cpu.arch == .x86_64 and builtin.os.tag == .windows) return error.SkipZigTest;
-
-    try std.testing.expectEqual(@as(c_int, 0), add(0));
-    try std.testing.expectEqual(@as(c_int, 1), add(1, @as(c_int, 1)));
-    try std.testing.expectEqual(@as(c_int, 3), add(2, @as(c_int, 1), @as(c_int, 2)));
-}
-      {#code_end#}
-      {#header_close#}
       {#header_open|Exporting a C Library#}
       <p>
       One of the primary use cases for Zig is exporting a library with the C ABI for other programming languages
@@ -11064,28 +11459,24 @@ pub fn main() !void {
       {#code_begin|exe|preopens#}
       {#target_wasi#}
 const std = @import("std");
-const fs = std.fs;
+const PreopenList = std.fs.wasi.PreopenList;
 
 pub fn main() !void {
     var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
     const gpa = general_purpose_allocator.allocator();
 
-    var arena_instance = std.heap.ArenaAllocator.init(gpa);
-    defer arena_instance.deinit();
-    const arena = arena_instance.allocator();
+    var preopens = PreopenList.init(gpa);
+    defer preopens.deinit();
 
-    const preopens = try fs.wasi.preopensAlloc(arena);
+    try preopens.populate(null);
 
-    for (preopens.names) |preopen, i| {
-        std.debug.print("{}: {s}\n", .{ i, preopen });
+    for (preopens.asSlice()) |preopen, i| {
+        std.debug.print("{}: {}\n", .{ i, preopen });
     }
 }
       {#code_end#}
       {#shell_samp#}$ wasmtime --dir=. preopens.wasm
-0: stdin
-1: stdout
-2: stderr
-3: .
+0: Preopen{ .fd = 3, .type = PreopenType{ .Dir = '.' } }
       {#end_shell_samp#}
       {#header_close#}
       {#header_close#}
@@ -11223,7 +11614,7 @@ Architectures:
     v5
     v5te
     v4t
-  x86
+  i386
   x86_64 (native)
   xcore
   nvptx
@@ -11302,8 +11693,8 @@ Available libcs:
   arm-linux-gnueabihf
   arm-linux-musleabi
   arm-linux-musleabihf
-  x86-linux-gnu
-  x86-linux-musl
+  i386-linux-gnu
+  i386-linux-musl
   mips64el-linux-gnuabi64
   mips64el-linux-gnuabin32
   mips64el-linux-musl
@@ -11880,6 +12271,9 @@ fn readU32Be() u32 {}
           </th>
           <td>
             {#syntax#}resume{#endsyntax#} will continue execution of a function frame after the point the function was suspended.
+            <ul>
+              <li>See also {#link|Suspend and Resume#}</li>
+            </ul>
           </td>
         </tr>
         <tr>
@@ -11923,6 +12317,9 @@ fn readU32Be() u32 {}
             {#syntax#}suspend{#endsyntax#} will cause control flow to return to the call site or resumer of the function.
             {#syntax#}suspend{#endsyntax#} can also be used before a block within a function,
             to allow the function access to its frame before control flow returns to the call site.
+            <ul>
+              <li>See also {#link|Suspend and Resume#}</li>
+            </ul>
           </td>
         </tr>
         <tr>
@@ -11993,7 +12390,7 @@ fn readU32Be() u32 {}
             Depending on the build mode, {#syntax#}unreachable{#endsyntax#} may emit a panic.
             <ul>
               <li>Emits a panic in {#syntax#}Debug{#endsyntax#} and {#syntax#}ReleaseSafe{#endsyntax#} mode, or when using <kbd>zig test</kbd>.</li>
-              <li>Does not emit a panic in {#syntax#}ReleaseFast{#endsyntax#} and {#syntax#}ReleaseSmall{#endsyntax#} mode.</li>
+              <li>Does not emit a panic in {#syntax#}ReleaseFast{#endsyntax#} mode, unless <kbd>zig test</kbd> is being used.</li>
               <li>See also {#link|unreachable#}</li>
             </ul>
           </td>
@@ -12071,26 +12468,24 @@ ContainerMembers <- ContainerDeclarations (ContainerField COMMA)* (ContainerFiel
 
 ContainerDeclarations
     <- TestDecl ContainerDeclarations
-     / ComptimeDecl ContainerDeclarations
-     / doc_comment? KEYWORD_pub? Decl ContainerDeclarations
+     / TopLevelComptime ContainerDeclarations
+     / doc_comment? KEYWORD_pub? TopLevelDecl ContainerDeclarations
      /
 
-TestDecl <- KEYWORD_test STRINGLITERALSINGLE? Block
+TestDecl <- doc_comment? KEYWORD_test STRINGLITERALSINGLE? Block
 
-ComptimeDecl <- KEYWORD_comptime Block
+TopLevelComptime <- doc_comment? KEYWORD_comptime BlockExpr
 
-Decl
+TopLevelDecl
     <- (KEYWORD_export / KEYWORD_extern STRINGLITERALSINGLE? / (KEYWORD_inline / KEYWORD_noinline))? FnProto (SEMICOLON / Block)
      / (KEYWORD_export / KEYWORD_extern STRINGLITERALSINGLE?)? KEYWORD_threadlocal? VarDecl
      / KEYWORD_usingnamespace Expr SEMICOLON
 
-FnProto <- KEYWORD_fn IDENTIFIER? LPAREN ParamDeclList RPAREN ByteAlign? AddrSpace? LinkSection? CallConv? EXCLAMATIONMARK? TypeExpr
+FnProto <- KEYWORD_fn IDENTIFIER? LPAREN ParamDeclList RPAREN ByteAlign? LinkSection? CallConv? EXCLAMATIONMARK? TypeExpr
 
-VarDecl <- (KEYWORD_const / KEYWORD_var) IDENTIFIER (COLON TypeExpr)? ByteAlign? AddrSpace? LinkSection? (EQUAL Expr)? SEMICOLON
+VarDecl <- (KEYWORD_const / KEYWORD_var) IDENTIFIER (COLON TypeExpr)? ByteAlign? LinkSection? (EQUAL Expr)? SEMICOLON
 
-ContainerField
-     <- doc_comment? KEYWORD_comptime? IDENTIFIER (COLON TypeExpr ByteAlign?)? (EQUAL Expr)?
-      / doc_comment? KEYWORD_comptime? (IDENTIFIER COLON)? !KEYWORD_fn TypeExpr ByteAlign? (EQUAL Expr)?
+ContainerField <- doc_comment? KEYWORD_comptime? IDENTIFIER (COLON (KEYWORD_anytype / TypeExpr) ByteAlign?)? (EQUAL Expr)?
 
 # *** Block Level ***
 Statement
@@ -12251,8 +12646,6 @@ WhileContinueExpr <- COLON LPAREN AssignExpr RPAREN
 
 LinkSection <- KEYWORD_linksection LPAREN Expr RPAREN
 
-AddrSpace <- KEYWORD_addrspace LPAREN Expr RPAREN
-
 # Fn specific
 CallConv <- KEYWORD_callconv LPAREN Expr RPAREN
 
@@ -12280,7 +12673,7 @@ PtrIndexPayload <- PIPE ASTERISK? IDENTIFIER (COMMA IDENTIFIER)? PIPE
 
 
 # Switch specific
-SwitchProng <- KEYWORD_inline? SwitchCase EQUALRARROW PtrIndexPayload? AssignExpr
+SwitchProng <- SwitchCase EQUALRARROW PtrPayload? AssignExpr
 
 SwitchCase
     <- SwitchItem (COMMA SwitchItem)* COMMA?
@@ -12291,15 +12684,11 @@ SwitchItem <- Expr (DOT3 Expr)?
 # Operators
 AssignOp
     <- ASTERISKEQUAL
-     / ASTERISKPIPEEQUAL
      / SLASHEQUAL
      / PERCENTEQUAL
      / PLUSEQUAL
-     / PLUSPIPEEQUAL
      / MINUSEQUAL
-     / MINUSPIPEEQUAL
      / LARROW2EQUAL
-     / LARROW2PIPEEQUAL
      / RARROW2EQUAL
      / AMPERSANDEQUAL
      / CARETEQUAL
@@ -12327,7 +12716,6 @@ BitwiseOp
 BitShiftOp
     <- LARROW2
      / RARROW2
-     / LARROW2PIPE
 
 AdditionOp
     <- PLUS
@@ -12335,8 +12723,6 @@ AdditionOp
      / PLUS2
      / PLUSPERCENT
      / MINUSPERCENT
-     / PLUSPIPE
-     / MINUSPIPE
 
 MultiplyOp
     <- PIPE2
@@ -12345,7 +12731,6 @@ MultiplyOp
      / PERCENT
      / ASTERISK2
      / ASTERISKPERCENT
-     / ASTERISKPIPE
 
 PrefixOp
     <- EXCLAMATIONMARK
@@ -12359,8 +12744,8 @@ PrefixOp
 PrefixTypeOp
     <- QUESTIONMARK
      / KEYWORD_anyframe MINUSRARROW
-     / SliceTypeStart (ByteAlign / AddrSpace / KEYWORD_const / KEYWORD_volatile / KEYWORD_allowzero)*
-     / PtrTypeStart (AddrSpace / KEYWORD_align LPAREN Expr (COLON INTEGER COLON INTEGER)? RPAREN / KEYWORD_const / KEYWORD_volatile / KEYWORD_allowzero)*
+     / SliceTypeStart (ByteAlign / KEYWORD_const / KEYWORD_volatile / KEYWORD_allowzero)*
+     / PtrTypeStart (KEYWORD_align LPAREN Expr (COLON INTEGER COLON INTEGER)? RPAREN / KEYWORD_const / KEYWORD_volatile / KEYWORD_allowzero)*
      / ArrayTypeStart
 
 SuffixOp
@@ -12385,7 +12770,7 @@ ArrayTypeStart <- LBRACKET Expr (COLON Expr)? RBRACKET
 ContainerDeclAuto <- ContainerDeclType LBRACE container_doc_comment? ContainerMembers RBRACE
 
 ContainerDeclType
-    <- KEYWORD_struct (LPAREN Expr RPAREN)?
+    <- KEYWORD_struct
      / KEYWORD_opaque
      / KEYWORD_enum (LPAREN Expr RPAREN)?
      / KEYWORD_union (LPAREN (KEYWORD_enum (LPAREN Expr RPAREN)? / Expr) RPAREN)?
@@ -12475,8 +12860,8 @@ string_char
     <- char_escape
      / [^\\"\n]
 
-container_doc_comment <- ('//!' [^\n]* [ \n]* skip)+
-doc_comment <- ('///' [^\n]* [ \n]* skip)+
+container_doc_comment <- ('//!' [^\n]* [ \n]*)+
+doc_comment <- ('///' [^\n]* [ \n]*)+
 line_comment <- '//' ![!/][^\n]* / '////' [^\n]*
 line_string <- ("\\\\" [^\n]* [ \n]*)+
 skip <- ([ \n] / line_comment)*
@@ -12504,13 +12889,11 @@ BUILTINIDENTIFIER <- "@"[A-Za-z_][A-Za-z0-9_]* skip
 
 AMPERSAND            <- '&'      ![=]      skip
 AMPERSANDEQUAL       <- '&='               skip
-ASTERISK             <- '*'      ![*%=|]   skip
+ASTERISK             <- '*'      ![*%=]    skip
 ASTERISK2            <- '**'               skip
 ASTERISKEQUAL        <- '*='               skip
 ASTERISKPERCENT      <- '*%'     ![=]      skip
 ASTERISKPERCENTEQUAL <- '*%='              skip
-ASTERISKPIPE         <- '*|'     ![=]      skip
-ASTERISKPIPEEQUAL    <- '*|='              skip
 CARET                <- '^'      ![=]      skip
 CARETEQUAL           <- '^='               skip
 COLON                <- ':'                skip
@@ -12526,33 +12909,27 @@ EQUALRARROW          <- '=>'               skip
 EXCLAMATIONMARK      <- '!'      ![=]      skip
 EXCLAMATIONMARKEQUAL <- '!='               skip
 LARROW               <- '<'      ![<=]     skip
-LARROW2              <- '<<'     ![=|]     skip
+LARROW2              <- '<<'     ![=]      skip
 LARROW2EQUAL         <- '<<='              skip
-LARROW2PIPE          <- '<<|'    ![=]      skip
-LARROW2PIPEEQUAL     <- '<<|='             skip
 LARROWEQUAL          <- '<='               skip
 LBRACE               <- '{'                skip
 LBRACKET             <- '['                skip
 LPAREN               <- '('                skip
-MINUS                <- '-'      ![%=>|]   skip
+MINUS                <- '-'      ![%=>]    skip
 MINUSEQUAL           <- '-='               skip
 MINUSPERCENT         <- '-%'     ![=]      skip
 MINUSPERCENTEQUAL    <- '-%='              skip
-MINUSPIPE            <- '-|'     ![=]      skip
-MINUSPIPEEQUAL       <- '-|='              skip
 MINUSRARROW          <- '->'               skip
 PERCENT              <- '%'      ![=]      skip
 PERCENTEQUAL         <- '%='               skip
 PIPE                 <- '|'      ![|=]     skip
 PIPE2                <- '||'               skip
 PIPEEQUAL            <- '|='               skip
-PLUS                 <- '+'      ![%+=|]   skip
+PLUS                 <- '+'      ![%+=]    skip
 PLUS2                <- '++'               skip
 PLUSEQUAL            <- '+='               skip
 PLUSPERCENT          <- '+%'     ![=]      skip
 PLUSPERCENTEQUAL     <- '+%='              skip
-PLUSPIPE             <- '+|'     ![=]      skip
-PLUSPIPEEQUAL        <- '+|='              skip
 LETTERC              <- 'c'                skip
 QUESTIONMARK         <- '?'                skip
 RARROW               <- '>'      ![>=]     skip
@@ -12568,7 +12945,6 @@ SLASHEQUAL           <- '/='               skip
 TILDE                <- '~'                skip
 
 end_of_word <- ![a-zA-Z0-9_] skip
-KEYWORD_addrspace   <- 'addrspace'   end_of_word
 KEYWORD_align       <- 'align'       end_of_word
 KEYWORD_allowzero   <- 'allowzero'   end_of_word
 KEYWORD_and         <- 'and'         end_of_word
@@ -12618,11 +12994,11 @@ KEYWORD_var         <- 'var'         end_of_word
 KEYWORD_volatile    <- 'volatile'    end_of_word
 KEYWORD_while       <- 'while'       end_of_word
 
-keyword <- KEYWORD_addrspace / KEYWORD_align / KEYWORD_allowzero / KEYWORD_and
-         / KEYWORD_anyframe / KEYWORD_anytype / KEYWORD_asm / KEYWORD_async
-         / KEYWORD_await / KEYWORD_break / KEYWORD_callconv / KEYWORD_catch
-         / KEYWORD_comptime / KEYWORD_const / KEYWORD_continue / KEYWORD_defer
-         / KEYWORD_else / KEYWORD_enum / KEYWORD_errdefer / KEYWORD_error / KEYWORD_export
+keyword <- KEYWORD_align / KEYWORD_allowzero / KEYWORD_and / KEYWORD_anyframe
+         / KEYWORD_anytype / KEYWORD_asm / KEYWORD_async / KEYWORD_await
+         / KEYWORD_break / KEYWORD_callconv / KEYWORD_catch / KEYWORD_comptime
+         / KEYWORD_const / KEYWORD_continue / KEYWORD_defer / KEYWORD_else
+         / KEYWORD_enum / KEYWORD_errdefer / KEYWORD_error / KEYWORD_export
          / KEYWORD_extern / KEYWORD_fn / KEYWORD_for / KEYWORD_if
          / KEYWORD_inline / KEYWORD_noalias / KEYWORD_nosuspend / KEYWORD_noinline
          / KEYWORD_opaque / KEYWORD_or / KEYWORD_orelse / KEYWORD_packed
