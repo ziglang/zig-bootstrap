@@ -196,4 +196,5 @@ $ZIG build \
   -Dstrip \
   -Dtarget="$TARGET" \
   -Dcpu="$MCPU" \
-  -Dversion-string="$ZIG_VERSION"
+  -Dversion-string="$ZIG_VERSION" \
+  -Denable-stage1
