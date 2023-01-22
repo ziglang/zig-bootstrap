@@ -28,6 +28,7 @@ const EmulatableRunStep = std.build.EmulatableRunStep;
 const CheckObjectStep = std.build.CheckObjectStep;
 const RunStep = std.build.RunStep;
 const OptionsStep = std.build.OptionsStep;
+const ConfigHeaderStep = std.build.ConfigHeaderStep;
 const LibExeObjStep = @This();
 
 pub const base_id = .lib_exe_obj;
@@ -74,6 +75,9 @@ disable_sanitize_c: bool,
 sanitize_thread: bool,
 rdynamic: bool,
 import_memory: bool = false,
+/// For WebAssembly targets, this will allow for undefined symbols to
+/// be imported from the host environment.
+import_symbols: bool = false,
 import_table: bool = false,
 export_table: bool = false,
 initial_memory: ?u64 = null,
@@ -104,6 +108,7 @@ object_src: []const u8,
 link_objects: ArrayList(LinkObject),
 include_dirs: ArrayList(IncludeDir),
 c_macros: ArrayList([]const u8),
+installed_headers: ArrayList(*std.build.Step),
 output_dir: ?[]const u8,
 is_linking_libc: bool = false,
 is_linking_libcpp: bool = false,
@@ -151,6 +156,12 @@ link_z_relro: bool = true,
 
 /// Allow relocations to be lazily processed after load.
 link_z_lazy: bool = false,
+
+/// Common page size
+link_z_common_page_size: ?u64 = null,
+
+/// Maximum page size
+link_z_max_page_size: ?u64 = null,
 
 /// (Darwin) Install name for the dylib
 install_name: ?[]const u8 = null,
@@ -257,6 +268,7 @@ pub const IncludeDir = union(enum) {
     raw_path: []const u8,
     raw_path_system: []const u8,
     other_step: *LibExeObjStep,
+    config_header_step: *ConfigHeaderStep,
 };
 
 pub const Kind = enum {
@@ -359,6 +371,7 @@ fn initExtraArgs(
         .lib_paths = ArrayList([]const u8).init(builder.allocator),
         .rpaths = ArrayList([]const u8).init(builder.allocator),
         .framework_dirs = ArrayList([]const u8).init(builder.allocator),
+        .installed_headers = ArrayList(*std.build.Step).init(builder.allocator),
         .object_src = undefined,
         .c_std = Builder.CStd.C99,
         .override_lib_dir = null,
@@ -461,6 +474,33 @@ pub fn installRaw(self: *LibExeObjStep, dest_filename: []const u8, options: Inst
     return self.builder.installRaw(self, dest_filename, options);
 }
 
+pub fn installHeader(a: *LibExeObjStep, src_path: []const u8, dest_rel_path: []const u8) void {
+    const install_file = a.builder.addInstallHeaderFile(src_path, dest_rel_path);
+    a.builder.getInstallStep().dependOn(&install_file.step);
+    a.installed_headers.append(&install_file.step) catch unreachable;
+}
+
+pub fn installHeadersDirectory(
+    a: *LibExeObjStep,
+    src_dir_path: []const u8,
+    dest_rel_path: []const u8,
+) void {
+    return installHeadersDirectoryOptions(a, .{
+        .source_dir = src_dir_path,
+        .install_dir = .header,
+        .install_subdir = dest_rel_path,
+    });
+}
+
+pub fn installHeadersDirectoryOptions(
+    a: *LibExeObjStep,
+    options: std.build.InstallDirStep.Options,
+) void {
+    const install_dir = a.builder.addInstallDirectory(options);
+    a.builder.getInstallStep().dependOn(&install_dir.step);
+    a.installed_headers.append(&install_dir.step) catch unreachable;
+}
+
 /// Creates a `RunStep` with an executable built with `addExecutable`.
 /// Add command line arguments with `addArg`.
 pub fn run(exe: *LibExeObjStep) *RunStep {
@@ -545,41 +585,25 @@ pub fn linkLibrary(self: *LibExeObjStep, lib: *LibExeObjStep) void {
 }
 
 pub fn isDynamicLibrary(self: *LibExeObjStep) bool {
-    return self.kind == .lib and self.linkage != null and self.linkage.? == .dynamic;
+    return self.kind == .lib and self.linkage == Linkage.dynamic;
+}
+
+pub fn isStaticLibrary(self: *LibExeObjStep) bool {
+    return self.kind == .lib and self.linkage != Linkage.dynamic;
 }
 
 pub fn producesPdbFile(self: *LibExeObjStep) bool {
     if (!self.target.isWindows() and !self.target.isUefi()) return false;
-    if (self.strip != null and self.strip.?) return false;
+    if (self.strip == true) return false;
     return self.isDynamicLibrary() or self.kind == .exe or self.kind == .test_exe;
 }
 
 pub fn linkLibC(self: *LibExeObjStep) void {
-    if (!self.is_linking_libc) {
-        self.is_linking_libc = true;
-        self.link_objects.append(.{
-            .system_lib = .{
-                .name = "c",
-                .needed = false,
-                .weak = false,
-                .use_pkg_config = .no,
-            },
-        }) catch unreachable;
-    }
+    self.is_linking_libc = true;
 }
 
 pub fn linkLibCpp(self: *LibExeObjStep) void {
-    if (!self.is_linking_libcpp) {
-        self.is_linking_libcpp = true;
-        self.link_objects.append(.{
-            .system_lib = .{
-                .name = "c++",
-                .needed = false,
-                .weak = false,
-                .use_pkg_config = .no,
-            },
-        }) catch unreachable;
-    }
+    self.is_linking_libcpp = true;
 }
 
 /// If the value is omitted, it is set to 1.
@@ -722,7 +746,7 @@ pub fn runPkgConfig(self: *LibExeObjStep, lib_name: []const u8) ![]const []const
         else => return err,
     };
 
-    var zig_args = std.ArrayList([]const u8).init(self.builder.allocator);
+    var zig_args = ArrayList([]const u8).init(self.builder.allocator);
     defer zig_args.deinit();
 
     var it = mem.tokenize(u8, stdout, " \r\n\t");
@@ -923,6 +947,11 @@ pub fn addIncludePath(self: *LibExeObjStep, path: []const u8) void {
     self.include_dirs.append(IncludeDir{ .raw_path = self.builder.dupe(path) }) catch unreachable;
 }
 
+pub fn addConfigHeader(self: *LibExeObjStep, config_header: *ConfigHeaderStep) void {
+    self.step.dependOn(&config_header.step);
+    self.include_dirs.append(.{ .config_header_step = config_header }) catch @panic("OOM");
+}
+
 pub fn addLibraryPath(self: *LibExeObjStep, path: []const u8) void {
     self.lib_paths.append(self.builder.dupe(path)) catch unreachable;
 }
@@ -1060,21 +1089,8 @@ fn make(step: *Step) !void {
         try zig_args.append(try std.fmt.allocPrint(builder.allocator, "-freference-trace={d}", .{some}));
     }
 
-    if (self.use_llvm) |use_llvm| {
-        if (use_llvm) {
-            try zig_args.append("-fLLVM");
-        } else {
-            try zig_args.append("-fno-LLVM");
-        }
-    }
-
-    if (self.use_lld) |use_lld| {
-        if (use_lld) {
-            try zig_args.append("-fLLD");
-        } else {
-            try zig_args.append("-fno-LLD");
-        }
-    }
+    try addFlag(&zig_args, "LLVM", self.use_llvm);
+    try addFlag(&zig_args, "LLD", self.use_lld);
 
     if (self.target.ofmt) |ofmt| {
         try zig_args.append(try std.fmt.allocPrint(builder.allocator, "-ofmt={s}", .{@tagName(ofmt)}));
@@ -1092,40 +1108,24 @@ fn make(step: *Step) !void {
 
     if (self.root_src) |root_src| try zig_args.append(root_src.getPath(builder));
 
+    // We will add link objects from transitive dependencies, but we want to keep
+    // all link objects in the same order provided.
+    // This array is used to keep self.link_objects immutable.
+    var transitive_deps: TransitiveDeps = .{
+        .link_objects = ArrayList(LinkObject).init(builder.allocator),
+        .seen_system_libs = StringHashMap(void).init(builder.allocator),
+        .seen_steps = std.AutoHashMap(*const Step, void).init(builder.allocator),
+        .is_linking_libcpp = self.is_linking_libcpp,
+        .is_linking_libc = self.is_linking_libc,
+        .frameworks = &self.frameworks,
+    };
+
+    try transitive_deps.seen_steps.put(&self.step, {});
+    try transitive_deps.add(self.link_objects.items);
+
     var prev_has_extra_flags = false;
 
-    // Resolve transitive dependencies
-    {
-        var transitive_dependencies = std.ArrayList(LinkObject).init(builder.allocator);
-        defer transitive_dependencies.deinit();
-
-        for (self.link_objects.items) |link_object| {
-            switch (link_object) {
-                .other_step => |other| {
-                    // Inherit dependency on system libraries
-                    for (other.link_objects.items) |other_link_object| {
-                        switch (other_link_object) {
-                            .system_lib => try transitive_dependencies.append(other_link_object),
-                            else => continue,
-                        }
-                    }
-
-                    // Inherit dependencies on darwin frameworks
-                    if (!other.isDynamicLibrary()) {
-                        var it = other.frameworks.iterator();
-                        while (it.next()) |framework| {
-                            self.frameworks.put(framework.key_ptr.*, framework.value_ptr.*) catch unreachable;
-                        }
-                    }
-                },
-                else => continue,
-            }
-        }
-
-        try self.link_objects.appendSlice(transitive_dependencies.items);
-    }
-
-    for (self.link_objects.items) |link_object| {
+    for (transitive_deps.link_objects.items) |link_object| {
         switch (link_object) {
             .static_path => |static_path| try zig_args.append(static_path.getPath(builder)),
 
@@ -1136,11 +1136,16 @@ fn make(step: *Step) !void {
                 .obj => {
                     try zig_args.append(other.getOutputSource().getPath(builder));
                 },
-                .lib => {
+                .lib => l: {
+                    if (self.isStaticLibrary() and other.isStaticLibrary()) {
+                        // Avoid putting a static library inside a static library.
+                        break :l;
+                    }
+
                     const full_path_lib = other.getOutputLibSource().getPath(builder);
                     try zig_args.append(full_path_lib);
 
-                    if (other.linkage != null and other.linkage.? == .dynamic and !self.target.isWindows()) {
+                    if (other.linkage == Linkage.dynamic and !self.target.isWindows()) {
                         if (fs.path.dirname(full_path_lib)) |dirname| {
                             try zig_args.append("-rpath");
                             try zig_args.append(dirname);
@@ -1237,6 +1242,14 @@ fn make(step: *Step) !void {
         }
     }
 
+    if (transitive_deps.is_linking_libcpp) {
+        try zig_args.append("-lc++");
+    }
+
+    if (transitive_deps.is_linking_libc) {
+        try zig_args.append("-lc");
+    }
+
     if (self.image_base) |image_base| {
         try zig_args.append("--image-base");
         try zig_args.append(builder.fmt("0x{x}", .{image_base}));
@@ -1287,21 +1300,8 @@ fn make(step: *Step) !void {
 
     if (self.emit_h) try zig_args.append("-femit-h");
 
-    if (self.strip) |strip| {
-        if (strip) {
-            try zig_args.append("-fstrip");
-        } else {
-            try zig_args.append("-fno-strip");
-        }
-    }
-
-    if (self.unwind_tables) |unwind_tables| {
-        if (unwind_tables) {
-            try zig_args.append("-funwind-tables");
-        } else {
-            try zig_args.append("-fno-unwind-tables");
-        }
-    }
+    try addFlag(&zig_args, "strip", self.strip);
+    try addFlag(&zig_args, "unwind-tables", self.unwind_tables);
 
     switch (self.compress_debug_sections) {
         .none => {},
@@ -1335,10 +1335,18 @@ fn make(step: *Step) !void {
         try zig_args.append("-z");
         try zig_args.append("lazy");
     }
+    if (self.link_z_common_page_size) |size| {
+        try zig_args.append("-z");
+        try zig_args.append(builder.fmt("common-page-size={d}", .{size}));
+    }
+    if (self.link_z_max_page_size) |size| {
+        try zig_args.append("-z");
+        try zig_args.append(builder.fmt("max-page-size={d}", .{size}));
+    }
 
     if (self.libc_file) |libc_file| {
         try zig_args.append("--libc");
-        try zig_args.append(libc_file.getPath(self.builder));
+        try zig_args.append(libc_file.getPath(builder));
     } else if (builder.libc_file) |libc_file| {
         try zig_args.append("--libc");
         try zig_args.append(libc_file);
@@ -1401,51 +1409,16 @@ fn make(step: *Step) !void {
         try zig_args.append("-dead_strip_dylibs");
     }
 
-    if (self.bundle_compiler_rt) |x| {
-        if (x) {
-            try zig_args.append("-fcompiler-rt");
-        } else {
-            try zig_args.append("-fno-compiler-rt");
-        }
-    }
-    if (self.single_threaded) |single_threaded| {
-        if (single_threaded) {
-            try zig_args.append("-fsingle-threaded");
-        } else {
-            try zig_args.append("-fno-single-threaded");
-        }
-    }
+    try addFlag(&zig_args, "compiler-rt", self.bundle_compiler_rt);
+    try addFlag(&zig_args, "single-threaded", self.single_threaded);
     if (self.disable_stack_probing) {
         try zig_args.append("-fno-stack-check");
     }
-    if (self.stack_protector) |stack_protector| {
-        if (stack_protector) {
-            try zig_args.append("-fstack-protector");
-        } else {
-            try zig_args.append("-fno-stack-protector");
-        }
-    }
-    if (self.red_zone) |red_zone| {
-        if (red_zone) {
-            try zig_args.append("-mred-zone");
-        } else {
-            try zig_args.append("-mno-red-zone");
-        }
-    }
-    if (self.omit_frame_pointer) |omit_frame_pointer| {
-        if (omit_frame_pointer) {
-            try zig_args.append("-fomit-frame-pointer");
-        } else {
-            try zig_args.append("-fno-omit-frame-pointer");
-        }
-    }
-    if (self.dll_export_fns) |dll_export_fns| {
-        if (dll_export_fns) {
-            try zig_args.append("-fdll-export-fns");
-        } else {
-            try zig_args.append("-fno-dll-export-fns");
-        }
-    }
+    try addFlag(&zig_args, "stack-protector", self.stack_protector);
+    try addFlag(&zig_args, "red-zone", self.red_zone);
+    try addFlag(&zig_args, "omit-frame-pointer", self.omit_frame_pointer);
+    try addFlag(&zig_args, "dll-export-fns", self.dll_export_fns);
+
     if (self.disable_sanitize_c) {
         try zig_args.append("-fno-sanitize-c");
     }
@@ -1457,6 +1430,9 @@ fn make(step: *Step) !void {
     }
     if (self.import_memory) {
         try zig_args.append("--import-memory");
+    }
+    if (self.import_symbols) {
+        try zig_args.append("--import-symbols");
     }
     if (self.import_table) {
         try zig_args.append("--import-table");
@@ -1503,7 +1479,7 @@ fn make(step: *Step) !void {
             try zig_args.append("-mcpu");
             try zig_args.append(cross.cpu.model.name);
         } else {
-            var mcpu_buffer = std.ArrayList(u8).init(builder.allocator);
+            var mcpu_buffer = ArrayList(u8).init(builder.allocator);
 
             try mcpu_buffer.writer().print("-mcpu={s}", .{cross.cpu.model.name});
 
@@ -1548,11 +1524,11 @@ fn make(step: *Step) !void {
                 }
             }
         } else {
-            const need_cross_glibc = self.target.isGnuLibC() and self.is_linking_libc;
+            const need_cross_glibc = self.target.isGnuLibC() and transitive_deps.is_linking_libc;
 
-            switch (self.builder.host.getExternalExecutor(self.target_info, .{
+            switch (builder.host.getExternalExecutor(self.target_info, .{
                 .qemu_fixes_dl = need_cross_glibc and builder.glibc_runtimes_dir != null,
-                .link_libc = self.is_linking_libc,
+                .link_libc = transitive_deps.is_linking_libc,
             })) {
                 .native => {},
                 .bad_dl, .bad_os_or_cpu => {
@@ -1609,8 +1585,6 @@ fn make(step: *Step) !void {
                     try zig_args.append(bin_name);
                     try zig_args.append("--test-cmd");
                     try zig_args.append("--dir=.");
-                    try zig_args.append("--test-cmd");
-                    try zig_args.append("--allow-unknown-exports"); // TODO: Remove when stage2 is default compiler
                     try zig_args.append("--test-cmd-bin");
                 } else {
                     try zig_args.append("--test-no-exec");
@@ -1636,7 +1610,7 @@ fn make(step: *Step) !void {
         switch (include_dir) {
             .raw_path => |include_path| {
                 try zig_args.append("-I");
-                try zig_args.append(self.builder.pathFromRoot(include_path));
+                try zig_args.append(builder.pathFromRoot(include_path));
             },
             .raw_path_system => |include_path| {
                 if (builder.sysroot != null) {
@@ -1645,7 +1619,7 @@ fn make(step: *Step) !void {
                     try zig_args.append("-isystem");
                 }
 
-                const resolved_include_path = self.builder.pathFromRoot(include_path);
+                const resolved_include_path = builder.pathFromRoot(include_path);
 
                 const common_include_path = if (builtin.os.tag == .windows and builder.sysroot != null and fs.path.isAbsolute(resolved_include_path)) blk: {
                     // We need to check for disk designator and strip it out from dir path so
@@ -1661,10 +1635,25 @@ fn make(step: *Step) !void {
 
                 try zig_args.append(common_include_path);
             },
-            .other_step => |other| if (other.emit_h) {
-                const h_path = other.getOutputHSource().getPath(self.builder);
-                try zig_args.append("-isystem");
-                try zig_args.append(fs.path.dirname(h_path).?);
+            .other_step => |other| {
+                if (other.emit_h) {
+                    const h_path = other.getOutputHSource().getPath(builder);
+                    try zig_args.append("-isystem");
+                    try zig_args.append(fs.path.dirname(h_path).?);
+                }
+                if (other.installed_headers.items.len > 0) {
+                    for (other.installed_headers.items) |install_step| {
+                        try install_step.make();
+                    }
+                    try zig_args.append("-I");
+                    try zig_args.append(builder.pathJoin(&.{
+                        other.builder.install_prefix, "include",
+                    }));
+                }
+            },
+            .config_header_step => |config_header| {
+                try zig_args.append("-I");
+                try zig_args.append(config_header.output_dir);
             },
         }
     }
@@ -1734,34 +1723,14 @@ fn make(step: *Step) !void {
         }));
     }
 
-    if (self.valgrind_support) |valgrind_support| {
-        if (valgrind_support) {
-            try zig_args.append("-fvalgrind");
-        } else {
-            try zig_args.append("-fno-valgrind");
-        }
-    }
-
-    if (self.each_lib_rpath) |each_lib_rpath| {
-        if (each_lib_rpath) {
-            try zig_args.append("-feach-lib-rpath");
-        } else {
-            try zig_args.append("-fno-each-lib-rpath");
-        }
-    }
-
-    if (self.build_id) |build_id| {
-        if (build_id) {
-            try zig_args.append("-fbuild-id");
-        } else {
-            try zig_args.append("-fno-build-id");
-        }
-    }
+    try addFlag(&zig_args, "valgrind", self.valgrind_support);
+    try addFlag(&zig_args, "each-lib-rpath", self.each_lib_rpath);
+    try addFlag(&zig_args, "build-id", self.build_id);
 
     if (self.override_lib_dir) |dir| {
         try zig_args.append("--zig-lib-dir");
         try zig_args.append(builder.pathFromRoot(dir));
-    } else if (self.builder.override_lib_dir) |dir| {
+    } else if (builder.override_lib_dir) |dir| {
         try zig_args.append("--zig-lib-dir");
         try zig_args.append(builder.pathFromRoot(dir));
     }
@@ -1771,29 +1740,9 @@ fn make(step: *Step) !void {
         try zig_args.append(builder.pathFromRoot(dir));
     }
 
-    if (self.force_pic) |pic| {
-        if (pic) {
-            try zig_args.append("-fPIC");
-        } else {
-            try zig_args.append("-fno-PIC");
-        }
-    }
-
-    if (self.pie) |pie| {
-        if (pie) {
-            try zig_args.append("-fPIE");
-        } else {
-            try zig_args.append("-fno-PIE");
-        }
-    }
-
-    if (self.want_lto) |lto| {
-        if (lto) {
-            try zig_args.append("-flto");
-        } else {
-            try zig_args.append("-fno-lto");
-        }
-    }
+    try addFlag(&zig_args, "PIC", self.force_pic);
+    try addFlag(&zig_args, "PIE", self.pie);
+    try addFlag(&zig_args, "lto", self.want_lto);
 
     if (self.subsystem) |subsystem| {
         try zig_args.append("--subsystem");
@@ -2060,3 +2009,73 @@ test "addPackage" {
     const dupe = exe.packages.items[0];
     try std.testing.expectEqualStrings(pkg_top.name, dupe.name);
 }
+
+fn addFlag(args: *ArrayList([]const u8), comptime name: []const u8, opt: ?bool) !void {
+    const cond = opt orelse return;
+    try args.ensureUnusedCapacity(1);
+    if (cond) {
+        args.appendAssumeCapacity("-f" ++ name);
+    } else {
+        args.appendAssumeCapacity("-fno-" ++ name);
+    }
+}
+
+const TransitiveDeps = struct {
+    link_objects: ArrayList(LinkObject),
+    seen_system_libs: StringHashMap(void),
+    seen_steps: std.AutoHashMap(*const Step, void),
+    is_linking_libcpp: bool,
+    is_linking_libc: bool,
+    frameworks: *StringHashMap(FrameworkLinkInfo),
+
+    fn add(td: *TransitiveDeps, link_objects: []const LinkObject) !void {
+        try td.link_objects.ensureUnusedCapacity(link_objects.len);
+
+        for (link_objects) |link_object| {
+            try td.link_objects.append(link_object);
+            switch (link_object) {
+                .other_step => |other| try addInner(td, other, other.isDynamicLibrary()),
+                else => {},
+            }
+        }
+    }
+
+    fn addInner(td: *TransitiveDeps, other: *LibExeObjStep, dyn: bool) !void {
+        // Inherit dependency on libc and libc++
+        td.is_linking_libcpp = td.is_linking_libcpp or other.is_linking_libcpp;
+        td.is_linking_libc = td.is_linking_libc or other.is_linking_libc;
+
+        // Inherit dependencies on darwin frameworks
+        if (!dyn) {
+            var it = other.frameworks.iterator();
+            while (it.next()) |framework| {
+                try td.frameworks.put(framework.key_ptr.*, framework.value_ptr.*);
+            }
+        }
+
+        // Inherit dependencies on system libraries and static libraries.
+        for (other.link_objects.items) |other_link_object| {
+            switch (other_link_object) {
+                .system_lib => |system_lib| {
+                    if ((try td.seen_system_libs.fetchPut(system_lib.name, {})) != null)
+                        continue;
+
+                    if (dyn)
+                        continue;
+
+                    try td.link_objects.append(other_link_object);
+                },
+                .other_step => |inner_other| {
+                    if ((try td.seen_steps.fetchPut(&inner_other.step, {})) != null)
+                        continue;
+
+                    if (!dyn)
+                        try td.link_objects.append(other_link_object);
+
+                    try addInner(td, inner_other, dyn or inner_other.isDynamicLibrary());
+                },
+                else => continue,
+            }
+        }
+    }
+};

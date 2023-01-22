@@ -121,6 +121,8 @@ pub const Options = struct {
     z_nocopyreloc: bool,
     z_now: bool,
     z_relro: bool,
+    z_common_page_size: ?u64,
+    z_max_page_size: ?u64,
     tsaware: bool,
     nxcompat: bool,
     dynamicbase: bool,
@@ -128,6 +130,7 @@ pub const Options = struct {
     compress_debug_sections: CompressDebugSections,
     bind_global_refs_locally: bool,
     import_memory: bool,
+    import_symbols: bool,
     import_table: bool,
     export_table: bool,
     initial_memory: ?u64,
@@ -168,6 +171,7 @@ pub const Options = struct {
     print_gc_sections: bool,
     print_icf_sections: bool,
     print_map: bool,
+    opt_bisect_limit: i32,
 
     objects: []Compilation.LinkObject,
     framework_dirs: []const []const u8,
@@ -216,6 +220,16 @@ pub const Options = struct {
 
     /// (Darwin) remove dylibs that are unreachable by the entry point or exported symbols
     dead_strip_dylibs: bool = false,
+
+    /// (Windows) PDB source path prefix to instruct the linker how to resolve relative
+    /// paths when consolidating CodeView streams into a single PDB file.
+    pdb_source_path: ?[]const u8 = null,
+
+    /// (Windows) PDB output path
+    pdb_out_path: ?[]const u8 = null,
+
+    /// (Windows) .def file to specify when linking
+    module_definition_file: ?[]const u8 = null,
 
     pub fn effectiveOutputMode(options: Options) std.builtin.OutputMode {
         return if (options.use_lld) .Obj else options.output_mode;
@@ -683,6 +697,7 @@ pub const File = struct {
     /// TODO audit this error set. most of these should be collapsed into one error,
     /// and ErrorFlags should be updated to convey the meaning to the user.
     pub const FlushError = error{
+        BadDwarfCfi,
         CacheUnavailable,
         CurrentWorkingDirectoryUnlinked,
         DivisionByZero,
@@ -702,6 +717,7 @@ pub const File = struct {
         InvalidFeatureSet,
         InvalidFormat,
         InvalidIndex,
+        InvalidInitFunc,
         InvalidMagicByte,
         InvalidWasmVersion,
         LLDCrashed,
@@ -722,6 +738,8 @@ pub const File = struct {
         MissingEndForExpression,
         /// TODO: this should be removed from the error set in favor of using ErrorFlags
         MissingMainEntrypoint,
+        /// TODO: this should be removed from the error set in favor of using ErrorFlags
+        MissingSection,
         MissingSymbol,
         MissingTableSymbols,
         ModuleNameMismatch,

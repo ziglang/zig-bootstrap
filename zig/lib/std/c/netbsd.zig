@@ -1,4 +1,5 @@
 const std = @import("../std.zig");
+const assert = std.debug.assert;
 const builtin = @import("builtin");
 const maxInt = std.math.maxInt;
 const iovec = std.os.iovec;
@@ -481,7 +482,16 @@ pub const sockaddr = extern struct {
     data: [14]u8,
 
     pub const SS_MAXSIZE = 128;
-    pub const storage = std.x.os.Socket.Address.Native.Storage;
+    pub const storage = extern struct {
+        len: u8 align(8),
+        family: sa_family_t,
+        padding: [126]u8 = undefined,
+
+        comptime {
+            assert(@sizeOf(storage) == SS_MAXSIZE);
+            assert(@alignOf(storage) == 8);
+        }
+    };
 
     pub const in = extern struct {
         len: u8 = @sizeOf(in),
@@ -537,6 +547,7 @@ pub const KERN = struct {
 };
 
 pub const PATH_MAX = 1024;
+pub const NAME_MAX = 255;
 pub const IOV_MAX = KERN.IOV_MAX;
 
 pub const STDIN_FILENO = 0;
@@ -689,13 +700,17 @@ pub const F = struct {
     pub const SETFD = 2;
     pub const GETFL = 3;
     pub const SETFL = 4;
-
     pub const GETOWN = 5;
     pub const SETOWN = 6;
-
     pub const GETLK = 7;
     pub const SETLK = 8;
     pub const SETLKW = 9;
+    pub const CLOSEM = 10;
+    pub const MAXFD = 11;
+    pub const DUPFD_CLOEXEC = 12;
+    pub const GETNOSIGPIPE = 13;
+    pub const SETNOSIGPIPE = 14;
+    pub const GETPATH = 15;
 
     pub const RDLCK = 1;
     pub const WRLCK = 3;
@@ -1046,17 +1061,37 @@ pub const sigset_t = extern struct {
 
 pub const empty_sigset = sigset_t{ .__bits = [_]u32{0} ** SIG.WORDS };
 
-// XXX x86_64 specific
-pub const mcontext_t = extern struct {
-    gregs: [26]u64,
-    mc_tlsbase: u64,
-    fpregs: [512]u8 align(8),
+pub const mcontext_t = switch (builtin.cpu.arch) {
+    .aarch64 => extern struct {
+        gregs: [35]u64,
+        fregs: [528]u8 align(16),
+        spare: [8]u64,
+    },
+    .x86_64 => extern struct {
+        gregs: [26]u64,
+        mc_tlsbase: u64,
+        fpregs: [512]u8 align(8),
+    },
+    else => struct {},
 };
 
-pub const REG = struct {
-    pub const RBP = 12;
-    pub const RIP = 21;
-    pub const RSP = 24;
+pub const REG = switch (builtin.cpu.arch) {
+    .aarch64 => struct {
+        pub const FP = 29;
+        pub const SP = 31;
+        pub const PC = 32;
+    },
+    .arm => struct {
+        pub const FP = 11;
+        pub const SP = 13;
+        pub const PC = 15;
+    },
+    .x86_64 => struct {
+        pub const RBP = 12;
+        pub const RIP = 21;
+        pub const RSP = 24;
+    },
+    else => struct {},
 };
 
 pub const ucontext_t = extern struct {

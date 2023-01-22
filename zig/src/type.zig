@@ -1236,7 +1236,7 @@ pub const Type = extern union {
             // we can't hash these based on tags because they wouldn't match the expanded version.
             .type_info => unreachable, // needed to resolve the type before now
 
-            .bound_fn => unreachable, // TODO delete from the language
+            .bound_fn => unreachable,
             .var_args_param => unreachable, // can be any type
         }
     }
@@ -1689,13 +1689,13 @@ pub const Type = extern union {
                         try writer.writeAll("...");
                     }
                     try writer.writeAll(") ");
+                    if (payload.alignment != 0) {
+                        try writer.print("align({d}) ", .{payload.alignment});
+                    }
                     if (payload.cc != .Unspecified) {
                         try writer.writeAll("callconv(.");
                         try writer.writeAll(@tagName(payload.cc));
                         try writer.writeAll(") ");
-                    }
-                    if (payload.alignment != 0) {
-                        try writer.print("align({d}) ", .{payload.alignment});
                     }
                     ty = payload.return_type;
                     continue;
@@ -2084,13 +2084,13 @@ pub const Type = extern union {
                     try writer.writeAll("...");
                 }
                 try writer.writeAll(") ");
+                if (fn_info.alignment != 0) {
+                    try writer.print("align({d}) ", .{fn_info.alignment});
+                }
                 if (fn_info.cc != .Unspecified) {
                     try writer.writeAll("callconv(.");
                     try writer.writeAll(@tagName(fn_info.cc));
                     try writer.writeAll(") ");
-                }
-                if (fn_info.alignment != 0) {
-                    try writer.print("align({d}) ", .{fn_info.alignment});
                 }
                 if (fn_info.return_type.tag() == .generic_poison) {
                     try writer.writeAll("anytype");
@@ -2195,7 +2195,12 @@ pub const Type = extern union {
                     .Slice => try writer.writeAll("[]"),
                 }
                 if (info.@"align" != 0 or info.host_size != 0 or info.vector_index != .none) {
-                    try writer.print("align({d}", .{info.@"align"});
+                    if (info.@"align" != 0) {
+                        try writer.print("align({d}", .{info.@"align"});
+                    } else {
+                        const alignment = info.pointee_type.abiAlignment(mod.getTarget());
+                        try writer.print("align({d}", .{alignment});
+                    }
 
                     if (info.bit_offset != 0 or info.host_size != 0) {
                         try writer.print(":{d}:{d}", .{ info.bit_offset, info.host_size });
@@ -3267,7 +3272,7 @@ pub const Type = extern union {
             .fn_ccc_void_no_args => unreachable, // represents machine code; not a pointer
             .function => unreachable, // represents machine code; not a pointer
             .@"opaque" => unreachable, // no size available
-            .bound_fn => unreachable, // TODO remove from the language
+            .bound_fn => unreachable,
             .noreturn => unreachable,
             .inferred_alloc_const => unreachable,
             .inferred_alloc_mut => unreachable,
@@ -3784,6 +3789,39 @@ pub const Type = extern union {
         }
     }
 
+    /// Returns true if the type's layout is already resolved and it is safe
+    /// to use `abiSize`, `abiAlignment` and `bitSize` on it.
+    pub fn layoutIsResolved(ty: Type) bool {
+        switch (ty.zigTypeTag()) {
+            .Struct => {
+                if (ty.castTag(.@"struct")) |struct_ty| {
+                    return struct_ty.data.haveLayout();
+                }
+                return true;
+            },
+            .Union => {
+                if (ty.cast(Payload.Union)) |union_ty| {
+                    return union_ty.data.haveLayout();
+                }
+                return true;
+            },
+            .Array => {
+                if (ty.arrayLenIncludingSentinel() == 0) return true;
+                return ty.childType().layoutIsResolved();
+            },
+            .Optional => {
+                var buf: Type.Payload.ElemType = undefined;
+                const payload_ty = ty.optionalChild(&buf);
+                return payload_ty.layoutIsResolved();
+            },
+            .ErrorUnion => {
+                const payload_ty = ty.errorUnionPayload();
+                return payload_ty.layoutIsResolved();
+            },
+            else => return true,
+        }
+    }
+
     pub fn isSinglePointer(self: Type) bool {
         return switch (self.tag()) {
             .single_const_pointer,
@@ -4081,47 +4119,6 @@ pub const Type = extern union {
 
             else => return false,
         }
-    }
-
-    /// Returns if type can be used for a runtime variable
-    pub fn isValidVarType(self: Type, is_extern: bool) bool {
-        var ty = self;
-        while (true) switch (ty.zigTypeTag()) {
-            .Bool,
-            .Int,
-            .Float,
-            .ErrorSet,
-            .Enum,
-            .Frame,
-            .AnyFrame,
-            => return true,
-
-            .Opaque => return is_extern,
-            .ComptimeFloat,
-            .ComptimeInt,
-            .EnumLiteral,
-            .NoReturn,
-            .Type,
-            .Void,
-            .Undefined,
-            .Null,
-            => return false,
-
-            .Optional => {
-                var buf: Payload.ElemType = undefined;
-                return ty.optionalChild(&buf).isValidVarType(is_extern);
-            },
-            .Pointer, .Array, .Vector => ty = ty.elemType(),
-            .ErrorUnion => ty = ty.errorUnionPayload(),
-
-            .Fn => @panic("TODO fn isValidVarType"),
-            .Struct => {
-                // TODO this is not always correct; introduce lazy value mechanism
-                // and here we need to force a resolve of "type requires comptime".
-                return true;
-            },
-            .Union => @panic("TODO union isValidVarType"),
-        };
     }
 
     /// For *[N]T,  returns [N]T.
@@ -5429,7 +5426,6 @@ pub const Type = extern union {
     }
 
     /// Asserts the type is an enum or a union.
-    /// TODO support unions
     pub fn intTagType(ty: Type, buffer: *Payload.Bits) Type {
         switch (ty.tag()) {
             .enum_full, .enum_nonexhaustive => return ty.cast(Payload.EnumFull).?.data.tag_ty,
@@ -5537,7 +5533,7 @@ pub const Type = extern union {
         }
         const S = struct {
             fn fieldWithRange(int_ty: Type, int_val: Value, end: usize, m: *Module) ?usize {
-                if (int_val.compareAllWithZero(.lt)) return null;
+                if (int_val.compareAllWithZero(.lt, m)) return null;
                 var end_payload: Value.Payload.U64 = .{
                     .base = .{ .tag = .int_u64 },
                     .data = end,
@@ -5778,10 +5774,14 @@ pub const Type = extern union {
         target: Target,
 
         pub fn next(it: *StructOffsetIterator) ?FieldOffset {
-            const i = it.field;
+            var i = it.field;
             if (it.struct_obj.fields.count() <= i)
                 return null;
 
+            if (it.struct_obj.optimized_order) |some| {
+                i = some[i];
+                if (i == Module.Struct.omitted_field) return null;
+            }
             const field = it.struct_obj.fields.values()[i];
             it.field += 1;
 
@@ -6531,12 +6531,7 @@ pub const Type = extern union {
         // pointee type needs to be resolved more, that needs to be done before calling
         // this ptr() function.
         if (d.@"align" != 0) canonicalize: {
-            if (d.pointee_type.castTag(.@"struct")) |struct_ty| {
-                if (!struct_ty.data.haveLayout()) break :canonicalize;
-            }
-            if (d.pointee_type.cast(Payload.Union)) |union_ty| {
-                if (!union_ty.data.haveLayout()) break :canonicalize;
-            }
+            if (!d.pointee_type.layoutIsResolved()) break :canonicalize;
             if (d.@"align" == d.pointee_type.abiAlignment(target)) {
                 d.@"align" = 0;
             }
@@ -6561,12 +6556,12 @@ pub const Type = extern union {
                 if (!d.mutable and d.pointee_type.eql(Type.u8, mod)) {
                     switch (d.size) {
                         .Slice => {
-                            if (sent.compareAllWithZero(.eq)) {
+                            if (sent.compareAllWithZero(.eq, mod)) {
                                 return Type.initTag(.const_slice_u8_sentinel_0);
                             }
                         },
                         .Many => {
-                            if (sent.compareAllWithZero(.eq)) {
+                            if (sent.compareAllWithZero(.eq, mod)) {
                                 return Type.initTag(.manyptr_const_u8_sentinel_0);
                             }
                         },

@@ -293,6 +293,10 @@ pub fn getEnvMap(allocator: Allocator) !EnvMap {
             return os.unexpectedErrno(environ_sizes_get_ret);
         }
 
+        if (environ_count == 0) {
+            return result;
+        }
+
         var environ = try allocator.alloc([*:0]u8, environ_count);
         defer allocator.free(environ);
         var environ_buf = try allocator.alloc(u8, environ_buf_size);
@@ -307,7 +311,7 @@ pub fn getEnvMap(allocator: Allocator) !EnvMap {
             const pair = mem.sliceTo(env, 0);
             var parts = mem.split(u8, pair, "=");
             const key = parts.first();
-            const value = parts.next().?;
+            const value = parts.rest();
             try result.put(key, value);
         }
         return result;
@@ -369,6 +373,11 @@ pub fn getEnvVarOwned(allocator: Allocator, key: []const u8) GetEnvVarOwnedError
             error.UnexpectedSecondSurrogateHalf => return error.InvalidUtf8,
             else => |e| return e,
         };
+    } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
+        var envmap = getEnvMap(allocator) catch return error.OutOfMemory;
+        defer envmap.deinit();
+        const val = envmap.get(key) orelse return error.EnvironmentVariableNotFound;
+        return allocator.dupe(u8, val);
     } else {
         const result = os.getenv(key) orelse return error.EnvironmentVariableNotFound;
         return allocator.dupe(u8, result);
@@ -379,6 +388,8 @@ pub fn hasEnvVarConstant(comptime key: []const u8) bool {
     if (builtin.os.tag == .windows) {
         const key_w = comptime std.unicode.utf8ToUtf16LeStringLiteral(key);
         return std.os.getenvW(key_w) != null;
+    } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
+        @compileError("hasEnvVarConstant is not supported for WASI without libc");
     } else {
         return os.getenv(key) != null;
     }
@@ -390,6 +401,10 @@ pub fn hasEnvVar(allocator: Allocator, key: []const u8) error{OutOfMemory}!bool 
         const key_w = try std.unicode.utf8ToUtf16LeWithNull(stack_alloc.get(), key);
         defer stack_alloc.allocator.free(key_w);
         return std.os.getenvW(key_w) != null;
+    } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
+        var envmap = getEnvMap(allocator) catch return error.OutOfMemory;
+        defer envmap.deinit();
+        return envmap.getPtr(key) != null;
     } else {
         return os.getenv(key) != null;
     }
@@ -455,6 +470,10 @@ pub const ArgIteratorWasi = struct {
         switch (w.args_sizes_get(&count, &buf_size)) {
             .SUCCESS => {},
             else => |err| return os.unexpectedErrno(err),
+        }
+
+        if (count == 0) {
+            return &[_][:0]u8{};
         }
 
         var argv = try allocator.alloc([*:0]u8, count);

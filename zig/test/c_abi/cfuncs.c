@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
-void zig_panic();
+void zig_panic(void);
 
 static void assert_or_panic(bool ok) {
     if (!ok) {
@@ -58,6 +58,54 @@ static void assert_or_panic(bool ok) {
 
 #ifdef __riscv
 #  define ZIG_NO_COMPLEX
+#endif
+
+#ifdef __x86_64__
+#define ZIG_NO_RAW_F16
+#endif
+
+#ifdef __i386__
+#define ZIG_NO_RAW_F16
+#endif
+
+#ifdef __mips__
+#define ZIG_NO_RAW_F16
+#endif
+
+#ifdef __riscv
+#define ZIG_NO_RAW_F16
+#endif
+
+#ifdef __wasm__
+#define ZIG_NO_RAW_F16
+#endif
+
+#ifdef __powerpc__
+#define ZIG_NO_RAW_F16
+#endif
+
+#ifdef __aarch64__
+#define ZIG_NO_F128
+#endif
+
+#ifdef __arm__
+#define ZIG_NO_F128
+#endif
+
+#ifdef __mips__
+#define ZIG_NO_F128
+#endif
+
+#ifdef __riscv
+#define ZIG_NO_F128
+#endif
+
+#ifdef __powerpc__
+#define ZIG_NO_F128
+#endif
+
+#ifdef __APPLE__
+#define ZIG_NO_F128
 #endif
 
 #ifndef ZIG_NO_I128
@@ -884,3 +932,98 @@ void c_func_ptr_byval(void *a, void *b, struct ByVal in, unsigned long c, void *
     assert_or_panic((intptr_t)d == 4);
     assert_or_panic(e == 5);
 }
+
+#ifndef ZIG_NO_RAW_F16
+__fp16 c_f16(__fp16 a) {
+    assert_or_panic(a == 12);
+    return 34;
+}
+#endif
+
+typedef struct {
+    __fp16 a;
+} f16_struct;
+f16_struct c_f16_struct(f16_struct a) {
+    assert_or_panic(a.a == 12);
+    return (f16_struct){34};
+}
+
+#if defined __x86_64__ || defined __i386__
+typedef long double f80;
+f80 c_f80(f80 a) {
+    assert_or_panic((double)a == 12.34);
+    return 56.78;
+}
+typedef struct {
+    f80 a;
+} f80_struct;
+f80_struct c_f80_struct(f80_struct a) {
+    assert_or_panic((double)a.a == 12.34);
+    return (f80_struct){56.78};
+}
+typedef struct {
+    f80 a;
+    int b;
+} f80_extra_struct;
+f80_extra_struct c_f80_extra_struct(f80_extra_struct a) {
+    assert_or_panic((double)a.a == 12.34);
+    assert_or_panic(a.b == 42);
+    return (f80_extra_struct){56.78, 24};
+}
+#endif
+
+#ifndef ZIG_NO_F128
+__float128 c_f128(__float128 a) {
+    assert_or_panic((double)a == 12.34);
+    return 56.78;
+}
+typedef struct {
+    __float128 a;
+} f128_struct;
+f128_struct c_f128_struct(f128_struct a) {
+    assert_or_panic((double)a.a == 12.34);
+    return (f128_struct){56.78};
+}
+#endif
+
+void __attribute__((stdcall)) stdcall_scalars(char a, short b, int c, float d, double e) {
+    assert_or_panic(a == 1);
+    assert_or_panic(b == 2);
+    assert_or_panic(c == 3);
+    assert_or_panic(d == 4.0);
+    assert_or_panic(e == 5.0);
+}
+
+typedef struct {
+    short x;
+    short y;
+} Coord2;
+
+Coord2 __attribute__((stdcall)) stdcall_coord2(Coord2 a, Coord2 b, Coord2 c) {
+    assert_or_panic(a.x == 0x1111);
+    assert_or_panic(a.y == 0x2222);
+    assert_or_panic(b.x == 0x3333);
+    assert_or_panic(b.y == 0x4444);
+    assert_or_panic(c.x == 0x5555);
+    assert_or_panic(c.y == 0x6666);
+    return (Coord2){123, 456};
+}
+
+void __attribute__((stdcall)) stdcall_big_union(union BigUnion x) {
+    assert_or_panic(x.a.a == 1);
+    assert_or_panic(x.a.b == 2);
+    assert_or_panic(x.a.c == 3);
+    assert_or_panic(x.a.d == 4);
+}
+
+#ifdef __x86_64__
+struct ByRef __attribute__((ms_abi)) c_explict_win64(struct ByRef in) {
+    in.val = 42;
+    return in;
+}
+
+struct ByRef __attribute__((sysv_abi)) c_explict_sys_v(struct ByRef in) {
+    in.val = 42;
+    return in;
+}
+#endif

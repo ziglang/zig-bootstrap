@@ -814,7 +814,6 @@ pub const Value = extern union {
             .float_80 => return out_stream.print("{}", .{val.castTag(.float_80).?.data}),
             .float_128 => return out_stream.print("{}", .{val.castTag(.float_128).?.data}),
             .@"error" => return out_stream.print("error.{s}", .{val.castTag(.@"error").?.data.name}),
-            // TODO to print this it should be error{ Set, Items }!T(val), but we need the type for that
             .eu_payload => {
                 try out_stream.writeAll("(eu_payload) ");
                 val = val.castTag(.eu_payload).?.data;
@@ -989,8 +988,7 @@ pub const Value = extern union {
         switch (val.tag()) {
             .enum_field_index => {
                 const field_index = val.castTag(.enum_field_index).?.data;
-                // TODO should `@intToEnum` do this `@intCast` for you?
-                return @intToEnum(E, @intCast(@typeInfo(E).Enum.tag_type, field_index));
+                return @intToEnum(E, field_index);
             },
             .the_only_possible_value => {
                 const fields = std.meta.fields(E);
@@ -2078,13 +2076,22 @@ pub const Value = extern union {
     /// For vectors, returns true if comparison is true for ALL elements.
     ///
     /// Note that `!compareAllWithZero(.eq, ...) != compareAllWithZero(.neq, ...)`
-    pub fn compareAllWithZero(lhs: Value, op: std.math.CompareOperator) bool {
-        return compareAllWithZeroAdvanced(lhs, op, null) catch unreachable;
+    pub fn compareAllWithZero(lhs: Value, op: std.math.CompareOperator, mod: *Module) bool {
+        return compareAllWithZeroAdvancedExtra(lhs, op, mod, null) catch unreachable;
     }
 
     pub fn compareAllWithZeroAdvanced(
         lhs: Value,
         op: std.math.CompareOperator,
+        sema: *Sema,
+    ) Module.CompileError!bool {
+        return compareAllWithZeroAdvancedExtra(lhs, op, sema.mod, sema);
+    }
+
+    pub fn compareAllWithZeroAdvancedExtra(
+        lhs: Value,
+        op: std.math.CompareOperator,
+        mod: *Module,
         opt_sema: ?*Sema,
     ) Module.CompileError!bool {
         if (lhs.isInf()) {
@@ -2097,10 +2104,25 @@ pub const Value = extern union {
         }
 
         switch (lhs.tag()) {
-            .repeated => return lhs.castTag(.repeated).?.data.compareAllWithZeroAdvanced(op, opt_sema),
+            .repeated => return lhs.castTag(.repeated).?.data.compareAllWithZeroAdvancedExtra(op, mod, opt_sema),
             .aggregate => {
                 for (lhs.castTag(.aggregate).?.data) |elem_val| {
-                    if (!(try elem_val.compareAllWithZeroAdvanced(op, opt_sema))) return false;
+                    if (!(try elem_val.compareAllWithZeroAdvancedExtra(op, mod, opt_sema))) return false;
+                }
+                return true;
+            },
+            .str_lit => {
+                const str_lit = lhs.castTag(.str_lit).?.data;
+                const bytes = mod.string_literal_bytes.items[str_lit.index..][0..str_lit.len];
+                for (bytes) |byte| {
+                    if (!std.math.compare(byte, op, 0)) return false;
+                }
+                return true;
+            },
+            .bytes => {
+                const bytes = lhs.castTag(.bytes).?.data;
+                for (bytes) |byte| {
+                    if (!std.math.compare(byte, op, 0)) return false;
                 }
                 return true;
             },
@@ -2195,8 +2217,16 @@ pub const Value = extern union {
                 const payload_ty = ty.errorUnionPayload();
                 return eqlAdvanced(a_payload, payload_ty, b_payload, payload_ty, mod, opt_sema);
             },
-            .eu_payload_ptr => @panic("TODO: Implement more pointer eql cases"),
-            .opt_payload_ptr => @panic("TODO: Implement more pointer eql cases"),
+            .eu_payload_ptr => {
+                const a_payload = a.castTag(.eu_payload_ptr).?.data;
+                const b_payload = b.castTag(.eu_payload_ptr).?.data;
+                return eqlAdvanced(a_payload.container_ptr, ty, b_payload.container_ptr, ty, mod, opt_sema);
+            },
+            .opt_payload_ptr => {
+                const a_payload = a.castTag(.opt_payload_ptr).?.data;
+                const b_payload = b.castTag(.opt_payload_ptr).?.data;
+                return eqlAdvanced(a_payload.container_ptr, ty, b_payload.container_ptr, ty, mod, opt_sema);
+            },
             .function => {
                 const a_payload = a.castTag(.function).?.data;
                 const b_payload = b.castTag(.function).?.data;
@@ -3097,7 +3127,7 @@ pub const Value = extern union {
             .int_i64,
             .int_big_positive,
             .int_big_negative,
-            => compareAllWithZero(self, .eq),
+            => self.orderAgainstZero().compare(.eq),
 
             .undef => unreachable,
             .unreachable_value => unreachable,

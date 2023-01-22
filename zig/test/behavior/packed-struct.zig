@@ -567,3 +567,61 @@ test "packed struct passed to callconv(.C) function" {
     }, 5, 4, 3, 2, 1);
     try expect(result);
 }
+
+test "overaligned pointer to packed struct" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+
+    const S = packed struct { a: u32, b: u32 };
+    var foo: S align(4) = .{ .a = 123, .b = 456 };
+    const ptr: *align(4) S = &foo;
+    switch (comptime builtin.cpu.arch.endian()) {
+        .Little => {
+            const ptr_to_b: *u32 = &ptr.b;
+            try expect(ptr_to_b.* == 456);
+        },
+        .Big => {
+            // Byte aligned packed struct field pointers have not been implemented yet.
+            const ptr_to_a: *align(4:0:8) u32 = &ptr.a;
+            try expect(ptr_to_a.* == 123);
+        },
+    }
+}
+
+test "packed struct initialized in bitcast" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+
+    const T = packed struct { val: u8 };
+    var val: u8 = 123;
+    const t = @bitCast(u8, T{ .val = val });
+    try expect(t == val);
+}
+
+test "pointer to container level packed struct field" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
+
+    const S = packed struct(u32) {
+        test_bit: bool,
+        someother_data: u12,
+        other_test_bit: bool,
+        someother_more_different_data: u12,
+        other_bits: packed struct(u6) {
+            enable_1: bool,
+            enable_2: bool,
+            enable_3: bool,
+            enable_4: bool,
+            enable_5: bool,
+            enable_6: bool,
+        },
+        var arr = [_]u32{0} ** 2;
+    };
+    @ptrCast(*S, &S.arr[0]).other_bits.enable_3 = true;
+    try expect(S.arr[0] == 0x10000000);
+}

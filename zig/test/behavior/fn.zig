@@ -484,3 +484,59 @@ test "using @ptrCast on function pointers" {
     // https://github.com/ziglang/zig/issues/2626
     // try comptime S.run();
 }
+
+test "function returns function returning type" {
+    const S = struct {
+        fn a() fn () type {
+            return (struct {
+                fn b() type {
+                    return u32;
+                }
+            }).b;
+        }
+    };
+    try expect(S.a()() == u32);
+}
+
+test "peer type resolution of inferred error set with non-void payload" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+
+    const S = struct {
+        fn openDataFile(mode: enum { read, write }) !u32 {
+            return switch (mode) {
+                .read => foo(),
+                .write => bar(),
+            };
+        }
+        fn foo() error{ a, b }!u32 {
+            return 1;
+        }
+        fn bar() error{ c, d }!u32 {
+            return 2;
+        }
+    };
+    try expect(try S.openDataFile(.read) == 1);
+}
+
+test "lazy values passed to anytype parameter" {
+    const A = struct {
+        a: u32,
+        fn foo(comptime a: anytype) !void {
+            try expect(a[0][0] == @sizeOf(@This()));
+        }
+    };
+    try A.foo(.{[_]usize{@sizeOf(A)}});
+
+    const B = struct {
+        fn foo(comptime a: anytype) !void {
+            try expect(a.x == 0);
+        }
+    };
+    try B.foo(.{ .x = @sizeOf(B) });
+
+    const C = struct {};
+    try expect(@truncate(u32, @sizeOf(C)) == 0);
+
+    const D = struct {};
+    try expect(@sizeOf(D) << 1 == 0);
+}

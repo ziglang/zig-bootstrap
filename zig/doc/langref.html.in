@@ -488,7 +488,7 @@ pub fn main() !void {
         purposely written to show how to perform {#link|string|String Literals and Unicode Code Point Literals#}
         substitution in the {#syntax#}print{#endsyntax#} function. The curly-braces inside of the first argument
         are substituted with the compile-time known value inside of the second argument
-        (known as an {#link|anonymous struct literal|Anonymous Struct Literals#}). The <code>\n</code>
+        (known as an {#link|tuple|Tuples#}). The <code>\n</code>
         inside of the double-quotes of the first argument is the {#link|escape sequence|Escape Sequences#} for the
         newline character. The {#link|try#} expression evaluates the result of {#syntax#}stdout.print{#endsyntax#}.
         If the result is an error, then the {#syntax#}try{#endsyntax#} expression will return from
@@ -2433,43 +2433,6 @@ test "array initialization with function calls" {
       {#code_end#}
       {#see_also|for|Slices#}
 
-      {#header_open|Anonymous List Literals#}
-      <p>Similar to {#link|Enum Literals#} and {#link|Anonymous Struct Literals#}
-      the type can be omitted from array literals:</p>
-      {#code_begin|test|anon_list#}
-const std = @import("std");
-const expect = std.testing.expect;
-
-test "anonymous list literal syntax" {
-    var array: [4]u8 = .{11, 22, 33, 44};
-    try expect(array[0] == 11);
-    try expect(array[1] == 22);
-    try expect(array[2] == 33);
-    try expect(array[3] == 44);
-}
-      {#code_end#}
-      <p>
-      If there is no type in the {#link|result location|Result Location Semantics#} then an
-      anonymous list literal actually turns into a {#link|struct#} with numbered field names:
-      </p>
-      {#code_begin|test|infer_list_literal#}
-const std = @import("std");
-const expect = std.testing.expect;
-
-test "fully anonymous list literal" {
-    try dump(.{ @as(u32, 1234), @as(f64, 12.34), true, "hi"});
-}
-
-fn dump(args: anytype) !void {
-    try expect(args.@"0" == 1234);
-    try expect(args.@"1" == 12.34);
-    try expect(args.@"2");
-    try expect(args.@"3"[0] == 'h');
-    try expect(args.@"3"[1] == 'i');
-}
-      {#code_end#}
-      {#header_close#}
-
       {#header_open|Multidimensional Arrays#}
       <p>
       Multidimensional arrays can be created by nesting arrays:
@@ -3578,15 +3541,21 @@ fn dump(args: anytype) !void {
     try expect(args.s[1] == 'i');
 }
       {#code_end#}
+      {#header_close#}
+
+      {#header_open|Tuples#}
       <p>
       Anonymous structs can be created without specifying field names, and are referred to as "tuples".
       </p>
       <p>
       The fields are implicitly named using numbers starting from 0. Because their names are integers,
-      the {#syntax#}@"0"{#endsyntax#} syntax must be used to access them. Names inside {#syntax#}@""{#endsyntax#} are always recognised as {#link|identifiers|Identifiers#}.
+      they cannot be accessed with {#syntax#}.{#endsyntax#} syntax without also wrapping them in
+      {#syntax#}@""{#endsyntax#}. Names inside {#syntax#}@""{#endsyntax#} are always recognised as
+      {#link|identifiers|Identifiers#}.
       </p>
       <p>
-      Like arrays, tuples have a .len field, can be indexed and  work with the ++ and ** operators. They can also be iterated over with {#link|inline for#}.
+      Like arrays, tuples have a .len field, can be indexed (provided the index is comptime-known)
+      and work with the ++ and ** operators. They can also be iterated over with {#link|inline for#}.
       </p>
       {#code_begin|test|tuple#}
 const std = @import("std");
@@ -5619,6 +5588,7 @@ test "createFoo" {
       <p>
       To ensure that {#syntax#}deallocateFoo{#endsyntax#} is properly called
       when returning an error, you must add an {#syntax#}errdefer{#endsyntax#} outside of the block:
+      </p>
       {#code_begin|test|test_errdefer_block#}
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -6075,14 +6045,16 @@ const optional_int: ?i32 = 5678;
       Task: call malloc, if the result is null, return null.
       </p>
       <p>C code</p>
-      {#syntax_block|c|call_malloc_in_c.c#}// malloc prototype included for reference
+      {#syntax_block|c|call_malloc_in_c.c#}
+// malloc prototype included for reference
 void *malloc(size_t size);
 
 struct Foo *do_a_thing(void) {
     char *ptr = malloc(1234);
     if (!ptr) return NULL;
     // ...
-}{#end_syntax_block#}
+}
+      {#end_syntax_block#}
       <p>Zig code</p>
       {#syntax_block|zig|call_malloc_from_zig.zig#}
 // malloc prototype included for reference
@@ -6102,7 +6074,8 @@ fn doAThing() ?*Foo {
       <p>
         The other form of checking against NULL you might see looks like this:
       </p>
-      {#syntax_block|c|checking_null_in_c.c#}void do_a_thing(struct Foo *foo) {
+      {#syntax_block|c|checking_null_in_c.c#}
+void do_a_thing(struct Foo *foo) {
     // do some stuff
 
     if (foo) {
@@ -6110,7 +6083,8 @@ fn doAThing() ?*Foo {
     }
 
     // do some stuff
-}{#end_syntax_block#}
+}
+      {#end_syntax_block#}
       <p>
         In Zig you can accomplish the same thing:
       </p>
@@ -6488,7 +6462,22 @@ test "coercion between unions and enums" {
       {#see_also|union|enum#}
       {#header_close#}
       {#header_open|Type Coercion: undefined#}
-      <p>{#link|undefined#} can be cast to any type.</p>
+      <p>{#link|undefined#} can be coerced to any type.</p>
+      {#header_close#}
+
+      {#header_open|Type Coercion: tuples to arrays#}
+      <p>{#link|Tuples#} can be coerced to arrays, if all of the fields have the same type.</p>
+      {#code_begin|test|test_coerce_tuples_arrays#}
+const std = @import("std");
+const expect = std.testing.expect;
+
+const Tuple = struct{ u8, u8 };
+test "coercion from homogenous tuple to array" {
+	const tuple: Tuple = .{5, 6};
+	const array: [2]u8 = tuple;
+	_ = array;
+}
+      {#code_end#}
       {#header_close#}
       {#header_close#}
 
@@ -7458,7 +7447,8 @@ pub fn syscall3(number: usize, arg1: usize, arg2: usize, arg3: usize) usize {
       <p>
       Dissecting the syntax:
       </p>
-      {#syntax_block|zig|Assembly Syntax Explained#}// Inline assembly is an expression which returns a value.
+      {#syntax_block|zig|Assembly Syntax Explained#}
+// Inline assembly is an expression which returns a value.
 // the `asm` keyword begins the expression.
 _ = asm
 // `volatile` is an optional modifier that tells Zig this
@@ -7513,7 +7503,8 @@ volatile (
 // output. In this example we list $rcx and $r11 because it is known the
 // kernel syscall does not preserve these registers.
     : "rcx", "r11"
-);{#end_syntax_block#}
+);
+      {#end_syntax_block#}
       <p>
       For x86 and x86_64 targets, the syntax is AT&amp;T syntax, rather than the more
       popular Intel syntax. This is due to technical constraints; assembly parsing is
@@ -9427,8 +9418,9 @@ test "integer truncation" {
           <li>{#link|Enum Literals#}</li>
           <li>{#link|union#}</li>
       </ul>
-      <p>
+<p>
       {#syntax#}@Type{#endsyntax#} is not available for {#link|Functions#}.
+      </p>
       {#header_close#}
       {#header_open|@typeInfo#}
       <pre>{#syntax#}@typeInfo(comptime T: type) std.builtin.Type{#endsyntax#}</pre>
@@ -10702,12 +10694,15 @@ const c = @cImport({
         or <kbd>-cflags</kbd> could result in clang or Zig parse failures, or subtle ABI incompatibilities
         when linking with C code.
       </p>
-      {#syntax_block|c|varytarget.h#}long FOO = __LONG_MAX__;{#end_syntax_block#}
+      {#syntax_block|c|varytarget.h#}
+long FOO = __LONG_MAX__;
+      {#end_syntax_block#}
       {#shell_samp#}$ zig translate-c -target thumb-freestanding-gnueabihf varytarget.h|grep FOO
 pub export var FOO: c_long = 2147483647;
 $ zig translate-c -target x86_64-macos-gnu varytarget.h|grep FOO
 pub export var FOO: c_long = 9223372036854775807;{#end_shell_samp#}
-      {#syntax_block|c|varycflags.h#}enum FOO { BAR };
+      {#syntax_block|c|varycflags.h#}
+enum FOO { BAR };
 int do_something(enum FOO foo);
       {#end_syntax_block#}
       {#shell_samp#}$ zig translate-c varycflags.h|grep -B1 do_something
@@ -10798,7 +10793,8 @@ pub fn main() void {
         Zig.
       </p>
       <p>Consider the following example:</p>
-      {#syntax_block|c|macro.c#}#define MAKELOCAL(NAME, INIT) int NAME = INIT
+      {#syntax_block|c|macro.c#}
+#define MAKELOCAL(NAME, INIT) int NAME = INIT
 int foo(void) {
    MAKELOCAL(a, 1);
    MAKELOCAL(b, 2);
@@ -10919,7 +10915,8 @@ export fn add(a: i32, b: i32) i32 {
       <p>To make a shared library:</p>
       {#shell_samp#}$ zig build-lib mathtest.zig -dynamic{#end_shell_samp#}
       <p>Here is an example with the {#link|Zig Build System#}:</p>
-      {#syntax_block|c|test.c#}// This header is generated by zig from mathtest.zig
+      {#syntax_block|c|test.c#}
+// This header is generated by zig from mathtest.zig
 #include "mathtest.h"
 #include <stdio.h>
 
@@ -10973,7 +10970,8 @@ export fn decode_base_64(
     return decoded_size;
 }
       {#code_end#}
-      {#syntax_block|c|test.c#}// This header is generated by zig from base64.zig
+      {#syntax_block|c|test.c#}
+// This header is generated by zig from base64.zig
 #include "base64.h"
 
 #include <string.h>
@@ -11023,7 +11021,8 @@ export fn add(a: i32, b: i32) void {
     print(a + b);
 }
       {#code_end#}
-      {#syntax_block|javascript|test.js#}const fs = require('fs');
+      {#syntax_block|javascript|test.js#}
+const fs = require('fs');
 const source = fs.readFileSync("./math.wasm");
 const typedArray = new Uint8Array(source);
 
@@ -11033,8 +11032,9 @@ WebAssembly.instantiate(typedArray, {
   }}).then(result => {
   const add = result.instance.exports.add;
   add(1, 2);
-});{#end_syntax_block#}
-    {#shell_samp#}$ node test.js
+});
+      {#end_syntax_block#}
+      {#shell_samp#}$ node test.js
 The result is 3{#end_shell_samp#}
       {#header_close#}
       {#header_open|WASI#}
@@ -11494,6 +11494,10 @@ fn readU32Be() u32 {}
       but use of hard tabs is discouraged. See {#link|Grammar#}.
       </p>
       <p>
+      For compatibility with other tools, the compiler ignores a UTF-8-encoded byte order mark (U+FEFF)
+      if it is the first Unicode code point in the source text. A byte order mark is not allowed anywhere else in the source.
+      </p>
+      <p>
       Note that running <kbd>zig fmt</kbd> on a source file will implement all recommendations mentioned here.
       Note also that the stage1 compiler does <a href="https://github.com/ziglang/zig/wiki/FAQ#why-does-zig-force-me-to-use-spaces-instead-of-tabs">not yet support CR or HT</a> control characters.
       </p>
@@ -11520,6 +11524,17 @@ fn readU32Be() u32 {}
         </tr>
         </thead>
         <tbody>
+        <tr>
+          <th scope="row">
+            <pre>{#syntax#}addrspace{#endsyntax#}</pre>
+          </th>
+          <td>
+            The {#syntax#}addrspace{#endsyntax#} keyword.
+            <ul>
+              <li>TODO add documentation for addrspace</li>
+            </ul>
+          </td>
+        </tr>
         <tr>
           <th scope="row">
             <pre>{#syntax#}align{#endsyntax#}</pre>
@@ -11801,6 +11816,17 @@ fn readU32Be() u32 {}
         </tr>
         <tr>
           <th scope="row">
+            <pre>{#syntax#}linksection{#endsyntax#}</pre>
+          </th>
+          <td>
+            The {#syntax#}linksection{#endsyntax#} keyword.
+            <ul>
+              <li>TODO add documentation for linksection</li>
+            </ul>
+          </td>
+        </tr>
+        <tr>
+          <th scope="row">
             <pre>{#syntax#}noalias{#endsyntax#}</pre>
           </th>
           <td>
@@ -11890,17 +11916,6 @@ fn readU32Be() u32 {}
             {#syntax#}return{#endsyntax#} exits a function with a value.
             <ul>
               <li>See also {#link|Functions#}</li>
-            </ul>
-          </td>
-        </tr>
-        <tr>
-          <th scope="row">
-            <pre>{#syntax#}linksection{#endsyntax#}</pre>
-          </th>
-          <td>
-            The {#syntax#}linksection{#endsyntax#} keyword.
-            <ul>
-              <li>TODO add documentation for linksection</li>
             </ul>
           </td>
         </tr>
@@ -12064,7 +12079,8 @@ fn readU32Be() u32 {}
       {#header_close#}
 
       {#header_open|Grammar#}
-      {#syntax_block|peg|grammar.y#}Root <- skip container_doc_comment? ContainerMembers eof
+      {#syntax_block|peg|grammar.y#}
+Root <- skip container_doc_comment? ContainerMembers eof
 
 # *** Top level ***
 ContainerMembers <- ContainerDeclarations (ContainerField COMMA)* (ContainerField / ContainerDeclarations)
@@ -12075,7 +12091,7 @@ ContainerDeclarations
      / doc_comment? KEYWORD_pub? Decl ContainerDeclarations
      /
 
-TestDecl <- KEYWORD_test STRINGLITERALSINGLE? Block
+TestDecl <- KEYWORD_test (STRINGLITERALSINGLE / IDENTIFIER)? Block
 
 ComptimeDecl <- KEYWORD_comptime Block
 
@@ -12089,7 +12105,7 @@ FnProto <- KEYWORD_fn IDENTIFIER? LPAREN ParamDeclList RPAREN ByteAlign? AddrSpa
 VarDecl <- (KEYWORD_const / KEYWORD_var) IDENTIFIER (COLON TypeExpr)? ByteAlign? AddrSpace? LinkSection? (EQUAL Expr)? SEMICOLON
 
 ContainerField
-     <- doc_comment? KEYWORD_comptime? IDENTIFIER (COLON TypeExpr ByteAlign?)? (EQUAL Expr)?
+     <- doc_comment? KEYWORD_comptime? IDENTIFIER (COLON TypeExpr)? ByteAlign? (EQUAL Expr)?
       / doc_comment? KEYWORD_comptime? (IDENTIFIER COLON)? !KEYWORD_fn TypeExpr ByteAlign? (EQUAL Expr)?
 
 # *** Block Level ***
@@ -12360,7 +12376,7 @@ PrefixTypeOp
     <- QUESTIONMARK
      / KEYWORD_anyframe MINUSRARROW
      / SliceTypeStart (ByteAlign / AddrSpace / KEYWORD_const / KEYWORD_volatile / KEYWORD_allowzero)*
-     / PtrTypeStart (AddrSpace / KEYWORD_align LPAREN Expr (COLON INTEGER COLON INTEGER)? RPAREN / KEYWORD_const / KEYWORD_volatile / KEYWORD_allowzero)*
+     / PtrTypeStart (AddrSpace / KEYWORD_align LPAREN Expr (COLON Expr COLON Expr)? RPAREN / KEYWORD_const / KEYWORD_volatile / KEYWORD_allowzero)*
      / ArrayTypeStart
 
 SuffixOp
@@ -12630,7 +12646,7 @@ keyword <- KEYWORD_addrspace / KEYWORD_align / KEYWORD_allowzero / KEYWORD_and
          / KEYWORD_struct / KEYWORD_suspend / KEYWORD_switch / KEYWORD_test
          / KEYWORD_threadlocal / KEYWORD_try / KEYWORD_union / KEYWORD_unreachable
          / KEYWORD_usingnamespace / KEYWORD_var / KEYWORD_volatile / KEYWORD_while
-{#end_syntax_block#}
+      {#end_syntax_block#}
       {#header_close#}
       {#header_open|Zen#}
       <ul>

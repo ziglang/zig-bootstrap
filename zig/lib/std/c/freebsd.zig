@@ -1,4 +1,5 @@
 const std = @import("../std.zig");
+const assert = std.debug.assert;
 const builtin = @import("builtin");
 const maxInt = std.math.maxInt;
 const iovec = std.os.iovec;
@@ -15,11 +16,14 @@ pub extern "c" fn pthread_getthreadid_np() c_int;
 pub extern "c" fn pthread_set_name_np(thread: std.c.pthread_t, name: [*:0]const u8) void;
 pub extern "c" fn pthread_get_name_np(thread: std.c.pthread_t, name: [*:0]u8, len: usize) void;
 pub extern "c" fn pipe2(fds: *[2]fd_t, flags: u32) c_int;
+pub extern "c" fn arc4random_buf(buf: [*]u8, len: usize) void;
 
 pub extern "c" fn posix_memalign(memptr: *?*anyopaque, alignment: usize, size: usize) c_int;
 pub extern "c" fn malloc_usable_size(?*const anyopaque) usize;
 
 pub extern "c" fn getpid() pid_t;
+
+pub extern "c" fn kinfo_getfile(pid: pid_t, cntp: *c_int) ?[*]kinfo_file;
 
 pub const sf_hdtr = extern struct {
     headers: [*]const iovec_const,
@@ -150,6 +154,8 @@ pub const EAI = enum(c_int) {
 };
 
 pub const EAI_MAX = 15;
+
+pub const IFNAMESIZE = 16;
 
 pub const AI = struct {
     /// get address to use bind()
@@ -401,7 +407,16 @@ pub const sockaddr = extern struct {
     data: [14]u8,
 
     pub const SS_MAXSIZE = 128;
-    pub const storage = std.x.os.Socket.Address.Native.Storage;
+    pub const storage = extern struct {
+        len: u8 align(8),
+        family: sa_family_t,
+        padding: [126]u8 = undefined,
+
+        comptime {
+            assert(@sizeOf(storage) == SS_MAXSIZE);
+            assert(@alignOf(storage) == 8);
+        }
+    };
 
     pub const in = extern struct {
         len: u8 = @sizeOf(in),
@@ -1258,60 +1273,96 @@ pub const siginfo_t = extern struct {
     },
 };
 
-pub usingnamespace switch (builtin.cpu.arch) {
-    .x86_64 => struct {
-        pub const ucontext_t = extern struct {
-            sigmask: sigset_t,
-            mcontext: mcontext_t,
-            link: ?*ucontext_t,
-            stack: stack_t,
-            flags: c_int,
-            __spare__: [4]c_int,
-        };
-
-        /// XXX x86_64 specific
-        pub const mcontext_t = extern struct {
-            onstack: u64,
-            rdi: u64,
-            rsi: u64,
-            rdx: u64,
-            rcx: u64,
-            r8: u64,
-            r9: u64,
-            rax: u64,
-            rbx: u64,
-            rbp: u64,
-            r10: u64,
-            r11: u64,
-            r12: u64,
-            r13: u64,
-            r14: u64,
-            r15: u64,
-            trapno: u32,
-            fs: u16,
-            gs: u16,
-            addr: u64,
+pub const mcontext_t = switch (builtin.cpu.arch) {
+    .x86_64 => extern struct {
+        onstack: u64,
+        rdi: u64,
+        rsi: u64,
+        rdx: u64,
+        rcx: u64,
+        r8: u64,
+        r9: u64,
+        rax: u64,
+        rbx: u64,
+        rbp: u64,
+        r10: u64,
+        r11: u64,
+        r12: u64,
+        r13: u64,
+        r14: u64,
+        r15: u64,
+        trapno: u32,
+        fs: u16,
+        gs: u16,
+        addr: u64,
+        flags: u32,
+        es: u16,
+        ds: u16,
+        err: u64,
+        rip: u64,
+        cs: u64,
+        rflags: u64,
+        rsp: u64,
+        ss: u64,
+        len: u64,
+        fpformat: u64,
+        ownedfp: u64,
+        fpstate: [64]u64 align(16),
+        fsbase: u64,
+        gsbase: u64,
+        xfpustate: u64,
+        xfpustate_len: u64,
+        spare: [4]u64,
+    },
+    .aarch64 => extern struct {
+        gpregs: extern struct {
+            x: [30]u64,
+            lr: u64,
+            sp: u64,
+            elr: u64,
+            spsr: u32,
+            _pad: u32,
+        },
+        fpregs: extern struct {
+            q: [32]u128,
+            sr: u32,
+            cr: u32,
             flags: u32,
-            es: u16,
-            ds: u16,
-            err: u64,
-            rip: u64,
-            cs: u64,
-            rflags: u64,
-            rsp: u64,
-            ss: u64,
-            len: u64,
-            fpformat: u64,
-            ownedfp: u64,
-            fpstate: [64]u64 align(16),
-            fsbase: u64,
-            gsbase: u64,
-            xfpustate: u64,
-            xfpustate_len: u64,
-            spare: [4]u64,
-        };
+            _pad: u32,
+        },
+        flags: u32,
+        _pad: u32,
+        _spare: [8]u64,
     },
     else => struct {},
+};
+
+pub const REG = switch (builtin.cpu.arch) {
+    .aarch64 => struct {
+        pub const FP = 29;
+        pub const SP = 31;
+        pub const PC = 32;
+    },
+    .arm => struct {
+        pub const FP = 11;
+        pub const SP = 13;
+        pub const PC = 15;
+    },
+    .x86_64 => struct {
+        pub const RBP = 12;
+        pub const RIP = 21;
+        pub const RSP = 24;
+    },
+    else => struct {},
+};
+
+pub const ucontext_t = extern struct {
+    sigmask: sigset_t,
+    mcontext: mcontext_t,
+    link: ?*ucontext_t,
+    stack: stack_t,
+    flags: c_int,
+    __spare__: [4]c_int,
 };
 
 pub const E = enum(u16) {
