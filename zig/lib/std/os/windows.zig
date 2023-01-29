@@ -435,8 +435,9 @@ pub fn FindClose(hFindFile: HANDLE) void {
 }
 
 pub const ReadFileError = error{
-    OperationAborted,
     BrokenPipe,
+    NetNameDeleted,
+    OperationAborted,
     Unexpected,
 };
 
@@ -475,6 +476,7 @@ pub fn ReadFile(in_hFile: HANDLE, buffer: []u8, offset: ?u64, io_mode: std.io.Mo
                 .IO_PENDING => unreachable,
                 .OPERATION_ABORTED => return error.OperationAborted,
                 .BROKEN_PIPE => return error.BrokenPipe,
+                .NETNAME_DELETED => return error.NetNameDeleted,
                 .HANDLE_EOF => return @as(usize, bytes_transferred),
                 else => |err| return unexpectedError(err),
             }
@@ -506,9 +508,11 @@ pub fn ReadFile(in_hFile: HANDLE, buffer: []u8, offset: ?u64, io_mode: std.io.Mo
             } else null;
             if (kernel32.ReadFile(in_hFile, buffer.ptr, want_read_count, &amt_read, overlapped) == 0) {
                 switch (kernel32.GetLastError()) {
+                    .IO_PENDING => unreachable,
                     .OPERATION_ABORTED => continue,
                     .BROKEN_PIPE => return 0,
                     .HANDLE_EOF => return 0,
+                    .NETNAME_DELETED => return error.NetNameDeleted,
                     else => |err| return unexpectedError(err),
                 }
             }
@@ -1800,14 +1804,21 @@ pub fn UnlockFile(
 
 /// This is a workaround for the C backend until zig has the ability to put
 /// C code in inline assembly.
+extern fn zig_x86_windows_teb() callconv(.C) *anyopaque;
 extern fn zig_x86_64_windows_teb() callconv(.C) *anyopaque;
 
 pub fn teb() *TEB {
     return switch (native_arch) {
-        .x86 => asm volatile (
-            \\ movl %%fs:0x18, %[ptr]
-            : [ptr] "=r" (-> *TEB),
-        ),
+        .x86 => blk: {
+            if (builtin.zig_backend == .stage2_c) {
+                break :blk @ptrCast(*TEB, @alignCast(@alignOf(TEB), zig_x86_windows_teb()));
+            } else {
+                break :blk asm volatile (
+                    \\ movl %%fs:0x18, %[ptr]
+                    : [ptr] "=r" (-> *TEB),
+                );
+            }
+        },
         .x86_64 => blk: {
             if (builtin.zig_backend == .stage2_c) {
                 break :blk @ptrCast(*TEB, @alignCast(@alignOf(TEB), zig_x86_64_windows_teb()));
@@ -2006,7 +2017,7 @@ pub fn sliceToPrefixedFileW(s: []const u8) !PathSpace {
 }
 
 fn getFullPathNameW(path: [*:0]const u16, out: []u16) !usize {
-    const result = kernel32.GetFullPathNameW(path, @intCast(u32, out.len), std.meta.assumeSentinel(out.ptr, 0), null);
+    const result = kernel32.GetFullPathNameW(path, @intCast(u32, out.len), out.ptr, null);
     if (result == 0) {
         switch (kernel32.GetLastError()) {
             else => |err| return unexpectedError(err),

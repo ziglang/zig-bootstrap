@@ -978,7 +978,7 @@ pub fn readElfDebugInfo(allocator: mem.Allocator, elf_file: File) !ModuleDebugIn
         for (shdrs) |*shdr| {
             if (shdr.sh_type == elf.SHT_NULL) continue;
 
-            const name = std.mem.span(std.meta.assumeSentinel(header_strings[shdr.sh_name..].ptr, 0));
+            const name = mem.sliceTo(header_strings[shdr.sh_name..], 0);
             if (mem.eql(u8, name, ".debug_info")) {
                 opt_debug_info = try chopSlice(mapped_mem, shdr.sh_offset, shdr.sh_size);
             } else if (mem.eql(u8, name, ".debug_abbrev")) {
@@ -2059,11 +2059,6 @@ pub fn dumpStackPointerAddr(prefix: []const u8) void {
 
 test "manage resources correctly" {
     if (builtin.os.tag == .wasi) return error.SkipZigTest;
-
-    if (builtin.os.tag == .windows and builtin.cpu.arch == .x86_64) {
-        // https://github.com/ziglang/zig/issues/13963
-        return error.SkipZigTest;
-    }
 
     const writer = std.io.null_writer;
     var di = try openSelfDebugInfo(testing.allocator);

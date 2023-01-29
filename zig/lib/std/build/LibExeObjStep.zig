@@ -501,6 +501,29 @@ pub fn installHeadersDirectoryOptions(
     a.installed_headers.append(&install_dir.step) catch unreachable;
 }
 
+pub fn installLibraryHeaders(a: *LibExeObjStep, l: *LibExeObjStep) void {
+    assert(l.kind == .lib);
+    const install_step = a.builder.getInstallStep();
+    // Copy each element from installed_headers, modifying the builder
+    // to be the new parent's builder.
+    for (l.installed_headers.items) |step| {
+        const step_copy = switch (step.id) {
+            inline .install_file, .install_dir => |id| blk: {
+                const T = id.Type();
+                const ptr = a.builder.allocator.create(T) catch unreachable;
+                ptr.* = step.cast(T).?.*;
+                ptr.override_source_builder = ptr.builder;
+                ptr.builder = a.builder;
+                break :blk &ptr.step;
+            },
+            else => unreachable,
+        };
+        a.installed_headers.append(step_copy) catch unreachable;
+        install_step.dependOn(step_copy);
+    }
+    a.installed_headers.appendSlice(l.installed_headers.items) catch unreachable;
+}
+
 /// Creates a `RunStep` with an executable built with `addExecutable`.
 /// Add command line arguments with `addArg`.
 pub fn run(exe: *LibExeObjStep) *RunStep {
@@ -1415,7 +1438,13 @@ fn make(step: *Step) !void {
         try zig_args.append("-fno-stack-check");
     }
     try addFlag(&zig_args, "stack-protector", self.stack_protector);
-    try addFlag(&zig_args, "red-zone", self.red_zone);
+    if (self.red_zone) |red_zone| {
+        if (red_zone) {
+            try zig_args.append("-mred-zone");
+        } else {
+            try zig_args.append("-mno-red-zone");
+        }
+    }
     try addFlag(&zig_args, "omit-frame-pointer", self.omit_frame_pointer);
     try addFlag(&zig_args, "dll-export-fns", self.dll_export_fns);
 
