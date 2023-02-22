@@ -23,7 +23,7 @@ const leb128 = std.leb;
 const log = std.log.scoped(.codegen);
 const build_options = @import("build_options");
 
-const FnResult = codegen.FnResult;
+const Result = codegen.Result;
 const GenerateSymbolError = codegen.GenerateSymbolError;
 const DebugInfoOutput = codegen.DebugInfoOutput;
 
@@ -282,13 +282,7 @@ const DbgInfoReloc = struct {
                     else => unreachable, // not a possible argument
                 };
 
-                try dw.genArgDbgInfo(
-                    reloc.name,
-                    reloc.ty,
-                    function.bin_file.tag,
-                    function.mod_fn.owner_decl,
-                    loc,
-                );
+                try dw.genArgDbgInfo(reloc.name, reloc.ty, function.mod_fn.owner_decl, loc);
             },
             .plan9 => {},
             .none => {},
@@ -331,14 +325,7 @@ const DbgInfoReloc = struct {
                         break :blk .nop;
                     },
                 };
-                try dw.genVarDbgInfo(
-                    reloc.name,
-                    reloc.ty,
-                    function.bin_file.tag,
-                    function.mod_fn.owner_decl,
-                    is_ptr,
-                    loc,
-                );
+                try dw.genVarDbgInfo(reloc.name, reloc.ty, function.mod_fn.owner_decl, is_ptr, loc);
             },
             .plan9 => {},
             .none => {},
@@ -356,7 +343,7 @@ pub fn generate(
     liveness: Liveness,
     code: *std.ArrayList(u8),
     debug_output: DebugInfoOutput,
-) GenerateSymbolError!FnResult {
+) GenerateSymbolError!Result {
     if (build_options.skip_non_native and builtin.cpu.arch != bin_file.options.target.cpu.arch) {
         @panic("Attempted to compile for architecture that was disabled by build configuration");
     }
@@ -399,8 +386,8 @@ pub fn generate(
     defer function.dbg_info_relocs.deinit(bin_file.allocator);
 
     var call_info = function.resolveCallingConventionValues(fn_type) catch |err| switch (err) {
-        error.CodegenFail => return FnResult{ .fail = function.err_msg.? },
-        error.OutOfRegisters => return FnResult{
+        error.CodegenFail => return Result{ .fail = function.err_msg.? },
+        error.OutOfRegisters => return Result{
             .fail = try ErrorMsg.create(bin_file.allocator, src_loc, "CodeGen ran out of registers. This is a bug in the Zig compiler.", .{}),
         },
         else => |e| return e,
@@ -413,8 +400,8 @@ pub fn generate(
     function.max_end_stack = call_info.stack_byte_count;
 
     function.gen() catch |err| switch (err) {
-        error.CodegenFail => return FnResult{ .fail = function.err_msg.? },
-        error.OutOfRegisters => return FnResult{
+        error.CodegenFail => return Result{ .fail = function.err_msg.? },
+        error.OutOfRegisters => return Result{
             .fail = try ErrorMsg.create(bin_file.allocator, src_loc, "CodeGen ran out of registers. This is a bug in the Zig compiler.", .{}),
         },
         else => |e| return e,
@@ -446,14 +433,14 @@ pub fn generate(
     defer emit.deinit();
 
     emit.emitMir() catch |err| switch (err) {
-        error.EmitFail => return FnResult{ .fail = emit.err_msg.? },
+        error.EmitFail => return Result{ .fail = emit.err_msg.? },
         else => |e| return e,
     };
 
     if (function.err_msg) |em| {
-        return FnResult{ .fail = em };
+        return Result{ .fail = em };
     } else {
-        return FnResult{ .appended = {} };
+        return Result.ok;
     }
 }
 
@@ -526,7 +513,7 @@ fn gen(self: *Self) !void {
             self.ret_mcv = MCValue{ .stack_offset = stack_offset };
         }
 
-        for (self.args) |*arg, arg_index| {
+        for (self.args, 0..) |*arg, arg_index| {
             // Copy register arguments to the stack
             switch (arg.*) {
                 .register => |reg| {
@@ -2778,7 +2765,9 @@ fn store(self: *Self, ptr: MCValue, value: MCValue, ptr_ty: Type, value_ty: Type
 
             switch (value) {
                 .dead => unreachable,
-                .undef => unreachable,
+                .undef => {
+                    try self.genSetReg(value_ty, addr_reg, value);
+                },
                 .register => |value_reg| {
                     try self.genStrRegister(value_reg, addr_reg, value_ty);
                 },
@@ -2984,6 +2973,11 @@ fn airFieldParentPtr(self: *Self, inst: Air.Inst.Index) !void {
     const result: MCValue = if (self.liveness.isUnused(inst)) .dead else result: {
         const field_ptr = try self.resolveInst(extra.field_ptr);
         const struct_ty = self.air.getRefType(ty_pl.ty).childType();
+
+        if (struct_ty.zigTypeTag() == .Union) {
+            return self.fail("TODO implement @fieldParentPtr codegen for unions", .{});
+        }
+
         const struct_field_offset = @intCast(u32, struct_ty.structFieldOffset(extra.field_index, self.target.*));
         switch (field_ptr) {
             .ptr_stack_offset => |off| {
@@ -3118,14 +3112,14 @@ fn allocRegs(
     var reused_read_arg: ?usize = null;
 
     // Lock all args which are already allocated to registers
-    for (read_args) |arg, i| {
+    for (read_args, 0..) |arg, i| {
         const mcv = try arg.bind.resolveToMcv(self);
         if (mcv == .register) {
             read_locks[i] = self.register_manager.lockReg(mcv.register);
         }
     }
 
-    for (write_args) |arg, i| {
+    for (write_args, 0..) |arg, i| {
         if (arg.bind == .reg) {
             write_locks[i] = self.register_manager.lockReg(arg.bind.reg);
         }
@@ -3133,7 +3127,7 @@ fn allocRegs(
 
     // Allocate registers for all args which aren't allocated to
     // registers yet
-    for (read_args) |arg, i| {
+    for (read_args, 0..) |arg, i| {
         const mcv = try arg.bind.resolveToMcv(self);
         if (mcv == .register) {
             arg.reg.* = mcv.register;
@@ -3154,7 +3148,7 @@ fn allocRegs(
         if (arg.bind == .reg) {
             arg.reg.* = arg.bind.reg;
         } else {
-            reuse_operand: for (read_args) |read_arg, i| {
+            reuse_operand: for (read_args, 0..) |read_arg, i| {
                 if (read_arg.bind == .inst) {
                     const operand = read_arg.bind.inst;
                     const mcv = try self.resolveInst(operand);
@@ -3174,7 +3168,7 @@ fn allocRegs(
             }
         }
     } else {
-        for (write_args) |arg, i| {
+        for (write_args, 0..) |arg, i| {
             if (arg.bind == .reg) {
                 arg.reg.* = arg.bind.reg;
             } else {
@@ -3186,7 +3180,7 @@ fn allocRegs(
 
     // For all read_args which need to be moved from non-register to
     // register, perform the move
-    for (read_args) |arg, i| {
+    for (read_args, 0..) |arg, i| {
         if (reused_read_arg) |j| {
             // Check whether this read_arg was reused
             if (i == j) continue;
@@ -4230,7 +4224,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
     // Make space for the arguments passed via the stack
     self.max_end_stack += info.stack_byte_count;
 
-    for (info.args) |mc_arg, arg_i| {
+    for (info.args, 0..) |mc_arg, arg_i| {
         const arg = args[arg_i];
         const arg_ty = self.air.typeOf(arg);
         const arg_mcv = try self.resolveInst(args[arg_i]);
@@ -4253,59 +4247,56 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
 
     // Due to incremental compilation, how function calls are generated depends
     // on linking.
-    switch (self.bin_file.tag) {
-        .elf => {
-            if (self.air.value(callee)) |func_value| {
-                if (func_value.castTag(.function)) |func_payload| {
-                    const func = func_payload.data;
-                    const ptr_bits = self.target.cpu.arch.ptrBitWidth();
-                    const ptr_bytes: u64 = @divExact(ptr_bits, 8);
-                    const mod = self.bin_file.options.module.?;
-                    const fn_owner_decl = mod.declPtr(func.owner_decl);
-                    const got_addr = if (self.bin_file.cast(link.File.Elf)) |elf_file| blk: {
-                        const got = &elf_file.program_headers.items[elf_file.phdr_got_index.?];
-                        break :blk @intCast(u32, got.p_vaddr + fn_owner_decl.link.elf.offset_table_index * ptr_bytes);
-                    } else unreachable;
-                    try self.genSetReg(Type.initTag(.usize), .lr, .{ .memory = got_addr });
-                } else if (func_value.castTag(.extern_fn)) |_| {
-                    return self.fail("TODO implement calling extern functions", .{});
-                } else {
-                    return self.fail("TODO implement calling bitcasted functions", .{});
-                }
+    if (self.air.value(callee)) |func_value| {
+        if (func_value.castTag(.function)) |func_payload| {
+            const func = func_payload.data;
+
+            if (self.bin_file.cast(link.File.Elf)) |elf_file| {
+                const atom_index = try elf_file.getOrCreateAtomForDecl(func.owner_decl);
+                const atom = elf_file.getAtom(atom_index);
+                const got_addr = @intCast(u32, atom.getOffsetTableAddress(elf_file));
+                try self.genSetReg(Type.initTag(.usize), .lr, .{ .memory = got_addr });
+            } else if (self.bin_file.cast(link.File.MachO)) |_| {
+                unreachable; // unsupported architecture for MachO
             } else {
-                assert(ty.zigTypeTag() == .Pointer);
-                const mcv = try self.resolveInst(callee);
-
-                try self.genSetReg(Type.initTag(.usize), .lr, mcv);
-            }
-
-            // TODO: add Instruction.supportedOn
-            // function for ARM
-            if (Target.arm.featureSetHas(self.target.cpu.features, .has_v5t)) {
-                _ = try self.addInst(.{
-                    .tag = .blx,
-                    .data = .{ .reg = .lr },
+                return self.fail("TODO implement call on {s} for {s}", .{
+                    @tagName(self.bin_file.tag),
+                    @tagName(self.target.cpu.arch),
                 });
-            } else {
-                return self.fail("TODO fix blx emulation for ARM <v5", .{});
-                // _ = try self.addInst(.{
-                //     .tag = .mov,
-                //     .data = .{ .rr_op = .{
-                //         .rd = .lr,
-                //         .rn = .r0,
-                //         .op = Instruction.Operand.reg(.pc, Instruction.Operand.Shift.none),
-                //     } },
-                // });
-                // _ = try self.addInst(.{
-                //     .tag = .bx,
-                //     .data = .{ .reg = .lr },
-                // });
             }
-        },
-        .macho => unreachable, // unsupported architecture for MachO
-        .coff => return self.fail("TODO implement call in COFF for {}", .{self.target.cpu.arch}),
-        .plan9 => return self.fail("TODO implement call on plan9 for {}", .{self.target.cpu.arch}),
-        else => unreachable,
+        } else if (func_value.castTag(.extern_fn)) |_| {
+            return self.fail("TODO implement calling extern functions", .{});
+        } else {
+            return self.fail("TODO implement calling bitcasted functions", .{});
+        }
+    } else {
+        assert(ty.zigTypeTag() == .Pointer);
+        const mcv = try self.resolveInst(callee);
+
+        try self.genSetReg(Type.initTag(.usize), .lr, mcv);
+    }
+
+    // TODO: add Instruction.supportedOn
+    // function for ARM
+    if (Target.arm.featureSetHas(self.target.cpu.features, .has_v5t)) {
+        _ = try self.addInst(.{
+            .tag = .blx,
+            .data = .{ .reg = .lr },
+        });
+    } else {
+        return self.fail("TODO fix blx emulation for ARM <v5", .{});
+        // _ = try self.addInst(.{
+        //     .tag = .mov,
+        //     .data = .{ .rr_op = .{
+        //         .rd = .lr,
+        //         .rn = .r0,
+        //         .op = Instruction.Operand.reg(.pc, Instruction.Operand.Shift.none),
+        //     } },
+        // });
+        // _ = try self.addInst(.{
+        //     .tag = .bx,
+        //     .data = .{ .reg = .lr },
+        // });
     }
 
     const result: MCValue = result: {
@@ -4685,7 +4676,7 @@ fn airCondBr(self: *Self, inst: Air.Inst.Index) !void {
     const else_slice = else_branch.inst_table.entries.slice();
     const else_keys = else_slice.items(.key);
     const else_values = else_slice.items(.value);
-    for (else_keys) |else_key, else_idx| {
+    for (else_keys, 0..) |else_key, else_idx| {
         const else_value = else_values[else_idx];
         const canon_mcv = if (saved_then_branch.inst_table.fetchSwapRemove(else_key)) |then_entry| blk: {
             // The instruction's MCValue is overridden in both branches.
@@ -4718,7 +4709,7 @@ fn airCondBr(self: *Self, inst: Air.Inst.Index) !void {
     const then_slice = saved_then_branch.inst_table.entries.slice();
     const then_keys = then_slice.items(.key);
     const then_values = then_slice.items(.value);
-    for (then_keys) |then_key, then_idx| {
+    for (then_keys, 0..) |then_key, then_idx| {
         const then_value = then_values[then_idx];
         // We already deleted the items from this table that matched the else_branch.
         // So these are all instructions that are only overridden in the then branch.
@@ -5007,7 +4998,7 @@ fn airSwitch(self: *Self, inst: Air.Inst.Index) !void {
         const branch_into_prong_relocs = try self.gpa.alloc(u32, items.len);
         defer self.gpa.free(branch_into_prong_relocs);
 
-        for (items) |item, idx| {
+        for (items, 0..) |item, idx| {
             const cmp_result = try self.cmp(.{ .inst = pl_op.operand }, .{ .inst = item }, condition_ty, .neq);
             branch_into_prong_relocs[idx] = try self.condBr(cmp_result);
         }
@@ -5832,7 +5823,24 @@ fn airPtrToInt(self: *Self, inst: Air.Inst.Index) !void {
 
 fn airBitCast(self: *Self, inst: Air.Inst.Index) !void {
     const ty_op = self.air.instructions.items(.data)[inst].ty_op;
-    const result = try self.resolveInst(ty_op.operand);
+    const result = if (self.liveness.isUnused(inst)) .dead else result: {
+        const operand = try self.resolveInst(ty_op.operand);
+        if (self.reuseOperand(inst, ty_op.operand, 0, operand)) break :result operand;
+
+        const operand_lock = switch (operand) {
+            .register,
+            .register_c_flag,
+            .register_v_flag,
+            => |reg| self.register_manager.lockReg(reg),
+            else => null,
+        };
+        defer if (operand_lock) |lock| self.register_manager.unlockReg(lock);
+
+        const dest_ty = self.air.typeOfIndex(inst);
+        const dest = try self.allocRegOrMem(dest_ty, true, inst);
+        try self.setRegOrMem(dest_ty, dest, operand);
+        break :result dest;
+    };
     return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
 }
 
@@ -6086,16 +6094,17 @@ fn lowerDeclRef(self: *Self, tv: TypedValue, decl_index: Module.Decl.Index) Inne
     mod.markDeclAlive(decl);
 
     if (self.bin_file.cast(link.File.Elf)) |elf_file| {
-        const got = &elf_file.program_headers.items[elf_file.phdr_got_index.?];
-        const got_addr = got.p_vaddr + decl.link.elf.offset_table_index * ptr_bytes;
-        return MCValue{ .memory = got_addr };
+        const atom_index = try elf_file.getOrCreateAtomForDecl(decl_index);
+        const atom = elf_file.getAtom(atom_index);
+        return MCValue{ .memory = atom.getOffsetTableAddress(elf_file) };
     } else if (self.bin_file.cast(link.File.MachO)) |_| {
         unreachable; // unsupported architecture for MachO
     } else if (self.bin_file.cast(link.File.Coff)) |_| {
         return self.fail("TODO codegen COFF const Decl pointer", .{});
     } else if (self.bin_file.cast(link.File.Plan9)) |p9| {
-        try p9.seeDecl(decl_index);
-        const got_addr = p9.bases.data + decl.link.plan9.got_index.? * ptr_bytes;
+        const decl_block_index = try p9.seeDecl(decl_index);
+        const decl_block = p9.getDeclBlock(decl_block_index);
+        const got_addr = p9.bases.data + decl_block.got_index.? * ptr_bytes;
         return MCValue{ .memory = got_addr };
     } else {
         return self.fail("TODO codegen non-ELF const Decl pointer", .{});
@@ -6109,8 +6118,7 @@ fn lowerUnnamedConst(self: *Self, tv: TypedValue) InnerError!MCValue {
         return self.fail("lowering unnamed constant failed: {s}", .{@errorName(err)});
     };
     if (self.bin_file.cast(link.File.Elf)) |elf_file| {
-        const vaddr = elf_file.local_symbols.items[local_sym_index].st_value;
-        return MCValue{ .memory = vaddr };
+        return MCValue{ .memory = elf_file.getSymbol(local_sym_index).st_value };
     } else if (self.bin_file.cast(link.File.MachO)) |_| {
         unreachable;
     } else if (self.bin_file.cast(link.File.Coff)) |_| {
@@ -6312,7 +6320,7 @@ fn resolveCallingConventionValues(self: *Self, fn_ty: Type) !CallMCValues {
                 }
             }
 
-            for (param_types) |ty, i| {
+            for (param_types, 0..) |ty, i| {
                 if (ty.abiAlignment(self.target.*) == 8)
                     ncrn = std.mem.alignForwardGeneric(usize, ncrn, 2);
 
@@ -6362,7 +6370,7 @@ fn resolveCallingConventionValues(self: *Self, fn_ty: Type) !CallMCValues {
 
             var stack_offset: u32 = 0;
 
-            for (param_types) |ty, i| {
+            for (param_types, 0..) |ty, i| {
                 if (ty.abiSize(self.target.*) > 0) {
                     const param_size = @intCast(u32, ty.abiSize(self.target.*));
                     const param_alignment = ty.abiAlignment(self.target.*);

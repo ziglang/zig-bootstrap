@@ -20,7 +20,7 @@ const LibCInstallation = @import("libc_installation.zig").LibCInstallation;
 const wasi_libc = @import("wasi_libc.zig");
 const translate_c = @import("translate_c.zig");
 const clang = @import("clang.zig");
-const Cache = @import("Cache.zig");
+const Cache = std.Build.Cache;
 const target_util = @import("target.zig");
 const ThreadPool = @import("ThreadPool.zig");
 const crash_report = @import("crash_report.zig");
@@ -403,8 +403,11 @@ const usage_build_generic =
     \\    ReleaseFast             Optimizations on, safety off
     \\    ReleaseSafe             Optimizations on, safety on
     \\    ReleaseSmall            Optimize for small binary, safety off
-    \\  --pkg-begin [name] [path] Make pkg available to import and push current pkg
-    \\  --pkg-end                 Pop current pkg
+    \\  --mod [name]:[deps]:[src] Make a module available for dependency under the given name
+    \\      deps: [dep],[dep],...
+    \\      dep:  [[import=]name]
+    \\  --deps [dep],[dep],...    Set dependency names for the root package
+    \\      dep:  [[import=]name]
     \\  --main-pkg-path           Set the directory of the root package
     \\  -fPIC                     Force-enable Position Independent Code
     \\  -fno-PIC                  Force-disable Position Independent Code
@@ -432,6 +435,8 @@ const usage_build_generic =
     \\  -fno-Clang                Prevent using Clang as the C/C++ compilation backend
     \\  -freference-trace[=num]   How many lines of reference trace should be shown per compile error
     \\  -fno-reference-trace      Disable reference trace
+    \\  -ferror-tracing           Enable error tracing in ReleaseFast mode
+    \\  -fno-error-tracing        Disable error tracing in Debug and ReleaseSafe mode
     \\  -fsingle-threaded         Code assumes there is only one thread
     \\  -fno-single-threaded      Code may not assume there is only one thread
     \\  -fbuiltin                 Enable implicit builtin knowledge of functions
@@ -490,6 +495,7 @@ const usage_build_generic =
     \\    nodelete                     Indicate that the object cannot be deleted from a process
     \\    notext                       Permit read-only relocations in read-only segments
     \\    defs                         Force a fatal error if any undefined symbols remain
+    \\    undefs                       Reverse of -z defs
     \\    origin                       Indicate that the object must have its origin processed
     \\    nocopyreloc                  Disable the creation of copy relocations
     \\    now                          (default) Force all relocations to be processed on load
@@ -506,6 +512,7 @@ const usage_build_generic =
     \\      zlib                       Compression with deflate/inflate
     \\  --gc-sections                  Force removal of functions and data that are unreachable by the entry point or exported symbols
     \\  --no-gc-sections               Don't force removal of unreachable functions and data
+    \\  --sort-section=[value]         Sort wildcard section patterns by 'name' or 'alignment'
     \\  --subsystem [subsystem]        (Windows) /SUBSYSTEM:<subsystem> to the linker
     \\  --stack [size]                 Override default stack size
     \\  --image-base [addr]            Set base address for executable image
@@ -728,6 +735,7 @@ fn buildOutputType(
     var linker_script: ?[]const u8 = null;
     var version_script: ?[]const u8 = null;
     var disable_c_depfile = false;
+    var linker_sort_section: ?link.SortSection = null;
     var linker_gc_sections: ?bool = null;
     var linker_compress_debug_sections: ?link.CompressDebugSections = null;
     var linker_allow_shlib_undefined: ?bool = null;
@@ -797,6 +805,7 @@ fn buildOutputType(
     var headerpad_max_install_names: bool = false;
     var dead_strip_dylibs: bool = false;
     var reference_trace: ?u32 = null;
+    var error_tracing: ?bool = null;
     var pdb_out_path: ?[]const u8 = null;
 
     // e.g. -m3dnow or -mno-outline-atomics. They correspond to std.Target llvm cpu feature names.
@@ -852,14 +861,21 @@ fn buildOutputType(
     var linker_export_symbol_names = std.ArrayList([]const u8).init(gpa);
     defer linker_export_symbol_names.deinit();
 
-    // This package only exists to clean up the code parsing --pkg-begin and
-    // --pkg-end flags. Use dummy values that are safe for the destroy call.
-    var pkg_tree_root: Package = .{
-        .root_src_directory = .{ .path = null, .handle = fs.cwd() },
-        .root_src_path = &[0]u8{},
-    };
-    defer freePkgTree(gpa, &pkg_tree_root, false);
-    var cur_pkg: *Package = &pkg_tree_root;
+    // Contains every module specified via --mod. The dependencies are added
+    // after argument parsing is completed. We use a StringArrayHashMap to make
+    // error output consistent.
+    var modules = std.StringArrayHashMap(struct {
+        mod: *Package,
+        deps_str: []const u8, // still in CLI arg format
+    }).init(gpa);
+    defer {
+        var it = modules.iterator();
+        while (it.next()) |kv| kv.value_ptr.mod.destroy(gpa);
+        modules.deinit();
+    }
+
+    // The dependency string for the root package
+    var root_deps_str: ?[]const u8 = null;
 
     // before arg parsing, check for the NO_COLOR environment variable
     // if it exists, default the color setting to .off
@@ -892,7 +908,7 @@ fn buildOutputType(
                 i: usize = 0,
                 fn next(it: *@This()) ?[]const u8 {
                     if (it.i >= it.args.len) {
-                        if (it.resp_file) |*resp| return if (resp.next()) |sentinel| std.mem.span(sentinel) else null;
+                        if (it.resp_file) |*resp| return resp.next();
                         return null;
                     }
                     defer it.i += 1;
@@ -900,7 +916,7 @@ fn buildOutputType(
                 }
                 fn nextOrFatal(it: *@This()) []const u8 {
                     if (it.i >= it.args.len) {
-                        if (it.resp_file) |*resp| if (resp.next()) |sentinel| return std.mem.span(sentinel);
+                        if (it.resp_file) |*resp| if (resp.next()) |ret| return ret;
                         fatal("expected parameter after {s}", .{it.args[it.i - 1]});
                     }
                     defer it.i += 1;
@@ -936,33 +952,44 @@ fn buildOutputType(
                         } else {
                             fatal("unexpected end-of-parameter mark: --", .{});
                         }
-                    } else if (mem.eql(u8, arg, "--pkg-begin")) {
-                        const opt_pkg_name = args_iter.next();
-                        const opt_pkg_path = args_iter.next();
-                        if (opt_pkg_name == null or opt_pkg_path == null)
-                            fatal("Expected 2 arguments after {s}", .{arg});
+                    } else if (mem.eql(u8, arg, "--mod")) {
+                        const info = args_iter.nextOrFatal();
+                        var info_it = mem.split(u8, info, ":");
+                        const mod_name = info_it.next() orelse fatal("expected non-empty argument after {s}", .{arg});
+                        const deps_str = info_it.next() orelse fatal("expected 'name:deps:path' after {s}", .{arg});
+                        const root_src_orig = info_it.rest();
+                        if (root_src_orig.len == 0) fatal("expected 'name:deps:path' after {s}", .{arg});
+                        if (mod_name.len == 0) fatal("empty name for module at '{s}'", .{root_src_orig});
 
-                        const pkg_name = opt_pkg_name.?;
-                        const pkg_path = try introspect.resolvePath(arena, opt_pkg_path.?);
+                        const root_src = try introspect.resolvePath(arena, root_src_orig);
 
-                        const new_cur_pkg = Package.create(
-                            gpa,
-                            fs.path.dirname(pkg_path),
-                            fs.path.basename(pkg_path),
-                        ) catch |err| {
-                            fatal("Failed to add package at path {s}: {s}", .{ pkg_path, @errorName(err) });
-                        };
-
-                        if (mem.eql(u8, pkg_name, "std") or mem.eql(u8, pkg_name, "root") or mem.eql(u8, pkg_name, "builtin")) {
-                            fatal("unable to add package '{s}' -> '{s}': conflicts with builtin package", .{ pkg_name, pkg_path });
-                        } else if (cur_pkg.table.get(pkg_name)) |prev| {
-                            fatal("unable to add package '{s}' -> '{s}': already exists as '{s}", .{ pkg_name, pkg_path, prev.root_src_path });
+                        for ([_][]const u8{ "std", "root", "builtin" }) |name| {
+                            if (mem.eql(u8, mod_name, name)) {
+                                fatal("unable to add module '{s}' -> '{s}': conflicts with builtin module", .{ mod_name, root_src });
+                            }
                         }
-                        try cur_pkg.addAndAdopt(gpa, pkg_name, new_cur_pkg);
-                        cur_pkg = new_cur_pkg;
-                    } else if (mem.eql(u8, arg, "--pkg-end")) {
-                        cur_pkg = cur_pkg.parent orelse
-                            fatal("encountered --pkg-end with no matching --pkg-begin", .{});
+
+                        var mod_it = modules.iterator();
+                        while (mod_it.next()) |kv| {
+                            if (std.mem.eql(u8, mod_name, kv.key_ptr.*)) {
+                                fatal("unable to add module '{s}' -> '{s}': already exists as '{s}'", .{ mod_name, root_src, kv.value_ptr.mod.root_src_path });
+                            }
+                        }
+
+                        try modules.ensureUnusedCapacity(1);
+                        modules.put(mod_name, .{
+                            .mod = try Package.create(
+                                gpa,
+                                fs.path.dirname(root_src),
+                                fs.path.basename(root_src),
+                            ),
+                            .deps_str = deps_str,
+                        }) catch unreachable;
+                    } else if (mem.eql(u8, arg, "--deps")) {
+                        if (root_deps_str != null) {
+                            fatal("only one --deps argument is allowed", .{});
+                        }
+                        root_deps_str = args_iter.nextOrFatal();
                     } else if (mem.eql(u8, arg, "--main-pkg-path")) {
                         main_pkg_path = args_iter.nextOrFatal();
                     } else if (mem.eql(u8, arg, "-cflags")) {
@@ -1216,6 +1243,10 @@ fn buildOutputType(
                         };
                     } else if (mem.eql(u8, arg, "-fno-reference-trace")) {
                         reference_trace = null;
+                    } else if (mem.eql(u8, arg, "-ferror-tracing")) {
+                        error_tracing = true;
+                    } else if (mem.eql(u8, arg, "-fno-error-tracing")) {
+                        error_tracing = false;
                     } else if (mem.eql(u8, arg, "-rdynamic")) {
                         rdynamic = true;
                     } else if (mem.eql(u8, arg, "-fsoname")) {
@@ -1324,6 +1355,8 @@ fn buildOutputType(
                             linker_z_notext = true;
                         } else if (mem.eql(u8, z_arg, "defs")) {
                             linker_z_defs = true;
+                        } else if (mem.eql(u8, z_arg, "undefs")) {
+                            linker_z_defs = false;
                         } else if (mem.eql(u8, z_arg, "origin")) {
                             linker_z_origin = true;
                         } else if (mem.eql(u8, z_arg, "nocopyreloc")) {
@@ -1341,7 +1374,7 @@ fn buildOutputType(
                         } else if (mem.startsWith(u8, z_arg, "max-page-size=")) {
                             linker_z_max_page_size = parseIntSuffix(z_arg, "max-page-size=".len);
                         } else {
-                            warn("unsupported linker extension flag: -z {s}", .{z_arg});
+                            fatal("unsupported linker extension flag: -z {s}", .{z_arg});
                         }
                     } else if (mem.eql(u8, arg, "--import-memory")) {
                         linker_import_memory = true;
@@ -1605,6 +1638,10 @@ fn buildOutputType(
                                         build_id = true;
                                         warn("ignoring build-id style argument: '{s}'", .{value});
                                         continue;
+                                    } else if (mem.eql(u8, key, "--sort-common")) {
+                                        // this ignores --sort=common=<anything>; ignoring plain --sort-common
+                                        // is done below.
+                                        continue;
                                     }
                                     try linker_args.append(key);
                                     try linker_args.append(value);
@@ -1617,6 +1654,9 @@ fn buildOutputType(
                                 needed = true;
                             } else if (mem.eql(u8, linker_arg, "-no-pie")) {
                                 want_pie = false;
+                            } else if (mem.eql(u8, linker_arg, "--sort-common")) {
+                                // from ld.lld(1): --sort-common is ignored for GNU compatibility,
+                                // this ignores plain --sort-common
                             } else if (mem.eql(u8, linker_arg, "--whole-archive") or
                                 mem.eql(u8, linker_arg, "-whole-archive"))
                             {
@@ -1870,6 +1910,8 @@ fn buildOutputType(
                     linker_gc_sections = true;
                 } else if (mem.eql(u8, arg, "-dead_strip_dylibs")) {
                     dead_strip_dylibs = true;
+                } else if (mem.eql(u8, arg, "--no-undefined")) {
+                    linker_z_defs = true;
                 } else if (mem.eql(u8, arg, "--gc-sections")) {
                     linker_gc_sections = true;
                 } else if (mem.eql(u8, arg, "--no-gc-sections")) {
@@ -1880,6 +1922,15 @@ fn buildOutputType(
                     linker_print_icf_sections = true;
                 } else if (mem.eql(u8, arg, "--print-map")) {
                     linker_print_map = true;
+                } else if (mem.eql(u8, arg, "--sort-section")) {
+                    i += 1;
+                    if (i >= linker_args.items.len) {
+                        fatal("expected linker arg after '{s}'", .{arg});
+                    }
+                    const arg1 = linker_args.items[i];
+                    linker_sort_section = std.meta.stringToEnum(link.SortSection, arg1) orelse {
+                        fatal("expected [name|alignment] after --sort-section, found '{s}'", .{arg1});
+                    };
                 } else if (mem.eql(u8, arg, "--allow-shlib-undefined") or
                     mem.eql(u8, arg, "-allow-shlib-undefined"))
                 {
@@ -1923,18 +1974,23 @@ fn buildOutputType(
                     linker_compress_debug_sections = std.meta.stringToEnum(link.CompressDebugSections, arg1) orelse {
                         fatal("expected [none|zlib] after --compress-debug-sections, found '{s}'", .{arg1});
                     };
-                } else if (mem.eql(u8, arg, "-z")) {
-                    i += 1;
-                    if (i >= linker_args.items.len) {
-                        fatal("expected linker extension flag after '{s}'", .{arg});
+                } else if (mem.startsWith(u8, arg, "-z")) {
+                    var z_arg = arg[2..];
+                    if (z_arg.len == 0) {
+                        i += 1;
+                        if (i >= linker_args.items.len) {
+                            fatal("expected linker extension flag after '{s}'", .{arg});
+                        }
+                        z_arg = linker_args.items[i];
                     }
-                    const z_arg = linker_args.items[i];
                     if (mem.eql(u8, z_arg, "nodelete")) {
                         linker_z_nodelete = true;
                     } else if (mem.eql(u8, z_arg, "notext")) {
                         linker_z_notext = true;
                     } else if (mem.eql(u8, z_arg, "defs")) {
                         linker_z_defs = true;
+                    } else if (mem.eql(u8, z_arg, "undefs")) {
+                        linker_z_defs = false;
                     } else if (mem.eql(u8, z_arg, "origin")) {
                         linker_z_origin = true;
                     } else if (mem.eql(u8, z_arg, "nocopyreloc")) {
@@ -1959,7 +2015,7 @@ fn buildOutputType(
                     } else if (mem.startsWith(u8, z_arg, "max-page-size=")) {
                         linker_z_max_page_size = parseIntSuffix(z_arg, "max-page-size=".len);
                     } else {
-                        warn("unsupported linker extension flag: -z {s}", .{z_arg});
+                        fatal("unsupported linker extension flag: -z {s}", .{z_arg});
                     }
                 } else if (mem.eql(u8, arg, "--major-image-version")) {
                     i += 1;
@@ -2021,6 +2077,14 @@ fn buildOutputType(
                     // This option does not do anything.
                 } else if (mem.eql(u8, arg, "--export-all-symbols")) {
                     rdynamic = true;
+                } else if (mem.eql(u8, arg, "--color-diagnostics") or
+                    mem.eql(u8, arg, "--color-diagnostics=always"))
+                {
+                    color = .on;
+                } else if (mem.eql(u8, arg, "--no-color-diagnostics") or
+                    mem.eql(u8, arg, "--color-diagnostics=never"))
+                {
+                    color = .off;
                 } else if (mem.eql(u8, arg, "-s") or mem.eql(u8, arg, "--strip-all") or
                     mem.eql(u8, arg, "-S") or mem.eql(u8, arg, "--strip-debug"))
                 {
@@ -2184,7 +2248,7 @@ fn buildOutputType(
 
                     have_version = true;
                 } else {
-                    warn("unsupported linker arg: {s}", .{arg});
+                    fatal("unsupported linker arg: {s}", .{arg});
                 }
             }
 
@@ -2260,6 +2324,31 @@ fn buildOutputType(
                 return process.exit(try clangMain(arena, all_args));
             }
         },
+    }
+
+    {
+        // Resolve module dependencies
+        var it = modules.iterator();
+        while (it.next()) |kv| {
+            const deps_str = kv.value_ptr.deps_str;
+            var deps_it = ModuleDepIterator.init(deps_str);
+            while (deps_it.next()) |dep| {
+                if (dep.expose.len == 0) {
+                    fatal("module '{s}' depends on '{s}' with a blank name", .{ kv.key_ptr.*, dep.name });
+                }
+
+                for ([_][]const u8{ "std", "root", "builtin" }) |name| {
+                    if (mem.eql(u8, dep.expose, name)) {
+                        fatal("unable to add module '{s}' under name '{s}': conflicts with builtin module", .{ dep.name, dep.expose });
+                    }
+                }
+
+                const dep_mod = modules.get(dep.name) orelse
+                    fatal("module '{s}' depends on module '{s}' which does not exist", .{ kv.key_ptr.*, dep.name });
+
+                try kv.value_ptr.mod.add(gpa, dep.expose, dep_mod.mod);
+            }
+        }
     }
 
     if (arg_mode == .build and optimize_mode == .ReleaseSmall and strip == null)
@@ -2859,23 +2948,24 @@ fn buildOutputType(
     } else null;
     defer if (main_pkg) |p| p.destroy(gpa);
 
-    // Transfer packages added with --pkg-begin/--pkg-end to the root package
-    if (main_pkg) |pkg| {
-        var it = pkg_tree_root.table.valueIterator();
-        while (it.next()) |p| {
-            if (p.*.parent == &pkg_tree_root) {
-                p.*.parent = pkg;
+    // Transfer packages added with --deps to the root package
+    if (main_pkg) |mod| {
+        var it = ModuleDepIterator.init(root_deps_str orelse "");
+        while (it.next()) |dep| {
+            if (dep.expose.len == 0) {
+                fatal("root module depends on '{s}' with a blank name", .{dep.name});
             }
-        }
-        pkg.table = pkg_tree_root.table;
-        pkg_tree_root.table = .{};
-    } else {
-        // Remove any dangling pointers just in case.
-        var it = pkg_tree_root.table.valueIterator();
-        while (it.next()) |p| {
-            if (p.*.parent == &pkg_tree_root) {
-                p.*.parent = null;
+
+            for ([_][]const u8{ "std", "root", "builtin" }) |name| {
+                if (mem.eql(u8, dep.expose, name)) {
+                    fatal("unable to add module '{s}' under name '{s}': conflicts with builtin module", .{ dep.name, dep.expose });
+                }
             }
+
+            const dep_mod = modules.get(dep.name) orelse
+                fatal("root module depends on module '{s}' which does not exist", .{dep.name});
+
+            try mod.add(gpa, dep.expose, dep_mod.mod);
         }
     }
 
@@ -3054,6 +3144,7 @@ fn buildOutputType(
         .version_script = version_script,
         .disable_c_depfile = disable_c_depfile,
         .soname = resolved_soname,
+        .linker_sort_section = linker_sort_section,
         .linker_gc_sections = linker_gc_sections,
         .linker_allow_shlib_undefined = linker_allow_shlib_undefined,
         .linker_bind_global_refs_locally = linker_bind_global_refs_locally,
@@ -3134,6 +3225,7 @@ fn buildOutputType(
         .headerpad_max_install_names = headerpad_max_install_names,
         .dead_strip_dylibs = dead_strip_dylibs,
         .reference_trace = reference_trace,
+        .error_tracing = error_tracing,
         .pdb_out_path = pdb_out_path,
     }) catch |err| switch (err) {
         error.LibCUnavailable => {
@@ -3352,6 +3444,32 @@ fn buildOutputType(
     // Skip resource deallocation in release builds; let the OS do it.
     return cleanExit();
 }
+
+const ModuleDepIterator = struct {
+    split: mem.SplitIterator(u8),
+
+    fn init(deps_str: []const u8) ModuleDepIterator {
+        return .{ .split = mem.split(u8, deps_str, ",") };
+    }
+
+    const Dependency = struct {
+        expose: []const u8,
+        name: []const u8,
+    };
+
+    fn next(it: *ModuleDepIterator) ?Dependency {
+        if (it.split.buffer.len == 0) return null; // don't return "" for the first iteration on ""
+        const str = it.split.next() orelse return null;
+        if (mem.indexOfScalar(u8, str, '=')) |i| {
+            return .{
+                .expose = str[0..i],
+                .name = str[i + 1 ..],
+            };
+        } else {
+            return .{ .expose = str, .name = str };
+        }
+    }
+};
 
 fn parseCrossTargetOrReportFatalError(
     allocator: Allocator,
@@ -3579,18 +3697,6 @@ fn updateModule(gpa: Allocator, comp: *Compilation, hook: AfterUpdateHook) !void
     }
 }
 
-fn freePkgTree(gpa: Allocator, pkg: *Package, free_parent: bool) void {
-    {
-        var it = pkg.table.valueIterator();
-        while (it.next()) |value| {
-            freePkgTree(gpa, value.*, true);
-        }
-    }
-    if (free_parent) {
-        pkg.destroy(gpa);
-    }
-}
-
 fn cmdTranslateC(comp: *Compilation, arena: Allocator, enable_cache: bool) !void {
     if (!build_options.have_llvm)
         fatal("cannot translate-c: compiler built without LLVM extensions", .{});
@@ -3605,7 +3711,7 @@ fn cmdTranslateC(comp: *Compilation, arena: Allocator, enable_cache: bool) !void
     defer if (enable_cache) man.deinit();
 
     man.hash.add(@as(u16, 0xb945)); // Random number to distinguish translate-c from compiling C objects
-    man.hashCSource(c_source_file) catch |err| {
+    Compilation.cache_helpers.hashCSource(&man, c_source_file) catch |err| {
         fatal("unable to process '{s}': {s}", .{ c_source_file.src_path, @errorName(err) });
     };
 
@@ -3640,10 +3746,10 @@ fn cmdTranslateC(comp: *Compilation, arena: Allocator, enable_cache: bool) !void
         const new_argv_with_sentinel = try arena.alloc(?[*:0]const u8, clang_args_len + 1);
         new_argv_with_sentinel[clang_args_len] = null;
         const new_argv = new_argv_with_sentinel[0..clang_args_len :null];
-        for (argv.items) |arg, i| {
+        for (argv.items, 0..) |arg, i| {
             new_argv[i] = try arena.dupeZ(u8, arg);
         }
-        for (c_source_file.extra_flags) |arg, i| {
+        for (c_source_file.extra_flags, 0..) |arg, i| {
             new_argv[argv.items.len + i] = try arena.dupeZ(u8, arg);
         }
 
@@ -3913,6 +4019,7 @@ pub const usage_build =
 ;
 
 pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
+    var color: Color = .auto;
     var prominent_compile_errors: bool = false;
 
     // We want to release all the locks before executing the child process, so we make a nice
@@ -4114,6 +4221,7 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
             // Here we borrow main package's table and will replace it with a fresh
             // one after this process completes.
             main_pkg.fetchAndAddDependencies(
+                arena,
                 &thread_pool,
                 &http_client,
                 build_directory,
@@ -4122,6 +4230,7 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
                 &dependencies_source,
                 &build_roots_source,
                 "",
+                color,
             ) catch |err| switch (err) {
                 error.PackageFetchFailed => process.exit(1),
                 else => |e| return e,
@@ -4139,14 +4248,14 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
             );
 
             mem.swap(Package.Table, &main_pkg.table, &deps_pkg.table);
-            try main_pkg.addAndAdopt(gpa, "@dependencies", deps_pkg);
+            try main_pkg.add(gpa, "@dependencies", deps_pkg);
         }
 
         var build_pkg: Package = .{
             .root_src_directory = build_directory,
             .root_src_path = build_zig_basename,
         };
-        try main_pkg.addAndAdopt(gpa, "@build", &build_pkg);
+        try main_pkg.add(gpa, "@build", &build_pkg);
 
         const comp = Compilation.create(gpa, .{
             .zig_lib_directory = zig_lib_directory,
@@ -4356,12 +4465,12 @@ pub fn cmdFmt(gpa: Allocator, arena: Allocator, args: []const []const u8) !void 
         };
         defer gpa.free(source_code);
 
-        var tree = std.zig.parse(gpa, source_code) catch |err| {
+        var tree = Ast.parse(gpa, source_code, .zig) catch |err| {
             fatal("error parsing stdin: {}", .{err});
         };
         defer tree.deinit(gpa);
 
-        try printErrsMsgToStdErr(gpa, arena, tree.errors, tree, "<stdin>", color);
+        try printErrsMsgToStdErr(gpa, arena, tree, "<stdin>", color);
         var has_ast_error = false;
         if (check_ast_flag) {
             const Module = @import("Module.zig");
@@ -4482,6 +4591,7 @@ const FmtError = error{
     UnsupportedEncoding,
     ConnectionResetByPeer,
     LockViolation,
+    NetNameDeleted,
 } || fs.File.OpenError;
 
 fn fmtPath(fmt: *Fmt, file_path: []const u8, check_mode: bool, dir: fs.Dir, sub_path: []const u8) FmtError!void {
@@ -4514,7 +4624,7 @@ fn fmtPathDir(
 
         if (is_dir and (mem.eql(u8, entry.name, "zig-cache") or mem.eql(u8, entry.name, "zig-out"))) continue;
 
-        if (is_dir or entry.kind == .File and mem.endsWith(u8, entry.name, ".zig")) {
+        if (is_dir or entry.kind == .File and (mem.endsWith(u8, entry.name, ".zig") or mem.endsWith(u8, entry.name, ".zon"))) {
             const full_path = try fs.path.join(fmt.gpa, &[_][]const u8{ file_path, entry.name });
             defer fmt.gpa.free(full_path);
 
@@ -4560,10 +4670,10 @@ fn fmtPathFile(
     // Add to set after no longer possible to get error.IsDir.
     if (try fmt.seen.fetchPut(stat.inode, {})) |_| return;
 
-    var tree = try std.zig.parse(fmt.gpa, source_code);
+    var tree = try Ast.parse(fmt.gpa, source_code, .zig);
     defer tree.deinit(fmt.gpa);
 
-    try printErrsMsgToStdErr(fmt.gpa, fmt.arena, tree.errors, tree, file_path, fmt.color);
+    try printErrsMsgToStdErr(fmt.gpa, fmt.arena, tree, file_path, fmt.color);
     if (tree.errors.len != 0) {
         fmt.any_error = true;
         return;
@@ -4643,14 +4753,14 @@ fn fmtPathFile(
     }
 }
 
-fn printErrsMsgToStdErr(
+pub fn printErrsMsgToStdErr(
     gpa: mem.Allocator,
     arena: mem.Allocator,
-    parse_errors: []const Ast.Error,
     tree: Ast,
     path: []const u8,
     color: Color,
 ) !void {
+    const parse_errors: []const Ast.Error = tree.errors;
     var i: usize = 0;
     while (i < parse_errors.len) : (i += 1) {
         const parse_error = parse_errors[i];
@@ -4765,7 +4875,7 @@ extern "c" fn ZigLlvmAr_main(argc: c_int, argv: [*:null]?[*:0]u8) c_int;
 
 fn argsCopyZ(alloc: Allocator, args: []const []const u8) ![:null]?[*:0]u8 {
     var argv = try alloc.allocSentinel(?[*:0]u8, args.len, null);
-    for (args) |arg, i| {
+    for (args, 0..) |arg, i| {
         argv[i] = try alloc.dupeZ(u8, arg); // TODO If there was an argsAllocZ we could avoid this allocation.
     }
     return argv;
@@ -4967,7 +5077,7 @@ pub const ClangArgIterator = struct {
         // rather than an argument to a parameter.
         // We adjust the len below when necessary.
         self.other_args = (self.argv.ptr + self.next_index)[0..1];
-        var arg = mem.span(self.argv[self.next_index]);
+        var arg = self.argv[self.next_index];
         self.incrementArgIndex();
 
         if (mem.startsWith(u8, arg, "@")) {
@@ -5011,7 +5121,7 @@ pub const ClangArgIterator = struct {
 
             self.has_next = true;
             self.other_args = (self.argv.ptr + self.next_index)[0..1]; // We adjust len below when necessary.
-            arg = mem.span(self.argv[self.next_index]);
+            arg = self.argv[self.next_index];
             self.incrementArgIndex();
         }
 
@@ -5306,11 +5416,11 @@ pub fn cmdAstCheck(
     file.pkg = try Package.create(gpa, null, file.sub_file_path);
     defer file.pkg.destroy(gpa);
 
-    file.tree = try std.zig.parse(gpa, file.source);
+    file.tree = try Ast.parse(gpa, file.source, .zig);
     file.tree_loaded = true;
     defer file.tree.deinit(gpa);
 
-    try printErrsMsgToStdErr(gpa, arena, file.tree.errors, file.tree, file.sub_file_path, color);
+    try printErrsMsgToStdErr(gpa, arena, file.tree, file.sub_file_path, color);
     if (file.tree.errors.len != 0) {
         process.exit(1);
     }
@@ -5432,11 +5542,11 @@ pub fn cmdChangelist(
     file.source = source;
     file.source_loaded = true;
 
-    file.tree = try std.zig.parse(gpa, file.source);
+    file.tree = try Ast.parse(gpa, file.source, .zig);
     file.tree_loaded = true;
     defer file.tree.deinit(gpa);
 
-    try printErrsMsgToStdErr(gpa, arena, file.tree.errors, file.tree, old_source_file, .auto);
+    try printErrsMsgToStdErr(gpa, arena, file.tree, old_source_file, .auto);
     if (file.tree.errors.len != 0) {
         process.exit(1);
     }
@@ -5470,10 +5580,10 @@ pub fn cmdChangelist(
     if (new_amt != new_stat.size)
         return error.UnexpectedEndOfFile;
 
-    var new_tree = try std.zig.parse(gpa, new_source);
+    var new_tree = try Ast.parse(gpa, new_source, .zig);
     defer new_tree.deinit(gpa);
 
-    try printErrsMsgToStdErr(gpa, arena, new_tree.errors, new_tree, new_source_file, .auto);
+    try printErrsMsgToStdErr(gpa, arena, new_tree, new_source_file, .auto);
     if (new_tree.errors.len != 0) {
         process.exit(1);
     }

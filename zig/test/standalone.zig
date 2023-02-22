@@ -27,6 +27,7 @@ pub fn addCases(cases: *tests.StandaloneContext) void {
     cases.add("test/standalone/noreturn_call/inline.zig");
     cases.add("test/standalone/noreturn_call/as_arg.zig");
     cases.addBuildFile("test/standalone/test_runner_path/build.zig", .{ .requires_stage2 = true });
+    cases.addBuildFile("test/standalone/issue_13970/build.zig", .{});
     cases.addBuildFile("test/standalone/main_pkg_path/build.zig", .{});
     cases.addBuildFile("test/standalone/shared_library/build.zig", .{});
     cases.addBuildFile("test/standalone/mix_o_files/build.zig", .{});
@@ -83,6 +84,9 @@ pub fn addCases(cases: *tests.StandaloneContext) void {
         cases.addBuildFile("test/standalone/pie/build.zig", .{});
     }
     cases.addBuildFile("test/standalone/issue_12706/build.zig", .{});
+    if (std.os.have_sigpipe_support) {
+        cases.addBuildFile("test/standalone/sigpipe/build.zig", .{});
+    }
 
     // Ensure the development tools are buildable. Alphabetically sorted.
     // No need to build `tools/spirv/grammar.zig`.
@@ -102,4 +106,11 @@ pub fn addCases(cases: *tests.StandaloneContext) void {
     cases.addBuildFile("test/standalone/issue_13030/build.zig", .{ .build_modes = true });
     cases.addBuildFile("test/standalone/emit_asm_and_bin/build.zig", .{});
     cases.addBuildFile("test/standalone/issue_12588/build.zig", .{});
+    cases.addBuildFile("test/standalone/embed_generated_file/build.zig", .{});
+
+    cases.addBuildFile("test/standalone/dep_diamond/build.zig", .{});
+    cases.addBuildFile("test/standalone/dep_triangle/build.zig", .{});
+    cases.addBuildFile("test/standalone/dep_recursive/build.zig", .{});
+    cases.addBuildFile("test/standalone/dep_mutually_recursive/build.zig", .{});
+    cases.addBuildFile("test/standalone/dep_shared_builtin/build.zig", .{});
 }

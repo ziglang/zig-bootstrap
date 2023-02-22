@@ -85,7 +85,7 @@ pub fn OpenFile(sub_path_w: []const u16, options: OpenFileOptions) OpenError!HAN
     var nt_name = UNICODE_STRING{
         .Length = path_len_bytes,
         .MaximumLength = path_len_bytes,
-        .Buffer = @intToPtr([*]u16, @ptrToInt(sub_path_w.ptr)),
+        .Buffer = @constCast(sub_path_w.ptr),
     };
     var attr = OBJECT_ATTRIBUTES{
         .Length = @sizeOf(OBJECT_ATTRIBUTES),
@@ -435,8 +435,9 @@ pub fn FindClose(hFindFile: HANDLE) void {
 }
 
 pub const ReadFileError = error{
-    OperationAborted,
     BrokenPipe,
+    NetNameDeleted,
+    OperationAborted,
     Unexpected,
 };
 
@@ -475,6 +476,7 @@ pub fn ReadFile(in_hFile: HANDLE, buffer: []u8, offset: ?u64, io_mode: std.io.Mo
                 .IO_PENDING => unreachable,
                 .OPERATION_ABORTED => return error.OperationAborted,
                 .BROKEN_PIPE => return error.BrokenPipe,
+                .NETNAME_DELETED => return error.NetNameDeleted,
                 .HANDLE_EOF => return @as(usize, bytes_transferred),
                 else => |err| return unexpectedError(err),
             }
@@ -506,9 +508,11 @@ pub fn ReadFile(in_hFile: HANDLE, buffer: []u8, offset: ?u64, io_mode: std.io.Mo
             } else null;
             if (kernel32.ReadFile(in_hFile, buffer.ptr, want_read_count, &amt_read, overlapped) == 0) {
                 switch (kernel32.GetLastError()) {
+                    .IO_PENDING => unreachable,
                     .OPERATION_ABORTED => continue,
                     .BROKEN_PIPE => return 0,
                     .HANDLE_EOF => return 0,
+                    .NETNAME_DELETED => return error.NetNameDeleted,
                     else => |err| return unexpectedError(err),
                 }
             }
@@ -630,7 +634,7 @@ pub fn SetCurrentDirectory(path_name: []const u16) SetCurrentDirectoryError!void
     var nt_name = UNICODE_STRING{
         .Length = path_len_bytes,
         .MaximumLength = path_len_bytes,
-        .Buffer = @intToPtr([*]u16, @ptrToInt(path_name.ptr)),
+        .Buffer = @constCast(path_name.ptr),
     };
 
     const rc = ntdll.RtlSetCurrentDirectory_U(&nt_name);
@@ -762,7 +766,7 @@ pub fn ReadLink(dir: ?HANDLE, sub_path_w: []const u16, out_buffer: []u8) ReadLin
     var nt_name = UNICODE_STRING{
         .Length = path_len_bytes,
         .MaximumLength = path_len_bytes,
-        .Buffer = @intToPtr([*]u16, @ptrToInt(sub_path_w.ptr)),
+        .Buffer = @constCast(sub_path_w.ptr),
     };
     var attr = OBJECT_ATTRIBUTES{
         .Length = @sizeOf(OBJECT_ATTRIBUTES),
@@ -872,7 +876,7 @@ pub fn DeleteFile(sub_path_w: []const u16, options: DeleteFileOptions) DeleteFil
         .Length = path_len_bytes,
         .MaximumLength = path_len_bytes,
         // The Windows API makes this mutable, but it will not mutate here.
-        .Buffer = @intToPtr([*]u16, @ptrToInt(sub_path_w.ptr)),
+        .Buffer = @constCast(sub_path_w.ptr),
     };
 
     if (sub_path_w[0] == '.' and sub_path_w[1] == 0) {
@@ -1410,7 +1414,7 @@ pub fn sendmsg(
 }
 
 pub fn sendto(s: ws2_32.SOCKET, buf: [*]const u8, len: usize, flags: u32, to: ?*const ws2_32.sockaddr, to_len: ws2_32.socklen_t) i32 {
-    var buffer = ws2_32.WSABUF{ .len = @truncate(u31, len), .buf = @intToPtr([*]u8, @ptrToInt(buf)) };
+    var buffer = ws2_32.WSABUF{ .len = @truncate(u31, len), .buf = @constCast(buf) };
     var bytes_send: DWORD = undefined;
     if (ws2_32.WSASendTo(s, @ptrCast([*]ws2_32.WSABUF, &buffer), 1, &bytes_send, flags, to, @intCast(i32, to_len), null, null) == ws2_32.SOCKET_ERROR) {
         return ws2_32.SOCKET_ERROR;
@@ -1800,14 +1804,21 @@ pub fn UnlockFile(
 
 /// This is a workaround for the C backend until zig has the ability to put
 /// C code in inline assembly.
+extern fn zig_x86_windows_teb() callconv(.C) *anyopaque;
 extern fn zig_x86_64_windows_teb() callconv(.C) *anyopaque;
 
 pub fn teb() *TEB {
     return switch (native_arch) {
-        .x86 => asm volatile (
-            \\ movl %%fs:0x18, %[ptr]
-            : [ptr] "=r" (-> *TEB),
-        ),
+        .x86 => blk: {
+            if (builtin.zig_backend == .stage2_c) {
+                break :blk @ptrCast(*TEB, @alignCast(@alignOf(TEB), zig_x86_windows_teb()));
+            } else {
+                break :blk asm volatile (
+                    \\ movl %%fs:0x18, %[ptr]
+                    : [ptr] "=r" (-> *TEB),
+                );
+            }
+        },
         .x86_64 => blk: {
             if (builtin.zig_backend == .stage2_c) {
                 break :blk @ptrCast(*TEB, @alignCast(@alignOf(TEB), zig_x86_64_windows_teb()));
@@ -1865,13 +1876,13 @@ pub fn eqlIgnoreCaseWTF16(a: []const u16, b: []const u16) bool {
     const a_string = UNICODE_STRING{
         .Length = a_bytes,
         .MaximumLength = a_bytes,
-        .Buffer = @intToPtr([*]u16, @ptrToInt(a.ptr)),
+        .Buffer = @constCast(a.ptr),
     };
     const b_bytes = @intCast(u16, b.len * 2);
     const b_string = UNICODE_STRING{
         .Length = b_bytes,
         .MaximumLength = b_bytes,
-        .Buffer = @intToPtr([*]u16, @ptrToInt(b.ptr)),
+        .Buffer = @constCast(b.ptr),
     };
     return ntdll.RtlEqualUnicodeString(&a_string, &b_string, TRUE) == TRUE;
 }
@@ -2006,7 +2017,7 @@ pub fn sliceToPrefixedFileW(s: []const u8) !PathSpace {
 }
 
 fn getFullPathNameW(path: [*:0]const u16, out: []u16) !usize {
-    const result = kernel32.GetFullPathNameW(path, @intCast(u32, out.len), std.meta.assumeSentinel(out.ptr, 0), null);
+    const result = kernel32.GetFullPathNameW(path, @intCast(u32, out.len), out.ptr, null);
     if (result == 0) {
         switch (kernel32.GetLastError()) {
             else => |err| return unexpectedError(err),
@@ -2847,7 +2858,7 @@ pub const GUID = extern struct {
         assert(s[18] == '-');
         assert(s[23] == '-');
         var bytes: [16]u8 = undefined;
-        for (hex_offsets) |hex_offset, i| {
+        for (hex_offsets, 0..) |hex_offset, i| {
             bytes[i] = (try std.fmt.charToDigit(s[hex_offset], 16)) << 4 |
                 try std.fmt.charToDigit(s[hex_offset + 1], 16);
         }

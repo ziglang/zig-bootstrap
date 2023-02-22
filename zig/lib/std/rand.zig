@@ -18,8 +18,9 @@ const maxInt = std.math.maxInt;
 pub const DefaultPrng = Xoshiro256;
 
 /// Cryptographically secure random numbers.
-pub const DefaultCsprng = Xoodoo;
+pub const DefaultCsprng = Ascon;
 
+pub const Ascon = @import("rand/Ascon.zig");
 pub const Isaac64 = @import("rand/Isaac64.zig");
 pub const Xoodoo = @import("rand/Xoodoo.zig");
 pub const Pcg = @import("rand/Pcg.zig");
@@ -413,7 +414,7 @@ pub const Random = struct {
         std.debug.assert(point < sum);
 
         var accumulator: T = 0;
-        for (proportions) |p, index| {
+        for (proportions, 0..) |p, index| {
             accumulator += p;
             if (point < accumulator) return index;
         }

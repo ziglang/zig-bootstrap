@@ -550,7 +550,6 @@ pub fn abort() noreturn {
         exit(0); // TODO choose appropriate exit code
     }
     if (builtin.os.tag == .wasi) {
-        @breakpoint();
         exit(1);
     }
     if (builtin.os.tag == .cuda) {
@@ -640,6 +639,9 @@ pub const ReadError = error{
     ConnectionResetByPeer,
     ConnectionTimedOut,
     NotOpenForReading,
+
+    // Windows only
+    NetNameDeleted,
 
     /// This error occurs when no global event loop is configured,
     /// and reading from the file descriptor would block.
@@ -1977,7 +1979,7 @@ pub fn getcwd(out_buffer: []u8) GetCwdError![]u8 {
         break :blk errno(system.getcwd(out_buffer.ptr, out_buffer.len));
     };
     switch (err) {
-        .SUCCESS => return mem.sliceTo(std.meta.assumeSentinel(out_buffer.ptr, 0), 0),
+        .SUCCESS => return mem.sliceTo(out_buffer, 0),
         .FAULT => unreachable,
         .INVAL => unreachable,
         .NOENT => return error.CurrentWorkingDirectoryUnlinked,
@@ -4511,7 +4513,7 @@ pub fn faccessatW(dirfd: fd_t, sub_path_w: [*:0]const u16, mode: u32, flags: u32
     var nt_name = windows.UNICODE_STRING{
         .Length = path_len_bytes,
         .MaximumLength = path_len_bytes,
-        .Buffer = @intToPtr([*]u16, @ptrToInt(sub_path_w)),
+        .Buffer = @constCast(sub_path_w),
     };
     var attr = windows.OBJECT_ATTRIBUTES{
         .Length = @sizeOf(windows.OBJECT_ATTRIBUTES),
@@ -5131,10 +5133,10 @@ pub fn getFdPath(fd: fd_t, out_buffer: *[MAX_PATH_BYTES]u8) RealPathError![]u8 {
             return out_buffer[0..len];
         },
         .linux => {
-            var procfs_buf: ["/proc/self/fd/-2147483648".len:0]u8 = undefined;
-            const proc_path = std.fmt.bufPrint(procfs_buf[0..], "/proc/self/fd/{d}\x00", .{fd}) catch unreachable;
+            var procfs_buf: ["/proc/self/fd/-2147483648\x00".len]u8 = undefined;
+            const proc_path = std.fmt.bufPrintZ(procfs_buf[0..], "/proc/self/fd/{d}", .{fd}) catch unreachable;
 
-            const target = readlinkZ(std.meta.assumeSentinel(proc_path.ptr, 0), out_buffer) catch |err| {
+            const target = readlinkZ(proc_path, out_buffer) catch |err| {
                 switch (err) {
                     error.UnsupportedReparsePointType => unreachable, // Windows only,
                     error.NotLink => unreachable,
@@ -5144,7 +5146,7 @@ pub fn getFdPath(fd: fd_t, out_buffer: *[MAX_PATH_BYTES]u8) RealPathError![]u8 {
             return target;
         },
         .solaris => {
-            var procfs_buf: ["/proc/self/path/-2147483648".len:0]u8 = undefined;
+            var procfs_buf: ["/proc/self/path/-2147483648\x00".len]u8 = undefined;
             const proc_path = std.fmt.bufPrintZ(procfs_buf[0..], "/proc/self/path/{d}", .{fd}) catch unreachable;
 
             const target = readlinkZ(proc_path, out_buffer) catch |err| switch (err) {
@@ -5561,7 +5563,7 @@ pub const GetHostNameError = error{PermissionDenied} || UnexpectedError;
 pub fn gethostname(name_buffer: *[HOST_NAME_MAX]u8) GetHostNameError![]u8 {
     if (builtin.link_libc) {
         switch (errno(system.gethostname(name_buffer, name_buffer.len))) {
-            .SUCCESS => return mem.sliceTo(std.meta.assumeSentinel(name_buffer, 0), 0),
+            .SUCCESS => return mem.sliceTo(name_buffer, 0),
             .FAULT => unreachable,
             .NAMETOOLONG => unreachable, // HOST_NAME_MAX prevents this
             .PERM => return error.PermissionDenied,
@@ -5570,7 +5572,7 @@ pub fn gethostname(name_buffer: *[HOST_NAME_MAX]u8) GetHostNameError![]u8 {
     }
     if (builtin.os.tag == .linux) {
         const uts = uname();
-        const hostname = mem.sliceTo(std.meta.assumeSentinel(&uts.nodename, 0), 0);
+        const hostname = mem.sliceTo(&uts.nodename, 0);
         mem.copy(u8, name_buffer, hostname);
         return name_buffer[0..hostname.len];
     }
@@ -6026,7 +6028,7 @@ pub fn sendfile(
                     .BADF => unreachable, // Always a race condition.
                     .FAULT => unreachable, // Segmentation fault.
                     .OVERFLOW => unreachable, // We avoid passing too large of a `count`.
-                    .NOTCONN => unreachable, // `out_fd` is an unconnected socket.
+                    .NOTCONN => return error.BrokenPipe, // `out_fd` is an unconnected socket
 
                     .INVAL, .NOSYS => {
                         // EINVAL could be any of the following situations:
@@ -6094,7 +6096,7 @@ pub fn sendfile(
 
                     .BADF => unreachable, // Always a race condition.
                     .FAULT => unreachable, // Segmentation fault.
-                    .NOTCONN => unreachable, // `out_fd` is an unconnected socket.
+                    .NOTCONN => return error.BrokenPipe, // `out_fd` is an unconnected socket
 
                     .INVAL, .OPNOTSUPP, .NOTSOCK, .NOSYS => {
                         // EINVAL could be any of the following situations:
@@ -6176,7 +6178,7 @@ pub fn sendfile(
                     .BADF => unreachable, // Always a race condition.
                     .FAULT => unreachable, // Segmentation fault.
                     .INVAL => unreachable,
-                    .NOTCONN => unreachable, // `out_fd` is an unconnected socket.
+                    .NOTCONN => return error.BrokenPipe, // `out_fd` is an unconnected socket
 
                     .OPNOTSUPP, .NOTSOCK, .NOSYS => break :sf,
 
@@ -6470,7 +6472,7 @@ pub fn recvfrom(
                 .BADF => unreachable, // always a race condition
                 .FAULT => unreachable,
                 .INVAL => unreachable,
-                .NOTCONN => unreachable,
+                .NOTCONN => return error.SocketNotConnected,
                 .NOTSOCK => unreachable,
                 .INTR => continue,
                 .AGAIN => return error.WouldBlock,
@@ -7053,4 +7055,22 @@ pub fn timerfd_gettime(fd: i32) TimerFdGetError!linux.itimerspec {
         .INVAL => unreachable,
         else => |err| return unexpectedErrno(err),
     };
+}
+
+pub const have_sigpipe_support = @hasDecl(@This(), "SIG") and @hasDecl(SIG, "PIPE");
+
+fn noopSigHandler(_: c_int) callconv(.C) void {}
+
+pub fn maybeIgnoreSigpipe() void {
+    if (have_sigpipe_support and !std.options.keep_sigpipe) {
+        const act = Sigaction{
+            // We set handler to a noop function instead of SIG.IGN so we don't leak our
+            // signal disposition to a child process
+            .handler = .{ .handler = noopSigHandler },
+            .mask = empty_sigset,
+            .flags = 0,
+        };
+        sigaction(SIG.PIPE, &act, null) catch |err|
+            std.debug.panic("failed to install noop SIGPIPE handler with '{s}'", .{@errorName(err)});
+    }
 }

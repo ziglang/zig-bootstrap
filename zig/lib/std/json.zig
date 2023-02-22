@@ -1163,11 +1163,12 @@ const ArrayList = std.ArrayList;
 const StringArrayHashMap = std.StringArrayHashMap;
 
 pub const ValueTree = struct {
-    arena: ArenaAllocator,
+    arena: *ArenaAllocator,
     root: Value,
 
     pub fn deinit(self: *ValueTree) void {
         self.arena.deinit();
+        self.arena.child_allocator.destroy(self.arena);
     }
 };
 
@@ -1279,7 +1280,7 @@ fn parsedEqual(a: anytype, b: @TypeOf(a)) bool {
             }
         },
         .Array => {
-            for (a) |e, i|
+            for (a, 0..) |e, i|
                 if (!parsedEqual(e, b[i])) return false;
             return true;
         },
@@ -1293,7 +1294,7 @@ fn parsedEqual(a: anytype, b: @TypeOf(a)) bool {
             .One => return parsedEqual(a.*, b.*),
             .Slice => {
                 if (a.len != b.len) return false;
-                for (a) |e, i|
+                for (a, 0..) |e, i|
                     if (!parsedEqual(e, b[i])) return false;
                 return true;
             },
@@ -1384,7 +1385,7 @@ fn ParseInternalErrorImpl(comptime T: type, comptime inferred_types: []const typ
             return errors;
         },
         .Array => |arrayInfo| {
-            return error{ UnexpectedEndOfJson, UnexpectedToken } || TokenStream.Error ||
+            return error{ UnexpectedEndOfJson, UnexpectedToken, LengthMismatch } || TokenStream.Error ||
                 UnescapeValidStringError ||
                 ParseInternalErrorImpl(arrayInfo.child, inferred_types ++ [_]type{T});
         },
@@ -1517,7 +1518,7 @@ fn parseInternal(
             var r: T = undefined;
             var fields_seen = [_]bool{false} ** structInfo.fields.len;
             errdefer {
-                inline for (structInfo.fields) |field, i| {
+                inline for (structInfo.fields, 0..) |field, i| {
                     if (fields_seen[i] and !field.is_comptime) {
                         parseFree(field.type, @field(r, field.name), options);
                     }
@@ -1532,7 +1533,7 @@ fn parseInternal(
                         var child_options = options;
                         child_options.allow_trailing_data = true;
                         var found = false;
-                        inline for (structInfo.fields) |field, i| {
+                        inline for (structInfo.fields, 0..) |field, i| {
                             // TODO: using switches here segfault the compiler (#2727?)
                             if ((stringToken.escapes == .None and mem.eql(u8, field.name, key_source_slice)) or (stringToken.escapes == .Some and (field.name.len == stringToken.decodedLength() and encodesTo(field.name, key_source_slice)))) {
                                 // if (switch (stringToken.escapes) {
@@ -1583,7 +1584,7 @@ fn parseInternal(
                     else => return error.UnexpectedToken,
                 }
             }
-            inline for (structInfo.fields) |field, i| {
+            inline for (structInfo.fields, 0..) |field, i| {
                 if (!fields_seen[i]) {
                     if (field.default_value) |default_ptr| {
                         if (!field.is_comptime) {
@@ -1625,6 +1626,7 @@ fn parseInternal(
                     if (arrayInfo.child != u8) return error.UnexpectedToken;
                     var r: T = undefined;
                     const source_slice = stringToken.slice(tokens.slice, tokens.i - 1);
+                    if (r.len != stringToken.decodedLength()) return error.LengthMismatch;
                     switch (stringToken.escapes) {
                         .None => mem.copy(u8, &r, source_slice),
                         .Some => try unescapeValidString(&r, source_slice),
@@ -1638,7 +1640,7 @@ fn parseInternal(
             const allocator = options.allocator orelse return error.AllocatorRequired;
             switch (ptrInfo.size) {
                 .One => {
-                    const r: T = try allocator.create(ptrInfo.child);
+                    const r: *ptrInfo.child = try allocator.create(ptrInfo.child);
                     errdefer allocator.destroy(r);
                     r.* = try parseInternal(ptrInfo.child, token, tokens, options);
                     return r;
@@ -1677,17 +1679,14 @@ fn parseInternal(
                             if (ptrInfo.child != u8) return error.UnexpectedToken;
                             const source_slice = stringToken.slice(tokens.slice, tokens.i - 1);
                             const len = stringToken.decodedLength();
-                            const output = try allocator.alloc(u8, len + @boolToInt(ptrInfo.sentinel != null));
+                            const output = if (ptrInfo.sentinel) |sentinel_ptr|
+                                try allocator.allocSentinel(u8, len, @ptrCast(*const u8, sentinel_ptr).*)
+                            else
+                                try allocator.alloc(u8, len);
                             errdefer allocator.free(output);
                             switch (stringToken.escapes) {
                                 .None => mem.copy(u8, output, source_slice),
                                 .Some => try unescapeValidString(output, source_slice),
-                            }
-
-                            if (ptrInfo.sentinel) |some| {
-                                const char = @ptrCast(*const u8, some).*;
-                                output[len] = char;
-                                return output[0..len :char];
                             }
 
                             return output;
@@ -1743,7 +1742,37 @@ pub fn parseFree(comptime T: type, value: T, options: ParseOptions) void {
         .Struct => |structInfo| {
             inline for (structInfo.fields) |field| {
                 if (!field.is_comptime) {
-                    parseFree(field.type, @field(value, field.name), options);
+                    var should_free = true;
+                    if (field.default_value) |default| {
+                        switch (@typeInfo(field.type)) {
+                            // We must not attempt to free pointers to struct default values
+                            .Pointer => |fieldPtrInfo| {
+                                const field_value = @field(value, field.name);
+                                const field_ptr = switch (fieldPtrInfo.size) {
+                                    .One => field_value,
+                                    .Slice => field_value.ptr,
+                                    else => unreachable, // Other pointer types are not parseable
+                                };
+                                const field_addr = @ptrToInt(field_ptr);
+
+                                const casted_default = @ptrCast(*const field.type, @alignCast(@alignOf(field.type), default)).*;
+                                const default_ptr = switch (fieldPtrInfo.size) {
+                                    .One => casted_default,
+                                    .Slice => casted_default.ptr,
+                                    else => unreachable, // Other pointer types are not parseable
+                                };
+                                const default_addr = @ptrToInt(default_ptr);
+
+                                if (field_addr == default_addr) {
+                                    should_free = false;
+                                }
+                            },
+                            else => {},
+                        }
+                    }
+                    if (should_free) {
+                        parseFree(field.type, @field(value, field.name), options);
+                    }
                 }
             }
         },
@@ -1808,8 +1837,12 @@ pub const Parser = struct {
     pub fn parse(p: *Parser, input: []const u8) !ValueTree {
         var s = TokenStream.init(input);
 
-        var arena = ArenaAllocator.init(p.allocator);
+        var arena = try p.allocator.create(ArenaAllocator);
+        errdefer p.allocator.destroy(arena);
+
+        arena.* = ArenaAllocator.init(p.allocator);
         errdefer arena.deinit();
+
         const allocator = arena.allocator();
 
         while (try s.next()) |token| {
@@ -2334,7 +2367,7 @@ pub fn stringify(
                 if (child_options.whitespace) |*whitespace| {
                     whitespace.indent_level += 1;
                 }
-                for (value) |x, i| {
+                for (value, 0..) |x, i| {
                     if (i != 0) {
                         try out_stream.writeByte(',');
                     }
@@ -2682,4 +2715,17 @@ test "encodesTo" {
     try testing.expectEqual(true, encodesTo("ą", "\\u0105"));
     try testing.expectEqual(true, encodesTo("😂", "\\ud83d\\ude02"));
     try testing.expectEqual(true, encodesTo("withąunicode😂", "with\\u0105unicode\\ud83d\\ude02"));
+}
+
+test "issue 14600" {
+    const json = "\"\\n\"";
+    var token_stream = std.json.TokenStream.init(json);
+    const options = ParseOptions{ .allocator = std.testing.allocator };
+
+    // Pre-fix, this line would panic:
+    const result = try std.json.parse([:0]const u8, &token_stream, options);
+    defer std.json.parseFree([:0]const u8, result, options);
+
+    // Double-check that we're getting the right result
+    try testing.expect(mem.eql(u8, result, "\n"));
 }

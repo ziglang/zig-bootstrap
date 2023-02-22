@@ -899,7 +899,7 @@ pub fn main() anyerror!void {
         }
     } else {
         var threads = try arena.alloc(std.Thread, llvm_targets.len);
-        for (llvm_targets) |llvm_target, i| {
+        for (llvm_targets, 0..) |llvm_target, i| {
             const job = Job{
                 .llvm_tblgen_exe = llvm_tblgen_exe,
                 .llvm_src_root = llvm_src_root,
@@ -1226,7 +1226,7 @@ fn processOneTarget(job: Job) anyerror!void {
     }
     try w.writeAll(
         \\    const ti = @typeInfo(Feature);
-        \\    for (result) |*elem, i| {
+        \\    for (&result, 0..) |*elem, i| {
         \\        elem.index = i;
         \\        elem.name = ti.Enum.fields[i].name;
         \\    }
@@ -1306,7 +1306,7 @@ fn usageAndExit(file: fs.File, arg0: []const u8, code: u8) noreturn {
         \\
         \\Updates lib/std/target/<target>.zig from llvm/lib/Target/<Target>/<Target>.td .
         \\
-        \\On a less beefy system, or when debugging, compile with --single-threaded.
+        \\On a less beefy system, or when debugging, compile with -fsingle-threaded.
         \\
     , .{arg0}) catch std.process.exit(1);
     std.process.exit(code);

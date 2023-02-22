@@ -183,7 +183,7 @@ pub fn ArrayListAligned(comptime T: type, comptime alignment: ?u29) type {
                 mem.copy(T, range, new_items);
                 const after_subrange = start + new_items.len;
 
-                for (self.items[after_range..]) |item, i| {
+                for (self.items[after_range..], 0..) |item, i| {
                     self.items[after_subrange..][i] = item;
                 }
 
@@ -216,7 +216,7 @@ pub fn ArrayListAligned(comptime T: type, comptime alignment: ?u29) type {
             if (newlen == i) return self.pop();
 
             const old_item = self.items[i];
-            for (self.items[i..newlen]) |*b, j| b.* = self.items[i + 1 + j];
+            for (self.items[i..newlen], 0..) |*b, j| b.* = self.items[i + 1 + j];
             self.items[newlen] = undefined;
             self.items.len = newlen;
             return old_item;
@@ -482,14 +482,14 @@ pub fn ArrayListAligned(comptime T: type, comptime alignment: ?u29) type {
 
         /// Return the last element from the list.
         /// Asserts the list has at least one item.
-        pub fn getLast(self: *Self) T {
+        pub fn getLast(self: Self) T {
             const val = self.items[self.items.len - 1];
             return val;
         }
 
         /// Return the last element from the list, or
         /// return `null` if list is empty.
-        pub fn getLastOrNull(self: *Self) ?T {
+        pub fn getLastOrNull(self: Self) ?T {
             if (self.items.len == 0) return null;
             return self.getLast();
         }
@@ -666,7 +666,7 @@ pub fn ArrayListAlignedUnmanaged(comptime T: type, comptime alignment: ?u29) typ
             if (newlen == i) return self.pop();
 
             const old_item = self.items[i];
-            for (self.items[i..newlen]) |*b, j| b.* = self.items[i + 1 + j];
+            for (self.items[i..newlen], 0..) |*b, j| b.* = self.items[i + 1 + j];
             self.items[newlen] = undefined;
             self.items.len = newlen;
             return old_item;
@@ -961,14 +961,14 @@ pub fn ArrayListAlignedUnmanaged(comptime T: type, comptime alignment: ?u29) typ
 
         /// Return the last element from the list.
         /// Asserts the list has at least one item.
-        pub fn getLast(self: *Self) T {
+        pub fn getLast(self: Self) T {
             const val = self.items[self.items.len - 1];
             return val;
         }
 
         /// Return the last element from the list, or
         /// return `null` if list is empty.
-        pub fn getLastOrNull(self: *Self) ?T {
+        pub fn getLastOrNull(self: Self) ?T {
             if (self.items.len == 0) return null;
             return self.getLast();
         }
@@ -1069,7 +1069,7 @@ test "std.ArrayList/ArrayListUnmanaged.basic" {
             }
         }
 
-        for (list.items) |v, i| {
+        for (list.items, 0..) |v, i| {
             try testing.expect(v == @intCast(i32, i + 1));
         }
 
@@ -1119,7 +1119,7 @@ test "std.ArrayList/ArrayListUnmanaged.basic" {
             }
         }
 
-        for (list.items) |v, i| {
+        for (list.items, 0..) |v, i| {
             try testing.expect(v == @intCast(i32, i + 1));
         }
 
@@ -1718,4 +1718,28 @@ test "std.ArrayList(?u32).popOrNull()" {
     try testing.expect(list.popOrNull().? == @as(u32, 1));
     try testing.expect(list.popOrNull().? == null);
     try testing.expect(list.popOrNull() == null);
+}
+
+test "std.ArrayList(u32).getLast()" {
+    const a = testing.allocator;
+
+    var list = ArrayList(u32).init(a);
+    defer list.deinit();
+
+    try list.append(2);
+    const const_list = list;
+    try testing.expectEqual(const_list.getLast(), 2);
+}
+
+test "std.ArrayList(u32).getLastOrNull()" {
+    const a = testing.allocator;
+
+    var list = ArrayList(u32).init(a);
+    defer list.deinit();
+
+    try testing.expectEqual(list.getLastOrNull(), null);
+
+    try list.append(2);
+    const const_list = list;
+    try testing.expectEqual(const_list.getLastOrNull().?, 2);
 }

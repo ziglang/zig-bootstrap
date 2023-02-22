@@ -131,12 +131,15 @@ pub const CodeModel = enum {
 
 /// This data structure is used by the Zig language code generation and
 /// therefore must be kept in sync with the compiler implementation.
-pub const Mode = enum {
+pub const OptimizeMode = enum {
     Debug,
     ReleaseSafe,
     ReleaseFast,
     ReleaseSmall,
 };
+
+/// Deprecated; use OptimizeMode.
+pub const Mode = OptimizeMode;
 
 /// This data structure is used by the Zig language code generation and
 /// therefore must be kept in sync with the compiler implementation.
@@ -972,6 +975,7 @@ pub const panic_messages = struct {
     pub const unwrap_error = "attempt to unwrap error";
     pub const index_out_of_bounds = "index out of bounds";
     pub const start_index_greater_than_end = "start index is larger than end index";
+    pub const for_len_mismatch = "for loop over objects with non-equal lengths";
 };
 
 pub noinline fn returnError(st: *StackTrace) void {

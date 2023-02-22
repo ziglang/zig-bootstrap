@@ -216,6 +216,9 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/atomic/stack.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/base64.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/buf_map.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Build.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Build/Cache.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Build/Cache/DepTokenizer.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/builtin.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/c.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/c/linux.zig"
@@ -513,7 +516,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/zig/Ast.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/CrossTarget.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/c_builtins.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/zig/parse.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/zig/Parse.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/render.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/string_literal.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/system.zig"
@@ -523,9 +526,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/zig/tokenizer.zig"
     "${CMAKE_SOURCE_DIR}/src/Air.zig"
     "${CMAKE_SOURCE_DIR}/src/AstGen.zig"
-    "${CMAKE_SOURCE_DIR}/src/Cache.zig"
     "${CMAKE_SOURCE_DIR}/src/Compilation.zig"
-    "${CMAKE_SOURCE_DIR}/src/DepTokenizer.zig"
     "${CMAKE_SOURCE_DIR}/src/Liveness.zig"
     "${CMAKE_SOURCE_DIR}/src/Module.zig"
     "${CMAKE_SOURCE_DIR}/src/Package.zig"
@@ -568,6 +569,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/clang_options_data.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen/c.zig"
+    "${CMAKE_SOURCE_DIR}/src/codegen/c/type.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen/llvm.zig"
     "${CMAKE_SOURCE_DIR}/src/codegen/llvm/bindings.zig"
     "${CMAKE_SOURCE_DIR}/src/glibc.zig"
@@ -654,46 +656,19 @@ include_directories(
     "${CMAKE_SOURCE_DIR}/src"
 )
 
-# These have to go before the -Wno- flags
 if(MSVC)
   set(EXE_CXX_FLAGS "/std:c++14")
-else(MSVC)
-  set(EXE_CXX_FLAGS "-std=c++14")
-endif(MSVC)
-
-if("${CMAKE_BUILD_TYPE}" STREQUAL "Debug")
-    if(MSVC)
-      set(EXE_CXX_FLAGS "${EXE_CXX_FLAGS} /w")
-    else()
-      set(EXE_CXX_FLAGS "${EXE_CXX_FLAGS} -Werror -Wall")
-        # fallthrough support was added in GCC 7.0
-        if(NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR CMAKE_CXX_COMPILER_VERSION VERSION_GREATER_EQUAL 7.0)
-          set(EXE_CXX_FLAGS "${EXE_CXX_FLAGS} -Werror=implicit-fallthrough")
-        endif()
-        # GCC 9.2 and older are unable to detect valid variable initialization in some cases
-        if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" AND CMAKE_CXX_COMPILER_VERSION VERSION_LESS_EQUAL 9.2)
-          set(EXE_CXX_FLAGS "${EXE_CXX_FLAGS} -Wno-maybe-uninitialized")
-        endif()
-    endif()
-endif()
-
-if(MSVC)
-  set(EXE_CXX_FLAGS "${EXE_CXX_FLAGS}")
+  set(EXE_LDFLAGS "/STACK:16777216")
+  if(NOT "${CMAKE_BUILD_TYPE}" STREQUAL "Release" AND NOT "${CMAKE_BUILD_TYPE}" STREQUAL "MinSizeRel")
+    set(EXE_LDFLAGS "${EXE_LDFLAGS} /debug:fastlink")
+  endif()
 else()
-  set(EXE_CXX_FLAGS "${EXE_CXX_FLAGS} -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS -D_GNU_SOURCE -fvisibility-inlines-hidden -fno-exceptions -fno-rtti -Werror=type-limits -Wno-missing-braces -Wno-comment")
-    if(MINGW)
-      set(EXE_CXX_FLAGS "${EXE_CXX_FLAGS} -Wno-format")
-    endif()
-endif()
-
-set(EXE_LDFLAGS " ")
-if(MSVC)
-    set(EXE_LDFLAGS "${EXE_LDFLAGS} /STACK:16777216")
-    if(NOT "${CMAKE_BUILD_TYPE}" STREQUAL "Release" AND NOT "${CMAKE_BUILD_TYPE}" STREQUAL "MinSizeRel")
-        set(EXE_LDFLAGS "${EXE_LDFLAGS} /debug:fastlink")
-    endif()
-elseif(MINGW)
+  set(EXE_CXX_FLAGS "-std=c++14 -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS -D_GNU_SOURCE -fvisibility-inlines-hidden -fno-exceptions -fno-rtti -Werror=type-limits -Wno-missing-braces -Wno-comment")
+  set(EXE_LDFLAGS " ")
+  if(MINGW)
+    set(EXE_CXX_FLAGS "${EXE_CXX_FLAGS} -Wno-format")
     set(EXE_LDFLAGS "${EXE_LDFLAGS} -Wl,--stack,16777216")
+  endif()
 endif()
 
 if(ZIG_STATIC)
@@ -774,7 +749,8 @@ set(BUILD_ZIG2_ARGS
   build-exe src/main.zig -ofmt=c -lc
   -OReleaseSmall
   --name zig2 -femit-bin="${ZIG2_C_SOURCE}"
-  --pkg-begin build_options "${ZIG_CONFIG_ZIG_OUT}" --pkg-end
+  --mod "build_options::${ZIG_CONFIG_ZIG_OUT}"
+  --deps build_options
   -target "${HOST_TARGET_TRIPLE}"
 )
  
@@ -791,7 +767,8 @@ set(BUILD_COMPILER_RT_ARGS
   build-obj lib/compiler_rt.zig -ofmt=c
   -OReleaseSmall
   --name compiler_rt -femit-bin="${ZIG_COMPILER_RT_C_SOURCE}"
-  --pkg-begin build_options "${ZIG_CONFIG_ZIG_OUT}" --pkg-end
+  --mod "build_options::${ZIG_CONFIG_ZIG_OUT}"
+  --deps build_options
   -target "${HOST_TARGET_TRIPLE}"
 )
  
@@ -808,7 +785,7 @@ set_target_properties(zig2 PROPERTIES
   COMPILE_FLAGS ${ZIG2_COMPILE_FLAGS}
   LINK_FLAGS ${ZIG2_LINK_FLAGS}
 )
-target_include_directories(zig2 PUBLIC "${CMAKE_SOURCE_DIR}/lib")
+target_include_directories(zig2 PUBLIC "${CMAKE_SOURCE_DIR}/stage1")
 target_link_libraries(zig2 LINK_PUBLIC zigcpp)
 
 if(MSVC)

@@ -61,7 +61,7 @@ const Reloc = struct {
 pub fn lowerMir(emit: *Emit) InnerError!void {
     const mir_tags = emit.mir.instructions.items(.tag);
 
-    for (mir_tags) |tag, index| {
+    for (mir_tags, 0..) |tag, index| {
         const inst = @intCast(u32, index);
         try emit.code_offset_mapping.putNoClobber(emit.bin_file.allocator, inst, emit.code.items.len);
         switch (tag) {
@@ -1001,8 +1001,8 @@ fn mirLeaPic(emit: *Emit, inst: Mir.Inst.Index) InnerError!void {
             0b01 => @enumToInt(std.macho.reloc_type_x86_64.X86_64_RELOC_SIGNED),
             else => unreachable,
         };
-        const atom = macho_file.getAtomForSymbol(.{ .sym_index = relocation.atom_index, .file = null }).?;
-        try atom.addRelocation(macho_file, .{
+        const atom_index = macho_file.getAtomIndexForSymbol(.{ .sym_index = relocation.atom_index, .file = null }).?;
+        try link.File.MachO.Atom.addRelocation(macho_file, atom_index, .{
             .type = reloc_type,
             .target = .{ .sym_index = relocation.sym_index, .file = null },
             .offset = @intCast(u32, end_offset - 4),
@@ -1011,8 +1011,8 @@ fn mirLeaPic(emit: *Emit, inst: Mir.Inst.Index) InnerError!void {
             .length = 2,
         });
     } else if (emit.bin_file.cast(link.File.Coff)) |coff_file| {
-        const atom = coff_file.getAtomForSymbol(.{ .sym_index = relocation.atom_index, .file = null }).?;
-        try atom.addRelocation(coff_file, .{
+        const atom_index = coff_file.getAtomIndexForSymbol(.{ .sym_index = relocation.atom_index, .file = null }).?;
+        try link.File.Coff.Atom.addRelocation(coff_file, atom_index, .{
             .type = switch (ops.flags) {
                 0b00 => .got,
                 0b01 => .direct,
@@ -1140,9 +1140,9 @@ fn mirCallExtern(emit: *Emit, inst: Mir.Inst.Index) InnerError!void {
 
     if (emit.bin_file.cast(link.File.MachO)) |macho_file| {
         // Add relocation to the decl.
-        const atom = macho_file.getAtomForSymbol(.{ .sym_index = relocation.atom_index, .file = null }).?;
+        const atom_index = macho_file.getAtomIndexForSymbol(.{ .sym_index = relocation.atom_index, .file = null }).?;
         const target = macho_file.getGlobalByIndex(relocation.sym_index);
-        try atom.addRelocation(macho_file, .{
+        try link.File.MachO.Atom.addRelocation(macho_file, atom_index, .{
             .type = @enumToInt(std.macho.reloc_type_x86_64.X86_64_RELOC_BRANCH),
             .target = target,
             .offset = offset,
@@ -1152,9 +1152,9 @@ fn mirCallExtern(emit: *Emit, inst: Mir.Inst.Index) InnerError!void {
         });
     } else if (emit.bin_file.cast(link.File.Coff)) |coff_file| {
         // Add relocation to the decl.
-        const atom = coff_file.getAtomForSymbol(.{ .sym_index = relocation.atom_index, .file = null }).?;
+        const atom_index = coff_file.getAtomIndexForSymbol(.{ .sym_index = relocation.atom_index, .file = null }).?;
         const target = coff_file.getGlobalByIndex(relocation.sym_index);
-        try atom.addRelocation(coff_file, .{
+        try link.File.Coff.Atom.addRelocation(coff_file, atom_index, .{
             .type = .direct,
             .target = target,
             .offset = offset,
@@ -1544,7 +1544,7 @@ const OpCode = struct {
     fn init(comptime in_bytes: []const u8) OpCode {
         comptime assert(in_bytes.len <= 3);
         comptime var bytes: [3]u8 = undefined;
-        inline for (in_bytes) |x, i| {
+        inline for (in_bytes, 0..) |x, i| {
             bytes[i] = x;
         }
         return .{ .bytes = bytes, .count = in_bytes.len };

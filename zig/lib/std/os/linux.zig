@@ -40,6 +40,7 @@ const arch_bits = switch (native_arch) {
     .riscv64 => @import("linux/riscv64.zig"),
     .sparc64 => @import("linux/sparc64.zig"),
     .mips, .mipsel => @import("linux/mips.zig"),
+    .mips64, .mips64el => @import("linux/mips64.zig"),
     .powerpc => @import("linux/powerpc.zig"),
     .powerpc64, .powerpc64le => @import("linux/powerpc64.zig"),
     else => struct {},
@@ -101,6 +102,7 @@ pub const SYS = switch (@import("builtin").cpu.arch) {
     .riscv64 => syscalls.RiscV64,
     .sparc64 => syscalls.Sparc64,
     .mips, .mipsel => syscalls.Mips,
+    .mips64, .mips64el => syscalls.Mips64,
     .powerpc => syscalls.PowerPC,
     .powerpc64, .powerpc64le => syscalls.PowerPC64,
     else => @compileError("The Zig Standard Library is missing syscall definitions for the target CPU architecture"),
@@ -1243,7 +1245,7 @@ pub fn sendmmsg(fd: i32, msgvec: [*]mmsghdr_const, vlen: u32, flags: u32) usize 
         // see https://www.openwall.com/lists/musl/2014/06/07/5
         const kvlen = if (vlen > IOV_MAX) IOV_MAX else vlen; // matches kernel
         var next_unsent: usize = 0;
-        for (msgvec[0..kvlen]) |*msg, i| {
+        for (msgvec[0..kvlen], 0..) |*msg, i| {
             var size: i32 = 0;
             const msg_iovlen = @intCast(usize, msg.msg_hdr.msg_iovlen); // kernel side this is treated as unsigned
             for (msg.msg_hdr.msg_iov[0..msg_iovlen]) |iov| {

@@ -104,7 +104,18 @@ test "alignment and size of structs with 128-bit fields" {
             .u129_size = 24,
         },
 
-        .x86 => switch (builtin.os.tag) {
+        .x86 => if (builtin.object_format == .c) .{
+            .a_align = 16,
+            .a_size = 16,
+
+            .b_align = 16,
+            .b_size = 32,
+
+            .u128_align = 16,
+            .u128_size = 16,
+            .u129_align = 16,
+            .u129_size = 32,
+        } else switch (builtin.os.tag) {
             .windows => .{
                 .a_align = 8,
                 .a_size = 16,
@@ -540,7 +551,11 @@ test "align(N) on functions" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO this is not supported on MSVC
+
+    // This is not supported on MSVC
+    if (builtin.zig_backend == .stage2_c and builtin.os.tag == .windows) {
+        return error.SkipZigTest;
+    }
 
     // function alignment is a compile error on wasm32/wasm64
     if (native_arch == .wasm32 or native_arch == .wasm64) return error.SkipZigTest;

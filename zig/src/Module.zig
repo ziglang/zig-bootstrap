@@ -16,7 +16,7 @@ const Ast = std.zig.Ast;
 
 const Module = @This();
 const Compilation = @import("Compilation.zig");
-const Cache = @import("Cache.zig");
+const Cache = std.Build.Cache;
 const Value = @import("value.zig").Value;
 const Type = @import("type.zig").Type;
 const TypedValue = @import("TypedValue.zig");
@@ -144,10 +144,6 @@ stage1_flags: packed struct {
 } = .{},
 
 job_queued_update_builtin_zig: bool = true,
-/// This makes it so that we can run `zig test` on the standard library.
-/// Otherwise, the logic for scanning test decls skips all of them because
-/// `main_pkg != std_pkg`.
-main_pkg_is_std: bool,
 
 compile_log_text: ArrayListUnmanaged(u8) = .{},
 
@@ -268,7 +264,7 @@ pub const MemoizedCall = struct {
         if (a.func != b.func) return false;
 
         assert(a.args.len == b.args.len);
-        for (a.args) |a_arg, arg_i| {
+        for (a.args, 0..) |a_arg, arg_i| {
             const b_arg = b.args[arg_i];
             if (!a_arg.eql(b_arg, ctx.module)) {
                 return false;
@@ -328,8 +324,6 @@ pub const ErrorInt = u32;
 pub const Export = struct {
     options: std.builtin.ExportOptions,
     src: LazySrcLoc,
-    /// Represents the position of the export, if any, in the output file.
-    link: link.File.Export,
     /// The Decl that performs the export. Note that this is *not* the Decl being exported.
     owner_decl: Decl.Index,
     /// The Decl containing the export statement.  Inline function calls
@@ -532,17 +526,6 @@ pub const Decl = struct {
     name_fully_qualified: bool = false,
     /// What kind of a declaration is this.
     kind: Kind,
-
-    /// Represents the position of the code in the output file.
-    /// This is populated regardless of semantic analysis and code generation.
-    link: link.File.LinkBlock,
-
-    /// Represents the function in the linked output file, if the `Decl` is a function.
-    /// This is stored here and not in `Fn` because `Decl` survives across updates but
-    /// `Fn` does not.
-    /// TODO Look into making `Fn` a longer lived structure and moving this field there
-    /// to save on memory usage.
-    fn_link: link.File.LinkFn,
 
     /// The shallow set of other decls whose typed_value could possibly change if this Decl's
     /// typed_value is modified.
@@ -1095,7 +1078,7 @@ pub const Struct = struct {
         assert(s.layout == .Packed);
         assert(s.haveLayout());
         var bit_sum: u64 = 0;
-        for (s.fields.values()) |field, i| {
+        for (s.fields.values(), 0..) |field, i| {
             if (i == index) {
                 return @intCast(u16, bit_sum);
             }
@@ -1354,7 +1337,7 @@ pub const Union = struct {
         assert(u.haveFieldTypes());
         var most_alignment: u32 = 0;
         var most_index: usize = undefined;
-        for (u.fields.values()) |field, i| {
+        for (u.fields.values(), 0..) |field, i| {
             if (!field.ty.hasRuntimeBits()) continue;
 
             const field_align = field.normalAlignment(target);
@@ -1418,7 +1401,7 @@ pub const Union = struct {
         var payload_size: u64 = 0;
         var payload_align: u32 = 0;
         const fields = u.fields.values();
-        for (fields) |field, i| {
+        for (fields, 0..) |field, i| {
             if (!field.ty.hasRuntimeBitsIgnoreComptime()) continue;
 
             const field_align = a: {
@@ -1943,6 +1926,10 @@ pub const File = struct {
     zir: Zir,
     /// Package that this file is a part of, managed externally.
     pkg: *Package,
+    /// Whether this file is a part of multiple packages. This is an error condition which will be reported after AstGen.
+    multi_pkg: bool = false,
+    /// List of references to this file, used for multi-package errors.
+    references: std.ArrayListUnmanaged(Reference) = .{},
 
     /// Used by change detection algorithm, after astgen, contains the
     /// set of decls that existed in the previous ZIR but not in the new one.
@@ -1957,6 +1944,14 @@ pub const File = struct {
     /// newly introduces compile errors during an update. When ZIR is
     /// successful, this field is unloaded.
     prev_zir: ?*Zir = null,
+
+    /// A single reference to a file.
+    pub const Reference = union(enum) {
+        /// The file is imported directly (i.e. not as a package) with @import.
+        import: SrcLoc,
+        /// The file is the root of a package.
+        root: *Package,
+    };
 
     pub fn unload(file: *File, gpa: Allocator) void {
         file.unloadTree(gpa);
@@ -1990,6 +1985,7 @@ pub const File = struct {
         log.debug("deinit File {s}", .{file.sub_file_path});
         file.deleted_decls.deinit(gpa);
         file.outdated_decls.deinit(gpa);
+        file.references.deinit(gpa);
         if (file.root_decl.unwrap()) |root_decl| {
             mod.destroyDecl(root_decl);
         }
@@ -2054,7 +2050,7 @@ pub const File = struct {
         if (file.tree_loaded) return &file.tree;
 
         const source = try file.getSource(gpa);
-        file.tree = try std.zig.parse(gpa, source.bytes);
+        file.tree = try Ast.parse(gpa, source.bytes, .zig);
         file.tree_loaded = true;
         return &file.tree;
     }
@@ -2109,6 +2105,67 @@ pub const File = struct {
             .parse_failure, .astgen_failure => false,
             else => true,
         };
+    }
+
+    /// Add a reference to this file during AstGen.
+    pub fn addReference(file: *File, mod: Module, ref: Reference) !void {
+        // Don't add the same module root twice. Note that since we always add module roots at the
+        // front of the references array (see below), this loop is actually O(1) on valid code.
+        if (ref == .root) {
+            for (file.references.items) |other| {
+                switch (other) {
+                    .root => |r| if (ref.root == r) return,
+                    else => break, // reached the end of the "is-root" references
+                }
+            }
+        }
+
+        switch (ref) {
+            // We put root references at the front of the list both to make the above loop fast and
+            // to make multi-module errors more helpful (since "root-of" notes are generally more
+            // informative than "imported-from" notes). This path is hit very rarely, so the speed
+            // of the insert operation doesn't matter too much.
+            .root => try file.references.insert(mod.gpa, 0, ref),
+
+            // Other references we'll just put at the end.
+            else => try file.references.append(mod.gpa, ref),
+        }
+
+        const pkg = switch (ref) {
+            .import => |loc| loc.file_scope.pkg,
+            .root => |pkg| pkg,
+        };
+        if (pkg != file.pkg) file.multi_pkg = true;
+    }
+
+    /// Mark this file and every file referenced by it as multi_pkg and report an
+    /// astgen_failure error for them. AstGen must have completed in its entirety.
+    pub fn recursiveMarkMultiPkg(file: *File, mod: *Module) void {
+        file.multi_pkg = true;
+        file.status = .astgen_failure;
+
+        // We can only mark children as failed if the ZIR is loaded, which may not
+        // be the case if there were other astgen failures in this file
+        if (!file.zir_loaded) return;
+
+        const imports_index = file.zir.extra[@enumToInt(Zir.ExtraIndex.imports)];
+        if (imports_index == 0) return;
+        const extra = file.zir.extraData(Zir.Inst.Imports, imports_index);
+
+        var import_i: u32 = 0;
+        var extra_index = extra.end;
+        while (import_i < extra.data.imports_len) : (import_i += 1) {
+            const item = file.zir.extraData(Zir.Inst.Imports.Item, extra_index);
+            extra_index = item.end;
+
+            const import_path = file.zir.nullTerminatedString(item.data.name);
+            if (mem.eql(u8, import_path, "builtin")) continue;
+
+            const res = mod.importFile(file, import_path) catch continue;
+            if (!res.is_pkg and !res.file.multi_pkg) {
+                res.file.recursiveMarkMultiPkg(mod);
+            }
+        }
     }
 };
 
@@ -2423,6 +2480,55 @@ pub const SrcLoc = struct {
                     else => unreachable,
                 };
                 return nodeToSpan(tree, src_node);
+            },
+            .for_input => |for_input| {
+                const tree = try src_loc.file_scope.getTree(gpa);
+                const node = src_loc.declRelativeToNodeIndex(for_input.for_node_offset);
+                const for_full = tree.fullFor(node).?;
+                const src_node = for_full.ast.inputs[for_input.input_index];
+                return nodeToSpan(tree, src_node);
+            },
+            .for_capture_from_input => |node_off| {
+                const tree = try src_loc.file_scope.getTree(gpa);
+                const token_tags = tree.tokens.items(.tag);
+                const input_node = src_loc.declRelativeToNodeIndex(node_off);
+                // We have to actually linear scan the whole AST to find the for loop
+                // that contains this input.
+                const node_tags = tree.nodes.items(.tag);
+                for (node_tags, 0..) |node_tag, node_usize| {
+                    const node = @intCast(Ast.Node.Index, node_usize);
+                    switch (node_tag) {
+                        .for_simple, .@"for" => {
+                            const for_full = tree.fullFor(node).?;
+                            for (for_full.ast.inputs, 0..) |input, input_index| {
+                                if (input_node == input) {
+                                    var count = input_index;
+                                    var tok = for_full.payload_token;
+                                    while (true) {
+                                        switch (token_tags[tok]) {
+                                            .comma => {
+                                                count -= 1;
+                                                tok += 1;
+                                            },
+                                            .identifier => {
+                                                if (count == 0)
+                                                    return tokensToSpan(tree, tok, tok + 1, tok);
+                                                tok += 1;
+                                            },
+                                            .asterisk => {
+                                                if (count == 0)
+                                                    return tokensToSpan(tree, tok, tok + 2, tok);
+                                                tok += 1;
+                                            },
+                                            else => unreachable,
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                        else => continue,
+                    }
+                } else unreachable;
             },
             .node_offset_bin_lhs => |node_off| {
                 const tree = try src_loc.file_scope.getTree(gpa);
@@ -3076,6 +3182,20 @@ pub const LazySrcLoc = union(enum) {
     /// The source location points to the RHS of an assignment.
     /// The Decl is determined contextually.
     node_offset_store_operand: i32,
+    /// The source location points to a for loop input.
+    /// The Decl is determined contextually.
+    for_input: struct {
+        /// Points to the for loop AST node.
+        for_node_offset: i32,
+        /// Picks one of the inputs from the condition.
+        input_index: u32,
+    },
+    /// The source location points to one of the captures of a for loop, found
+    /// by taking this AST node index offset from the containing
+    /// Decl AST node, which points to one of the input nodes of a for loop.
+    /// Next, navigate to the corresponding capture.
+    /// The Decl is determined contextually.
+    for_capture_from_input: i32,
 
     pub const nodeOffset = if (TracedOffset.want_tracing) nodeOffsetDebug else nodeOffsetRelease;
 
@@ -3162,6 +3282,8 @@ pub const LazySrcLoc = union(enum) {
             .node_offset_init_ty,
             .node_offset_store_ptr,
             .node_offset_store_operand,
+            .for_input,
+            .for_capture_from_input,
             => .{
                 .file_scope = decl.getFileScope(),
                 .parent_decl_node = decl.src_node,
@@ -3225,7 +3347,11 @@ pub fn deinit(mod: *Module) void {
     }
     if (mod.main_pkg.table.fetchRemove("std")) |kv| {
         gpa.free(kv.key);
-        kv.value.destroy(gpa);
+        // It's possible for main_pkg to be std when running 'zig test'! In this case, we must not
+        // destroy it, since it would lead to a double-free.
+        if (kv.value != mod.main_pkg) {
+            kv.value.destroy(gpa);
+        }
     }
     if (mod.main_pkg.table.fetchRemove("root")) |kv| {
         gpa.free(kv.key);
@@ -3520,7 +3646,7 @@ pub fn astGenFile(mod: *Module, file: *File) !void {
             }
             if (data_has_safety_tag) {
                 const tags = zir.instructions.items(.tag);
-                for (zir.instructions.items(.data)) |*data, i| {
+                for (zir.instructions.items(.data), 0..) |*data, i| {
                     const union_tag = Zir.Inst.Tag.data_tags[@enumToInt(tags[i])];
                     const as_struct = @ptrCast(*HackDataLayout, data);
                     as_struct.* = .{
@@ -3626,7 +3752,7 @@ pub fn astGenFile(mod: *Module, file: *File) !void {
     file.source = source;
     file.source_loaded = true;
 
-    file.tree = try std.zig.parse(gpa, source);
+    file.tree = try Ast.parse(gpa, source, .zig);
     defer if (!file.tree_loaded) file.tree.deinit(gpa);
 
     if (file.tree.errors.len != 0) {
@@ -3707,7 +3833,7 @@ pub fn astGenFile(mod: *Module, file: *File) !void {
         @ptrCast([*]const u8, file.zir.instructions.items(.data).ptr);
     if (data_has_safety_tag) {
         // The `Data` union has a safety tag but in the file format we store it without.
-        for (file.zir.instructions.items(.data)) |*data, i| {
+        for (file.zir.instructions.items(.data), 0..) |*data, i| {
             const as_struct = @ptrCast(*const HackDataLayout, data);
             safety_buffer[i] = as_struct.data;
         }
@@ -3941,7 +4067,7 @@ pub fn populateBuiltinFile(mod: *Module) !void {
         else => |e| return e,
     }
 
-    file.tree = try std.zig.parse(gpa, file.source);
+    file.tree = try Ast.parse(gpa, file.source, .zig);
     file.tree_loaded = true;
     assert(file.tree.errors.len == 0); // builtin.zig must parse
 
@@ -4052,7 +4178,7 @@ pub fn ensureDeclAnalyzed(mod: *Module, decl_index: Decl.Index) SemaError!void {
 
             // The exports this Decl performs will be re-discovered, so we remove them here
             // prior to re-analysis.
-            mod.deleteDeclExports(decl_index);
+            try mod.deleteDeclExports(decl_index);
 
             // Similarly, `@setAlignStack` invocations will be re-discovered.
             if (decl.getFunction()) |func| {
@@ -4539,7 +4665,6 @@ fn semaDecl(mod: *Module, decl_index: Decl.Index) !bool {
                 // We don't fully codegen the decl until later, but we do need to reserve a global
                 // offset table index for it. This allows us to codegen decls out of dependency
                 // order, increasing how many computations can be done in parallel.
-                try mod.comp.bin_file.allocateDeclIndexes(decl_index);
                 try mod.comp.work_queue.writeItem(.{ .codegen_func = func });
                 if (type_changed and mod.emit_h != null) {
                     try mod.comp.work_queue.writeItem(.{ .emit_h_decl = decl_index });
@@ -4651,7 +4776,6 @@ fn semaDecl(mod: *Module, decl_index: Decl.Index) !bool {
         // codegen backend wants full access to the Decl Type.
         try sema.resolveTypeFully(decl.ty);
 
-        try mod.comp.bin_file.allocateDeclIndexes(decl_index);
         try mod.comp.work_queue.writeItem(.{ .codegen_decl = decl_index });
 
         if (type_changed and mod.emit_h != null) {
@@ -4695,6 +4819,7 @@ pub fn declareDeclDependency(mod: *Module, depender_index: Decl.Index, dependee_
 pub const ImportFileResult = struct {
     file: *File,
     is_new: bool,
+    is_pkg: bool,
 };
 
 pub fn importPkg(mod: *Module, pkg: *Package) !ImportFileResult {
@@ -4711,10 +4836,14 @@ pub fn importPkg(mod: *Module, pkg: *Package) !ImportFileResult {
 
     const gop = try mod.import_table.getOrPut(gpa, resolved_path);
     errdefer _ = mod.import_table.pop();
-    if (gop.found_existing) return ImportFileResult{
-        .file = gop.value_ptr.*,
-        .is_new = false,
-    };
+    if (gop.found_existing) {
+        try gop.value_ptr.*.addReference(mod.*, .{ .root = pkg });
+        return ImportFileResult{
+            .file = gop.value_ptr.*,
+            .is_new = false,
+            .is_pkg = true,
+        };
+    }
 
     const sub_file_path = try gpa.dupe(u8, pkg.root_src_path);
     errdefer gpa.free(sub_file_path);
@@ -4737,9 +4866,11 @@ pub fn importPkg(mod: *Module, pkg: *Package) !ImportFileResult {
         .pkg = pkg,
         .root_decl = .none,
     };
+    try new_file.addReference(mod.*, .{ .root = pkg });
     return ImportFileResult{
         .file = new_file,
         .is_new = true,
+        .is_pkg = true,
     };
 }
 
@@ -4780,6 +4911,7 @@ pub fn importFile(
     if (gop.found_existing) return ImportFileResult{
         .file = gop.value_ptr.*,
         .is_new = false,
+        .is_pkg = false,
     };
 
     const new_file = try gpa.create(File);
@@ -4825,17 +4957,35 @@ pub fn importFile(
     return ImportFileResult{
         .file = new_file,
         .is_new = true,
+        .is_pkg = false,
     };
 }
 
-pub fn embedFile(mod: *Module, cur_file: *File, rel_file_path: []const u8) !*EmbedFile {
+pub fn embedFile(mod: *Module, cur_file: *File, import_string: []const u8) !*EmbedFile {
     const gpa = mod.gpa;
 
-    // The resolved path is used as the key in the table, to detect if
-    // a file refers to the same as another, despite different relative paths.
+    if (cur_file.pkg.table.get(import_string)) |pkg| {
+        const resolved_path = try std.fs.path.resolve(gpa, &[_][]const u8{
+            pkg.root_src_directory.path orelse ".", pkg.root_src_path,
+        });
+        var keep_resolved_path = false;
+        defer if (!keep_resolved_path) gpa.free(resolved_path);
+
+        const gop = try mod.embed_table.getOrPut(gpa, resolved_path);
+        errdefer assert(mod.embed_table.remove(resolved_path));
+        if (gop.found_existing) return gop.value_ptr.*;
+
+        const sub_file_path = try gpa.dupe(u8, pkg.root_src_path);
+        errdefer gpa.free(sub_file_path);
+
+        return newEmbedFile(mod, pkg, sub_file_path, resolved_path, &keep_resolved_path, gop);
+    }
+
+    // The resolved path is used as the key in the table, to detect if a file
+    // refers to the same as another, despite different relative paths.
     const cur_pkg_dir_path = cur_file.pkg.root_src_directory.path orelse ".";
     const resolved_path = try std.fs.path.resolve(gpa, &[_][]const u8{
-        cur_pkg_dir_path, cur_file.sub_file_path, "..", rel_file_path,
+        cur_pkg_dir_path, cur_file.sub_file_path, "..", import_string,
     });
     var keep_resolved_path = false;
     defer if (!keep_resolved_path) gpa.free(resolved_path);
@@ -4843,9 +4993,6 @@ pub fn embedFile(mod: *Module, cur_file: *File, rel_file_path: []const u8) !*Emb
     const gop = try mod.embed_table.getOrPut(gpa, resolved_path);
     errdefer assert(mod.embed_table.remove(resolved_path));
     if (gop.found_existing) return gop.value_ptr.*;
-
-    const new_file = try gpa.create(EmbedFile);
-    errdefer gpa.destroy(new_file);
 
     const resolved_root_path = try std.fs.path.resolve(gpa, &[_][]const u8{cur_pkg_dir_path});
     defer gpa.free(resolved_root_path);
@@ -4865,7 +5012,23 @@ pub fn embedFile(mod: *Module, cur_file: *File, rel_file_path: []const u8) !*Emb
     };
     errdefer gpa.free(sub_file_path);
 
-    var file = try cur_file.pkg.root_src_directory.handle.openFile(sub_file_path, .{});
+    return newEmbedFile(mod, cur_file.pkg, sub_file_path, resolved_path, &keep_resolved_path, gop);
+}
+
+fn newEmbedFile(
+    mod: *Module,
+    pkg: *Package,
+    sub_file_path: []const u8,
+    resolved_path: []const u8,
+    keep_resolved_path: *bool,
+    gop: std.StringHashMapUnmanaged(*EmbedFile).GetOrPutResult,
+) !*EmbedFile {
+    const gpa = mod.gpa;
+
+    const new_file = try gpa.create(EmbedFile);
+    errdefer gpa.destroy(new_file);
+
+    var file = try pkg.root_src_directory.handle.openFile(sub_file_path, .{});
     defer file.close();
 
     const actual_stat = try file.stat();
@@ -4878,10 +5041,6 @@ pub fn embedFile(mod: *Module, cur_file: *File, rel_file_path: []const u8) !*Emb
     const bytes = try file.readToEndAllocOptions(gpa, std.math.maxInt(u32), size_usize, 1, 0);
     errdefer gpa.free(bytes);
 
-    log.debug("new embedFile. resolved_root_path={s}, resolved_path={s}, sub_file_path={s}, rel_file_path={s}", .{
-        resolved_root_path, resolved_path, sub_file_path, rel_file_path,
-    });
-
     if (mod.comp.whole_cache_manifest) |whole_cache_manifest| {
         const copied_resolved_path = try gpa.dupe(u8, resolved_path);
         errdefer gpa.free(copied_resolved_path);
@@ -4890,13 +5049,13 @@ pub fn embedFile(mod: *Module, cur_file: *File, rel_file_path: []const u8) !*Emb
         try whole_cache_manifest.addFilePostContents(copied_resolved_path, bytes, stat);
     }
 
-    keep_resolved_path = true; // It's now owned by embed_table.
+    keep_resolved_path.* = true; // It's now owned by embed_table.
     gop.value_ptr.* = new_file;
     new_file.* = .{
         .sub_file_path = sub_file_path,
         .bytes = bytes,
         .stat = stat,
-        .pkg = cur_file.pkg,
+        .pkg = pkg,
         .owner_decl = undefined, // Set by Sema immediately after this function returns.
     };
     return new_file;
@@ -5080,22 +5239,14 @@ fn scanDecl(iter: *ScanDeclIter, decl_sub_index: usize, flags: u4) Allocator.Err
                 // test decl with no name. Skip the part where we check against
                 // the test name filter.
                 if (!comp.bin_file.options.is_test) break :blk false;
-                if (decl_pkg != mod.main_pkg) {
-                    if (!mod.main_pkg_is_std) break :blk false;
-                    const std_pkg = mod.main_pkg.table.get("std").?;
-                    if (std_pkg != decl_pkg) break :blk false;
-                }
+                if (decl_pkg != mod.main_pkg) break :blk false;
                 try mod.test_functions.put(gpa, new_decl_index, {});
                 break :blk true;
             },
             else => blk: {
                 if (!is_named_test) break :blk false;
                 if (!comp.bin_file.options.is_test) break :blk false;
-                if (decl_pkg != mod.main_pkg) {
-                    if (!mod.main_pkg_is_std) break :blk false;
-                    const std_pkg = mod.main_pkg.table.get("std").?;
-                    if (std_pkg != decl_pkg) break :blk false;
-                }
+                if (decl_pkg != mod.main_pkg) break :blk false;
                 if (comp.test_filter) |test_filter| {
                     if (mem.indexOf(u8, decl_name, test_filter) == null) {
                         break :blk false;
@@ -5133,20 +5284,7 @@ fn scanDecl(iter: *ScanDeclIter, decl_sub_index: usize, flags: u4) Allocator.Err
     decl.zir_decl_index = @intCast(u32, decl_sub_index);
     if (decl.getFunction()) |_| {
         switch (comp.bin_file.tag) {
-            .coff => {
-                // TODO Implement for COFF
-            },
-            .elf => if (decl.fn_link.elf.len != 0) {
-                // TODO Look into detecting when this would be unnecessary by storing enough state
-                // in `Decl` to notice that the line number did not change.
-                comp.work_queue.writeItemAssumeCapacity(.{ .update_line_number = decl_index });
-            },
-            .macho => if (decl.fn_link.macho.len != 0) {
-                // TODO Look into detecting when this would be unnecessary by storing enough state
-                // in `Decl` to notice that the line number did not change.
-                comp.work_queue.writeItemAssumeCapacity(.{ .update_line_number = decl_index });
-            },
-            .plan9 => {
+            .coff, .elf, .macho, .plan9 => {
                 // TODO Look into detecting when this would be unnecessary by storing enough state
                 // in `Decl` to notice that the line number did not change.
                 comp.work_queue.writeItemAssumeCapacity(.{ .update_line_number = decl_index });
@@ -5215,34 +5353,11 @@ pub fn clearDecl(
         assert(emit_h.decl_table.swapRemove(decl_index));
     }
     _ = mod.compile_log_decls.swapRemove(decl_index);
-    mod.deleteDeclExports(decl_index);
+    try mod.deleteDeclExports(decl_index);
 
     if (decl.has_tv) {
         if (decl.ty.isFnOrHasRuntimeBits()) {
             mod.comp.bin_file.freeDecl(decl_index);
-
-            // TODO instead of a union, put this memory trailing Decl objects,
-            // and allow it to be variably sized.
-            decl.link = switch (mod.comp.bin_file.tag) {
-                .coff => .{ .coff = link.File.Coff.Atom.empty },
-                .elf => .{ .elf = link.File.Elf.TextBlock.empty },
-                .macho => .{ .macho = link.File.MachO.Atom.empty },
-                .plan9 => .{ .plan9 = link.File.Plan9.DeclBlock.empty },
-                .c => .{ .c = {} },
-                .wasm => .{ .wasm = link.File.Wasm.DeclBlock.empty },
-                .spirv => .{ .spirv = {} },
-                .nvptx => .{ .nvptx = {} },
-            };
-            decl.fn_link = switch (mod.comp.bin_file.tag) {
-                .coff => .{ .coff = {} },
-                .elf => .{ .elf = link.File.Dwarf.SrcFn.empty },
-                .macho => .{ .macho = link.File.Dwarf.SrcFn.empty },
-                .plan9 => .{ .plan9 = {} },
-                .c => .{ .c = {} },
-                .wasm => .{ .wasm = link.File.Wasm.FnData.empty },
-                .spirv => .{ .spirv = .{} },
-                .nvptx => .{ .nvptx = {} },
-            };
         }
         if (decl.getInnerNamespace()) |namespace| {
             try namespace.deleteAllDecls(mod, outdated_decls);
@@ -5262,23 +5377,6 @@ pub fn clearDecl(
 pub fn deleteUnusedDecl(mod: *Module, decl_index: Decl.Index) void {
     const decl = mod.declPtr(decl_index);
     log.debug("deleteUnusedDecl {d} ({s})", .{ decl_index, decl.name });
-
-    // TODO: remove `allocateDeclIndexes` and make the API that the linker backends
-    // are required to notice the first time `updateDecl` happens and keep track
-    // of it themselves. However they can rely on getting a `freeDecl` call if any
-    // `updateDecl` or `updateFunc` calls happen. This will allow us to avoid any call
-    // into the linker backend here, since the linker backend will never have been told
-    // about the Decl in the first place.
-    // Until then, we did call `allocateDeclIndexes` on this anonymous Decl and so we
-    // must call `freeDecl` in the linker backend now.
-    switch (mod.comp.bin_file.tag) {
-        .c => {}, // this linker backend has already migrated to the new API
-        else => if (decl.has_tv) {
-            if (decl.ty.isFnOrHasRuntimeBits()) {
-                mod.comp.bin_file.freeDecl(decl_index);
-            }
-        },
-    }
 
     assert(!mod.declIsRoot(decl_index));
     assert(decl.src_namespace.anon_decls.swapRemove(decl_index));
@@ -5325,7 +5423,7 @@ pub fn abortAnonDecl(mod: *Module, decl_index: Decl.Index) void {
 
 /// Delete all the Export objects that are caused by this Decl. Re-analysis of
 /// this Decl will cause them to be re-created (or not).
-fn deleteDeclExports(mod: *Module, decl_index: Decl.Index) void {
+fn deleteDeclExports(mod: *Module, decl_index: Decl.Index) Allocator.Error!void {
     var export_owners = (mod.export_owners.fetchSwapRemove(decl_index) orelse return).value;
 
     for (export_owners.items) |exp| {
@@ -5348,16 +5446,16 @@ fn deleteDeclExports(mod: *Module, decl_index: Decl.Index) void {
             }
         }
         if (mod.comp.bin_file.cast(link.File.Elf)) |elf| {
-            elf.deleteExport(exp.link.elf);
+            elf.deleteDeclExport(decl_index, exp.options.name);
         }
         if (mod.comp.bin_file.cast(link.File.MachO)) |macho| {
-            macho.deleteExport(exp.link.macho);
+            try macho.deleteDeclExport(decl_index, exp.options.name);
         }
         if (mod.comp.bin_file.cast(link.File.Wasm)) |wasm| {
-            wasm.deleteExport(exp.link.wasm);
+            wasm.deleteDeclExport(decl_index);
         }
         if (mod.comp.bin_file.cast(link.File.Coff)) |coff| {
-            coff.deleteExport(exp.link.coff);
+            coff.deleteDeclExport(decl_index, exp.options.name);
         }
         if (mod.failed_exports.fetchSwapRemove(exp)) |failed_kv| {
             failed_kv.value.destroy(mod.gpa);
@@ -5660,26 +5758,6 @@ pub fn allocateNewDecl(
         .deletion_flag = false,
         .zir_decl_index = 0,
         .src_scope = src_scope,
-        .link = switch (mod.comp.bin_file.tag) {
-            .coff => .{ .coff = link.File.Coff.Atom.empty },
-            .elf => .{ .elf = link.File.Elf.TextBlock.empty },
-            .macho => .{ .macho = link.File.MachO.Atom.empty },
-            .plan9 => .{ .plan9 = link.File.Plan9.DeclBlock.empty },
-            .c => .{ .c = {} },
-            .wasm => .{ .wasm = link.File.Wasm.DeclBlock.empty },
-            .spirv => .{ .spirv = {} },
-            .nvptx => .{ .nvptx = {} },
-        },
-        .fn_link = switch (mod.comp.bin_file.tag) {
-            .coff => .{ .coff = {} },
-            .elf => .{ .elf = link.File.Dwarf.SrcFn.empty },
-            .macho => .{ .macho = link.File.Dwarf.SrcFn.empty },
-            .plan9 => .{ .plan9 = {} },
-            .c => .{ .c = {} },
-            .wasm => .{ .wasm = link.File.Wasm.FnData.empty },
-            .spirv => .{ .spirv = .{} },
-            .nvptx => .{ .nvptx = {} },
-        },
         .generation = 0,
         .is_pub = false,
         .is_exported = false,
@@ -5764,7 +5842,6 @@ pub fn initNewAnonDecl(
     // the Decl will be garbage collected by the `codegen_decl` task instead of sent
     // to the linker.
     if (typed_value.ty.isFnOrHasRuntimeBits()) {
-        try mod.comp.bin_file.allocateDeclIndexes(new_decl_index);
         try mod.comp.anon_work_queue.writeItem(.{ .codegen_decl = new_decl_index });
     }
 }
@@ -6304,7 +6381,7 @@ pub fn populateTestFunctions(
         // Add a dependency on each test name and function pointer.
         try array_decl.dependencies.ensureUnusedCapacity(gpa, test_fn_vals.len * 2);
 
-        for (mod.test_functions.keys()) |test_decl_index, i| {
+        for (mod.test_functions.keys(), 0..) |test_decl_index, i| {
             const test_decl = mod.declPtr(test_decl_index);
             const test_name_slice = mem.sliceTo(test_decl.name, 0);
             const test_name_decl_index = n: {

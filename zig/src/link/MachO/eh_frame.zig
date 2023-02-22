@@ -16,7 +16,7 @@ const Zld = @import("zld.zig").Zld;
 pub fn scanRelocs(zld: *Zld) !void {
     const gpa = zld.gpa;
 
-    for (zld.objects.items) |*object, object_id| {
+    for (zld.objects.items, 0..) |*object, object_id| {
         var cies = std.AutoHashMap(u32, void).init(gpa);
         defer cies.deinit();
 
@@ -108,7 +108,7 @@ pub fn write(zld: *Zld, unwind_info: *UnwindInfo) !void {
 
     var eh_frame_offset: u32 = 0;
 
-    for (zld.objects.items) |*object, object_id| {
+    for (zld.objects.items, 0..) |*object, object_id| {
         try eh_records.ensureUnusedCapacity(2 * @intCast(u32, object.exec_atoms.items.len));
 
         var cies = std.AutoHashMap(u32, u32).init(gpa);
@@ -171,8 +171,9 @@ pub fn write(zld: *Zld, unwind_info: *UnwindInfo) !void {
                     const cie_record = eh_records.get(
                         eh_frame_offset + 4 - fde_record.getCiePointer(),
                     ).?;
+                    const eh_frame_sect = object.getSourceSection(object.eh_frame_sect_id.?);
                     const source_lsda_ptr = try fde_record.getLsdaPointer(cie_record, .{
-                        .base_addr = object.eh_frame_sect.?.addr,
+                        .base_addr = eh_frame_sect.addr,
                         .base_offset = fde_record_offset,
                     });
                     if (source_lsda_ptr) |ptr| {
@@ -406,7 +407,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
             var creader = std.io.countingReader(stream.reader());
             const reader = creader.reader();
 
-            for (aug_str) |ch, i| switch (ch) {
+            for (aug_str, 0..) |ch, i| switch (ch) {
                 'z' => if (i > 0) {
                     return error.BadDwarfCfi;
                 } else {
@@ -466,7 +467,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
             var creader = std.io.countingReader(stream.reader());
             const reader = creader.reader();
 
-            for (aug_str) |ch, i| switch (ch) {
+            for (aug_str, 0..) |ch, i| switch (ch) {
                 'z' => if (i > 0) {
                     return error.BadDwarfCfi;
                 } else {
@@ -552,16 +553,12 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
     };
 }
 
-pub fn getRelocs(
-    zld: *Zld,
-    object_id: u32,
-    source_offset: u32,
-) []align(1) const macho.relocation_info {
+pub fn getRelocs(zld: *Zld, object_id: u32, source_offset: u32) []const macho.relocation_info {
     const object = &zld.objects.items[object_id];
     assert(object.hasEhFrameRecords());
     const urel = object.eh_frame_relocs_lookup.get(source_offset) orelse
         return &[0]macho.relocation_info{};
-    const all_relocs = object.getRelocs(object.eh_frame_sect.?);
+    const all_relocs = object.getRelocs(object.eh_frame_sect_id.?);
     return all_relocs[urel.reloc.start..][0..urel.reloc.len];
 }
 

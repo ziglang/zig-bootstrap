@@ -90,6 +90,8 @@ pub usingnamespace switch (builtin.os.tag) {
         pub extern "c" fn stat(noalias path: [*:0]const u8, noalias buf: *c.Stat) c_int;
 
         pub extern "c" fn alarm(seconds: c_uint) c_uint;
+
+        pub extern "c" fn msync(addr: *align(page_size) const anyopaque, len: usize, flags: c_int) c_int;
     },
 };
 
@@ -145,7 +147,6 @@ pub extern "c" fn write(fd: c.fd_t, buf: [*]const u8, nbyte: usize) isize;
 pub extern "c" fn pwrite(fd: c.fd_t, buf: [*]const u8, nbyte: usize, offset: c.off_t) isize;
 pub extern "c" fn mmap(addr: ?*align(page_size) anyopaque, len: usize, prot: c_uint, flags: c_uint, fd: c.fd_t, offset: c.off_t) *anyopaque;
 pub extern "c" fn munmap(addr: *align(page_size) const anyopaque, len: usize) c_int;
-pub extern "c" fn msync(addr: *align(page_size) const anyopaque, len: usize, flags: c_int) c_int;
 pub extern "c" fn mprotect(addr: *align(page_size) anyopaque, len: usize, prot: c_uint) c_int;
 pub extern "c" fn link(oldpath: [*:0]const u8, newpath: [*:0]const u8, flags: c_int) c_int;
 pub extern "c" fn linkat(oldfd: c.fd_t, oldpath: [*:0]const u8, newfd: c.fd_t, newpath: [*:0]const u8, flags: c_int) c_int;
@@ -172,6 +173,7 @@ pub extern "c" fn readlink(noalias path: [*:0]const u8, noalias buf: [*]u8, bufs
 pub extern "c" fn readlinkat(dirfd: c.fd_t, noalias path: [*:0]const u8, noalias buf: [*]u8, bufsize: usize) isize;
 pub extern "c" fn fchmod(fd: c.fd_t, mode: c.mode_t) c_int;
 pub extern "c" fn fchown(fd: c.fd_t, owner: c.uid_t, group: c.gid_t) c_int;
+pub extern "c" fn umask(mode: c.mode_t) c.mode_t;
 
 pub extern "c" fn rmdir(path: [*:0]const u8) c_int;
 pub extern "c" fn getenv(name: [*:0]const u8) ?[*:0]u8;

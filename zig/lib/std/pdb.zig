@@ -671,7 +671,7 @@ pub const Pdb = struct {
                 const name_index = try reader.readIntLittle(u32);
                 if (name_offset > name_bytes.len)
                     return error.InvalidDebugInfo;
-                const name = mem.sliceTo(std.meta.assumeSentinel(name_bytes.ptr + name_offset, 0), 0);
+                const name = mem.sliceTo(name_bytes[name_offset..], 0);
                 if (mem.eql(u8, name, "/names")) {
                     break :str_tab_index name_index;
                 }
@@ -922,7 +922,7 @@ const Msf = struct {
         }
 
         const streams = try allocator.alloc(MsfStream, stream_count);
-        for (streams) |*stream, i| {
+        for (streams, 0..) |*stream, i| {
             const size = stream_sizes[i];
             if (size == 0) {
                 stream.* = MsfStream{

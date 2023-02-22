@@ -1221,7 +1221,7 @@ test "quad hex float literal parsing accurate" {
                 0xb6a0000000000000,
             };
 
-            for (exp2ft) |x, i| {
+            for (exp2ft, 0..) |x, i| {
                 try expect(@bitCast(u64, x) == answers[i]);
             }
         }
@@ -1332,7 +1332,6 @@ test "float remainder division using @rem" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_llvm and builtin.os.tag == .windows) return error.SkipZigTest; // https://github.com/ziglang/zig/issues/12602
 
     comptime try frem(f16);
     comptime try frem(f32);
@@ -1375,7 +1374,6 @@ test "float modulo division using @mod" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_llvm and builtin.os.tag == .windows) return error.SkipZigTest; // https://github.com/ziglang/zig/issues/12602
 
     comptime try fmod(f16);
     comptime try fmod(f32);
@@ -1438,7 +1436,6 @@ test "@round f80" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_llvm and builtin.os.tag == .windows) return error.SkipZigTest; // https://github.com/ziglang/zig/issues/12602
 
     try testRound(f80, 12.0);
     comptime try testRound(f80, 12.0);
@@ -1466,7 +1463,6 @@ test "vector integer addition" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_c) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const S = struct {

@@ -508,7 +508,7 @@ pub fn HashMap(
         /// If a new entry needs to be stored, this function asserts there
         /// is enough capacity to store it.
         pub fn getOrPutAssumeCapacityAdapted(self: *Self, key: anytype, ctx: anytype) GetOrPutResult {
-            return self.unmanaged.getOrPutAssumeCapacityAdapted(self.allocator, key, ctx);
+            return self.unmanaged.getOrPutAssumeCapacityAdapted(key, ctx);
         }
 
         pub fn getOrPutValue(self: *Self, key: K, value: V) Allocator.Error!Entry {
@@ -2119,7 +2119,7 @@ test "std.hash_map getOrPutAdapted" {
 
     var real_keys: [keys.len]u64 = undefined;
 
-    inline for (keys) |key_str, i| {
+    inline for (keys, 0..) |key_str, i| {
         const result = try map.getOrPutAdapted(key_str, AdaptedContext{});
         try testing.expect(!result.found_existing);
         real_keys[i] = std.fmt.parseInt(u64, key_str, 10) catch unreachable;
@@ -2129,8 +2129,8 @@ test "std.hash_map getOrPutAdapted" {
 
     try testing.expectEqual(map.count(), keys.len);
 
-    inline for (keys) |key_str, i| {
-        const result = try map.getOrPutAdapted(key_str, AdaptedContext{});
+    inline for (keys, 0..) |key_str, i| {
+        const result = map.getOrPutAssumeCapacityAdapted(key_str, AdaptedContext{});
         try testing.expect(result.found_existing);
         try testing.expectEqual(real_keys[i], result.key_ptr.*);
         try testing.expectEqual(@as(u64, i) * 2, result.value_ptr.*);

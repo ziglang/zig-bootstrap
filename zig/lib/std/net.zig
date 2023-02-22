@@ -103,10 +103,10 @@ pub const Address = extern union {
             .path = undefined,
         };
 
-        // this enables us to have the proper length of the socket in getOsSockLen
-        mem.set(u8, &sock_addr.path, 0);
+        // Add 1 to ensure a terminating 0 is present in the path array for maximum portability.
+        if (path.len + 1 > sock_addr.path.len) return error.NameTooLong;
 
-        if (path.len > sock_addr.path.len) return error.NameTooLong;
+        mem.set(u8, &sock_addr.path, 0);
         mem.copy(u8, &sock_addr.path, path);
 
         return Address{ .un = sock_addr };
@@ -179,9 +179,17 @@ pub const Address = extern union {
                     unreachable;
                 }
 
-                const path_len = std.mem.len(std.meta.assumeSentinel(&self.un.path, 0));
-                return @intCast(os.socklen_t, @sizeOf(os.sockaddr.un) - self.un.path.len + path_len);
+                // Using the full length of the structure here is more portable than returning
+                // the number of bytes actually used by the currently stored path.
+                // This also is correct regardless if we are passing a socket address to the kernel
+                // (e.g. in bind, connect, sendto) since we ensure the path is 0 terminated in
+                // initUnix() or if we are receiving a socket address from the kernel and must
+                // provide the full buffer size (e.g. getsockname, getpeername, recvfrom, accept).
+                //
+                // To access the path, std.mem.sliceTo(&address.un.path, 0) should be used.
+                return @intCast(os.socklen_t, @sizeOf(os.sockaddr.un));
             },
+
             else => unreachable,
         }
     }
@@ -317,7 +325,7 @@ pub const Ip6Address = extern struct {
         var index: u8 = 0;
         var scope_id = false;
         var abbrv = false;
-        for (buf) |c, i| {
+        for (buf, 0..) |c, i| {
             if (scope_id) {
                 if (c >= '0' and c <= '9') {
                     const digit = c - '0';
@@ -436,7 +444,7 @@ pub const Ip6Address = extern struct {
         var scope_id_value: [os.IFNAMESIZE - 1]u8 = undefined;
         var scope_id_index: usize = 0;
 
-        for (buf) |c, i| {
+        for (buf, 0..) |c, i| {
             if (scope_id) {
                 // Handling of percent-encoding should be for an URI library.
                 if ((c >= '0' and c <= '9') or
@@ -594,7 +602,7 @@ pub const Ip6Address = extern struct {
             .Big => big_endian_parts.*,
             .Little => blk: {
                 var buf: [8]u16 = undefined;
-                for (big_endian_parts) |part, i| {
+                for (big_endian_parts, 0..) |part, i| {
                     buf[i] = mem.bigToNative(u16, part);
                 }
                 break :blk buf;
@@ -901,7 +909,7 @@ pub fn getAddressList(allocator: mem.Allocator, name: []const u8, port: u16) !*A
             result.canon_name = try canon.toOwnedSlice();
         }
 
-        for (lookup_addrs.items) |lookup_addr, i| {
+        for (lookup_addrs.items, 0..) |lookup_addr, i| {
             result.addrs[i] = lookup_addr.addr;
             assert(result.addrs[i].getPort() == port);
         }
@@ -981,7 +989,7 @@ fn linuxLookupName(
     // So far the label/precedence table cannot be customized.
     // This implementation is ported from musl libc.
     // A more idiomatic "ziggy" implementation would be welcome.
-    for (addrs.items) |*addr, i| {
+    for (addrs.items, 0..) |*addr, i| {
         var key: i32 = 0;
         var sa6: os.sockaddr.in6 = undefined;
         @memset(@ptrCast([*]u8, &sa6), 0, @sizeOf(os.sockaddr.in6));
@@ -1110,7 +1118,7 @@ const defined_policies = [_]Policy{
 };
 
 fn policyOf(a: [16]u8) *const Policy {
-    for (defined_policies) |*policy| {
+    for (&defined_policies) |*policy| {
         if (!mem.eql(u8, a[0..policy.len], policy.addr[0..policy.len])) continue;
         if ((a[policy.len] & policy.mask) != policy.addr[policy.len]) continue;
         return policy;
@@ -1494,7 +1502,7 @@ fn resMSendRc(
     try ns_list.resize(rc.ns.items.len);
     const ns = ns_list.items;
 
-    for (rc.ns.items) |iplit, i| {
+    for (rc.ns.items, 0..) |iplit, i| {
         ns[i] = iplit.addr;
         assert(ns[i].getPort() == 53);
         if (iplit.addr.any.family != os.AF.INET) {
@@ -1687,7 +1695,7 @@ fn dnsParseCallback(ctx: dpc_ctx, rr: u8, data: []const u8, packet: []const u8) 
             var tmp: [256]u8 = undefined;
             // Returns len of compressed name. strlen to get canon name.
             _ = try os.dn_expand(packet, data, &tmp);
-            const canon_name = mem.sliceTo(std.meta.assumeSentinel(&tmp, 0), 0);
+            const canon_name = mem.sliceTo(&tmp, 0);
             if (isValidHostName(canon_name)) {
                 ctx.canon.items.len = 0;
                 try ctx.canon.appendSlice(canon_name);

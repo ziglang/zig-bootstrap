@@ -1,4 +1,8 @@
 //! Abstract Syntax Tree for Zig source code.
+//! For Zig syntax, the root node is at nodes[0] and contains the list of
+//! sub-nodes.
+//! For Zon syntax, the root node is at nodes[0] and contains lhs as the node
+//! index of the main expression.
 
 /// Reference to externally-owned data.
 source: [:0]const u8,
@@ -10,13 +14,6 @@ nodes: NodeList.Slice,
 extra_data: []Node.Index,
 
 errors: []const Error,
-
-const std = @import("../std.zig");
-const assert = std.debug.assert;
-const testing = std.testing;
-const mem = std.mem;
-const Token = std.zig.Token;
-const Ast = @This();
 
 pub const TokenIndex = u32;
 pub const ByteOffset = u32;
@@ -34,7 +31,7 @@ pub const Location = struct {
     line_end: usize,
 };
 
-pub fn deinit(tree: *Ast, gpa: mem.Allocator) void {
+pub fn deinit(tree: *Ast, gpa: Allocator) void {
     tree.tokens.deinit(gpa);
     tree.nodes.deinit(gpa);
     gpa.free(tree.extra_data);
@@ -48,11 +45,69 @@ pub const RenderError = error{
     OutOfMemory,
 };
 
+pub const Mode = enum { zig, zon };
+
+/// Result should be freed with tree.deinit() when there are
+/// no more references to any of the tokens or nodes.
+pub fn parse(gpa: Allocator, source: [:0]const u8, mode: Mode) Allocator.Error!Ast {
+    var tokens = Ast.TokenList{};
+    defer tokens.deinit(gpa);
+
+    // Empirically, the zig std lib has an 8:1 ratio of source bytes to token count.
+    const estimated_token_count = source.len / 8;
+    try tokens.ensureTotalCapacity(gpa, estimated_token_count);
+
+    var tokenizer = std.zig.Tokenizer.init(source);
+    while (true) {
+        const token = tokenizer.next();
+        try tokens.append(gpa, .{
+            .tag = token.tag,
+            .start = @intCast(u32, token.loc.start),
+        });
+        if (token.tag == .eof) break;
+    }
+
+    var parser: Parse = .{
+        .source = source,
+        .gpa = gpa,
+        .token_tags = tokens.items(.tag),
+        .token_starts = tokens.items(.start),
+        .errors = .{},
+        .nodes = .{},
+        .extra_data = .{},
+        .scratch = .{},
+        .tok_i = 0,
+    };
+    defer parser.errors.deinit(gpa);
+    defer parser.nodes.deinit(gpa);
+    defer parser.extra_data.deinit(gpa);
+    defer parser.scratch.deinit(gpa);
+
+    // Empirically, Zig source code has a 2:1 ratio of tokens to AST nodes.
+    // Make sure at least 1 so we can use appendAssumeCapacity on the root node below.
+    const estimated_node_count = (tokens.len + 2) / 2;
+    try parser.nodes.ensureTotalCapacity(gpa, estimated_node_count);
+
+    switch (mode) {
+        .zig => try parser.parseRoot(),
+        .zon => try parser.parseZon(),
+    }
+
+    // TODO experiment with compacting the MultiArrayList slices here
+    return Ast{
+        .source = source,
+        .tokens = tokens.toOwnedSlice(),
+        .nodes = parser.nodes.toOwnedSlice(),
+        .extra_data = try parser.extra_data.toOwnedSlice(gpa),
+        .errors = try parser.errors.toOwnedSlice(gpa),
+    };
+}
+
 /// `gpa` is used for allocating the resulting formatted source code, as well as
 /// for allocating extra stack memory if needed, because this function utilizes recursion.
 /// Note: that's not actually true yet, see https://github.com/ziglang/zig/issues/1006.
 /// Caller owns the returned slice of bytes, allocated with `gpa`.
-pub fn render(tree: Ast, gpa: mem.Allocator) RenderError![]u8 {
+pub fn render(tree: Ast, gpa: Allocator) RenderError![]u8 {
     var buffer = std.ArrayList(u8).init(gpa);
     defer buffer.deinit();
 
@@ -81,7 +136,7 @@ pub fn tokenLocation(self: Ast, start_offset: ByteOffset, token_index: TokenInde
         .line_end = self.source.len,
     };
     const token_start = self.tokens.items(.start)[token_index];
-    for (self.source[start_offset..]) |c, i| {
+    for (self.source[start_offset..], 0..) |c, i| {
         if (i + start_offset == token_start) {
             loc.line_end = i + start_offset;
             while (loc.line_end < self.source.len and self.source[loc.line_end] != '\n') {
@@ -116,7 +171,7 @@ pub fn tokenSlice(tree: Ast, token_index: TokenIndex) []const u8 {
         .index = token_starts[token_index],
         .pending_invalid_token = null,
     };
-    const token = tokenizer.next();
+    const token = tokenizer.findTagAtCurrentIndex(token_tag);
     assert(token.tag == token_tag);
     return tree.source[token.loc.start..token.loc.end];
 }
@@ -124,7 +179,7 @@ pub fn tokenSlice(tree: Ast, token_index: TokenIndex) []const u8 {
 pub fn extraData(tree: Ast, index: usize, comptime T: type) T {
     const fields = std.meta.fields(T);
     var result: T = undefined;
-    inline for (fields) |field, i| {
+    inline for (fields, 0..) |field, i| {
         comptime assert(field.type == Node.Index);
         @field(result, field.name) = tree.extra_data[index + i];
     }
@@ -152,7 +207,7 @@ pub fn renderError(tree: Ast, parse_error: Error, stream: anytype) !void {
             return stream.writeAll("declarations are not allowed between container fields");
         },
         .expected_block => {
-            return stream.print("expected block or field, found '{s}'", .{
+            return stream.print("expected block, found '{s}'", .{
                 token_tags[parse_error.token + @boolToInt(parse_error.token_is_prev)].symbol(),
             });
         },
@@ -331,6 +386,12 @@ pub fn renderError(tree: Ast, parse_error: Error, stream: anytype) !void {
         .expected_comma_after_switch_prong => {
             return stream.writeAll("expected ',' after switch prong");
         },
+        .expected_comma_after_for_operand => {
+            return stream.writeAll("expected ',' after for operand");
+        },
+        .expected_comma_after_capture => {
+            return stream.writeAll("expected ',' after for capture");
+        },
         .expected_initializer => {
             return stream.writeAll("expected field initializer");
         },
@@ -364,6 +425,12 @@ pub fn renderError(tree: Ast, parse_error: Error, stream: anytype) !void {
         },
         .var_const_decl => {
             return stream.writeAll("use 'var' or 'const' to declare variable");
+        },
+        .extra_for_capture => {
+            return stream.writeAll("excess for captures");
+        },
+        .for_input_not_captured => {
+            return stream.writeAll("for input is not captured");
         },
 
         .expected_token => {
@@ -513,6 +580,7 @@ pub fn firstToken(tree: Ast, node: Node.Index) TokenIndex {
         .call,
         .call_comma,
         .switch_range,
+        .for_range,
         .error_union,
         => n = datas[n].lhs,
 
@@ -789,6 +857,12 @@ pub fn lastToken(tree: Ast, node: Node.Index) TokenIndex {
         .switch_case_inline,
         .switch_range,
         => n = datas[n].rhs,
+
+        .for_range => if (datas[n].rhs != 0) {
+            n = datas[n].rhs;
+        } else {
+            return main_tokens[n] + end_offset;
+        },
 
         .field_access,
         .unwrap_optional,
@@ -1208,10 +1282,14 @@ pub fn lastToken(tree: Ast, node: Node.Index) TokenIndex {
             assert(extra.else_expr != 0);
             n = extra.else_expr;
         },
-        .@"if", .@"for" => {
+        .@"if" => {
             const extra = tree.extraData(datas[n].rhs, Node.If);
             assert(extra.else_expr != 0);
             n = extra.else_expr;
+        },
+        .@"for" => {
+            const extra = @bitCast(Node.For, datas[n].rhs);
+            n = tree.extra_data[datas[n].lhs + extra.inputs + @boolToInt(extra.has_else)];
         },
         .@"suspend" => {
             if (datas[n].lhs != 0) {
@@ -1861,26 +1939,28 @@ pub fn whileFull(tree: Ast, node: Node.Index) full.While {
     });
 }
 
-pub fn forSimple(tree: Ast, node: Node.Index) full.While {
-    const data = tree.nodes.items(.data)[node];
-    return tree.fullWhileComponents(.{
-        .while_token = tree.nodes.items(.main_token)[node],
-        .cond_expr = data.lhs,
-        .cont_expr = 0,
+pub fn forSimple(tree: Ast, node: Node.Index) full.For {
+    const data = &tree.nodes.items(.data)[node];
+    const inputs: *[1]Node.Index = &data.lhs;
+    return tree.fullForComponents(.{
+        .for_token = tree.nodes.items(.main_token)[node],
+        .inputs = inputs[0..1],
         .then_expr = data.rhs,
         .else_expr = 0,
     });
 }
 
-pub fn forFull(tree: Ast, node: Node.Index) full.While {
+pub fn forFull(tree: Ast, node: Node.Index) full.For {
     const data = tree.nodes.items(.data)[node];
-    const extra = tree.extraData(data.rhs, Node.If);
-    return tree.fullWhileComponents(.{
-        .while_token = tree.nodes.items(.main_token)[node],
-        .cond_expr = data.lhs,
-        .cont_expr = 0,
-        .then_expr = extra.then_expr,
-        .else_expr = extra.else_expr,
+    const extra = @bitCast(Node.For, data.rhs);
+    const inputs = tree.extra_data[data.lhs..][0..extra.inputs];
+    const then_expr = tree.extra_data[data.lhs + extra.inputs];
+    const else_expr = if (extra.has_else) tree.extra_data[data.lhs + extra.inputs + 1] else 0;
+    return tree.fullForComponents(.{
+        .for_token = tree.nodes.items(.main_token)[node],
+        .inputs = inputs,
+        .then_expr = then_expr,
+        .else_expr = else_expr,
     });
 }
 
@@ -2103,7 +2183,7 @@ fn fullAsmComponents(tree: Ast, info: full.Asm.Components) full.Asm {
     if (token_tags[info.asm_token + 1] == .keyword_volatile) {
         result.volatile_token = info.asm_token + 1;
     }
-    const outputs_end: usize = for (info.items) |item, i| {
+    const outputs_end: usize = for (info.items, 0..) |item, i| {
         switch (node_tags[item]) {
             .asm_output => continue,
             else => break i,
@@ -2188,6 +2268,33 @@ fn fullWhileComponents(tree: Ast, info: full.While.Components) full.While {
     return result;
 }
 
+fn fullForComponents(tree: Ast, info: full.For.Components) full.For {
+    const token_tags = tree.tokens.items(.tag);
+    var result: full.For = .{
+        .ast = info,
+        .inline_token = null,
+        .label_token = null,
+        .payload_token = undefined,
+        .else_token = undefined,
+    };
+    var tok_i = info.for_token - 1;
+    if (token_tags[tok_i] == .keyword_inline) {
+        result.inline_token = tok_i;
+        tok_i -= 1;
+    }
+    if (token_tags[tok_i] == .colon and
+        token_tags[tok_i - 1] == .identifier)
+    {
+        result.label_token = tok_i - 1;
+    }
+    const last_cond_token = tree.lastToken(info.inputs[info.inputs.len - 1]);
+    result.payload_token = last_cond_token + 3 + @boolToInt(token_tags[last_cond_token + 1] == .comma);
+    if (info.else_expr != 0) {
+        result.else_token = tree.lastToken(info.then_expr) + 1;
+    }
+    return result;
+}
+
 fn fullCallComponents(tree: Ast, info: full.Call.Components) full.Call {
     const token_tags = tree.tokens.items(.tag);
     var result: full.Call = .{
@@ -2224,6 +2331,12 @@ pub fn fullWhile(tree: Ast, node: Node.Index) ?full.While {
         .while_simple => tree.whileSimple(node),
         .while_cont => tree.whileCont(node),
         .@"while" => tree.whileFull(node),
+        else => null,
+    };
+}
+
+pub fn fullFor(tree: Ast, node: Node.Index) ?full.For {
+    return switch (tree.nodes.items(.tag)[node]) {
         .for_simple => tree.forSimple(node),
         .@"for" => tree.forFull(node),
         else => null,
@@ -2396,6 +2509,34 @@ pub const full = struct {
             then_expr: Node.Index,
             else_expr: Node.Index,
         };
+    };
+
+    pub const For = struct {
+        ast: Components,
+        inline_token: ?TokenIndex,
+        label_token: ?TokenIndex,
+        payload_token: TokenIndex,
+        /// Populated only if else_expr != 0.
+        else_token: TokenIndex,
+
+        pub const Components = struct {
+            for_token: TokenIndex,
+            inputs: []const Node.Index,
+            then_expr: Node.Index,
+            else_expr: Node.Index,
+        };
+
+        /// TODO: remove this after zig 0.11.0 is tagged.
+        pub fn isOldSyntax(f: For, token_tags: []const Token.Tag) bool {
+            if (f.ast.inputs.len != 1) return false;
+            if (token_tags[f.payload_token + 1] == .comma) return true;
+            if (token_tags[f.payload_token] == .asterisk and
+                token_tags[f.payload_token + 2] == .comma)
+            {
+                return true;
+            }
+            return false;
+        }
     };
 
     pub const ContainerField = struct {
@@ -2740,6 +2881,8 @@ pub const Error = struct {
         expected_comma_after_param,
         expected_comma_after_initializer,
         expected_comma_after_switch_prong,
+        expected_comma_after_for_operand,
+        expected_comma_after_capture,
         expected_initializer,
         mismatched_binary_op_whitespace,
         invalid_ampersand_ampersand,
@@ -2747,6 +2890,8 @@ pub const Error = struct {
         expected_var_const,
         wrong_equal_var_decl,
         var_const_decl,
+        extra_for_capture,
+        for_input_not_captured,
 
         zig_style_container,
         previous_field,
@@ -3057,8 +3202,10 @@ pub const Node = struct {
         @"while",
         /// `for (lhs) rhs`.
         for_simple,
-        /// `for (lhs) a else b`. `if_list[rhs]`.
+        /// `for (lhs[0..inputs]) lhs[inputs + 1] else lhs[inputs + 2]`. `For[rhs]`.
         @"for",
+        /// `lhs..rhs`.
+        for_range,
         /// `if (lhs) rhs`.
         /// `if (lhs) |a| rhs`.
         if_simple,
@@ -3314,6 +3461,11 @@ pub const Node = struct {
         then_expr: Index,
     };
 
+    pub const For = packed struct(u32) {
+        inputs: u31,
+        has_else: bool,
+    };
+
     pub const FnProtoOne = struct {
         /// Populated if there is exactly 1 parameter. Otherwise there are 0 parameters.
         param: Index,
@@ -3347,3 +3499,12 @@ pub const Node = struct {
         rparen: TokenIndex,
     };
 };
+
+const std = @import("../std.zig");
+const assert = std.debug.assert;
+const testing = std.testing;
+const mem = std.mem;
+const Token = std.zig.Token;
+const Ast = @This();
+const Allocator = std.mem.Allocator;
+const Parse = @import("Parse.zig");
