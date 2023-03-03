@@ -11,7 +11,7 @@ var log_err_count: usize = 0;
 
 pub fn main() void {
     if (builtin.zig_backend != .stage1 and
-        (builtin.zig_backend != .stage2_llvm or builtin.cpu.arch == .wasm32) and
+        builtin.zig_backend != .stage2_llvm and
         builtin.zig_backend != .stage2_c)
     {
         return main2() catch @panic("test failure");
@@ -33,7 +33,7 @@ pub fn main() void {
     async_frame_buffer = &[_]u8{};
 
     var leaks: usize = 0;
-    for (test_fn_list) |test_fn, i| {
+    for (test_fn_list, 0..) |test_fn, i| {
         std.testing.allocator_instance = .{};
         defer {
             if (std.testing.allocator_instance.deinit()) {

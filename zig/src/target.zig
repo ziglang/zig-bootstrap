@@ -648,8 +648,9 @@ pub fn defaultAddressSpace(
         function,
     },
 ) AddressSpace {
-    _ = target;
-    _ = context;
+    // The default address space for functions on AVR is .flash to produce
+    // correct fixups into progmem.
+    if (context == .function and target.cpu.arch == .avr) return .flash;
     return .generic;
 }
 
@@ -727,6 +728,7 @@ pub fn supportsFunctionAlignment(target: std.Target) bool {
 pub fn supportsTailCall(target: std.Target, backend: std.builtin.CompilerBackend) bool {
     switch (backend) {
         .stage1, .stage2_llvm => return @import("codegen/llvm.zig").supportsTailCall(target),
+        .stage2_c => return true,
         else => return false,
     }
 }

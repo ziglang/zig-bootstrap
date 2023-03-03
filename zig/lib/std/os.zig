@@ -302,8 +302,7 @@ pub const FChmodError = error{
 /// successfully, or must have the effective user ID matching the owner
 /// of the file.
 pub fn fchmod(fd: fd_t, mode: mode_t) FChmodError!void {
-    if (builtin.os.tag == .windows or builtin.os.tag == .wasi)
-        @compileError("Unsupported OS");
+    if (!std.fs.has_executable_bit) @compileError("fchmod unsupported by target OS");
 
     while (true) {
         const res = system.fchmod(fd, mode);
@@ -311,8 +310,38 @@ pub fn fchmod(fd: fd_t, mode: mode_t) FChmodError!void {
         switch (system.getErrno(res)) {
             .SUCCESS => return,
             .INTR => continue,
-            .BADF => unreachable, // Can be reached if the fd refers to a non-iterable directory.
+            .BADF => unreachable,
+            .FAULT => unreachable,
+            .INVAL => unreachable,
+            .ACCES => return error.AccessDenied,
+            .IO => return error.InputOutput,
+            .LOOP => return error.SymLinkLoop,
+            .NOENT => return error.FileNotFound,
+            .NOMEM => return error.SystemResources,
+            .NOTDIR => return error.FileNotFound,
+            .PERM => return error.AccessDenied,
+            .ROFS => return error.ReadOnlyFileSystem,
+            else => |err| return unexpectedErrno(err),
+        }
+    }
+}
 
+const FChmodAtError = FChmodError || error{
+    NameTooLong,
+};
+
+pub fn fchmodat(dirfd: fd_t, path: []const u8, mode: mode_t, flags: u32) FChmodAtError!void {
+    if (!std.fs.has_executable_bit) @compileError("fchmodat unsupported by target OS");
+
+    const path_c = try toPosixPath(path);
+
+    while (true) {
+        const res = system.fchmodat(dirfd, &path_c, mode, flags);
+
+        switch (system.getErrno(res)) {
+            .SUCCESS => return,
+            .INTR => continue,
+            .BADF => unreachable,
             .FAULT => unreachable,
             .INVAL => unreachable,
             .ACCES => return error.AccessDenied,
@@ -550,7 +579,6 @@ pub fn abort() noreturn {
         exit(0); // TODO choose appropriate exit code
     }
     if (builtin.os.tag == .wasi) {
-        @breakpoint();
         exit(1);
     }
     if (builtin.os.tag == .cuda) {
@@ -4514,7 +4542,7 @@ pub fn faccessatW(dirfd: fd_t, sub_path_w: [*:0]const u16, mode: u32, flags: u32
     var nt_name = windows.UNICODE_STRING{
         .Length = path_len_bytes,
         .MaximumLength = path_len_bytes,
-        .Buffer = @intToPtr([*]u16, @ptrToInt(sub_path_w)),
+        .Buffer = @constCast(sub_path_w),
     };
     var attr = windows.OBJECT_ATTRIBUTES{
         .Length = @sizeOf(windows.OBJECT_ATTRIBUTES),
@@ -6029,7 +6057,7 @@ pub fn sendfile(
                     .BADF => unreachable, // Always a race condition.
                     .FAULT => unreachable, // Segmentation fault.
                     .OVERFLOW => unreachable, // We avoid passing too large of a `count`.
-                    .NOTCONN => unreachable, // `out_fd` is an unconnected socket.
+                    .NOTCONN => return error.BrokenPipe, // `out_fd` is an unconnected socket
 
                     .INVAL, .NOSYS => {
                         // EINVAL could be any of the following situations:
@@ -6097,7 +6125,7 @@ pub fn sendfile(
 
                     .BADF => unreachable, // Always a race condition.
                     .FAULT => unreachable, // Segmentation fault.
-                    .NOTCONN => unreachable, // `out_fd` is an unconnected socket.
+                    .NOTCONN => return error.BrokenPipe, // `out_fd` is an unconnected socket
 
                     .INVAL, .OPNOTSUPP, .NOTSOCK, .NOSYS => {
                         // EINVAL could be any of the following situations:
@@ -6179,7 +6207,7 @@ pub fn sendfile(
                     .BADF => unreachable, // Always a race condition.
                     .FAULT => unreachable, // Segmentation fault.
                     .INVAL => unreachable,
-                    .NOTCONN => unreachable, // `out_fd` is an unconnected socket.
+                    .NOTCONN => return error.BrokenPipe, // `out_fd` is an unconnected socket
 
                     .OPNOTSUPP, .NOTSOCK, .NOSYS => break :sf,
 
@@ -6473,7 +6501,7 @@ pub fn recvfrom(
                 .BADF => unreachable, // always a race condition
                 .FAULT => unreachable,
                 .INVAL => unreachable,
-                .NOTCONN => unreachable,
+                .NOTCONN => return error.SocketNotConnected,
                 .NOTSOCK => unreachable,
                 .INTR => continue,
                 .AGAIN => return error.WouldBlock,
@@ -7056,4 +7084,22 @@ pub fn timerfd_gettime(fd: i32) TimerFdGetError!linux.itimerspec {
         .INVAL => unreachable,
         else => |err| return unexpectedErrno(err),
     };
+}
+
+pub const have_sigpipe_support = @hasDecl(@This(), "SIG") and @hasDecl(SIG, "PIPE");
+
+fn noopSigHandler(_: c_int) callconv(.C) void {}
+
+pub fn maybeIgnoreSigpipe() void {
+    if (have_sigpipe_support and !std.options.keep_sigpipe) {
+        const act = Sigaction{
+            // We set handler to a noop function instead of SIG.IGN so we don't leak our
+            // signal disposition to a child process
+            .handler = .{ .handler = noopSigHandler },
+            .mask = empty_sigset,
+            .flags = 0,
+        };
+        sigaction(SIG.PIPE, &act, null) catch |err|
+            std.debug.panic("failed to install noop SIGPIPE handler with '{s}'", .{@errorName(err)});
+    }
 }

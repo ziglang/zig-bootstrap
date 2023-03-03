@@ -871,6 +871,13 @@ pub fn main() void {
       However, it is possible to embed non-UTF-8 bytes into a string literal using <code>\xNN</code> notation.
       </p>
       <p>
+      Indexing into a string containing non-ASCII bytes will return individual bytes, whether valid
+      UTF-8 or not.
+      The {#link|Zig Standard Library#} provides routines for checking the validity of UTF-8 encoded
+      strings, accessing their code points and other encoding/decoding related tasks in
+      {#syntax#}std.unicode{#endsyntax#}.
+      </p>
+      <p>
       Unicode code point literals have type {#syntax#}comptime_int{#endsyntax#}, the same as
       {#link|Integer Literals#}. All {#link|Escape Sequences#} are valid in both string literals
       and Unicode code point literals.
@@ -894,9 +901,12 @@ pub fn main() void {
     print("{}\n", .{'e' == '\x65'});                    // true
     print("{d}\n", .{'\u{1f4a9}'});                     // 128169
     print("{d}\n", .{'💯'});                            // 128175
-    print("{}\n", .{mem.eql(u8, "hello", "h\x65llo")}); // true
-    print("0x{x}\n", .{"\xff"[0]}); // non-UTF-8 strings are possible with \xNN notation.
     print("{u}\n", .{'⚡'});
+    print("{}\n", .{mem.eql(u8, "hello", "h\x65llo")});      // true
+    print("{}\n", .{mem.eql(u8, "💯", "\xf0\x9f\x92\xaf")}); // also true
+    const invalid_utf8 = "\xff\xfe";      // non-UTF-8 strings are possible with \xNN notation.
+    print("0x{x}\n", .{invalid_utf8[1]}); // indexing them returns individual bytes...
+    print("0x{x}\n", .{"💯"[1]});    // ...as does indexing part-way through non-ASCII characters
 }
       {#code_end#}
       {#see_also|Arrays|Source Encoding#}
@@ -2357,7 +2367,7 @@ test "iterate over an array" {
 var some_integers: [100]i32 = undefined;
 
 test "modify an array" {
-    for (some_integers) |*item, i| {
+    for (&some_integers, 0..) |*item, i| {
         item.* = @intCast(i32, i);
     }
     try expect(some_integers[10] == 10);
@@ -2398,7 +2408,7 @@ comptime {
 // use compile-time code to initialize an array
 var fancy_array = init: {
     var initial_value: [10]Point = undefined;
-    for (initial_value) |*pt, i| {
+    for (&initial_value, 0..) |*pt, i| {
         pt.* = Point{
             .x = @intCast(i32, i),
             .y = @intCast(i32, i) * 2,
@@ -2451,8 +2461,8 @@ test "multidimensional arrays" {
     try expect(mat4x4[1][1] == 1.0);
 
     // Here we iterate with for loops.
-    for (mat4x4) |row, row_index| {
-        for (row) |cell, column_index| {
+    for (mat4x4, 0..) |row, row_index| {
+        for (row, 0..) |cell, column_index| {
             if (row_index == column_index) {
                 try expect(cell == 1.0);
             }
@@ -3569,7 +3579,7 @@ test "tuple" {
     } ++ .{false} ** 2;
     try expect(values[0] == 1234);
     try expect(values[4] == false);
-    inline for (values) |v, i| {
+    inline for (values, 0..) |v, i| {
         if (i != 2) continue;
         try expect(v);
     }
@@ -4649,10 +4659,10 @@ test "for basics" {
     }
     try expect(sum == 20);
 
-    // To access the index of iteration, specify a second capture value.
-    // This is zero-indexed.
+    // To access the index of iteration, specify a second condition as well
+    // as a second capture value.
     var sum2: i32 = 0;
-    for (items) |_, i| {
+    for (items, 0..) |_, i| {
         try expect(@TypeOf(i) == usize);
         sum2 += @intCast(i32, i);
     }
@@ -4664,7 +4674,7 @@ test "for reference" {
 
     // Iterate over the slice by reference by
     // specifying that the capture value is a pointer.
-    for (items) |*value| {
+    for (&items) |*value| {
         value.* += 1;
     }
 
@@ -5383,7 +5393,6 @@ pub fn parseU64(buf: []const u8, radix: u8) !u64 {
         // x *= radix
         var ov = @mulWithOverflow(x, radix);
         if (ov[1] != 0) return error.OverFlow;
-        
 
         // x += digit
         ov = @addWithOverflow(ov[0], digit);
@@ -5650,7 +5659,7 @@ fn genFoos(allocator: Allocator, num: usize) ![]Foo {
     var foos = try allocator.alloc(Foo, num);
     errdefer allocator.free(foos);
 
-    for(foos) |*foo, i| {
+    for (foos, 0..) |*foo, i| {
         foo.data = try allocator.create(u32);
         // This errdefer does not last between iterations
         errdefer allocator.destroy(foo.data);
@@ -5691,14 +5700,14 @@ fn genFoos(allocator: Allocator, num: usize) ![]Foo {
     // Used to track how many foos have been initialized
     // (including their data being allocated)
     var num_allocated: usize = 0;
-    errdefer for(foos[0..num_allocated]) |foo| {
+    errdefer for (foos[0..num_allocated]) |foo| {
         allocator.destroy(foo.data);
     };
-    for(foos) |*foo, i| {
+    for (foos, 0..) |*foo, i| {
         foo.data = try allocator.create(u32);
         num_allocated += 1;
 
-        if(i >= 3) return error.TooManyFoos;
+        if (i >= 3) return error.TooManyFoos;
 
         foo.data.* = try getData();
     }
@@ -6057,7 +6066,7 @@ struct Foo *do_a_thing(void) {
       <p>Zig code</p>
       {#syntax_block|zig|call_malloc_from_zig.zig#}
 // malloc prototype included for reference
-extern fn malloc(size: size_t) ?*u8;
+extern fn malloc(size: usize) ?*u8;
 
 fn doAThing() ?*Foo {
     const ptr = malloc(1234) orelse return null;
@@ -7256,7 +7265,7 @@ const Writer = struct {
         comptime var state = State.start;
         comptime var next_arg: usize = 0;
 
-        inline for (format) |c, i| {
+        inline for (format, 0..) |c, i| {
             switch (state) {
                 State.start => switch (c) {
                     '{' => {
@@ -7469,64 +7478,66 @@ pub fn syscall3(number: usize, arg1: usize, arg2: usize, arg3: usize) usize {
       <p>
       Dissecting the syntax:
       </p>
-      {#syntax_block|zig|Assembly Syntax Explained#}
-// Inline assembly is an expression which returns a value.
-// the `asm` keyword begins the expression.
-_ = asm
-// `volatile` is an optional modifier that tells Zig this
-// inline assembly expression has side-effects. Without
-// `volatile`, Zig is allowed to delete the inline assembly
-// code if the result is unused.
-volatile (
-// Next is a comptime string which is the assembly code.
-// Inside this string one may use `%[ret]`, `%[number]`,
-// or `%[arg1]` where a register is expected, to specify
-// the register that Zig uses for the argument or return value,
-// if the register constraint strings are used. However in
-// the below code, this is not used. A literal `%` can be
-// obtained by escaping it with a double percent: `%%`.
-// Often multiline string syntax comes in handy here.
+      {#code_begin|syntax|Assembly Syntax Explained#}
+pub fn syscall1(number: usize, arg1: usize) usize {
+    // Inline assembly is an expression which returns a value.
+    // the `asm` keyword begins the expression.
+    return asm
+    // `volatile` is an optional modifier that tells Zig this
+    // inline assembly expression has side-effects. Without
+    // `volatile`, Zig is allowed to delete the inline assembly
+    // code if the result is unused.
+    volatile (
+    // Next is a comptime string which is the assembly code.
+    // Inside this string one may use `%[ret]`, `%[number]`,
+    // or `%[arg1]` where a register is expected, to specify
+    // the register that Zig uses for the argument or return value,
+    // if the register constraint strings are used. However in
+    // the below code, this is not used. A literal `%` can be
+    // obtained by escaping it with a double percent: `%%`.
+    // Often multiline string syntax comes in handy here.
     \\syscall
-// Next is the output. It is possible in the future Zig will
-// support multiple outputs, depending on how
-// https://github.com/ziglang/zig/issues/215 is resolved.
-// It is allowed for there to be no outputs, in which case
-// this colon would be directly followed by the colon for the inputs.
-    :
-// This specifies the name to be used in `%[ret]` syntax in
-// the above assembly string. This example does not use it,
-// but the syntax is mandatory.
-    [ret]
-// Next is the output constraint string. This feature is still
-// considered unstable in Zig, and so LLVM/GCC documentation
-// must be used to understand the semantics.
-// http://releases.llvm.org/10.0.0/docs/LangRef.html#inline-asm-constraint-string
-// https://gcc.gnu.org/onlinedocs/gcc/Extended-Asm.html
-// In this example, the constraint string means "the result value of
-// this inline assembly instruction is whatever is in $rax".
-    "={rax}"
-// Next is either a value binding, or `->` and then a type. The
-// type is the result type of the inline assembly expression.
-// If it is a value binding, then `%[ret]` syntax would be used
-// to refer to the register bound to the value.
-    (-> usize)
-// Next is the list of inputs.
-// The constraint for these inputs means, "when the assembly code is
-// executed, $rax shall have the value of `number` and $rdi shall have
-// the value of `arg1`". Any number of input parameters is allowed,
-// including none.
-    : [number] "{rax}" (number),
-        [arg1] "{rdi}" (arg1)
-// Next is the list of clobbers. These declare a set of registers whose
-// values will not be preserved by the execution of this assembly code.
-// These do not include output or input registers. The special clobber
-// value of "memory" means that the assembly writes to arbitrary undeclared
-// memory locations - not only the memory pointed to by a declared indirect
-// output. In this example we list $rcx and $r11 because it is known the
-// kernel syscall does not preserve these registers.
-    : "rcx", "r11"
-);
-      {#end_syntax_block#}
+    // Next is the output. It is possible in the future Zig will
+    // support multiple outputs, depending on how
+    // https://github.com/ziglang/zig/issues/215 is resolved.
+    // It is allowed for there to be no outputs, in which case
+    // this colon would be directly followed by the colon for the inputs.
+        :
+    // This specifies the name to be used in `%[ret]` syntax in
+    // the above assembly string. This example does not use it,
+    // but the syntax is mandatory.
+        [ret]
+    // Next is the output constraint string. This feature is still
+    // considered unstable in Zig, and so LLVM/GCC documentation
+    // must be used to understand the semantics.
+    // http://releases.llvm.org/10.0.0/docs/LangRef.html#inline-asm-constraint-string
+    // https://gcc.gnu.org/onlinedocs/gcc/Extended-Asm.html
+    // In this example, the constraint string means "the result value of
+    // this inline assembly instruction is whatever is in $rax".
+        "={rax}"
+    // Next is either a value binding, or `->` and then a type. The
+    // type is the result type of the inline assembly expression.
+    // If it is a value binding, then `%[ret]` syntax would be used
+    // to refer to the register bound to the value.
+        (-> usize)
+    // Next is the list of inputs.
+    // The constraint for these inputs means, "when the assembly code is
+    // executed, $rax shall have the value of `number` and $rdi shall have
+    // the value of `arg1`". Any number of input parameters is allowed,
+    // including none.
+        : [number] "{rax}" (number),
+            [arg1] "{rdi}" (arg1)
+    // Next is the list of clobbers. These declare a set of registers whose
+    // values will not be preserved by the execution of this assembly code.
+    // These do not include output or input registers. The special clobber
+    // value of "memory" means that the assembly writes to arbitrary undeclared
+    // memory locations - not only the memory pointed to by a declared indirect
+    // output. In this example we list $rcx and $r11 because it is known the
+    // kernel syscall does not preserve these registers.
+        : "rcx", "r11"
+    );
+}
+      {#code_end#}
       <p>
       For x86 and x86_64 targets, the syntax is AT&amp;T syntax, rather than the more
       popular Intel syntax. This is due to technical constraints; assembly parsing is
@@ -7882,7 +7893,7 @@ fn add(a: i32, b: i32) i32 {
       {#syntax#}@call{#endsyntax#} allows more flexibility than normal function call syntax does. The
       {#syntax#}CallModifier{#endsyntax#} enum is reproduced here:
       </p>
-      {#syntax_block|zig|builtin.CallModifier struct#}
+      {#code_begin|syntax|builtin.CallModifier struct#}
 pub const CallModifier = enum {
     /// Equivalent to function call syntax.
     auto,
@@ -7916,7 +7927,7 @@ pub const CallModifier = enum {
     /// compile-time, a compile error is emitted instead.
     compile_time,
 };
-      {#end_syntax_block#}
+      {#code_end#}
       {#header_close#}
 
       {#header_open|@cDefine#}
@@ -8116,6 +8127,13 @@ test "main" {
     print("Runtime in main, num1 = {}.\n", .{num1});
 }
       {#code_end#}
+      {#header_close#}
+
+      {#header_open|@constCast#}
+      <pre>{#syntax#}@constCast(value: anytype) DestType{#endsyntax#}</pre>
+      <p>
+      Remove {#syntax#}const{#endsyntax#} qualifier from a pointer.
+      </p>
       {#header_close#}
 
       {#header_open|@ctz#}
@@ -8611,7 +8629,7 @@ test "integer cast panic" {
       This function is a low level intrinsic with no safety mechanisms. Most code
       should not use this function, instead using something like this:
       </p>
-      <pre>{#syntax#}for (source[0..byte_count]) |b, i| dest[i] = b;{#endsyntax#}</pre>
+      <pre>{#syntax#}for (dest, source[0..byte_count]) |*d, s| d.* = s;{#endsyntax#}</pre>
       <p>
       The optimizer is intelligent enough to turn the above snippet into a memcpy.
       </p>
@@ -8799,6 +8817,16 @@ pub const PrefetchOptions = struct {
       {#link|Optional Pointers#} are allowed. Casting an optional pointer which is {#link|null#}
       to a non-optional pointer invokes safety-checked {#link|Undefined Behavior#}.
       </p>
+      <p>
+      {#syntax#}@ptrCast{#endsyntax#} cannot be used for:
+      </p>
+      <ul>
+          <li>Removing {#syntax#}const{#endsyntax#} qualifier, use {#link|@constCast#}.</li>
+          <li>Removing {#syntax#}volatile{#endsyntax#} qualifier, use {#link|@volatileCast#}.</li>
+          <li>Changing pointer address space, use {#link|@addrSpaceCast#}.</li>
+          <li>Increasing pointer alignment, use {#link|@alignCast#}.</li>
+          <li>Casting a non-slice pointer to a slice, use slicing syntax {#syntax#}ptr[start..end]{#endsyntax#}.</li>
+      </ul>
       {#header_close#}
 
       {#header_open|@ptrToInt#}
@@ -9180,8 +9208,7 @@ fn doTheTest() !void {
       when available.
       </p>
       <p>
-      Supports {#link|Floats#} and {#link|Vectors#} of floats, with the caveat that
-      <a href="https://github.com/ziglang/zig/issues/4026">some float operations are not yet implemented for all float types</a>.
+      Supports {#link|Floats#} and {#link|Vectors#} of floats.
       </p>
       {#header_close#}
       {#header_open|@sin#}
@@ -9191,8 +9218,7 @@ fn doTheTest() !void {
       when available.
       </p>
       <p>
-      Supports {#link|Floats#} and {#link|Vectors#} of floats, with the caveat that
-      <a href="https://github.com/ziglang/zig/issues/4026">some float operations are not yet implemented for all float types</a>.
+      Supports {#link|Floats#} and {#link|Vectors#} of floats.
       </p>
       {#header_close#}
 
@@ -9203,8 +9229,7 @@ fn doTheTest() !void {
       when available.
       </p>
       <p>
-      Supports {#link|Floats#} and {#link|Vectors#} of floats, with the caveat that
-      <a href="https://github.com/ziglang/zig/issues/4026">some float operations are not yet implemented for all float types</a>.
+      Supports {#link|Floats#} and {#link|Vectors#} of floats.
       </p>
       {#header_close#}
 
@@ -9215,8 +9240,7 @@ fn doTheTest() !void {
       Uses a dedicated hardware instruction when available.
       </p>
       <p>
-      Supports {#link|Floats#} and {#link|Vectors#} of floats, with the caveat that
-      <a href="https://github.com/ziglang/zig/issues/4026">some float operations are not yet implemented for all float types</a>.
+      Supports {#link|Floats#} and {#link|Vectors#} of floats.
       </p>
       {#header_close#}
 
@@ -9227,8 +9251,7 @@ fn doTheTest() !void {
       when available.
       </p>
       <p>
-      Supports {#link|Floats#} and {#link|Vectors#} of floats, with the caveat that
-      <a href="https://github.com/ziglang/zig/issues/4026">some float operations are not yet implemented for all float types</a>.
+      Supports {#link|Floats#} and {#link|Vectors#} of floats.
       </p>
       {#header_close#}
       {#header_open|@exp2#}
@@ -9238,8 +9261,7 @@ fn doTheTest() !void {
       when available.
       </p>
       <p>
-      Supports {#link|Floats#} and {#link|Vectors#} of floats, with the caveat that
-      <a href="https://github.com/ziglang/zig/issues/4026">some float operations are not yet implemented for all float types</a>.
+      Supports {#link|Floats#} and {#link|Vectors#} of floats.
       </p>
       {#header_close#}
       {#header_open|@log#}
@@ -9249,8 +9271,7 @@ fn doTheTest() !void {
       when available.
       </p>
       <p>
-      Supports {#link|Floats#} and {#link|Vectors#} of floats, with the caveat that
-      <a href="https://github.com/ziglang/zig/issues/4026">some float operations are not yet implemented for all float types</a>.
+      Supports {#link|Floats#} and {#link|Vectors#} of floats.
       </p>
       {#header_close#}
       {#header_open|@log2#}
@@ -9260,8 +9281,7 @@ fn doTheTest() !void {
       when available.
       </p>
       <p>
-      Supports {#link|Floats#} and {#link|Vectors#} of floats, with the caveat that
-      <a href="https://github.com/ziglang/zig/issues/4026">some float operations are not yet implemented for all float types</a>.
+      Supports {#link|Floats#} and {#link|Vectors#} of floats.
       </p>
       {#header_close#}
       {#header_open|@log10#}
@@ -9271,8 +9291,7 @@ fn doTheTest() !void {
       when available.
       </p>
       <p>
-      Supports {#link|Floats#} and {#link|Vectors#} of floats, with the caveat that
-      <a href="https://github.com/ziglang/zig/issues/4026">some float operations are not yet implemented for all float types</a>.
+      Supports {#link|Floats#} and {#link|Vectors#} of floats.
       </p>
       {#header_close#}
       {#header_open|@fabs#}
@@ -9282,8 +9301,7 @@ fn doTheTest() !void {
       when available.
       </p>
       <p>
-      Supports {#link|Floats#} and {#link|Vectors#} of floats, with the caveat that
-      <a href="https://github.com/ziglang/zig/issues/4026">some float operations are not yet implemented for all float types</a>.
+      Supports {#link|Floats#} and {#link|Vectors#} of floats.
       </p>
       {#header_close#}
       {#header_open|@floor#}
@@ -9293,8 +9311,7 @@ fn doTheTest() !void {
       Uses a dedicated hardware instruction when available.
       </p>
       <p>
-      Supports {#link|Floats#} and {#link|Vectors#} of floats, with the caveat that
-      <a href="https://github.com/ziglang/zig/issues/4026">some float operations are not yet implemented for all float types</a>.
+      Supports {#link|Floats#} and {#link|Vectors#} of floats.
       </p>
       {#header_close#}
       {#header_open|@ceil#}
@@ -9304,8 +9321,7 @@ fn doTheTest() !void {
       Uses a dedicated hardware instruction when available.
       </p>
       <p>
-      Supports {#link|Floats#} and {#link|Vectors#} of floats, with the caveat that
-      <a href="https://github.com/ziglang/zig/issues/4026">some float operations are not yet implemented for all float types</a>.
+      Supports {#link|Floats#} and {#link|Vectors#} of floats.
       </p>
       {#header_close#}
       {#header_open|@trunc#}
@@ -9315,8 +9331,7 @@ fn doTheTest() !void {
       Uses a dedicated hardware instruction when available.
       </p>
       <p>
-      Supports {#link|Floats#} and {#link|Vectors#} of floats, with the caveat that
-      <a href="https://github.com/ziglang/zig/issues/4026">some float operations are not yet implemented for all float types</a>.
+      Supports {#link|Floats#} and {#link|Vectors#} of floats.
       </p>
       {#header_close#}
       {#header_open|@round#}
@@ -9326,8 +9341,7 @@ fn doTheTest() !void {
       when available.
       </p>
       <p>
-      Supports {#link|Floats#} and {#link|Vectors#} of floats, with the caveat that
-      <a href="https://github.com/ziglang/zig/issues/4026">some float operations are not yet implemented for all float types</a>.
+      Supports {#link|Floats#} and {#link|Vectors#} of floats.
       </p>
       {#header_close#}
 
@@ -9512,6 +9526,13 @@ fn foo(comptime T: type, ptr: *T) T {
       <pre>{#syntax#}@Vector(len: comptime_int, Element: type) type{#endsyntax#}</pre>
       <p>Creates {#link|Vectors#}.</p>
       {#header_close#}
+
+      {#header_open|@volatileCast#}
+      <pre>{#syntax#}@volatileCast(value: anytype) DestType{#endsyntax#}</pre>
+      <p>
+      Remove {#syntax#}volatile{#endsyntax#} qualifier from a pointer.
+      </p>
+      {#header_close#}
       {#header_close#}
 
       {#header_open|Build Mode#}
@@ -9528,11 +9549,15 @@ fn foo(comptime T: type, ptr: *T) T {
       To add standard build options to a <code class="file">build.zig</code> file:
       </p>
       {#code_begin|syntax|build#}
-const Builder = @import("std").build.Builder;
+const std = @import("std");
 
-pub fn build(b: *Builder) void {
-    const exe = b.addExecutable("example", "example.zig");
-    exe.setBuildMode(b.standardReleaseOptions());
+pub fn build(b: *std.Build) void {
+    const optimize = b.standardOptimizeOption(.{});
+    const exe = b.addExecutable(.{
+        .name = "example",
+        .root_source_file = .{ .path = "example.zig" },
+        .optimize = optimize,
+    });
     b.default_step.dependOn(&exe.step);
 }
       {#code_end#}
@@ -9588,7 +9613,7 @@ pub fn build(b: *Builder) void {
       {#header_close#}
 
       {#header_open|Single Threaded Builds#}
-      <p>Zig has a compile option <kbd>--single-threaded</kbd> which has the following effects:</p>
+      <p>Zig has a compile option <kbd>-fsingle-threaded</kbd> which has the following effects:</p>
       <ul>
         <li>All {#link|Thread Local Variables#} are treated as regular {#link|Container Level Variables#}.</li>
         <li>The overhead of {#link|Async Functions#} becomes equivalent to function call overhead.</li>
@@ -10547,22 +10572,26 @@ const separator = if (builtin.os.tag == .windows) '\\' else '/';
       <p>This <code class="file">build.zig</code> file is automatically generated
         by <kbd>zig init-exe</kbd>.</p>
       {#code_begin|syntax|build_executable#}
-const Builder = @import("std").build.Builder;
+const std = @import("std");
 
-pub fn build(b: *Builder) void {
+pub fn build(b: *std.Build) void {
     // Standard target options allows the person running `zig build` to choose
     // what target to build for. Here we do not override the defaults, which
     // means any target is allowed, and the default is native. Other options
     // for restricting supported target set are available.
     const target = b.standardTargetOptions(.{});
 
-    // Standard release options allow the person running `zig build` to select
-    // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall.
-    const mode = b.standardReleaseOptions();
+    // Standard optimization options allow the person running `zig build` to select
+    // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
+    // set a preferred release mode, allowing the user to decide how to optimize.
+    const optimize = b.standardOptimizeOption(.{});
 
-    const exe = b.addExecutable("example", "src/main.zig");
-    exe.setTarget(target);
-    exe.setBuildMode(mode);
+    const exe = b.addExecutable(.{
+        .name = "example",
+        .root_source_file = .{ .path = "src/main.zig" },
+        .target = target,
+        .optimize = optimize,
+    });
     exe.install();
 
     const run_cmd = exe.run();
@@ -10581,16 +10610,21 @@ pub fn build(b: *Builder) void {
       <p>This <code class="file">build.zig</code> file is automatically generated
         by <kbd>zig init-lib</kbd>.</p>
       {#code_begin|syntax|build_library#}
-const Builder = @import("std").build.Builder;
+const std = @import("std");
 
-pub fn build(b: *Builder) void {
-    const mode = b.standardReleaseOptions();
-    const lib = b.addStaticLibrary("example", "src/main.zig");
-    lib.setBuildMode(mode);
+pub fn build(b: *std.Build) void {
+    const optimize = b.standardOptimizeOption(.{});
+    const lib = b.addStaticLibrary(.{
+        .name = "example",
+        .root_source_file = .{ .path = "src/main.zig" },
+        .optimize = optimize,
+    });
     lib.install();
 
-    var main_tests = b.addTest("src/main.zig");
-    main_tests.setBuildMode(mode);
+    const main_tests = b.addTest(.{
+        .root_source_file = .{ .path = "src/main.zig" },
+        .optimize = optimize,
+    });
 
     const test_step = b.step("test", "Run library tests");
     test_step.dependOn(&main_tests.step);
@@ -10949,12 +10983,17 @@ int main(int argc, char **argv) {
 }
       {#end_syntax_block#}
       {#code_begin|syntax|build_c#}
-const Builder = @import("std").build.Builder;
+const std = @import("std");
 
-pub fn build(b: *Builder) void {
-    const lib = b.addSharedLibrary("mathtest", "mathtest.zig", b.version(1, 0, 0));
-
-    const exe = b.addExecutable("test", null);
+pub fn build(b: *std.Build) void {
+    const lib = b.addSharedLibrary(.{
+        .name = "mathtest",
+        .root_source_file = .{ .path = "mathtest.zig" },
+        .version = .{ .major = 1, .minor = 0, .patch = 0 },
+    });
+    const exe = b.addExecutable(.{
+        .name = "test",
+    });
     exe.addCSourceFile("test.c", &[_][]const u8{"-std=c99"});
     exe.linkLibrary(lib);
     exe.linkSystemLibrary("c");
@@ -11011,12 +11050,17 @@ int main(int argc, char **argv) {
 }
       {#end_syntax_block#}
       {#code_begin|syntax|build_object#}
-const Builder = @import("std").build.Builder;
+const std = @import("std");
 
-pub fn build(b: *Builder) void {
-    const obj = b.addObject("base64", "base64.zig");
+pub fn build(b: *std.Build) void {
+    const obj = b.addObject(.{
+        .name = "base64",
+        .root_source_file = .{ .path = "base64.zig" },
+    });
 
-    const exe = b.addExecutable("test", null);
+    const exe = b.addExecutable(.{
+        .name = "test",
+    });
     exe.addCSourceFile("test.c", &[_][]const u8{"-std=c99"});
     exe.addObject(obj);
     exe.linkSystemLibrary("c");
@@ -11072,7 +11116,7 @@ pub fn main() !void {
     const args = try std.process.argsAlloc(gpa);
     defer std.process.argsFree(gpa, args);
 
-    for (args) |arg, i| {
+    for (args, 0..) |arg, i| {
         std.debug.print("{}: {s}\n", .{ i, arg });
     }
 }
@@ -11098,7 +11142,7 @@ pub fn main() !void {
 
     const preopens = try fs.wasi.preopensAlloc(arena);
 
-    for (preopens.names) |preopen, i| {
+    for (preopens.names, 0..) |preopen, i| {
         std.debug.print("{}: {s}\n", .{ i, preopen });
     }
 }
@@ -11507,7 +11551,8 @@ fn readU32Be() u32 {}
       </p>
       <p>
       Each LF may be immediately preceded by a single CR (byte value 0x0d, code point U+000d, {#syntax#}'\r'{#endsyntax#})
-      to form a Windows style line ending, but this is discouraged.
+      to form a Windows style line ending, but this is discouraged. Note that in mulitline strings, CRLF sequences will
+      be encoded as LF when compiled into a zig program.
       A CR in any other context is not allowed.
       </p>
       <p>

@@ -19,7 +19,6 @@ const Liveness = @import("../Liveness.zig");
 const Value = @import("../value.zig").Value;
 const Type = @import("../type.zig").Type;
 const LazySrcLoc = Module.LazySrcLoc;
-const CType = @import("../type.zig").CType;
 const x86_64_abi = @import("../arch/x86_64/abi.zig");
 const wasm_c_abi = @import("../arch/wasm/abi.zig");
 const aarch64_c_abi = @import("../arch/aarch64/abi.zig");
@@ -606,7 +605,7 @@ pub const Object = struct {
         defer mod.gpa.free(llvm_errors);
 
         llvm_errors[0] = llvm_slice_ty.getUndef();
-        for (llvm_errors[1..]) |*llvm_error, i| {
+        for (llvm_errors[1..], 0..) |*llvm_error, i| {
             const name = error_name_list[1..][i];
             const str_init = self.context.constString(name.ptr, @intCast(c_uint, name.len), .False);
             const str_global = self.llvm_module.addGlobal(str_init.typeOf(), "");
@@ -697,7 +696,7 @@ pub const Object = struct {
         object.extern_collisions.clearRetainingCapacity();
 
         const export_keys = mod.decl_exports.keys();
-        for (mod.decl_exports.values()) |export_list, i| {
+        for (mod.decl_exports.values(), 0..) |export_list, i| {
             const decl_index = export_keys[i];
             const llvm_global = object.decl_map.get(decl_index) orelse continue;
             for (export_list.items) |exp| {
@@ -1082,7 +1081,7 @@ pub const Object = struct {
                     const param_alignment = param_ty.abiAlignment(target);
                     const arg_ptr = buildAllocaInner(dg.context, builder, llvm_func, false, param_llvm_ty, param_alignment, target);
                     const llvm_ty = dg.context.structType(field_types.ptr, @intCast(c_uint, field_types.len), .False);
-                    for (field_types) |_, field_i_usize| {
+                    for (field_types, 0..) |_, field_i_usize| {
                         const field_i = @intCast(c_uint, field_i_usize);
                         const param = llvm_func.getParam(llvm_arg_i);
                         llvm_arg_i += 1;
@@ -1501,7 +1500,7 @@ pub const Object = struct {
                 const int_info = ty.intInfo(target);
                 assert(int_info.bits != 0);
 
-                for (field_names) |field_name, i| {
+                for (field_names, 0..) |field_name, i| {
                     const field_name_z = try gpa.dupeZ(u8, field_name);
                     defer gpa.free(field_name_z);
 
@@ -1998,7 +1997,7 @@ pub const Object = struct {
                     comptime assert(struct_layout_version == 2);
                     var offset: u64 = 0;
 
-                    for (tuple.types) |field_ty, i| {
+                    for (tuple.types, 0..) |field_ty, i| {
                         const field_val = tuple.values[i];
                         if (field_val.tag() != .unreachable_value or !field_ty.hasRuntimeBits()) continue;
 
@@ -2220,11 +2219,16 @@ pub const Object = struct {
                     ));
                 }
 
-                const union_name = if (layout.tag_size == 0) name.ptr else "AnonUnion";
+                var union_name_buf: ?[:0]const u8 = null;
+                defer if (union_name_buf) |buf| gpa.free(buf);
+                const union_name = if (layout.tag_size == 0) name else name: {
+                    union_name_buf = try std.fmt.allocPrintZ(gpa, "{s}:Payload", .{name});
+                    break :name union_name_buf.?;
+                };
 
                 const union_di_ty = dib.createUnionType(
                     compile_unit_scope,
-                    union_name,
+                    union_name.ptr,
                     null, // file
                     0, // line
                     ty.abiSize(target) * 8, // size in bits
@@ -2279,7 +2283,9 @@ pub const Object = struct {
 
                 const full_di_fields: [2]*llvm.DIType =
                     if (layout.tag_align >= layout.payload_align)
-                .{ tag_di, payload_di } else .{ payload_di, tag_di };
+                    .{ tag_di, payload_di }
+                else
+                    .{ payload_di, tag_di };
 
                 const full_di_ty = dib.createStructType(
                     compile_unit_scope,
@@ -2925,7 +2931,7 @@ pub const DeclGen = struct {
                     var offset: u64 = 0;
                     var big_align: u32 = 0;
 
-                    for (tuple.types) |field_ty, i| {
+                    for (tuple.types, 0..) |field_ty, i| {
                         const field_val = tuple.values[i];
                         if (field_val.tag() != .unreachable_value or !field_ty.hasRuntimeBits()) continue;
 
@@ -3436,7 +3442,7 @@ pub const DeclGen = struct {
                     const llvm_elems = try gpa.alloc(*llvm.Value, len);
                     defer gpa.free(llvm_elems);
                     var need_unnamed = false;
-                    for (elem_vals[0..len]) |elem_val, i| {
+                    for (elem_vals[0..len], 0..) |elem_val, i| {
                         llvm_elems[i] = try dg.lowerValue(.{ .ty = elem_ty, .val = elem_val });
                         need_unnamed = need_unnamed or dg.isUnnamedType(elem_ty, llvm_elems[i]);
                     }
@@ -3622,7 +3628,7 @@ pub const DeclGen = struct {
                     var big_align: u32 = 0;
                     var need_unnamed = false;
 
-                    for (tuple.types) |field_ty, i| {
+                    for (tuple.types, 0..) |field_ty, i| {
                         if (tuple.values[i].tag() != .unreachable_value) continue;
                         if (!field_ty.hasRuntimeBitsIgnoreComptime()) continue;
 
@@ -3684,7 +3690,7 @@ pub const DeclGen = struct {
                     comptime assert(Type.packed_struct_layout_version == 2);
                     var running_int: *llvm.Value = int_llvm_ty.constNull();
                     var running_bits: u16 = 0;
-                    for (field_vals) |field_val, i| {
+                    for (field_vals, 0..) |field_val, i| {
                         const field = fields[i];
                         if (!field.ty.hasRuntimeBitsIgnoreComptime()) continue;
 
@@ -3859,7 +3865,7 @@ pub const DeclGen = struct {
                     const elem_ty = tv.ty.elemType();
                     const llvm_elems = try dg.gpa.alloc(*llvm.Value, vector_len);
                     defer dg.gpa.free(llvm_elems);
-                    for (llvm_elems) |*elem, i| {
+                    for (llvm_elems, 0..) |*elem, i| {
                         var byte_payload: Value.Payload.U64 = .{
                             .base = .{ .tag = .int_u64 },
                             .data = bytes[i],
@@ -3884,7 +3890,7 @@ pub const DeclGen = struct {
                     const elem_ty = tv.ty.elemType();
                     const llvm_elems = try dg.gpa.alloc(*llvm.Value, vector_len);
                     defer dg.gpa.free(llvm_elems);
-                    for (llvm_elems) |*elem, i| {
+                    for (llvm_elems, 0..) |*elem, i| {
                         elem.* = try dg.lowerValue(.{ .ty = elem_ty, .val = elem_vals[i] });
                     }
                     return llvm.constVector(
@@ -3917,7 +3923,7 @@ pub const DeclGen = struct {
                     const elem_ty = tv.ty.elemType();
                     const llvm_elems = try dg.gpa.alloc(*llvm.Value, vector_len);
                     defer dg.gpa.free(llvm_elems);
-                    for (llvm_elems) |*elem, i| {
+                    for (llvm_elems, 0..) |*elem, i| {
                         var byte_payload: Value.Payload.U64 = .{
                             .base = .{ .tag = .int_u64 },
                             .data = bytes[i],
@@ -4165,6 +4171,10 @@ pub const DeclGen = struct {
         // `bar` is just an alias and we actually want to lower a reference to `foo`.
         const decl = self.module.declPtr(decl_index);
         if (decl.val.castTag(.function)) |func| {
+            if (func.data.owner_decl != decl_index) {
+                return self.lowerDeclRefValue(tv, func.data.owner_decl);
+            }
+        } else if (decl.val.castTag(.extern_fn)) |func| {
             if (func.data.owner_decl != decl_index) {
                 return self.lowerDeclRefValue(tv, func.data.owner_decl);
             }
@@ -4479,7 +4489,7 @@ pub const FuncGen = struct {
 
     fn genBody(self: *FuncGen, body: []const Air.Inst.Index) Error!void {
         const air_tags = self.air.instructions.items(.tag);
-        for (body) |inst, i| {
+        for (body, 0..) |inst, i| {
             const opt_value: ?*llvm.Value = switch (air_tags[inst]) {
                 // zig fmt: off
                 .add       => try self.airAdd(inst, false),
@@ -4852,7 +4862,7 @@ pub const FuncGen = struct {
 
                 const llvm_ty = self.context.structType(llvm_types.ptr, @intCast(c_uint, llvm_types.len), .False);
                 try llvm_args.ensureUnusedCapacity(it.llvm_types_len);
-                for (llvm_types) |field_ty, i_usize| {
+                for (llvm_types, 0..) |field_ty, i_usize| {
                     const i = @intCast(c_uint, i_usize);
                     const field_ptr = self.builder.buildStructGEP(llvm_ty, arg_ptr, i, "");
                     const load_inst = self.builder.buildLoad(field_ty, field_ptr, "");
@@ -6020,8 +6030,8 @@ pub const FuncGen = struct {
         const field_ptr = try self.resolveInst(extra.field_ptr);
 
         const target = self.dg.module.getTarget();
-        const struct_ty = self.air.getRefType(ty_pl.ty).childType();
-        const field_offset = struct_ty.structFieldOffset(extra.field_index, target);
+        const parent_ty = self.air.getRefType(ty_pl.ty).childType();
+        const field_offset = parent_ty.structFieldOffset(extra.field_index, target);
 
         const res_ty = try self.dg.lowerType(self.air.getRefType(ty_pl.ty));
         if (field_offset == 0) {
@@ -6250,7 +6260,7 @@ pub const FuncGen = struct {
         var name_map: std.StringArrayHashMapUnmanaged(u16) = .{};
         try name_map.ensureUnusedCapacity(arena, max_param_count);
 
-        for (outputs) |output, i| {
+        for (outputs, 0..) |output, i| {
             const extra_bytes = std.mem.sliceAsBytes(self.air.extra[extra_i..]);
             const constraint = std.mem.sliceTo(std.mem.sliceAsBytes(self.air.extra[extra_i..]), 0);
             const name = std.mem.sliceTo(extra_bytes[constraint.len + 1 ..], 0);
@@ -6435,7 +6445,7 @@ pub const FuncGen = struct {
 
         var name_start: usize = undefined;
         var modifier_start: usize = undefined;
-        for (asm_source) |byte, i| {
+        for (asm_source, 0..) |byte, i| {
             switch (state) {
                 .start => switch (byte) {
                     '%' => state = .percent,
@@ -6526,7 +6536,7 @@ pub const FuncGen = struct {
             .Auto,
             "",
         );
-        for (llvm_param_attrs[0..param_count]) |llvm_elem_ty, i| {
+        for (llvm_param_attrs[0..param_count], 0..) |llvm_elem_ty, i| {
             if (llvm_elem_ty) |llvm_ty| {
                 llvm.setCallElemTypeAttr(call, i, llvm_ty);
             }
@@ -6534,7 +6544,7 @@ pub const FuncGen = struct {
 
         var ret_val = call;
         llvm_ret_i = 0;
-        for (outputs) |output, i| {
+        for (outputs, 0..) |output, i| {
             if (llvm_ret_indirect[i]) continue;
 
             const output_value = if (return_count > 1) b: {
@@ -7416,7 +7426,7 @@ pub const FuncGen = struct {
             const index_i32 = llvm_i32.constInt(i, .False);
 
             var args: [3]*llvm.Value = undefined;
-            for (args_vectors) |arg_vector, k| {
+            for (args_vectors, 0..) |arg_vector, k| {
                 args[k] = self.builder.buildExtractElement(arg_vector, index_i32, "");
             }
             const result_elem = self.builder.buildCall(llvm_fn.globalGetValueType(), llvm_fn, &args, args_len, .C, .Auto, "");
@@ -8785,7 +8795,7 @@ pub const FuncGen = struct {
         const tag_int_value = fn_val.getParam(0);
         const switch_instr = self.builder.buildSwitch(tag_int_value, unnamed_block, @intCast(c_uint, fields.count()));
 
-        for (fields.keys()) |_, field_index| {
+        for (fields.keys(), 0..) |_, field_index| {
             const this_tag_int_value = int: {
                 var tag_val_payload: Value.Payload.U32 = .{
                     .base = .{ .tag = .enum_field_index },
@@ -8874,7 +8884,7 @@ pub const FuncGen = struct {
             usize_llvm_ty.constNull(), usize_llvm_ty.constNull(),
         };
 
-        for (fields.keys()) |name, field_index| {
+        for (fields.keys(), 0..) |name, field_index| {
             const str_init = self.context.constString(name.ptr, @intCast(c_uint, name.len), .False);
             const str_init_llvm_ty = str_init.typeOf();
             const str_global = self.dg.object.llvm_module.addGlobal(str_init_llvm_ty, "");
@@ -8998,7 +9008,7 @@ pub const FuncGen = struct {
 
         const llvm_i32 = self.context.intType(32);
 
-        for (values) |*val, i| {
+        for (values, 0..) |*val, i| {
             var buf: Value.ElemValueBuffer = undefined;
             const elem = mask.elemValueBuffer(self.dg.module, i, &buf);
             if (elem.isUndef()) {
@@ -9180,7 +9190,7 @@ pub const FuncGen = struct {
                 const llvm_u32 = self.context.intType(32);
 
                 var vector = llvm_result_ty.getUndef();
-                for (elements) |elem, i| {
+                for (elements, 0..) |elem, i| {
                     const index_u32 = llvm_u32.constInt(i, .False);
                     const llvm_elem = try self.resolveInst(elem);
                     vector = self.builder.buildInsertElement(vector, llvm_elem, index_u32, "");
@@ -9197,7 +9207,7 @@ pub const FuncGen = struct {
                     comptime assert(Type.packed_struct_layout_version == 2);
                     var running_int: *llvm.Value = int_llvm_ty.constNull();
                     var running_bits: u16 = 0;
-                    for (elements) |elem, i| {
+                    for (elements, 0..) |elem, i| {
                         const field = fields[i];
                         if (!field.ty.hasRuntimeBitsIgnoreComptime()) continue;
 
@@ -9229,7 +9239,7 @@ pub const FuncGen = struct {
                     const alloca_inst = self.buildAlloca(llvm_result_ty, result_ty.abiAlignment(target));
 
                     var indices: [2]*llvm.Value = .{ llvm_u32.constNull(), undefined };
-                    for (elements) |elem, i| {
+                    for (elements, 0..) |elem, i| {
                         if (result_ty.structFieldValueComptime(i) != null) continue;
 
                         const llvm_elem = try self.resolveInst(elem);
@@ -9250,7 +9260,7 @@ pub const FuncGen = struct {
                     return alloca_inst;
                 } else {
                     var result = llvm_result_ty.getUndef();
-                    for (elements) |elem, i| {
+                    for (elements, 0..) |elem, i| {
                         if (result_ty.structFieldValueComptime(i) != null) continue;
 
                         const llvm_elem = try self.resolveInst(elem);
@@ -9275,7 +9285,7 @@ pub const FuncGen = struct {
                 };
                 const elem_ptr_ty = Type.initPayload(&elem_ptr_payload.base);
 
-                for (elements) |elem, i| {
+                for (elements, 0..) |elem, i| {
                     const indices: [2]*llvm.Value = .{
                         llvm_usize.constNull(),
                         llvm_usize.constInt(@intCast(c_uint, i), .False),
@@ -9914,7 +9924,7 @@ pub const FuncGen = struct {
         };
         const array_elements = [_]*llvm.Value{ request, a1, a2, a3, a4, a5 };
         const zero = usize_llvm_ty.constInt(0, .False);
-        for (array_elements) |elem, i| {
+        for (array_elements, 0..) |elem, i| {
             const indexes = [_]*llvm.Value{
                 zero, usize_llvm_ty.constInt(@intCast(c_uint, i), .False),
             };
@@ -10336,7 +10346,7 @@ fn llvmFieldIndex(
     if (ty.isSimpleTupleOrAnonStruct()) {
         const tuple = ty.tupleFields();
         var llvm_field_index: c_uint = 0;
-        for (tuple.types) |field_ty, i| {
+        for (tuple.types, 0..) |field_ty, i| {
             if (tuple.values[i].tag() != .unreachable_value or !field_ty.hasRuntimeBits()) continue;
 
             const field_align = field_ty.abiAlignment(target);
@@ -10947,7 +10957,7 @@ fn isByRef(ty: Type) bool {
             if (ty.isSimpleTupleOrAnonStruct()) {
                 const tuple = ty.tupleFields();
                 var count: usize = 0;
-                for (tuple.values) |field_val, i| {
+                for (tuple.values, 0..) |field_val, i| {
                     if (field_val.tag() != .unreachable_value or !tuple.types[i].hasRuntimeBits()) continue;
 
                     count += 1;
@@ -11057,8 +11067,8 @@ fn backendSupportsF128(target: std.Target) bool {
 fn intrinsicsAllowed(scalar_ty: Type, target: std.Target) bool {
     return switch (scalar_ty.tag()) {
         .f16 => backendSupportsF16(target),
-        .f80 => (CType.longdouble.sizeInBits(target) == 80) and backendSupportsF80(target),
-        .f128 => (CType.longdouble.sizeInBits(target) == 128) and backendSupportsF128(target),
+        .f80 => (target.c_type_bit_size(.longdouble) == 80) and backendSupportsF80(target),
+        .f128 => (target.c_type_bit_size(.longdouble) == 128) and backendSupportsF128(target),
         else => true,
     };
 }

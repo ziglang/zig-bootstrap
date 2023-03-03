@@ -387,6 +387,7 @@ fn hereIsAnOpaqueType(ptr: *OpaqueA) *OpaqueA {
 }
 
 test "take address of parameter" {
+    if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
@@ -703,7 +704,7 @@ test "string concatenation" {
     comptime try expect(@TypeOf(a) == *const [12:0]u8);
     comptime try expect(@TypeOf(b) == *const [12:0]u8);
 
-    const len = mem.len(b);
+    const len = b.len;
     const len_with_null = len + 1;
     {
         var i: u32 = 0;
@@ -1124,4 +1125,36 @@ test "returning an opaque type from a function" {
         }
     };
     try expect(S.foo(123).b == 123);
+}
+
+test "orelse coercion as function argument" {
+    if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
+    if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
+
+    const Loc = struct { start: i32 = -1 };
+    const Container = struct {
+        a: ?Loc = null,
+        fn init(a: Loc) @This() {
+            return .{
+                .a = a,
+            };
+        }
+    };
+    var optional: ?Loc = .{};
+    var foo = Container.init(optional orelse .{});
+    try expect(foo.a.?.start == -1);
+}
+
+test "runtime-known globals initialized with undefined" {
+    const S = struct {
+        var array: [10]u32 = [_]u32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10 };
+        var vp: [*]u32 = undefined;
+        var s: []u32 = undefined;
+    };
+
+    S.vp = &S.array;
+    S.s = S.vp[0..5];
+
+    try expect(S.s[0] == 1);
+    try expect(S.s[4] == 5);
 }

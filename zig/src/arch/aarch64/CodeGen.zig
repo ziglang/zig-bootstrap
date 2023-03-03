@@ -24,7 +24,7 @@ const log = std.log.scoped(.codegen);
 const build_options = @import("build_options");
 
 const GenerateSymbolError = codegen.GenerateSymbolError;
-const FnResult = codegen.FnResult;
+const Result = codegen.Result;
 const DebugInfoOutput = codegen.DebugInfoOutput;
 
 const bits = @import("bits.zig");
@@ -181,6 +181,7 @@ const DbgInfoReloc = struct {
             else => unreachable,
         }
     }
+
     fn genArgDbgInfo(reloc: DbgInfoReloc, function: Self) error{OutOfMemory}!void {
         switch (function.debug_output) {
             .dwarf => |dw| {
@@ -202,13 +203,7 @@ const DbgInfoReloc = struct {
                     else => unreachable, // not a possible argument
 
                 };
-                try dw.genArgDbgInfo(
-                    reloc.name,
-                    reloc.ty,
-                    function.bin_file.tag,
-                    function.mod_fn.owner_decl,
-                    loc,
-                );
+                try dw.genArgDbgInfo(reloc.name, reloc.ty, function.mod_fn.owner_decl, loc);
             },
             .plan9 => {},
             .none => {},
@@ -254,14 +249,7 @@ const DbgInfoReloc = struct {
                         break :blk .nop;
                     },
                 };
-                try dw.genVarDbgInfo(
-                    reloc.name,
-                    reloc.ty,
-                    function.bin_file.tag,
-                    function.mod_fn.owner_decl,
-                    is_ptr,
-                    loc,
-                );
+                try dw.genVarDbgInfo(reloc.name, reloc.ty, function.mod_fn.owner_decl, is_ptr, loc);
             },
             .plan9 => {},
             .none => {},
@@ -349,7 +337,7 @@ pub fn generate(
     liveness: Liveness,
     code: *std.ArrayList(u8),
     debug_output: DebugInfoOutput,
-) GenerateSymbolError!FnResult {
+) GenerateSymbolError!Result {
     if (build_options.skip_non_native and builtin.cpu.arch != bin_file.options.target.cpu.arch) {
         @panic("Attempted to compile for architecture that was disabled by build configuration");
     }
@@ -392,8 +380,8 @@ pub fn generate(
     defer function.dbg_info_relocs.deinit(bin_file.allocator);
 
     var call_info = function.resolveCallingConventionValues(fn_type) catch |err| switch (err) {
-        error.CodegenFail => return FnResult{ .fail = function.err_msg.? },
-        error.OutOfRegisters => return FnResult{
+        error.CodegenFail => return Result{ .fail = function.err_msg.? },
+        error.OutOfRegisters => return Result{
             .fail = try ErrorMsg.create(bin_file.allocator, src_loc, "CodeGen ran out of registers. This is a bug in the Zig compiler.", .{}),
         },
         else => |e| return e,
@@ -406,8 +394,8 @@ pub fn generate(
     function.max_end_stack = call_info.stack_byte_count;
 
     function.gen() catch |err| switch (err) {
-        error.CodegenFail => return FnResult{ .fail = function.err_msg.? },
-        error.OutOfRegisters => return FnResult{
+        error.CodegenFail => return Result{ .fail = function.err_msg.? },
+        error.OutOfRegisters => return Result{
             .fail = try ErrorMsg.create(bin_file.allocator, src_loc, "CodeGen ran out of registers. This is a bug in the Zig compiler.", .{}),
         },
         else => |e| return e,
@@ -439,14 +427,14 @@ pub fn generate(
     defer emit.deinit();
 
     emit.emitMir() catch |err| switch (err) {
-        error.EmitFail => return FnResult{ .fail = emit.err_msg.? },
+        error.EmitFail => return Result{ .fail = emit.err_msg.? },
         else => |e| return e,
     };
 
     if (function.err_msg) |em| {
-        return FnResult{ .fail = em };
+        return Result{ .fail = em };
     } else {
-        return FnResult{ .appended = {} };
+        return Result.ok;
     }
 }
 
@@ -525,6 +513,28 @@ fn gen(self: *Self) !void {
 
             try self.genSetStack(Type.usize, stack_offset, MCValue{ .register = ret_ptr_reg });
             self.ret_mcv = MCValue{ .stack_offset = stack_offset };
+        }
+
+        for (self.args, 0..) |*arg, arg_index| {
+            // Copy register arguments to the stack
+            switch (arg.*) {
+                .register => |reg| {
+                    // The first AIR instructions of the main body are guaranteed
+                    // to be the functions arguments
+                    const inst = self.air.getMainBody()[arg_index];
+                    assert(self.air.instructions.items(.tag)[inst] == .arg);
+
+                    const ty = self.air.typeOfIndex(inst);
+
+                    const abi_size = @intCast(u32, ty.abiSize(self.target.*));
+                    const abi_align = ty.abiAlignment(self.target.*);
+                    const stack_offset = try self.allocMem(abi_size, abi_align, inst);
+                    try self.genSetStack(ty, stack_offset, MCValue{ .register = reg });
+
+                    arg.* = MCValue{ .stack_offset = stack_offset };
+                },
+                else => {},
+            }
         }
 
         _ = try self.addInst(.{
@@ -1623,14 +1633,14 @@ fn allocRegs(
     var reused_read_arg: ?usize = null;
 
     // Lock all args which are already allocated to registers
-    for (read_args) |arg, i| {
+    for (read_args, 0..) |arg, i| {
         const mcv = try arg.bind.resolveToMcv(self);
         if (mcv == .register) {
             read_locks[i] = self.register_manager.lockReg(mcv.register);
         }
     }
 
-    for (write_args) |arg, i| {
+    for (write_args, 0..) |arg, i| {
         if (arg.bind == .reg) {
             write_locks[i] = self.register_manager.lockReg(arg.bind.reg);
         }
@@ -1638,7 +1648,7 @@ fn allocRegs(
 
     // Allocate registers for all args which aren't allocated to
     // registers yet
-    for (read_args) |arg, i| {
+    for (read_args, 0..) |arg, i| {
         const mcv = try arg.bind.resolveToMcv(self);
         if (mcv == .register) {
             const raw_reg = mcv.register;
@@ -1662,7 +1672,7 @@ fn allocRegs(
             const raw_reg = arg.bind.reg;
             arg.reg.* = self.registerAlias(raw_reg, arg.ty);
         } else {
-            reuse_operand: for (read_args) |read_arg, i| {
+            reuse_operand: for (read_args, 0..) |read_arg, i| {
                 if (read_arg.bind == .inst) {
                     const operand = read_arg.bind.inst;
                     const mcv = try self.resolveInst(operand);
@@ -1684,7 +1694,7 @@ fn allocRegs(
             }
         }
     } else {
-        for (write_args) |arg, i| {
+        for (write_args, 0..) |arg, i| {
             if (arg.bind == .reg) {
                 const raw_reg = arg.bind.reg;
                 arg.reg.* = self.registerAlias(raw_reg, arg.ty);
@@ -1698,7 +1708,7 @@ fn allocRegs(
 
     // For all read_args which need to be moved from non-register to
     // register, perform the move
-    for (read_args) |arg, i| {
+    for (read_args, 0..) |arg, i| {
         if (reused_read_arg) |j| {
             // Check whether this read_arg was reused
             if (i == j) continue;
@@ -3948,7 +3958,9 @@ fn store(self: *Self, ptr: MCValue, value: MCValue, ptr_ty: Type, value_ty: Type
 
             switch (value) {
                 .dead => unreachable,
-                .undef => unreachable,
+                .undef => {
+                    try self.genSetReg(value_ty, addr_reg, value);
+                },
                 .register => |value_reg| {
                     log.debug("store: register {} to {}", .{ value_reg, addr_reg });
                     try self.genStrRegister(value_reg, addr_reg, value_ty);
@@ -3996,11 +4008,17 @@ fn store(self: *Self, ptr: MCValue, value: MCValue, ptr_ty: Type, value_ty: Type
                                     .direct => .load_memory_ptr_direct,
                                     .import => unreachable,
                                 };
-                                const mod = self.bin_file.options.module.?;
-                                const owner_decl = mod.declPtr(self.mod_fn.owner_decl);
                                 const atom_index = switch (self.bin_file.tag) {
-                                    .macho => owner_decl.link.macho.sym_index,
-                                    .coff => owner_decl.link.coff.sym_index,
+                                    .macho => blk: {
+                                        const macho_file = self.bin_file.cast(link.File.MachO).?;
+                                        const atom = try macho_file.getOrCreateAtomForDecl(self.mod_fn.owner_decl);
+                                        break :blk macho_file.getAtom(atom).getSymbolIndex().?;
+                                    },
+                                    .coff => blk: {
+                                        const coff_file = self.bin_file.cast(link.File.Coff).?;
+                                        const atom = try coff_file.getOrCreateAtomForDecl(self.mod_fn.owner_decl);
+                                        break :blk coff_file.getAtom(atom).getSymbolIndex().?;
+                                    },
                                     else => unreachable, // unsupported target format
                                 };
                                 _ = try self.addInst(.{
@@ -4159,49 +4177,25 @@ fn airFieldParentPtr(self: *Self, inst: Air.Inst.Index) !void {
 }
 
 fn airArg(self: *Self, inst: Air.Inst.Index) !void {
-    const arg_index = self.arg_index;
-    self.arg_index += 1;
+    // skip zero-bit arguments as they don't have a corresponding arg instruction
+    var arg_index = self.arg_index;
+    while (self.args[arg_index] == .none) arg_index += 1;
+    self.arg_index = arg_index + 1;
 
     const ty = self.air.typeOfIndex(inst);
-    const result = self.args[arg_index];
+    const tag = self.air.instructions.items(.tag)[inst];
     const src_index = self.air.instructions.items(.data)[inst].arg.src_index;
     const name = self.mod_fn.getParamName(self.bin_file.options.module.?, src_index);
 
-    const mcv = switch (result) {
-        // Copy registers to the stack
-        .register => |reg| blk: {
-            const mod = self.bin_file.options.module.?;
-            const abi_size = math.cast(u32, ty.abiSize(self.target.*)) orelse {
-                return self.fail("type '{}' too big to fit into stack frame", .{ty.fmt(mod)});
-            };
-            const abi_align = ty.abiAlignment(self.target.*);
-            const stack_offset = try self.allocMem(abi_size, abi_align, inst);
-            try self.genSetStack(ty, stack_offset, MCValue{ .register = reg });
-
-            break :blk MCValue{ .stack_offset = stack_offset };
-        },
-        else => result,
-    };
-
-    const tag = self.air.instructions.items(.tag)[inst];
     try self.dbg_info_relocs.append(self.gpa, .{
         .tag = tag,
         .ty = ty,
         .name = name,
-        .mcv = result,
+        .mcv = self.args[arg_index],
     });
 
-    if (self.liveness.isUnused(inst))
-        return self.finishAirBookkeeping();
-
-    switch (mcv) {
-        .register => |reg| {
-            self.register_manager.getRegAssumeFree(reg, inst);
-        },
-        else => {},
-    }
-
-    return self.finishAir(inst, mcv, .{ .none, .none, .none });
+    const result: MCValue = if (self.liveness.isUnused(inst)) .dead else self.args[arg_index];
+    return self.finishAir(inst, result, .{ .none, .none, .none });
 }
 
 fn airBreakpoint(self: *Self) !void {
@@ -4277,7 +4271,7 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
     // Make space for the arguments passed via the stack
     self.max_end_stack += info.stack_byte_count;
 
-    for (info.args) |mc_arg, arg_i| {
+    for (info.args, 0..) |mc_arg, arg_i| {
         const arg = args[arg_i];
         const arg_ty = self.air.typeOf(arg);
         const arg_mcv = try self.resolveInst(args[arg_i]);
@@ -4302,90 +4296,71 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
     // on linking.
     const mod = self.bin_file.options.module.?;
     if (self.air.value(callee)) |func_value| {
-        if (self.bin_file.cast(link.File.Elf)) |elf_file| {
-            if (func_value.castTag(.function)) |func_payload| {
-                const func = func_payload.data;
-                const ptr_bits = self.target.cpu.arch.ptrBitWidth();
-                const ptr_bytes: u64 = @divExact(ptr_bits, 8);
-                const fn_owner_decl = mod.declPtr(func.owner_decl);
-                const got_addr = blk: {
-                    const got = &elf_file.program_headers.items[elf_file.phdr_got_index.?];
-                    break :blk @intCast(u32, got.p_vaddr + fn_owner_decl.link.elf.offset_table_index * ptr_bytes);
-                };
+        if (func_value.castTag(.function)) |func_payload| {
+            const func = func_payload.data;
 
+            if (self.bin_file.cast(link.File.Elf)) |elf_file| {
+                const atom_index = try elf_file.getOrCreateAtomForDecl(func.owner_decl);
+                const atom = elf_file.getAtom(atom_index);
+                const got_addr = @intCast(u32, atom.getOffsetTableAddress(elf_file));
                 try self.genSetReg(Type.initTag(.usize), .x30, .{ .memory = got_addr });
-
-                _ = try self.addInst(.{
-                    .tag = .blr,
-                    .data = .{ .reg = .x30 },
-                });
-            } else if (func_value.castTag(.extern_fn)) |_| {
-                return self.fail("TODO implement calling extern functions", .{});
-            } else {
-                return self.fail("TODO implement calling bitcasted functions", .{});
-            }
-        } else if (self.bin_file.cast(link.File.MachO)) |macho_file| {
-            if (func_value.castTag(.function)) |func_payload| {
-                const func = func_payload.data;
-                const fn_owner_decl = mod.declPtr(func.owner_decl);
+            } else if (self.bin_file.cast(link.File.MachO)) |macho_file| {
+                const atom = try macho_file.getOrCreateAtomForDecl(func.owner_decl);
+                const sym_index = macho_file.getAtom(atom).getSymbolIndex().?;
                 try self.genSetReg(Type.initTag(.u64), .x30, .{
                     .linker_load = .{
                         .type = .got,
-                        .sym_index = fn_owner_decl.link.macho.sym_index,
+                        .sym_index = sym_index,
                     },
                 });
-                // blr x30
-                _ = try self.addInst(.{
-                    .tag = .blr,
-                    .data = .{ .reg = .x30 },
+            } else if (self.bin_file.cast(link.File.Coff)) |coff_file| {
+                const atom = try coff_file.getOrCreateAtomForDecl(func.owner_decl);
+                const sym_index = coff_file.getAtom(atom).getSymbolIndex().?;
+                try self.genSetReg(Type.initTag(.u64), .x30, .{
+                    .linker_load = .{
+                        .type = .got,
+                        .sym_index = sym_index,
+                    },
                 });
-            } else if (func_value.castTag(.extern_fn)) |func_payload| {
-                const extern_fn = func_payload.data;
-                const decl_name = mod.declPtr(extern_fn.owner_decl).name;
-                if (extern_fn.lib_name) |lib_name| {
-                    log.debug("TODO enforce that '{s}' is expected in '{s}' library", .{
-                        decl_name,
-                        lib_name,
-                    });
-                }
-                const sym_index = try macho_file.getGlobalSymbol(mem.sliceTo(decl_name, 0));
+            } else if (self.bin_file.cast(link.File.Plan9)) |p9| {
+                const decl_block_index = try p9.seeDecl(func.owner_decl);
+                const decl_block = p9.getDeclBlock(decl_block_index);
+                const ptr_bits = self.target.cpu.arch.ptrBitWidth();
+                const ptr_bytes: u64 = @divExact(ptr_bits, 8);
+                const got_addr = p9.bases.data;
+                const got_index = decl_block.got_index.?;
+                const fn_got_addr = got_addr + got_index * ptr_bytes;
+                try self.genSetReg(Type.initTag(.usize), .x30, .{ .memory = fn_got_addr });
+            } else unreachable;
 
+            _ = try self.addInst(.{
+                .tag = .blr,
+                .data = .{ .reg = .x30 },
+            });
+        } else if (func_value.castTag(.extern_fn)) |func_payload| {
+            const extern_fn = func_payload.data;
+            const decl_name = mod.declPtr(extern_fn.owner_decl).name;
+            if (extern_fn.lib_name) |lib_name| {
+                log.debug("TODO enforce that '{s}' is expected in '{s}' library", .{
+                    decl_name,
+                    lib_name,
+                });
+            }
+
+            if (self.bin_file.cast(link.File.MachO)) |macho_file| {
+                const sym_index = try macho_file.getGlobalSymbol(mem.sliceTo(decl_name, 0));
+                const atom = try macho_file.getOrCreateAtomForDecl(self.mod_fn.owner_decl);
+                const atom_index = macho_file.getAtom(atom).getSymbolIndex().?;
                 _ = try self.addInst(.{
                     .tag = .call_extern,
                     .data = .{
                         .relocation = .{
-                            .atom_index = mod.declPtr(self.mod_fn.owner_decl).link.macho.sym_index,
+                            .atom_index = atom_index,
                             .sym_index = sym_index,
                         },
                     },
                 });
-            } else {
-                return self.fail("TODO implement calling bitcasted functions", .{});
-            }
-        } else if (self.bin_file.cast(link.File.Coff)) |coff_file| {
-            if (func_value.castTag(.function)) |func_payload| {
-                const func = func_payload.data;
-                const fn_owner_decl = mod.declPtr(func.owner_decl);
-                try self.genSetReg(Type.initTag(.u64), .x30, .{
-                    .linker_load = .{
-                        .type = .got,
-                        .sym_index = fn_owner_decl.link.coff.sym_index,
-                    },
-                });
-                // blr x30
-                _ = try self.addInst(.{
-                    .tag = .blr,
-                    .data = .{ .reg = .x30 },
-                });
-            } else if (func_value.castTag(.extern_fn)) |func_payload| {
-                const extern_fn = func_payload.data;
-                const decl_name = mod.declPtr(extern_fn.owner_decl).name;
-                if (extern_fn.lib_name) |lib_name| {
-                    log.debug("TODO enforce that '{s}' is expected in '{s}' library", .{
-                        decl_name,
-                        lib_name,
-                    });
-                }
+            } else if (self.bin_file.cast(link.File.Coff)) |coff_file| {
                 const sym_index = try coff_file.getGlobalSymbol(mem.sliceTo(decl_name, 0));
                 try self.genSetReg(Type.initTag(.u64), .x30, .{
                     .linker_load = .{
@@ -4393,35 +4368,16 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
                         .sym_index = sym_index,
                     },
                 });
-                // blr x30
                 _ = try self.addInst(.{
                     .tag = .blr,
                     .data = .{ .reg = .x30 },
                 });
             } else {
-                return self.fail("TODO implement calling bitcasted functions", .{});
-            }
-        } else if (self.bin_file.cast(link.File.Plan9)) |p9| {
-            if (func_value.castTag(.function)) |func_payload| {
-                try p9.seeDecl(func_payload.data.owner_decl);
-                const ptr_bits = self.target.cpu.arch.ptrBitWidth();
-                const ptr_bytes: u64 = @divExact(ptr_bits, 8);
-                const got_addr = p9.bases.data;
-                const got_index = mod.declPtr(func_payload.data.owner_decl).link.plan9.got_index.?;
-                const fn_got_addr = got_addr + got_index * ptr_bytes;
-
-                try self.genSetReg(Type.initTag(.usize), .x30, .{ .memory = fn_got_addr });
-
-                _ = try self.addInst(.{
-                    .tag = .blr,
-                    .data = .{ .reg = .x30 },
-                });
-            } else if (func_value.castTag(.extern_fn)) |_| {
                 return self.fail("TODO implement calling extern functions", .{});
-            } else {
-                return self.fail("TODO implement calling bitcasted functions", .{});
             }
-        } else unreachable;
+        } else {
+            return self.fail("TODO implement calling bitcasted functions", .{});
+        }
     } else {
         assert(ty.zigTypeTag() == .Pointer);
         const mcv = try self.resolveInst(callee);
@@ -4805,7 +4761,7 @@ fn airCondBr(self: *Self, inst: Air.Inst.Index) !void {
     const else_slice = else_branch.inst_table.entries.slice();
     const else_keys = else_slice.items(.key);
     const else_values = else_slice.items(.value);
-    for (else_keys) |else_key, else_idx| {
+    for (else_keys, 0..) |else_key, else_idx| {
         const else_value = else_values[else_idx];
         const canon_mcv = if (saved_then_branch.inst_table.fetchSwapRemove(else_key)) |then_entry| blk: {
             // The instruction's MCValue is overridden in both branches.
@@ -4838,7 +4794,7 @@ fn airCondBr(self: *Self, inst: Air.Inst.Index) !void {
     const then_slice = saved_then_branch.inst_table.entries.slice();
     const then_keys = then_slice.items(.key);
     const then_values = then_slice.items(.value);
-    for (then_keys) |then_key, then_idx| {
+    for (then_keys, 0..) |then_key, then_idx| {
         const then_value = then_values[then_idx];
         // We already deleted the items from this table that matched the else_branch.
         // So these are all instructions that are only overridden in the then branch.
@@ -5117,7 +5073,7 @@ fn airSwitch(self: *Self, inst: Air.Inst.Index) !void {
         const branch_into_prong_relocs = try self.gpa.alloc(u32, items.len);
         defer self.gpa.free(branch_into_prong_relocs);
 
-        for (items) |item, idx| {
+        for (items, 0..) |item, idx| {
             const cmp_result = try self.cmp(.{ .inst = pl_op.operand }, .{ .inst = item }, condition_ty, .neq);
             branch_into_prong_relocs[idx] = try self.condBr(cmp_result);
         }
@@ -5534,11 +5490,17 @@ fn genSetStack(self: *Self, ty: Type, stack_offset: u32, mcv: MCValue) InnerErro
                             .direct => .load_memory_ptr_direct,
                             .import => unreachable,
                         };
-                        const mod = self.bin_file.options.module.?;
-                        const owner_decl = mod.declPtr(self.mod_fn.owner_decl);
                         const atom_index = switch (self.bin_file.tag) {
-                            .macho => owner_decl.link.macho.sym_index,
-                            .coff => owner_decl.link.coff.sym_index,
+                            .macho => blk: {
+                                const macho_file = self.bin_file.cast(link.File.MachO).?;
+                                const atom = try macho_file.getOrCreateAtomForDecl(self.mod_fn.owner_decl);
+                                break :blk macho_file.getAtom(atom).getSymbolIndex().?;
+                            },
+                            .coff => blk: {
+                                const coff_file = self.bin_file.cast(link.File.Coff).?;
+                                const atom = try coff_file.getOrCreateAtomForDecl(self.mod_fn.owner_decl);
+                                break :blk coff_file.getAtom(atom).getSymbolIndex().?;
+                            },
                             else => unreachable, // unsupported target format
                         };
                         _ = try self.addInst(.{
@@ -5648,11 +5610,17 @@ fn genSetReg(self: *Self, ty: Type, reg: Register, mcv: MCValue) InnerError!void
                 .direct => .load_memory_direct,
                 .import => .load_memory_import,
             };
-            const mod = self.bin_file.options.module.?;
-            const owner_decl = mod.declPtr(self.mod_fn.owner_decl);
             const atom_index = switch (self.bin_file.tag) {
-                .macho => owner_decl.link.macho.sym_index,
-                .coff => owner_decl.link.coff.sym_index,
+                .macho => blk: {
+                    const macho_file = self.bin_file.cast(link.File.MachO).?;
+                    const atom = try macho_file.getOrCreateAtomForDecl(self.mod_fn.owner_decl);
+                    break :blk macho_file.getAtom(atom).getSymbolIndex().?;
+                },
+                .coff => blk: {
+                    const coff_file = self.bin_file.cast(link.File.Coff).?;
+                    const atom = try coff_file.getOrCreateAtomForDecl(self.mod_fn.owner_decl);
+                    break :blk coff_file.getAtom(atom).getSymbolIndex().?;
+                },
                 else => unreachable, // unsupported target format
             };
             _ = try self.addInst(.{
@@ -5842,11 +5810,17 @@ fn genSetStackArgument(self: *Self, ty: Type, stack_offset: u32, mcv: MCValue) I
                             .direct => .load_memory_ptr_direct,
                             .import => unreachable,
                         };
-                        const mod = self.bin_file.options.module.?;
-                        const owner_decl = mod.declPtr(self.mod_fn.owner_decl);
                         const atom_index = switch (self.bin_file.tag) {
-                            .macho => owner_decl.link.macho.sym_index,
-                            .coff => owner_decl.link.coff.sym_index,
+                            .macho => blk: {
+                                const macho_file = self.bin_file.cast(link.File.MachO).?;
+                                const atom = try macho_file.getOrCreateAtomForDecl(self.mod_fn.owner_decl);
+                                break :blk macho_file.getAtom(atom).getSymbolIndex().?;
+                            },
+                            .coff => blk: {
+                                const coff_file = self.bin_file.cast(link.File.Coff).?;
+                                const atom = try coff_file.getOrCreateAtomForDecl(self.mod_fn.owner_decl);
+                                break :blk coff_file.getAtom(atom).getSymbolIndex().?;
+                            },
                             else => unreachable, // unsupported target format
                         };
                         _ = try self.addInst(.{
@@ -5900,7 +5874,22 @@ fn airPtrToInt(self: *Self, inst: Air.Inst.Index) !void {
 
 fn airBitCast(self: *Self, inst: Air.Inst.Index) !void {
     const ty_op = self.air.instructions.items(.data)[inst].ty_op;
-    const result = try self.resolveInst(ty_op.operand);
+    const result = if (self.liveness.isUnused(inst)) .dead else result: {
+        const operand = try self.resolveInst(ty_op.operand);
+        if (self.reuseOperand(inst, ty_op.operand, 0, operand)) break :result operand;
+
+        const operand_lock = switch (operand) {
+            .register => |reg| self.register_manager.lockReg(reg),
+            .register_with_overflow => |rwo| self.register_manager.lockReg(rwo.reg),
+            else => null,
+        };
+        defer if (operand_lock) |lock| self.register_manager.unlockReg(lock);
+
+        const dest_ty = self.air.typeOfIndex(inst);
+        const dest = try self.allocRegOrMem(dest_ty, true, inst);
+        try self.setRegOrMem(dest_ty, dest, operand);
+        break :result dest;
+    };
     return self.finishAir(inst, result, .{ ty_op.operand, .none, .none });
 }
 
@@ -6165,28 +6154,27 @@ fn lowerDeclRef(self: *Self, tv: TypedValue, decl_index: Module.Decl.Index) Inne
     mod.markDeclAlive(decl);
 
     if (self.bin_file.cast(link.File.Elf)) |elf_file| {
-        const got = &elf_file.program_headers.items[elf_file.phdr_got_index.?];
-        const got_addr = got.p_vaddr + decl.link.elf.offset_table_index * ptr_bytes;
-        return MCValue{ .memory = got_addr };
-    } else if (self.bin_file.cast(link.File.MachO)) |_| {
-        // Because MachO is PIE-always-on, we defer memory address resolution until
-        // the linker has enough info to perform relocations.
-        assert(decl.link.macho.sym_index != 0);
+        const atom_index = try elf_file.getOrCreateAtomForDecl(decl_index);
+        const atom = elf_file.getAtom(atom_index);
+        return MCValue{ .memory = atom.getOffsetTableAddress(elf_file) };
+    } else if (self.bin_file.cast(link.File.MachO)) |macho_file| {
+        const atom = try macho_file.getOrCreateAtomForDecl(decl_index);
+        const sym_index = macho_file.getAtom(atom).getSymbolIndex().?;
         return MCValue{ .linker_load = .{
             .type = .got,
-            .sym_index = decl.link.macho.sym_index,
+            .sym_index = sym_index,
         } };
-    } else if (self.bin_file.cast(link.File.Coff)) |_| {
-        // Because COFF is PIE-always-on, we defer memory address resolution until
-        // the linker has enough info to perform relocations.
-        assert(decl.link.coff.sym_index != 0);
+    } else if (self.bin_file.cast(link.File.Coff)) |coff_file| {
+        const atom_index = try coff_file.getOrCreateAtomForDecl(decl_index);
+        const sym_index = coff_file.getAtom(atom_index).getSymbolIndex().?;
         return MCValue{ .linker_load = .{
             .type = .got,
-            .sym_index = decl.link.coff.sym_index,
+            .sym_index = sym_index,
         } };
     } else if (self.bin_file.cast(link.File.Plan9)) |p9| {
-        try p9.seeDecl(decl_index);
-        const got_addr = p9.bases.data + decl.link.plan9.got_index.? * ptr_bytes;
+        const decl_block_index = try p9.seeDecl(decl_index);
+        const decl_block = p9.getDeclBlock(decl_block_index);
+        const got_addr = p9.bases.data + decl_block.got_index.? * ptr_bytes;
         return MCValue{ .memory = got_addr };
     } else {
         return self.fail("TODO codegen non-ELF const Decl pointer", .{});
@@ -6199,8 +6187,7 @@ fn lowerUnnamedConst(self: *Self, tv: TypedValue) InnerError!MCValue {
         return self.fail("lowering unnamed constant failed: {s}", .{@errorName(err)});
     };
     if (self.bin_file.cast(link.File.Elf)) |elf_file| {
-        const vaddr = elf_file.local_symbols.items[local_sym_index].st_value;
-        return MCValue{ .memory = vaddr };
+        return MCValue{ .memory = elf_file.getSymbol(local_sym_index).st_value };
     } else if (self.bin_file.cast(link.File.MachO)) |_| {
         return MCValue{ .linker_load = .{
             .type = .direct,
@@ -6405,7 +6392,7 @@ fn resolveCallingConventionValues(self: *Self, fn_ty: Type) !CallMCValues {
                 }
             }
 
-            for (param_types) |ty, i| {
+            for (param_types, 0..) |ty, i| {
                 const param_size = @intCast(u32, ty.abiSize(self.target.*));
                 if (param_size == 0) {
                     result.args[i] = .{ .none = {} };
@@ -6470,7 +6457,7 @@ fn resolveCallingConventionValues(self: *Self, fn_ty: Type) !CallMCValues {
 
             var stack_offset: u32 = 0;
 
-            for (param_types) |ty, i| {
+            for (param_types, 0..) |ty, i| {
                 if (ty.abiSize(self.target.*) > 0) {
                     const param_size = @intCast(u32, ty.abiSize(self.target.*));
                     const param_alignment = ty.abiAlignment(self.target.*);

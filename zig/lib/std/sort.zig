@@ -6,10 +6,10 @@ const math = std.math;
 
 pub fn binarySearch(
     comptime T: type,
-    key: T,
+    key: anytype,
     items: []const T,
     context: anytype,
-    comptime compareFn: fn (context: @TypeOf(context), lhs: T, rhs: T) math.Order,
+    comptime compareFn: fn (context: @TypeOf(context), key: @TypeOf(key), mid: T) math.Order,
 ) ?usize {
     var left: usize = 0;
     var right: usize = items.len;
@@ -41,35 +41,69 @@ test "binarySearch" {
     };
     try testing.expectEqual(
         @as(?usize, null),
-        binarySearch(u32, 1, &[_]u32{}, {}, S.order_u32),
+        binarySearch(u32, @as(u32, 1), &[_]u32{}, {}, S.order_u32),
     );
     try testing.expectEqual(
         @as(?usize, 0),
-        binarySearch(u32, 1, &[_]u32{1}, {}, S.order_u32),
+        binarySearch(u32, @as(u32, 1), &[_]u32{1}, {}, S.order_u32),
     );
     try testing.expectEqual(
         @as(?usize, null),
-        binarySearch(u32, 1, &[_]u32{0}, {}, S.order_u32),
+        binarySearch(u32, @as(u32, 1), &[_]u32{0}, {}, S.order_u32),
     );
     try testing.expectEqual(
         @as(?usize, null),
-        binarySearch(u32, 0, &[_]u32{1}, {}, S.order_u32),
+        binarySearch(u32, @as(u32, 0), &[_]u32{1}, {}, S.order_u32),
     );
     try testing.expectEqual(
         @as(?usize, 4),
-        binarySearch(u32, 5, &[_]u32{ 1, 2, 3, 4, 5 }, {}, S.order_u32),
+        binarySearch(u32, @as(u32, 5), &[_]u32{ 1, 2, 3, 4, 5 }, {}, S.order_u32),
     );
     try testing.expectEqual(
         @as(?usize, 0),
-        binarySearch(u32, 2, &[_]u32{ 2, 4, 8, 16, 32, 64 }, {}, S.order_u32),
+        binarySearch(u32, @as(u32, 2), &[_]u32{ 2, 4, 8, 16, 32, 64 }, {}, S.order_u32),
     );
     try testing.expectEqual(
         @as(?usize, 1),
-        binarySearch(i32, -4, &[_]i32{ -7, -4, 0, 9, 10 }, {}, S.order_i32),
+        binarySearch(i32, @as(i32, -4), &[_]i32{ -7, -4, 0, 9, 10 }, {}, S.order_i32),
     );
     try testing.expectEqual(
         @as(?usize, 3),
-        binarySearch(i32, 98, &[_]i32{ -100, -25, 2, 98, 99, 100 }, {}, S.order_i32),
+        binarySearch(i32, @as(i32, 98), &[_]i32{ -100, -25, 2, 98, 99, 100 }, {}, S.order_i32),
+    );
+    const R = struct {
+        b: i32,
+        e: i32,
+
+        fn r(b: i32, e: i32) @This() {
+            return @This(){ .b = b, .e = e };
+        }
+
+        fn order(context: void, key: i32, mid: @This()) math.Order {
+            _ = context;
+
+            if (key < mid.b) {
+                return .lt;
+            }
+
+            if (key > mid.e) {
+                return .gt;
+            }
+
+            return .eq;
+        }
+    };
+    try testing.expectEqual(
+        @as(?usize, null),
+        binarySearch(R, @as(i32, -45), &[_]R{ R.r(-100, -50), R.r(-40, -20), R.r(-10, 20), R.r(30, 40) }, {}, R.order),
+    );
+    try testing.expectEqual(
+        @as(?usize, 2),
+        binarySearch(R, @as(i32, 10), &[_]R{ R.r(-100, -50), R.r(-40, -20), R.r(-10, 20), R.r(30, 40) }, {}, R.order),
+    );
+    try testing.expectEqual(
+        @as(?usize, 1),
+        binarySearch(R, @as(i32, -20), &[_]R{ R.r(-100, -50), R.r(-40, -20), R.r(-10, 20), R.r(30, 40) }, {}, R.order),
     );
 }
 
@@ -1219,9 +1253,9 @@ fn testStableSort() !void {
             IdAndValue{ .id = 2, .value = 0 },
         },
     };
-    for (cases) |*case| {
+    for (&cases) |*case| {
         insertionSort(IdAndValue, (case.*)[0..], {}, cmpByValue);
-        for (case.*) |item, i| {
+        for (case.*, 0..) |item, i| {
             try testing.expect(item.id == expected[i].id);
             try testing.expect(item.value == expected[i].value);
         }
@@ -1373,7 +1407,7 @@ fn fuzzTest(rng: std.rand.Random) !void {
     var array = try testing.allocator.alloc(IdAndValue, array_size);
     defer testing.allocator.free(array);
     // populate with random data
-    for (array) |*item, index| {
+    for (array, 0..) |*item, index| {
         item.id = index;
         item.value = rng.intRangeLessThan(i32, 0, 100);
     }
@@ -1401,7 +1435,7 @@ pub fn argMin(
 
     var smallest = items[0];
     var smallest_index: usize = 0;
-    for (items[1..]) |item, i| {
+    for (items[1..], 0..) |item, i| {
         if (lessThan(context, item, smallest)) {
             smallest = item;
             smallest_index = i + 1;
@@ -1453,7 +1487,7 @@ pub fn argMax(
 
     var biggest = items[0];
     var biggest_index: usize = 0;
-    for (items[1..]) |item, i| {
+    for (items[1..], 0..) |item, i| {
         if (lessThan(context, biggest, item)) {
             biggest = item;
             biggest_index = i + 1;

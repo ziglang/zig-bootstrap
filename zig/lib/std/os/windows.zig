@@ -85,7 +85,7 @@ pub fn OpenFile(sub_path_w: []const u16, options: OpenFileOptions) OpenError!HAN
     var nt_name = UNICODE_STRING{
         .Length = path_len_bytes,
         .MaximumLength = path_len_bytes,
-        .Buffer = @intToPtr([*]u16, @ptrToInt(sub_path_w.ptr)),
+        .Buffer = @constCast(sub_path_w.ptr),
     };
     var attr = OBJECT_ATTRIBUTES{
         .Length = @sizeOf(OBJECT_ATTRIBUTES),
@@ -634,7 +634,7 @@ pub fn SetCurrentDirectory(path_name: []const u16) SetCurrentDirectoryError!void
     var nt_name = UNICODE_STRING{
         .Length = path_len_bytes,
         .MaximumLength = path_len_bytes,
-        .Buffer = @intToPtr([*]u16, @ptrToInt(path_name.ptr)),
+        .Buffer = @constCast(path_name.ptr),
     };
 
     const rc = ntdll.RtlSetCurrentDirectory_U(&nt_name);
@@ -766,7 +766,7 @@ pub fn ReadLink(dir: ?HANDLE, sub_path_w: []const u16, out_buffer: []u8) ReadLin
     var nt_name = UNICODE_STRING{
         .Length = path_len_bytes,
         .MaximumLength = path_len_bytes,
-        .Buffer = @intToPtr([*]u16, @ptrToInt(sub_path_w.ptr)),
+        .Buffer = @constCast(sub_path_w.ptr),
     };
     var attr = OBJECT_ATTRIBUTES{
         .Length = @sizeOf(OBJECT_ATTRIBUTES),
@@ -876,7 +876,7 @@ pub fn DeleteFile(sub_path_w: []const u16, options: DeleteFileOptions) DeleteFil
         .Length = path_len_bytes,
         .MaximumLength = path_len_bytes,
         // The Windows API makes this mutable, but it will not mutate here.
-        .Buffer = @intToPtr([*]u16, @ptrToInt(sub_path_w.ptr)),
+        .Buffer = @constCast(sub_path_w.ptr),
     };
 
     if (sub_path_w[0] == '.' and sub_path_w[1] == 0) {
@@ -1414,7 +1414,7 @@ pub fn sendmsg(
 }
 
 pub fn sendto(s: ws2_32.SOCKET, buf: [*]const u8, len: usize, flags: u32, to: ?*const ws2_32.sockaddr, to_len: ws2_32.socklen_t) i32 {
-    var buffer = ws2_32.WSABUF{ .len = @truncate(u31, len), .buf = @intToPtr([*]u8, @ptrToInt(buf)) };
+    var buffer = ws2_32.WSABUF{ .len = @truncate(u31, len), .buf = @constCast(buf) };
     var bytes_send: DWORD = undefined;
     if (ws2_32.WSASendTo(s, @ptrCast([*]ws2_32.WSABUF, &buffer), 1, &bytes_send, flags, to, @intCast(i32, to_len), null, null) == ws2_32.SOCKET_ERROR) {
         return ws2_32.SOCKET_ERROR;
@@ -1876,13 +1876,13 @@ pub fn eqlIgnoreCaseWTF16(a: []const u16, b: []const u16) bool {
     const a_string = UNICODE_STRING{
         .Length = a_bytes,
         .MaximumLength = a_bytes,
-        .Buffer = @intToPtr([*]u16, @ptrToInt(a.ptr)),
+        .Buffer = @constCast(a.ptr),
     };
     const b_bytes = @intCast(u16, b.len * 2);
     const b_string = UNICODE_STRING{
         .Length = b_bytes,
         .MaximumLength = b_bytes,
-        .Buffer = @intToPtr([*]u16, @ptrToInt(b.ptr)),
+        .Buffer = @constCast(b.ptr),
     };
     return ntdll.RtlEqualUnicodeString(&a_string, &b_string, TRUE) == TRUE;
 }
@@ -2068,7 +2068,7 @@ pub fn loadWinsockExtensionFunction(comptime T: type, sock: ws2_32.SOCKET, guid:
         ws2_32.SIO_GET_EXTENSION_FUNCTION_POINTER,
         @ptrCast(*const anyopaque, &guid),
         @sizeOf(GUID),
-        @intToPtr(?*anyopaque, @ptrToInt(function)),
+        @intToPtr(?*anyopaque, @ptrToInt(&function)),
         @sizeOf(T),
         &num_bytes,
         null,
@@ -2858,7 +2858,7 @@ pub const GUID = extern struct {
         assert(s[18] == '-');
         assert(s[23] == '-');
         var bytes: [16]u8 = undefined;
-        for (hex_offsets) |hex_offset, i| {
+        for (hex_offsets, 0..) |hex_offset, i| {
             bytes[i] = (try std.fmt.charToDigit(s[hex_offset], 16)) << 4 |
                 try std.fmt.charToDigit(s[hex_offset + 1], 16);
         }

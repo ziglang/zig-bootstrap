@@ -860,17 +860,9 @@ fn walkInstruction(
             const str_tok = data[inst_index].str_tok;
             var path = str_tok.get(file.zir);
 
-            const maybe_other_package: ?*Package = blk: {
-                if (self.module.main_pkg_is_std and std.mem.eql(u8, path, "std")) {
-                    path = "std";
-                    break :blk self.module.main_pkg;
-                } else {
-                    break :blk file.pkg.table.get(path);
-                }
-            };
             // importFile cannot error out since all files
             // are already loaded at this point
-            if (maybe_other_package) |other_package| {
+            if (file.pkg.table.get(path)) |other_package| {
                 const result = try self.packages.getOrPut(self.arena, other_package);
 
                 // Immediately add this package to the import table of our
@@ -1647,7 +1639,7 @@ fn walkInstruction(
             std.debug.assert(operands.len > 0);
             var array_type = try self.walkRef(file, parent_scope, parent_src, operands[0], false);
 
-            for (operands[1..]) |op, idx| {
+            for (operands[1..], 0..) |op, idx| {
                 const wr = try self.walkRef(file, parent_scope, parent_src, op, false);
                 const expr_index = self.exprs.items.len;
                 try self.exprs.append(self.arena, wr.expr);
@@ -1665,7 +1657,7 @@ fn walkInstruction(
             const operands = file.zir.refSlice(extra.end, extra.data.operands_len);
             const array_data = try self.arena.alloc(usize, operands.len);
 
-            for (operands) |op, idx| {
+            for (operands, 0..) |op, idx| {
                 const wr = try self.walkRef(file, parent_scope, parent_src, op, false);
                 const expr_index = self.exprs.items.len;
                 try self.exprs.append(self.arena, wr.expr);
@@ -1686,7 +1678,7 @@ fn walkInstruction(
             std.debug.assert(operands.len > 0);
             var array_type = try self.walkRef(file, parent_scope, parent_src, operands[0], false);
 
-            for (operands[1..]) |op, idx| {
+            for (operands[1..], 0..) |op, idx| {
                 const wr = try self.walkRef(file, parent_scope, parent_src, op, false);
                 const expr_index = self.exprs.items.len;
                 try self.exprs.append(self.arena, wr.expr);
@@ -1715,7 +1707,7 @@ fn walkInstruction(
             const operands = file.zir.refSlice(extra.end, extra.data.operands_len);
             const array_data = try self.arena.alloc(usize, operands.len);
 
-            for (operands) |op, idx| {
+            for (operands, 0..) |op, idx| {
                 const wr = try self.walkRef(file, parent_scope, parent_src, op, false);
                 const expr_index = self.exprs.items.len;
                 try self.exprs.append(self.arena, wr.expr);
@@ -2200,17 +2192,10 @@ fn walkInstruction(
                 false,
             );
 
-            _ = operand;
-
-            // WIP
-
-            printWithContext(
-                file,
-                inst_index,
-                "TODO: implement `{s}` for walkInstruction\n\n",
-                .{@tagName(tags[inst_index])},
-            );
-            return self.cteTodo(@tagName(tags[inst_index]));
+            return DocData.WalkResult{
+                .typeRef = operand.expr,
+                .expr = .{ .@"struct" = &.{} },
+            };
         },
         .struct_init_anon => {
             const pl_node = data[inst_index].pl_node;
@@ -2393,7 +2378,7 @@ fn walkInstruction(
                     const array_data = try self.arena.alloc(usize, args.len);
 
                     var array_type: ?DocData.Expr = null;
-                    for (args) |arg, idx| {
+                    for (args, 0..) |arg, idx| {
                         const wr = try self.walkRef(file, parent_scope, parent_src, arg, idx == 0);
                         if (idx == 0) {
                             array_type = wr.typeRef;
@@ -2537,6 +2522,7 @@ fn walkInstruction(
                         const var_init_ref = @intToEnum(Ref, file.zir.extra[extra_index]);
                         const var_init = try self.walkRef(file, parent_scope, parent_src, var_init_ref, need_type);
                         value.expr = var_init.expr;
+                        value.typeRef = var_init.typeRef;
                     }
 
                     return value;
@@ -2988,6 +2974,8 @@ fn walkInstruction(
                 .error_to_int,
                 .int_to_error,
                 .reify,
+                .const_cast,
+                .volatile_cast,
                 => {
                     const extra = file.zir.extraData(Zir.Inst.UnNode, extended.operand).data;
                     const bin_index = self.exprs.items.len;
@@ -3474,7 +3462,7 @@ fn tryResolveRefPath(
                         }
                     }
 
-                    for (self.ast_nodes.items[t_enum.src].fields.?) |ast_node, idx| {
+                    for (self.ast_nodes.items[t_enum.src].fields.?, 0..) |ast_node, idx| {
                         const name = self.ast_nodes.items[ast_node].name.?;
                         if (std.mem.eql(u8, name, child_string)) {
                             // TODO: should we really create an artificial
@@ -3521,7 +3509,7 @@ fn tryResolveRefPath(
                         }
                     }
 
-                    for (self.ast_nodes.items[t_union.src].fields.?) |ast_node, idx| {
+                    for (self.ast_nodes.items[t_union.src].fields.?, 0..) |ast_node, idx| {
                         const name = self.ast_nodes.items[ast_node].name.?;
                         if (std.mem.eql(u8, name, child_string)) {
                             // TODO: should we really create an artificial
@@ -3568,7 +3556,7 @@ fn tryResolveRefPath(
                         }
                     }
 
-                    for (self.ast_nodes.items[t_struct.src].fields.?) |ast_node, idx| {
+                    for (self.ast_nodes.items[t_struct.src].fields.?, 0..) |ast_node, idx| {
                         const name = self.ast_nodes.items[ast_node].name.?;
                         if (std.mem.eql(u8, name, child_string)) {
                             // TODO: should we really create an artificial
@@ -3633,7 +3621,7 @@ fn tryResolveRefPath(
     }
 
     if (self.pending_ref_paths.get(&path[path.len - 1])) |waiter_list| {
-        // It's important to de-register oureslves as pending before
+        // It's important to de-register ourselves as pending before
         // attempting to resolve any other decl.
         _ = self.pending_ref_paths.remove(&path[path.len - 1]);
 

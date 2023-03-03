@@ -2,8 +2,11 @@ const std = @import("std.zig");
 
 pub const deflate = @import("compress/deflate.zig");
 pub const gzip = @import("compress/gzip.zig");
-pub const zlib = @import("compress/zlib.zig");
+pub const lzma = @import("compress/lzma.zig");
+pub const lzma2 = @import("compress/lzma2.zig");
 pub const xz = @import("compress/xz.zig");
+pub const zlib = @import("compress/zlib.zig");
+pub const zstd = @import("compress/zstandard.zig");
 
 pub fn HashedReader(
     comptime ReaderType: anytype,
@@ -38,6 +41,9 @@ pub fn hashedReader(
 test {
     _ = deflate;
     _ = gzip;
-    _ = zlib;
+    _ = lzma;
+    _ = lzma2;
     _ = xz;
+    _ = zlib;
+    _ = zstd;
 }

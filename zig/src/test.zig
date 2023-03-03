@@ -583,6 +583,11 @@ pub const TestContext = struct {
         path: []const u8,
     };
 
+    pub const DepModule = struct {
+        name: []const u8,
+        path: []const u8,
+    };
+
     pub const Backend = enum {
         stage1,
         stage2,
@@ -611,11 +616,19 @@ pub const TestContext = struct {
         link_libc: bool = false,
 
         files: std.ArrayList(File),
+        deps: std.ArrayList(DepModule),
 
         result: anyerror!void = {},
 
         pub fn addSourceFile(case: *Case, name: []const u8, src: [:0]const u8) void {
             case.files.append(.{ .path = name, .src = src }) catch @panic("out of memory");
+        }
+
+        pub fn addDepModule(case: *Case, name: []const u8, path: []const u8) void {
+            case.deps.append(.{
+                .name = name,
+                .path = path,
+            }) catch @panic("out of memory");
         }
 
         /// Adds a subcase in which the module is updated with `src`, and a C
@@ -664,7 +677,7 @@ pub const TestContext = struct {
             errors: []const []const u8,
         ) void {
             var array = self.updates.allocator.alloc(ErrorMsg, errors.len) catch @panic("out of memory");
-            for (errors) |err_msg_line, i| {
+            for (errors, 0..) |err_msg_line, i| {
                 if (std.mem.startsWith(u8, err_msg_line, "error: ")) {
                     array[i] = .{
                         .plain = .{
@@ -767,6 +780,7 @@ pub const TestContext = struct {
             .updates = std.ArrayList(Update).init(ctx.cases.allocator),
             .output_mode = .Exe,
             .files = std.ArrayList(File).init(ctx.arena),
+            .deps = std.ArrayList(DepModule).init(ctx.arena),
         }) catch @panic("out of memory");
         return &ctx.cases.items[ctx.cases.items.len - 1];
     }
@@ -787,6 +801,7 @@ pub const TestContext = struct {
             .updates = std.ArrayList(Update).init(ctx.cases.allocator),
             .output_mode = .Exe,
             .files = std.ArrayList(File).init(ctx.arena),
+            .deps = std.ArrayList(DepModule).init(ctx.arena),
             .link_libc = true,
         }) catch @panic("out of memory");
         return &ctx.cases.items[ctx.cases.items.len - 1];
@@ -801,6 +816,7 @@ pub const TestContext = struct {
             .updates = std.ArrayList(Update).init(ctx.cases.allocator),
             .output_mode = .Exe,
             .files = std.ArrayList(File).init(ctx.arena),
+            .deps = std.ArrayList(DepModule).init(ctx.arena),
             .backend = .llvm,
             .link_libc = true,
         }) catch @panic("out of memory");
@@ -818,6 +834,7 @@ pub const TestContext = struct {
             .updates = std.ArrayList(Update).init(ctx.cases.allocator),
             .output_mode = .Obj,
             .files = std.ArrayList(File).init(ctx.arena),
+            .deps = std.ArrayList(DepModule).init(ctx.arena),
         }) catch @panic("out of memory");
         return &ctx.cases.items[ctx.cases.items.len - 1];
     }
@@ -834,6 +851,7 @@ pub const TestContext = struct {
             .output_mode = .Exe,
             .is_test = true,
             .files = std.ArrayList(File).init(ctx.arena),
+            .deps = std.ArrayList(DepModule).init(ctx.arena),
         }) catch @panic("out of memory");
         return &ctx.cases.items[ctx.cases.items.len - 1];
     }
@@ -858,6 +876,7 @@ pub const TestContext = struct {
             .updates = std.ArrayList(Update).init(ctx.cases.allocator),
             .output_mode = .Obj,
             .files = std.ArrayList(File).init(ctx.arena),
+            .deps = std.ArrayList(DepModule).init(ctx.arena),
         }) catch @panic("out of memory");
         return &ctx.cases.items[ctx.cases.items.len - 1];
     }
@@ -1145,6 +1164,7 @@ pub const TestContext = struct {
                                 .output_mode = output_mode,
                                 .link_libc = backend == .llvm,
                                 .files = std.ArrayList(TestContext.File).init(ctx.cases.allocator),
+                                .deps = std.ArrayList(DepModule).init(ctx.cases.allocator),
                             });
                             try cases.append(next);
                         }
@@ -1497,9 +1517,25 @@ pub const TestContext = struct {
         var main_pkg: Package = .{
             .root_src_directory = .{ .path = tmp_dir_path, .handle = tmp.dir },
             .root_src_path = tmp_src_path,
-            .name = "root",
         };
-        defer main_pkg.table.deinit(allocator);
+        defer {
+            var it = main_pkg.table.iterator();
+            while (it.next()) |kv| {
+                allocator.free(kv.key_ptr.*);
+                kv.value_ptr.*.destroy(allocator);
+            }
+            main_pkg.table.deinit(allocator);
+        }
+
+        for (case.deps.items) |dep| {
+            var pkg = try Package.create(
+                allocator,
+                tmp_dir_path,
+                dep.path,
+            );
+            errdefer pkg.destroy(allocator);
+            try main_pkg.add(allocator, dep.name, pkg);
+        }
 
         const bin_name = try std.zig.binNameAlloc(arena, .{
             .root_name = "test_case",
@@ -1558,7 +1594,7 @@ pub const TestContext = struct {
         });
         defer comp.destroy();
 
-        update: for (case.updates.items) |update, update_index| {
+        update: for (case.updates.items, 0..) |update, update_index| {
             var update_node = root_node.start(update.name, 3);
             update_node.activate();
             defer update_node.end();
@@ -1631,7 +1667,7 @@ pub const TestContext = struct {
                     defer notes_to_check.deinit();
 
                     for (actual_errors.list) |actual_error| {
-                        for (case_error_list) |case_msg, i| {
+                        for (case_error_list, 0..) |case_msg, i| {
                             if (handled_errors[i]) continue;
 
                             const ex_tag: std.meta.Tag(@TypeOf(case_msg)) = case_msg;
@@ -1702,7 +1738,7 @@ pub const TestContext = struct {
                         }
                     }
                     while (notes_to_check.popOrNull()) |note| {
-                        for (case_error_list) |case_msg, i| {
+                        for (case_error_list, 0..) |case_msg, i| {
                             const ex_tag: std.meta.Tag(@TypeOf(case_msg)) = case_msg;
                             switch (note.*) {
                                 .src => |actual_msg| {
@@ -1752,7 +1788,7 @@ pub const TestContext = struct {
                         }
                     }
 
-                    for (handled_errors) |handled, i| {
+                    for (handled_errors, 0..) |handled, i| {
                         if (!handled) {
                             print(
                                 "\nExpected error not found:\n{s}\n{}\n{s}",

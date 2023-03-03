@@ -3026,7 +3026,7 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\pub export fn log2(arg_a: u32) c_int {
         \\    var a = arg_a;
         \\    var i: c_int = 0;
-        \\    while (a > @bitCast(c_uint, @as(c_int, 0))) {
+        \\    while (a > @bitCast(u32, @as(c_int, 0))) {
         \\        a >>= @intCast(@import("std").math.Log2Int(c_int), @as(c_int, 1));
         \\    }
         \\    return i;
@@ -3900,4 +3900,52 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\pub const ZERO = @as(c_int, 0);
         \\pub const WORLD = @as(c_int, 0o0000123);
     });
+
+    cases.add("Assign expression from bool to int",
+        \\void foo(void) {
+        \\    int a;
+        \\    if (a = 1 > 0) {}
+        \\}
+    , &[_][]const u8{
+        \\pub export fn foo() void {
+        \\    var a: c_int = undefined;
+        \\    if ((blk: {
+        \\        const tmp = @boolToInt(@as(c_int, 1) > @as(c_int, 0));
+        \\        a = tmp;
+        \\        break :blk tmp;
+        \\    }) != 0) {}
+        \\}
+    });
+
+    if (builtin.os.tag == .windows) {
+        cases.add("Pointer subtraction with typedef",
+            \\typedef char* S;
+            \\void foo() {
+            \\    S a, b;
+            \\    long long c = a - b;
+            \\}
+        , &[_][]const u8{
+            \\pub export fn foo() void {
+            \\    var a: S = undefined;
+            \\    var b: S = undefined;
+            \\    var c: c_longlong = @divExact(@bitCast(c_longlong, @ptrToInt(a) -% @ptrToInt(b)), @sizeOf(u8));
+            \\    _ = @TypeOf(c);
+            \\}
+        });
+    } else {
+        cases.add("Pointer subtraction with typedef",
+            \\typedef char* S;
+            \\void foo() {
+            \\    S a, b;
+            \\    long c = a - b;
+            \\}
+        , &[_][]const u8{
+            \\pub export fn foo() void {
+            \\    var a: S = undefined;
+            \\    var b: S = undefined;
+            \\    var c: c_long = @divExact(@bitCast(c_long, @ptrToInt(a) -% @ptrToInt(b)), @sizeOf(u8));
+            \\    _ = @TypeOf(c);
+            \\}
+        });
+    }
 }

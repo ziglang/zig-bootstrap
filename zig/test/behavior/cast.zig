@@ -1179,7 +1179,6 @@ fn peerTypeEmptyArrayAndSlice(a: bool, slice: []const u8) []const u8 {
 test "implicitly cast from [N]T to ?[]const T" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     try expect(mem.eql(u8, castToOptionalSlice().?, "hi"));
@@ -1264,7 +1263,6 @@ test "cast from array reference to fn: runtime fn ptr" {
 test "*const [N]null u8 to ?[]const u8" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     const S = struct {
@@ -1413,7 +1411,6 @@ test "cast i8 fn call peers to i32 result" {
 test "cast compatible optional types" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
 
     var a: ?[:0]const u8 = null;
@@ -1543,4 +1540,40 @@ test "single item pointer to pointer to array to slice" {
     try expect(@as([]const i32, @as(*[1]i32, &x))[0] == 1234);
     const z1 = @as([]const i32, @as(*[1]i32, &x));
     try expect(z1[0] == 1234);
+}
+
+test "peer type resolution forms error union" {
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
+
+    var foo: i32 = 123;
+    const result = if (foo < 0) switch (-foo) {
+        0 => unreachable,
+        42 => error.AccessDenied,
+        else => unreachable,
+    } else @intCast(u32, foo);
+    try expect(try result == 123);
+}
+
+test "@constCast without a result location" {
+    const x: i32 = 1234;
+    const y = @constCast(&x);
+    try expect(@TypeOf(y) == *i32);
+    try expect(y.* == 1234);
+}
+
+test "@volatileCast without a result location" {
+    var x: i32 = 1234;
+    var y: *volatile i32 = &x;
+    const z = @volatileCast(y);
+    try expect(@TypeOf(z) == *i32);
+    try expect(z.* == 1234);
+}
+
+test "coercion from single-item pointer to @as to slice" {
+    var x: u32 = 1;
+
+    // Why the following line gets a compile error?
+    const t: []u32 = @as(*[1]u32, &x);
+
+    try expect(t[0] == 1);
 }

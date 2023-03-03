@@ -3,7 +3,6 @@ const std = @import("std");
 const builtin = @import("builtin");
 const io = std.io;
 const fmt = std.fmt;
-const Builder = std.build.Builder;
 const mem = std.mem;
 const process = std.process;
 const ArrayList = std.ArrayList;
@@ -42,12 +41,42 @@ pub fn main() !void {
         return error.InvalidArgs;
     };
 
-    const builder = try Builder.create(
+    const host = try std.zig.system.NativeTargetInfo.detect(.{});
+
+    const build_root_directory: std.Build.Cache.Directory = .{
+        .path = build_root,
+        .handle = try std.fs.cwd().openDir(build_root, .{}),
+    };
+
+    const local_cache_directory: std.Build.Cache.Directory = .{
+        .path = cache_root,
+        .handle = try std.fs.cwd().makeOpenPath(cache_root, .{}),
+    };
+
+    const global_cache_directory: std.Build.Cache.Directory = .{
+        .path = global_cache_root,
+        .handle = try std.fs.cwd().makeOpenPath(global_cache_root, .{}),
+    };
+
+    var cache: std.Build.Cache = .{
+        .gpa = allocator,
+        .manifest_dir = try local_cache_directory.handle.makeOpenPath("h", .{}),
+    };
+    cache.addPrefix(.{ .path = null, .handle = std.fs.cwd() });
+    cache.addPrefix(build_root_directory);
+    cache.addPrefix(local_cache_directory);
+    cache.addPrefix(global_cache_directory);
+
+    //cache.hash.addBytes(builtin.zig_version);
+
+    const builder = try std.Build.create(
         allocator,
         zig_exe,
-        build_root,
-        cache_root,
-        global_cache_root,
+        build_root_directory,
+        local_cache_directory,
+        global_cache_directory,
+        host,
+        &cache,
     );
     defer builder.destroy();
 
@@ -58,7 +87,7 @@ pub fn main() !void {
     const stdout_stream = io.getStdOut().writer();
 
     var install_prefix: ?[]const u8 = null;
-    var dir_list = Builder.DirList{};
+    var dir_list = std.Build.DirList{};
 
     // before arg parsing, check for the NO_COLOR environment variable
     // if it exists, default the color setting to .off
@@ -91,6 +120,8 @@ pub fn main() !void {
                     std.debug.print("Expected argument after {s}\n\n", .{arg});
                     return usageAndErr(builder, false, stderr_stream);
                 };
+            } else if (mem.eql(u8, arg, "-l") or mem.eql(u8, arg, "--list-steps")) {
+                return steps(builder, false, stdout_stream);
             } else if (mem.eql(u8, arg, "--prefix-lib-dir")) {
                 dir_list.lib_dir = nextArg(args, &arg_idx) orelse {
                     std.debug.print("Expected argument after {s}\n\n", .{arg});
@@ -134,7 +165,7 @@ pub fn main() !void {
                     return usageAndErr(builder, false, stderr_stream);
                 };
             } else if (mem.eql(u8, arg, "--zig-lib-dir")) {
-                builder.override_lib_dir = nextArg(args, &arg_idx) orelse {
+                builder.zig_lib_dir = nextArg(args, &arg_idx) orelse {
                     std.debug.print("Expected argument after --zig-lib-dir\n\n", .{});
                     return usageAndErr(builder, false, stderr_stream);
                 };
@@ -230,19 +261,12 @@ pub fn main() !void {
     };
 }
 
-fn usage(builder: *Builder, already_ran_build: bool, out_stream: anytype) !void {
+fn steps(builder: *std.Build, already_ran_build: bool, out_stream: anytype) !void {
     // run the build script to collect the options
     if (!already_ran_build) {
         builder.resolveInstallPrefix(null, .{});
         try builder.runBuild(root);
     }
-
-    try out_stream.print(
-        \\Usage: {s} build [steps] [options]
-        \\
-        \\Steps:
-        \\
-    , .{builder.zig_exe});
 
     const allocator = builder.allocator;
     for (builder.top_level_steps.items) |top_level_step| {
@@ -252,6 +276,23 @@ fn usage(builder: *Builder, already_ran_build: bool, out_stream: anytype) !void 
             top_level_step.step.name;
         try out_stream.print("  {s:<28} {s}\n", .{ name, top_level_step.description });
     }
+}
+
+fn usage(builder: *std.Build, already_ran_build: bool, out_stream: anytype) !void {
+    // run the build script to collect the options
+    if (!already_ran_build) {
+        builder.resolveInstallPrefix(null, .{});
+        try builder.runBuild(root);
+    }
+
+    try out_stream.print(
+        \\
+        \\Usage: {s} build [steps] [options]
+        \\
+        \\Steps:
+        \\
+    , .{builder.zig_exe});
+    try steps(builder, true, out_stream);
 
     try out_stream.writeAll(
         \\
@@ -282,6 +323,7 @@ fn usage(builder: *Builder, already_ran_build: bool, out_stream: anytype) !void 
         \\                               Windows programs on Linux hosts. (default: no)
         \\
         \\  -h, --help                   Print this help and exit
+        \\  -l, --list-steps             Print available steps
         \\  --verbose                    Print commands before executing them
         \\  --color [auto|off|on]        Enable or disable colored error messages
         \\  --prominent-compile-errors   Output compile errors formatted for a human to read
@@ -290,6 +332,7 @@ fn usage(builder: *Builder, already_ran_build: bool, out_stream: anytype) !void 
         \\
     );
 
+    const allocator = builder.allocator;
     if (builder.available_options_list.items.len == 0) {
         try out_stream.print("  (none)\n", .{});
     } else {
@@ -319,6 +362,7 @@ fn usage(builder: *Builder, already_ran_build: bool, out_stream: anytype) !void 
         \\  --cache-dir [path]           Override path to local Zig cache directory
         \\  --global-cache-dir [path]    Override path to global Zig cache directory
         \\  --zig-lib-dir [arg]          Override path to Zig lib directory
+        \\  --build-runner [file]        Override path to build runner
         \\  --debug-log [scope]          Enable debugging the compiler
         \\  --verbose-link               Enable compiler debug output for linking
         \\  --verbose-air                Enable compiler debug output for Zig AIR
@@ -330,7 +374,7 @@ fn usage(builder: *Builder, already_ran_build: bool, out_stream: anytype) !void 
     );
 }
 
-fn usageAndErr(builder: *Builder, already_ran_build: bool, out_stream: anytype) void {
+fn usageAndErr(builder: *std.Build, already_ran_build: bool, out_stream: anytype) void {
     usage(builder, already_ran_build, out_stream) catch {};
     process.exit(1);
 }

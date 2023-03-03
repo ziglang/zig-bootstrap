@@ -169,7 +169,7 @@ test "Allocator.resize" {
         var values = try testing.allocator.alloc(T, 100);
         defer testing.allocator.free(values);
 
-        for (values) |*v, i| v.* = @intCast(T, i);
+        for (values, 0..) |*v, i| v.* = @intCast(T, i);
         if (!testing.allocator.resize(values, values.len + 10)) return error.OutOfMemory;
         values = values.ptr[0 .. values.len + 10];
         try testing.expect(values.len == 110);
@@ -185,7 +185,7 @@ test "Allocator.resize" {
         var values = try testing.allocator.alloc(T, 100);
         defer testing.allocator.free(values);
 
-        for (values) |*v, i| v.* = @intToFloat(T, i);
+        for (values, 0..) |*v, i| v.* = @intToFloat(T, i);
         if (!testing.allocator.resize(values, values.len + 10)) return error.OutOfMemory;
         values = values.ptr[0 .. values.len + 10];
         try testing.expect(values.len == 110);
@@ -201,7 +201,7 @@ pub fn copy(comptime T: type, dest: []T, source: []const T) void {
     // this and automatically omit safety checks for loops
     @setRuntimeSafety(false);
     assert(dest.len >= source.len);
-    for (source) |s, i|
+    for (source, 0..) |s, i|
         dest[i] = s;
 }
 
@@ -445,7 +445,7 @@ pub fn zeroInit(comptime T: type, init: anytype) T {
 
                     var value: T = undefined;
 
-                    inline for (struct_info.fields) |field, i| {
+                    inline for (struct_info.fields, 0..) |field, i| {
                         if (field.is_comptime) {
                             continue;
                         }
@@ -611,7 +611,7 @@ test "lessThan" {
 pub fn eql(comptime T: type, a: []const T, b: []const T) bool {
     if (a.len != b.len) return false;
     if (a.ptr == b.ptr) return true;
-    for (a) |item, index| {
+    for (a, 0..) |item, index| {
         if (b[index] != item) return false;
     }
     return true;
@@ -636,12 +636,9 @@ test "indexOfDiff" {
     try testing.expectEqual(indexOfDiff(u8, "xne", "one"), 0);
 }
 
-/// Takes a pointer to an array, a sentinel-terminated pointer, or a slice, and
-/// returns a slice. If there is a sentinel on the input type, there will be a
-/// sentinel on the output type. The constness of the output type matches
-/// the constness of the input type. `[*c]` pointers are assumed to be 0-terminated,
-/// and assumed to not allow null.
-pub fn Span(comptime T: type) type {
+/// Takes a sentinel-terminated pointer and returns a slice preserving pointer attributes.
+/// `[*c]` pointers are assumed to be 0-terminated and assumed to not be allowzero.
+fn Span(comptime T: type) type {
     switch (@typeInfo(T)) {
         .Optional => |optional_info| {
             return ?Span(optional_info.child);
@@ -649,39 +646,22 @@ pub fn Span(comptime T: type) type {
         .Pointer => |ptr_info| {
             var new_ptr_info = ptr_info;
             switch (ptr_info.size) {
-                .One => switch (@typeInfo(ptr_info.child)) {
-                    .Array => |info| {
-                        new_ptr_info.child = info.child;
-                        new_ptr_info.sentinel = info.sentinel;
-                    },
-                    else => @compileError("invalid type given to std.mem.Span"),
-                },
                 .C => {
                     new_ptr_info.sentinel = &@as(ptr_info.child, 0);
                     new_ptr_info.is_allowzero = false;
                 },
-                .Many, .Slice => {},
+                .Many => if (ptr_info.sentinel == null) @compileError("invalid type given to std.mem.span: " ++ @typeName(T)),
+                .One, .Slice => @compileError("invalid type given to std.mem.span: " ++ @typeName(T)),
             }
             new_ptr_info.size = .Slice;
             return @Type(.{ .Pointer = new_ptr_info });
         },
-        else => @compileError("invalid type given to std.mem.Span"),
+        else => {},
     }
+    @compileError("invalid type given to std.mem.span: " ++ @typeName(T));
 }
 
 test "Span" {
-    try testing.expect(Span(*[5]u16) == []u16);
-    try testing.expect(Span(?*[5]u16) == ?[]u16);
-    try testing.expect(Span(*const [5]u16) == []const u16);
-    try testing.expect(Span(?*const [5]u16) == ?[]const u16);
-    try testing.expect(Span([]u16) == []u16);
-    try testing.expect(Span(?[]u16) == ?[]u16);
-    try testing.expect(Span([]const u8) == []const u8);
-    try testing.expect(Span(?[]const u8) == ?[]const u8);
-    try testing.expect(Span([:1]u16) == [:1]u16);
-    try testing.expect(Span(?[:1]u16) == ?[:1]u16);
-    try testing.expect(Span([:1]const u8) == [:1]const u8);
-    try testing.expect(Span(?[:1]const u8) == ?[:1]const u8);
     try testing.expect(Span([*:1]u16) == [:1]u16);
     try testing.expect(Span(?[*:1]u16) == ?[:1]u16);
     try testing.expect(Span([*:1]const u8) == [:1]const u8);
@@ -692,13 +672,10 @@ test "Span" {
     try testing.expect(Span(?[*c]const u8) == ?[:0]const u8);
 }
 
-/// Takes a pointer to an array, a sentinel-terminated pointer, or a slice, and
-/// returns a slice. If there is a sentinel on the input type, there will be a
-/// sentinel on the output type. The constness of the output type matches
-/// the constness of the input type.
-///
-/// When there is both a sentinel and an array length or slice length, the
-/// length value is used instead of the sentinel.
+/// Takes a sentinel-terminated pointer and returns a slice, iterating over the
+/// memory to find the sentinel and determine the length.
+/// Ponter attributes such as const are preserved.
+/// `[*c]` pointers are assumed to be non-null and 0-terminated.
 pub fn span(ptr: anytype) Span(@TypeOf(ptr)) {
     if (@typeInfo(@TypeOf(ptr)) == .Optional) {
         if (ptr) |non_null| {
@@ -722,7 +699,6 @@ test "span" {
     var array: [5]u16 = [_]u16{ 1, 2, 3, 4, 5 };
     const ptr = @as([*:3]u16, array[0..2 :3]);
     try testing.expect(eql(u16, span(ptr), &[_]u16{ 1, 2 }));
-    try testing.expect(eql(u16, span(&array), &[_]u16{ 1, 2, 3, 4, 5 }));
     try testing.expectEqual(@as(?[:0]u16, null), span(@as(?[*:0]u16, null)));
 }
 
@@ -919,22 +895,15 @@ test "lenSliceTo" {
     }
 }
 
-/// Takes a pointer to an array, an array, a vector, a sentinel-terminated pointer,
-/// a slice or a tuple, and returns the length.
-/// In the case of a sentinel-terminated array, it uses the array length.
-/// For C pointers it assumes it is a pointer-to-many with a 0 sentinel.
+/// Takes a sentinel-terminated pointer and iterates over the memory to find the
+/// sentinel and determine the length.
+/// `[*c]` pointers are assumed to be non-null and 0-terminated.
 pub fn len(value: anytype) usize {
-    return switch (@typeInfo(@TypeOf(value))) {
-        .Array => |info| info.len,
-        .Vector => |info| info.len,
+    switch (@typeInfo(@TypeOf(value))) {
         .Pointer => |info| switch (info.size) {
-            .One => switch (@typeInfo(info.child)) {
-                .Array => value.len,
-                else => @compileError("invalid type given to std.mem.len"),
-            },
             .Many => {
                 const sentinel_ptr = info.sentinel orelse
-                    @compileError("length of pointer with no sentinel");
+                    @compileError("invalid type given to std.mem.len: " ++ @typeName(@TypeOf(value)));
                 const sentinel = @ptrCast(*align(1) const info.child, sentinel_ptr).*;
                 return indexOfSentinel(info.child, sentinel, value);
             },
@@ -942,41 +911,18 @@ pub fn len(value: anytype) usize {
                 assert(value != null);
                 return indexOfSentinel(info.child, 0, value);
             },
-            .Slice => value.len,
+            else => @compileError("invalid type given to std.mem.len: " ++ @typeName(@TypeOf(value))),
         },
-        .Struct => |info| if (info.is_tuple) {
-            return info.fields.len;
-        } else @compileError("invalid type given to std.mem.len"),
-        else => @compileError("invalid type given to std.mem.len"),
-    };
+        else => @compileError("invalid type given to std.mem.len: " ++ @typeName(@TypeOf(value))),
+    }
 }
 
 test "len" {
-    try testing.expect(len("aoeu") == 4);
-
-    {
-        var array: [5]u16 = [_]u16{ 1, 2, 3, 4, 5 };
-        try testing.expect(len(&array) == 5);
-        try testing.expect(len(array[0..3]) == 3);
-        array[2] = 0;
-        const ptr = @as([*:0]u16, array[0..2 :0]);
-        try testing.expect(len(ptr) == 2);
-    }
-    {
-        var array: [5:0]u16 = [_:0]u16{ 1, 2, 3, 4, 5 };
-        try testing.expect(len(&array) == 5);
-        array[2] = 0;
-        try testing.expect(len(&array) == 5);
-    }
-    {
-        const vector: meta.Vector(2, u32) = [2]u32{ 1, 2 };
-        try testing.expect(len(vector) == 2);
-    }
-    {
-        const tuple = .{ 1, 2 };
-        try testing.expect(len(tuple) == 2);
-        try testing.expect(tuple[0] == 1);
-    }
+    var array: [5]u16 = [_]u16{ 1, 2, 0, 4, 5 };
+    const ptr = @as([*:4]u16, array[0..3 :4]);
+    try testing.expect(len(ptr) == 3);
+    const c_ptr = @as([*c]u16, ptr);
+    try testing.expect(len(c_ptr) == 2);
 }
 
 pub fn indexOfSentinel(comptime Elem: type, comptime sentinel: Elem, ptr: [*:sentinel]const Elem) usize {
@@ -995,21 +941,21 @@ pub fn allEqual(comptime T: type, slice: []const T, scalar: T) bool {
     return true;
 }
 
-/// Remove values from the beginning of a slice.
+/// Remove a set of values from the beginning of a slice.
 pub fn trimLeft(comptime T: type, slice: []const T, values_to_strip: []const T) []const T {
     var begin: usize = 0;
     while (begin < slice.len and indexOfScalar(T, values_to_strip, slice[begin]) != null) : (begin += 1) {}
     return slice[begin..];
 }
 
-/// Remove values from the end of a slice.
+/// Remove a set of values from the end of a slice.
 pub fn trimRight(comptime T: type, slice: []const T, values_to_strip: []const T) []const T {
     var end: usize = slice.len;
     while (end > 0 and indexOfScalar(T, values_to_strip, slice[end - 1]) != null) : (end -= 1) {}
     return slice[0..end];
 }
 
-/// Remove values from the beginning and end of a slice.
+/// Remove a set of values from the beginning and end of a slice.
 pub fn trim(comptime T: type, slice: []const T, values_to_strip: []const T) []const T {
     var begin: usize = 0;
     var end: usize = slice.len;
@@ -1315,7 +1261,7 @@ pub fn readVarInt(comptime ReturnType: type, bytes: []const u8, endian: Endian) 
         },
         .Little => {
             const ShiftType = math.Log2Int(ReturnType);
-            for (bytes) |b, index| {
+            for (bytes, 0..) |b, index| {
                 result = result | (@as(ReturnType, b) << @intCast(ShiftType, index * 8));
             }
         },
@@ -1382,7 +1328,7 @@ pub fn readVarPackedInt(
         },
         .Little => {
             int = read_bytes[0] >> bit_shift;
-            for (read_bytes[1..]) |elem, i| {
+            for (read_bytes[1..], 0..) |elem, i| {
                 int |= (@as(uN, elem) << @intCast(Log2N, (8 * (i + 1) - bit_shift)));
             }
         },
@@ -2961,7 +2907,7 @@ pub fn indexOfMin(comptime T: type, slice: []const T) usize {
     assert(slice.len > 0);
     var best = slice[0];
     var index: usize = 0;
-    for (slice[1..]) |item, i| {
+    for (slice[1..], 0..) |item, i| {
         if (item < best) {
             best = item;
             index = i + 1;
@@ -2982,7 +2928,7 @@ pub fn indexOfMax(comptime T: type, slice: []const T) usize {
     assert(slice.len > 0);
     var best = slice[0];
     var index: usize = 0;
-    for (slice[1..]) |item, i| {
+    for (slice[1..], 0..) |item, i| {
         if (item > best) {
             best = item;
             index = i + 1;
@@ -3006,7 +2952,7 @@ pub fn indexOfMinMax(comptime T: type, slice: []const T) struct { index_min: usi
     var maxVal = slice[0];
     var minIdx: usize = 0;
     var maxIdx: usize = 0;
-    for (slice[1..]) |item, i| {
+    for (slice[1..], 0..) |item, i| {
         if (item < minVal) {
             minVal = item;
             minIdx = i + 1;
@@ -3171,7 +3117,7 @@ test "replace" {
 
 /// Replace all occurences of `needle` with `replacement`.
 pub fn replaceScalar(comptime T: type, slice: []T, needle: T, replacement: T) void {
-    for (slice) |e, i| {
+    for (slice, 0..) |e, i| {
         if (e == needle) {
             slice[i] = replacement;
         }
@@ -3426,7 +3372,7 @@ test "asBytes" {
     try testing.expect(eql(u8, asBytes(&deadbeef), deadbeef_bytes));
 
     var codeface = @as(u32, 0xC0DEFACE);
-    for (asBytes(&codeface).*) |*b|
+    for (asBytes(&codeface)) |*b|
         b.* = 0;
     try testing.expect(codeface == 0);
 

@@ -2238,6 +2238,45 @@ test "parse into struct with no fields" {
     try testing.expectEqual(T{}, try parse(T, &ts, ParseOptions{}));
 }
 
+const test_const_value: usize = 123;
+
+test "parse into struct with default const pointer field" {
+    const T = struct { a: *const usize = &test_const_value };
+    var ts = TokenStream.init("{}");
+    try testing.expectEqual(T{}, try parse(T, &ts, .{}));
+}
+
+const test_default_usize: usize = 123;
+const test_default_usize_ptr: *align(1) const usize = &test_default_usize;
+const test_default_str: []const u8 = "test str";
+const test_default_str_slice: [2][]const u8 = [_][]const u8{
+    "test1",
+    "test2",
+};
+
+test "freeing parsed structs with pointers to default values" {
+    const T = struct {
+        int: *const usize = &test_default_usize,
+        int_ptr: *allowzero align(1) const usize = test_default_usize_ptr,
+        str: []const u8 = test_default_str,
+        str_slice: []const []const u8 = &test_default_str_slice,
+    };
+
+    var ts = json.TokenStream.init("{}");
+    const options = .{ .allocator = std.heap.page_allocator };
+    const parsed = try json.parse(T, &ts, options);
+
+    try testing.expectEqual(T{}, parsed);
+
+    json.parseFree(T, parsed, options);
+}
+
+test "parse into struct where destination and source lengths mismatch" {
+    const T = struct { a: [2]u8 };
+    var ts = TokenStream.init("{\"a\": \"bbb\"}");
+    try testing.expectError(error.LengthMismatch, parse(T, &ts, ParseOptions{}));
+}
+
 test "parse into struct with misc fields" {
     @setEvalBranchQuota(10000);
     const options = ParseOptions{ .allocator = testing.allocator };
@@ -2575,6 +2614,24 @@ test "parsing empty string gives appropriate error" {
     try testing.expectError(error.UnexpectedEndOfJson, testParse(arena_allocator.allocator(), ""));
 }
 
+test "parse tree should not contain dangling pointers" {
+    var arena_allocator = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena_allocator.deinit();
+
+    var p = json.Parser.init(arena_allocator.allocator(), false);
+    defer p.deinit();
+
+    var tree = try p.parse("[]");
+    defer tree.deinit();
+
+    // Allocation should succeed
+    var i: usize = 0;
+    while (i < 100) : (i += 1) {
+        try tree.root.Array.append(std.json.Value{ .Integer = 100 });
+    }
+    try testing.expectEqual(tree.root.Array.items.len, 100);
+}
+
 test "integer after float has proper type" {
     var arena_allocator = std.heap.ArenaAllocator.init(std.testing.allocator);
     defer arena_allocator.deinit();
@@ -2660,7 +2717,7 @@ test "string copy option" {
     const copy_addr = &obj_copy.get("noescape").?.String[0];
 
     var found_nocopy = false;
-    for (input) |_, index| {
+    for (input, 0..) |_, index| {
         try testing.expect(copy_addr != &input[index]);
         if (nocopy_addr == &input[index]) {
             found_nocopy = true;

@@ -9,12 +9,13 @@ const arch = builtin.cpu.arch;
 const is_test = builtin.is_test;
 const common = @import("common.zig");
 const udivmod = @import("udivmod.zig").udivmod;
+const __divti3 = @import("divti3.zig").__divti3;
 
 pub const panic = common.panic;
 
 comptime {
+    @export(__divmodti4, .{ .name = "__divmodti4", .linkage = common.linkage, .visibility = common.visibility });
     @export(__udivmoddi4, .{ .name = "__udivmoddi4", .linkage = common.linkage, .visibility = common.visibility });
-    @export(__mulsi3, .{ .name = "__mulsi3", .linkage = common.linkage, .visibility = common.visibility });
     @export(__divmoddi4, .{ .name = "__divmoddi4", .linkage = common.linkage, .visibility = common.visibility });
     if (common.want_aeabi) {
         @export(__aeabi_idiv, .{ .name = "__aeabi_idiv", .linkage = common.linkage, .visibility = common.visibility });
@@ -33,10 +34,70 @@ comptime {
     @export(__udivmodsi4, .{ .name = "__udivmodsi4", .linkage = common.linkage, .visibility = common.visibility });
 }
 
+pub fn __divmodti4(a: i128, b: i128, rem: *i128) callconv(.C) i128 {
+    const d = __divti3(a, b);
+    rem.* = a -% (d * b);
+    return d;
+}
+
+test "test_divmodti4" {
+    const cases = [_][4]i128{
+        [_]i128{ 0, 1, 0, 0 },
+        [_]i128{ 0, -1, 0, 0 },
+        [_]i128{ 2, 1, 2, 0 },
+        [_]i128{ 2, -1, -2, 0 },
+        [_]i128{ -2, 1, -2, 0 },
+        [_]i128{ -2, -1, 2, 0 },
+        [_]i128{ 7, 5, 1, 2 },
+        [_]i128{ -7, 5, -1, -2 },
+        [_]i128{ 19, 5, 3, 4 },
+        [_]i128{ 19, -5, -3, 4 },
+        [_]i128{ @bitCast(i128, @as(u128, 0x80000000000000000000000000000000)), 8, @bitCast(i128, @as(u128, 0xf0000000000000000000000000000000)), 0 },
+        [_]i128{ @bitCast(i128, @as(u128, 0x80000000000000000000000000000007)), 8, @bitCast(i128, @as(u128, 0xf0000000000000000000000000000001)), -1 },
+    };
+
+    for (cases) |case| {
+        try test_one_divmodti4(case[0], case[1], case[2], case[3]);
+    }
+}
+
+fn test_one_divmodti4(a: i128, b: i128, expected_q: i128, expected_r: i128) !void {
+    var r: i128 = undefined;
+    const q: i128 = __divmodti4(a, b, &r);
+    try testing.expect(q == expected_q and r == expected_r);
+}
+
 pub fn __divmoddi4(a: i64, b: i64, rem: *i64) callconv(.C) i64 {
     const d = __divdi3(a, b);
-    rem.* = a -% (d *% b);
+    rem.* = a -% (d * b);
     return d;
+}
+
+test "test_divmoddi4" {
+    const cases = [_][4]i64{
+        [_]i64{ 0, 1, 0, 0 },
+        [_]i64{ 0, -1, 0, 0 },
+        [_]i64{ 2, 1, 2, 0 },
+        [_]i64{ 2, -1, -2, 0 },
+        [_]i64{ -2, 1, -2, 0 },
+        [_]i64{ -2, -1, 2, 0 },
+        [_]i64{ 7, 5, 1, 2 },
+        [_]i64{ -7, 5, -1, -2 },
+        [_]i64{ 19, 5, 3, 4 },
+        [_]i64{ 19, -5, -3, 4 },
+        [_]i64{ @bitCast(i64, @as(u64, 0x8000000000000000)), 8, @bitCast(i64, @as(u64, 0xf000000000000000)), 0 },
+        [_]i64{ @bitCast(i64, @as(u64, 0x8000000000000007)), 8, @bitCast(i64, @as(u64, 0xf000000000000001)), -1 },
+    };
+
+    for (cases) |case| {
+        try test_one_divmoddi4(case[0], case[1], case[2], case[3]);
+    }
+}
+
+fn test_one_divmoddi4(a: i64, b: i64, expected_q: i64, expected_r: i64) !void {
+    var r: i64 = undefined;
+    const q: i64 = __divmoddi4(a, b, &r);
+    try testing.expect(q == expected_q and r == expected_r);
 }
 
 pub fn __udivmoddi4(a: u64, b: u64, maybe_rem: ?*u64) callconv(.C) u64 {
@@ -424,7 +485,7 @@ fn test_one_udivsi3(a: u32, b: u32, expected_q: u32) !void {
 }
 
 pub fn __modsi3(n: i32, d: i32) callconv(.C) i32 {
-    return n -% __divsi3(n, d) *% d;
+    return n -% __divsi3(n, d) * d;
 }
 
 test "test_modsi3" {
@@ -453,7 +514,7 @@ fn test_one_modsi3(a: i32, b: i32, expected_r: i32) !void {
 }
 
 pub fn __umodsi3(n: u32, d: u32) callconv(.C) u32 {
-    return n -% __udivsi3(n, d) *% d;
+    return n -% __udivsi3(n, d) * d;
 }
 
 test "test_umodsi3" {
@@ -600,60 +661,4 @@ test "test_umodsi3" {
 fn test_one_umodsi3(a: u32, b: u32, expected_r: u32) !void {
     const r: u32 = __umodsi3(a, b);
     try testing.expect(r == expected_r);
-}
-
-pub fn __mulsi3(a: i32, b: i32) callconv(.C) i32 {
-    var ua = @bitCast(u32, a);
-    var ub = @bitCast(u32, b);
-    var r: u32 = 0;
-
-    while (ua > 0) {
-        if ((ua & 1) != 0) r +%= ub;
-        ua >>= 1;
-        ub <<= 1;
-    }
-
-    return @bitCast(i32, r);
-}
-
-fn test_one_mulsi3(a: i32, b: i32, result: i32) !void {
-    try testing.expectEqual(result, __mulsi3(a, b));
-}
-
-test "mulsi3" {
-    try test_one_mulsi3(0, 0, 0);
-    try test_one_mulsi3(0, 1, 0);
-    try test_one_mulsi3(1, 0, 0);
-    try test_one_mulsi3(0, 10, 0);
-    try test_one_mulsi3(10, 0, 0);
-    try test_one_mulsi3(0, maxInt(i32), 0);
-    try test_one_mulsi3(maxInt(i32), 0, 0);
-    try test_one_mulsi3(0, -1, 0);
-    try test_one_mulsi3(-1, 0, 0);
-    try test_one_mulsi3(0, -10, 0);
-    try test_one_mulsi3(-10, 0, 0);
-    try test_one_mulsi3(0, minInt(i32), 0);
-    try test_one_mulsi3(minInt(i32), 0, 0);
-    try test_one_mulsi3(1, 1, 1);
-    try test_one_mulsi3(1, 10, 10);
-    try test_one_mulsi3(10, 1, 10);
-    try test_one_mulsi3(1, maxInt(i32), maxInt(i32));
-    try test_one_mulsi3(maxInt(i32), 1, maxInt(i32));
-    try test_one_mulsi3(1, -1, -1);
-    try test_one_mulsi3(1, -10, -10);
-    try test_one_mulsi3(-10, 1, -10);
-    try test_one_mulsi3(1, minInt(i32), minInt(i32));
-    try test_one_mulsi3(minInt(i32), 1, minInt(i32));
-    try test_one_mulsi3(46340, 46340, 2147395600);
-    try test_one_mulsi3(-46340, 46340, -2147395600);
-    try test_one_mulsi3(46340, -46340, -2147395600);
-    try test_one_mulsi3(-46340, -46340, 2147395600);
-    try test_one_mulsi3(4194303, 8192, @truncate(i32, 34359730176));
-    try test_one_mulsi3(-4194303, 8192, @truncate(i32, -34359730176));
-    try test_one_mulsi3(4194303, -8192, @truncate(i32, -34359730176));
-    try test_one_mulsi3(-4194303, -8192, @truncate(i32, 34359730176));
-    try test_one_mulsi3(8192, 4194303, @truncate(i32, 34359730176));
-    try test_one_mulsi3(-8192, 4194303, @truncate(i32, -34359730176));
-    try test_one_mulsi3(8192, -4194303, @truncate(i32, -34359730176));
-    try test_one_mulsi3(-8192, -4194303, @truncate(i32, 34359730176));
 }

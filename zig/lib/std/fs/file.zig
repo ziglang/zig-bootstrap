@@ -48,6 +48,12 @@ pub const File = struct {
         Unknown,
     };
 
+    /// This is the default mode given to POSIX operating systems for creating
+    /// files. `0o666` is "-rw-rw-rw-" which is counter-intuitive at first,
+    /// since most people would expect "-rw-r--r--", for example, when using
+    /// the `touch` command, which would correspond to `0o644`. However, POSIX
+    /// libc implementations use `0o666` inside `fopen` and then rely on the
+    /// process-scoped "umask" setting to adjust this number for file creation.
     pub const default_mode = switch (builtin.os.tag) {
         .windows => 0,
         .wasi => 0,
@@ -179,7 +185,7 @@ pub const File = struct {
         lock_nonblocking: bool = false,
 
         /// For POSIX systems this is the file system mode the file will
-        /// be created with.
+        /// be created with. On other systems this is always 0.
         mode: Mode = default_mode,
 
         /// Setting this to `.blocking` prevents `O.NONBLOCK` from being passed even
@@ -307,6 +313,7 @@ pub const File = struct {
         /// is unique to each filesystem.
         inode: INode,
         size: u64,
+        /// This is available on POSIX systems and is always 0 otherwise.
         mode: Mode,
         kind: Kind,
 
