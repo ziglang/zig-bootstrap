@@ -221,14 +221,19 @@ pub fn flush(self: *C, comp: *Compilation, prog_node: *std.Progress.Node) !void 
     return self.flushModule(comp, prog_node);
 }
 
-fn abiDefine(comp: *Compilation) ?[]const u8 {
-    return switch (comp.getTarget().abi) {
-        .msvc => "#define ZIG_TARGET_ABI_MSVC\n",
-        else => null,
-    };
+fn abiDefines(self: *C, target: std.Target) !std.ArrayList(u8) {
+    var defines = std.ArrayList(u8).init(self.base.allocator);
+    errdefer defines.deinit();
+    const writer = defines.writer();
+    switch (target.abi) {
+        .msvc => try writer.writeAll("#define ZIG_TARGET_ABI_MSVC\n"),
+        else => {},
+    }
+    try writer.print("#define ZIG_TARGET_MAX_INT_ALIGNMENT {d}\n", .{target.maxIntAlignment()});
+    return defines;
 }
 
-pub fn flushModule(self: *C, comp: *Compilation, prog_node: *std.Progress.Node) !void {
+pub fn flushModule(self: *C, _: *Compilation, prog_node: *std.Progress.Node) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -245,12 +250,13 @@ pub fn flushModule(self: *C, comp: *Compilation, prog_node: *std.Progress.Node) 
     var f: Flush = .{};
     defer f.deinit(gpa);
 
-    const abi_define = abiDefine(comp);
+    const abi_defines = try self.abiDefines(module.getTarget());
+    defer abi_defines.deinit();
 
-    // Covers defines, zig.h, ctypes, asm, lazy fwd, lazy code.
-    try f.all_buffers.ensureUnusedCapacity(gpa, 6);
+    // Covers defines, zig.h, ctypes, asm, lazy fwd.
+    try f.all_buffers.ensureUnusedCapacity(gpa, 5);
 
-    if (abi_define) |buf| f.appendBufAssumeCapacity(buf);
+    f.appendBufAssumeCapacity(abi_defines.items);
     f.appendBufAssumeCapacity(zig_h);
 
     const ctypes_index = f.all_buffers.items.len;
@@ -263,8 +269,8 @@ pub fn flushModule(self: *C, comp: *Compilation, prog_node: *std.Progress.Node) 
         f.appendBufAssumeCapacity(asm_buf.items);
     }
 
-    const lazy_indices = f.all_buffers.items.len;
-    f.all_buffers.items.len += 2;
+    const lazy_index = f.all_buffers.items.len;
+    f.all_buffers.items.len += 1;
 
     try self.flushErrDecls(&f.lazy_db);
 
@@ -297,6 +303,7 @@ pub fn flushModule(self: *C, comp: *Compilation, prog_node: *std.Progress.Node) 
 
     {
         // We need to flush lazy ctypes after flushing all decls but before flushing any decl ctypes.
+        // This ensures that every lazy CType.Index exactly matches the global CType.Index.
         assert(f.ctypes.count() == 0);
         try self.flushCTypes(&f, .none, f.lazy_db.ctypes);
 
@@ -305,30 +312,22 @@ pub fn flushModule(self: *C, comp: *Compilation, prog_node: *std.Progress.Node) 
             try self.flushCTypes(&f, entry.key_ptr.toOptional(), entry.value_ptr.ctypes);
     }
 
-    {
-        f.all_buffers.items[lazy_indices + 0] = .{
-            .iov_base = if (f.lazy_db.fwd_decl.items.len > 0) f.lazy_db.fwd_decl.items.ptr else "",
-            .iov_len = f.lazy_db.fwd_decl.items.len,
-        };
-        f.file_size += f.lazy_db.fwd_decl.items.len;
-
-        f.all_buffers.items[lazy_indices + 1] = .{
-            .iov_base = if (f.lazy_db.code.items.len > 0) f.lazy_db.code.items.ptr else "",
-            .iov_len = f.lazy_db.code.items.len,
-        };
-        f.file_size += f.lazy_db.code.items.len;
-    }
-
     f.all_buffers.items[ctypes_index] = .{
         .iov_base = if (f.ctypes_buf.items.len > 0) f.ctypes_buf.items.ptr else "",
         .iov_len = f.ctypes_buf.items.len,
     };
     f.file_size += f.ctypes_buf.items.len;
 
+    f.all_buffers.items[lazy_index] = .{
+        .iov_base = if (f.lazy_db.fwd_decl.items.len > 0) f.lazy_db.fwd_decl.items.ptr else "",
+        .iov_len = f.lazy_db.fwd_decl.items.len,
+    };
+    f.file_size += f.lazy_db.fwd_decl.items.len;
+
     // Now the code.
-    try f.all_buffers.ensureUnusedCapacity(gpa, decl_values.len);
-    for (decl_values) |decl|
-        f.appendBufAssumeCapacity(decl.code.items);
+    try f.all_buffers.ensureUnusedCapacity(gpa, 1 + decl_values.len);
+    f.appendBufAssumeCapacity(f.lazy_db.code.items);
+    for (decl_values) |decl| f.appendBufAssumeCapacity(decl.code.items);
 
     const file = self.base.file.?;
     try file.setEndPos(f.file_size);

@@ -1,4 +1,5 @@
 const std = @import("std");
+const builtin = @import("builtin");
 const Type = @import("type.zig").Type;
 const log2 = std.math.log2;
 const assert = std.debug.assert;
@@ -1112,6 +1113,14 @@ pub const Value = extern union {
             .bool_true,
             => return BigIntMutable.init(&space.limbs, 1).toConst(),
 
+            .enum_field_index => {
+                const index = val.castTag(.enum_field_index).?.data;
+                return BigIntMutable.init(&space.limbs, index).toConst();
+            },
+            .runtime_value => {
+                const sub_val = val.castTag(.runtime_value).?.data;
+                return sub_val.toBigIntAdvanced(space, target, opt_sema);
+            },
             .int_u64 => return BigIntMutable.init(&space.limbs, val.castTag(.int_u64).?.data).toConst(),
             .int_i64 => return BigIntMutable.init(&space.limbs, val.castTag(.int_i64).?.data).toConst(),
             .int_big_positive => return val.castTag(.int_big_positive).?.asBigInt(),
@@ -1364,6 +1373,17 @@ pub const Value = extern union {
                 if (val.isDeclRef()) return error.ReinterpretDeclRef;
                 return val.writeToMemory(Type.usize, mod, buffer);
             },
+            .Optional => {
+                assert(ty.isPtrLikeOptional());
+                var buf: Type.Payload.ElemType = undefined;
+                const child = ty.optionalChild(&buf);
+                const opt_val = val.optionalValue();
+                if (opt_val) |some| {
+                    return some.writeToMemory(child, mod, buffer);
+                } else {
+                    return writeToMemory(Value.zero, Type.usize, mod, buffer);
+                }
+            },
             else => @panic("TODO implement writeToMemory for more types"),
         }
     }
@@ -1469,6 +1489,17 @@ pub const Value = extern union {
                 assert(!ty.isSlice()); // No well defined layout.
                 if (val.isDeclRef()) return error.ReinterpretDeclRef;
                 return val.writeToPackedMemory(Type.usize, mod, buffer, bit_offset);
+            },
+            .Optional => {
+                assert(ty.isPtrLikeOptional());
+                var buf: Type.Payload.ElemType = undefined;
+                const child = ty.optionalChild(&buf);
+                const opt_val = val.optionalValue();
+                if (opt_val) |some| {
+                    return some.writeToPackedMemory(child, mod, buffer, bit_offset);
+                } else {
+                    return writeToPackedMemory(Value.zero, Type.usize, mod, buffer, bit_offset);
+                }
             },
             else => @panic("TODO implement writeToPackedMemory for more types"),
         }
@@ -1578,6 +1609,12 @@ pub const Value = extern union {
                 assert(!ty.isSlice()); // No well defined layout.
                 return readFromMemory(Type.usize, mod, buffer, arena);
             },
+            .Optional => {
+                assert(ty.isPtrLikeOptional());
+                var buf: Type.Payload.ElemType = undefined;
+                const child = ty.optionalChild(&buf);
+                return readFromMemory(child, mod, buffer, arena);
+            },
             else => @panic("TODO implement readFromMemory for more types"),
         }
     }
@@ -1668,6 +1705,12 @@ pub const Value = extern union {
             .Pointer => {
                 assert(!ty.isSlice()); // No well defined layout.
                 return readFromPackedMemory(Type.usize, mod, buffer, bit_offset, arena);
+            },
+            .Optional => {
+                assert(ty.isPtrLikeOptional());
+                var buf: Type.Payload.ElemType = undefined;
+                const child = ty.optionalChild(&buf);
+                return readFromPackedMemory(child, mod, buffer, bit_offset, arena);
             },
             else => @panic("TODO implement readFromPackedMemory for more types"),
         }
@@ -1944,6 +1987,13 @@ pub const Value = extern union {
             .variable,
             => .gt,
 
+            .enum_field_index => return std.math.order(lhs.castTag(.enum_field_index).?.data, 0),
+            .runtime_value => {
+                // This is needed to correctly handle hashing the value.
+                // Checks in Sema should prevent direct comparisons from reaching here.
+                const val = lhs.castTag(.runtime_value).?.data;
+                return val.orderAgainstZeroAdvanced(opt_sema);
+            },
             .int_u64 => std.math.order(lhs.castTag(.int_u64).?.data, 0),
             .int_i64 => std.math.order(lhs.castTag(.int_i64).?.data, 0),
             .int_big_positive => lhs.castTag(.int_big_positive).?.asBigInt().orderAgainstScalar(0),
@@ -3143,13 +3193,32 @@ pub const Value = extern union {
     /// TODO: check for cases such as array that is not marked undef but all the element
     /// values are marked undef, or struct that is not marked undef but all fields are marked
     /// undef, etc.
-    pub fn anyUndef(self: Value) bool {
-        if (self.castTag(.aggregate)) |aggregate| {
-            for (aggregate.data) |val| {
-                if (val.anyUndef()) return true;
-            }
+    pub fn anyUndef(self: Value, mod: *Module) bool {
+        switch (self.tag()) {
+            .slice => {
+                const payload = self.castTag(.slice).?;
+                const len = payload.data.len.toUnsignedInt(mod.getTarget());
+
+                var elem_value_buf: ElemValueBuffer = undefined;
+                var i: usize = 0;
+                while (i < len) : (i += 1) {
+                    const elem_val = payload.data.ptr.elemValueBuffer(mod, i, &elem_value_buf);
+                    if (elem_val.anyUndef(mod)) return true;
+                }
+            },
+
+            .aggregate => {
+                const payload = self.castTag(.aggregate).?;
+                for (payload.data) |val| {
+                    if (val.anyUndef(mod)) return true;
+                }
+            },
+
+            .undef => return true,
+            else => {},
         }
-        return self.isUndef();
+
+        return false;
     }
 
     /// Asserts the value is not undefined and not unreachable.
@@ -3318,7 +3387,7 @@ pub const Value = extern union {
         }
     }
 
-    fn floatToValue(float: f128, arena: Allocator, dest_ty: Type, target: Target) !Value {
+    pub fn floatToValue(float: f128, arena: Allocator, dest_ty: Type, target: Target) !Value {
         switch (dest_ty.floatBits(target)) {
             16 => return Value.Tag.float_16.create(arena, @floatCast(f16, float)),
             32 => return Value.Tag.float_32.create(arena, @floatCast(f32, float)),
@@ -5584,6 +5653,35 @@ pub const Value = extern union {
             ri.* = @intToEnum(RuntimeIndex, @enumToInt(ri.*) + 1);
         }
     };
+
+    /// This function is used in the debugger pretty formatters in tools/ to fetch the
+    /// Tag to Payload mapping to facilitate fancy debug printing for this type.
+    fn dbHelper(self: *Value, tag_to_payload_map: *map: {
+        const tags = @typeInfo(Tag).Enum.fields;
+        var fields: [tags.len]std.builtin.Type.StructField = undefined;
+        for (&fields, tags) |*field, t| field.* = .{
+            .name = t.name,
+            .type = *if (t.value < Tag.no_payload_count) void else @field(Tag, t.name).Type(),
+            .default_value = null,
+            .is_comptime = false,
+            .alignment = 0,
+        };
+        break :map @Type(.{ .Struct = .{
+            .layout = .Extern,
+            .fields = &fields,
+            .decls = &.{},
+            .is_tuple = false,
+        } });
+    }) void {
+        _ = self;
+        _ = tag_to_payload_map;
+    }
+
+    comptime {
+        if (builtin.mode == .Debug) {
+            _ = dbHelper;
+        }
+    }
 };
 
 var negative_one_payload: Value.Payload.I64 = .{

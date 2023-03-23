@@ -8,11 +8,11 @@ const Allocator = mem.Allocator;
 const assert = std.debug.assert;
 const log = std.log.scoped(.package);
 const main = @import("main.zig");
+const ThreadPool = std.Thread.Pool;
+const WaitGroup = std.Thread.WaitGroup;
 
 const Compilation = @import("Compilation.zig");
 const Module = @import("Module.zig");
-const ThreadPool = @import("ThreadPool.zig");
-const WaitGroup = @import("WaitGroup.zig");
 const Cache = std.Build.Cache;
 const build_options = @import("build_options");
 const Manifest = @import("Manifest.zig");
@@ -215,6 +215,7 @@ pub const build_zig_basename = "build.zig";
 
 pub fn fetchAndAddDependencies(
     pkg: *Package,
+    root_pkg: *Package,
     arena: Allocator,
     thread_pool: *ThreadPool,
     http_client: *std.http.Client,
@@ -224,7 +225,8 @@ pub fn fetchAndAddDependencies(
     dependencies_source: *std.ArrayList(u8),
     build_roots_source: *std.ArrayList(u8),
     name_prefix: []const u8,
-    color: main.Color,
+    error_bundle: *std.zig.ErrorBundle.Wip,
+    all_modules: *AllModules,
 ) !void {
     const max_bytes = 10 * 1024 * 1024;
     const gpa = thread_pool.allocator;
@@ -248,7 +250,7 @@ pub fn fetchAndAddDependencies(
 
     if (ast.errors.len > 0) {
         const file_path = try directory.join(arena, &.{Manifest.basename});
-        try main.printErrsMsgToStdErr(gpa, arena, ast, file_path, color);
+        try main.putAstErrorsIntoBundle(gpa, ast, file_path, error_bundle);
         return error.PackageFetchFailed;
     }
 
@@ -256,14 +258,9 @@ pub fn fetchAndAddDependencies(
     defer manifest.deinit(gpa);
 
     if (manifest.errors.len > 0) {
-        const ttyconf: std.debug.TTY.Config = switch (color) {
-            .auto => std.debug.detectTTYConfig(std.io.getStdErr()),
-            .on => .escape_codes,
-            .off => .no_color,
-        };
         const file_path = try directory.join(arena, &.{Manifest.basename});
         for (manifest.errors) |msg| {
-            Report.renderErrorMessage(ast, file_path, ttyconf, msg, &.{});
+            try Report.addErrorMessage(ast, file_path, error_bundle, 0, msg);
         }
         return error.PackageFetchFailed;
     }
@@ -271,8 +268,7 @@ pub fn fetchAndAddDependencies(
     const report: Report = .{
         .ast = &ast,
         .directory = directory,
-        .color = color,
-        .arena = arena,
+        .error_bundle = error_bundle,
     };
 
     var any_error = false;
@@ -291,9 +287,11 @@ pub fn fetchAndAddDependencies(
             report,
             build_roots_source,
             fqn,
+            all_modules,
         );
 
-        try pkg.fetchAndAddDependencies(
+        try sub_pkg.fetchAndAddDependencies(
+            root_pkg,
             arena,
             thread_pool,
             http_client,
@@ -303,10 +301,12 @@ pub fn fetchAndAddDependencies(
             dependencies_source,
             build_roots_source,
             sub_prefix,
-            color,
+            error_bundle,
+            all_modules,
         );
 
-        try add(pkg, gpa, fqn, sub_pkg);
+        try pkg.add(gpa, name, sub_pkg);
+        try root_pkg.add(gpa, fqn, sub_pkg);
 
         try dependencies_source.writer().print("    pub const {s} = @import(\"{}\");\n", .{
             std.zig.fmtId(fqn), std.zig.fmtEscapes(fqn),
@@ -344,8 +344,7 @@ pub fn createFilePkg(
 const Report = struct {
     ast: *const std.zig.Ast,
     directory: Compilation.Directory,
-    color: main.Color,
-    arena: Allocator,
+    error_bundle: *std.zig.ErrorBundle.Wip,
 
     fn fail(
         report: Report,
@@ -353,54 +352,53 @@ const Report = struct {
         comptime fmt_string: []const u8,
         fmt_args: anytype,
     ) error{ PackageFetchFailed, OutOfMemory } {
-        return failWithNotes(report, &.{}, tok, fmt_string, fmt_args);
-    }
+        const gpa = report.error_bundle.gpa;
 
-    fn failWithNotes(
-        report: Report,
-        notes: []const Compilation.AllErrors.Message,
-        tok: std.zig.Ast.TokenIndex,
-        comptime fmt_string: []const u8,
-        fmt_args: anytype,
-    ) error{ PackageFetchFailed, OutOfMemory } {
-        const ttyconf: std.debug.TTY.Config = switch (report.color) {
-            .auto => std.debug.detectTTYConfig(std.io.getStdErr()),
-            .on => .escape_codes,
-            .off => .no_color,
-        };
-        const file_path = try report.directory.join(report.arena, &.{Manifest.basename});
-        renderErrorMessage(report.ast.*, file_path, ttyconf, .{
+        const file_path = try report.directory.join(gpa, &.{Manifest.basename});
+        defer gpa.free(file_path);
+
+        const msg = try std.fmt.allocPrint(gpa, fmt_string, fmt_args);
+        defer gpa.free(msg);
+
+        try addErrorMessage(report.ast.*, file_path, report.error_bundle, 0, .{
             .tok = tok,
             .off = 0,
-            .msg = try std.fmt.allocPrint(report.arena, fmt_string, fmt_args),
-        }, notes);
+            .msg = msg,
+        });
+
         return error.PackageFetchFailed;
     }
 
-    fn renderErrorMessage(
+    fn addErrorMessage(
         ast: std.zig.Ast,
         file_path: []const u8,
-        ttyconf: std.debug.TTY.Config,
+        eb: *std.zig.ErrorBundle.Wip,
+        notes_len: u32,
         msg: Manifest.ErrorMessage,
-        notes: []const Compilation.AllErrors.Message,
-    ) void {
+    ) error{OutOfMemory}!void {
         const token_starts = ast.tokens.items(.start);
         const start_loc = ast.tokenLocation(0, msg.tok);
-        Compilation.AllErrors.Message.renderToStdErr(.{ .src = .{
-            .msg = msg.msg,
-            .src_path = file_path,
-            .line = @intCast(u32, start_loc.line),
-            .column = @intCast(u32, start_loc.column),
-            .span = .{
-                .start = token_starts[msg.tok],
-                .end = @intCast(u32, token_starts[msg.tok] + ast.tokenSlice(msg.tok).len),
-                .main = token_starts[msg.tok] + msg.off,
-            },
-            .source_line = ast.source[start_loc.line_start..start_loc.line_end],
-            .notes = notes,
-        } }, ttyconf);
+
+        try eb.addRootErrorMessage(.{
+            .msg = try eb.addString(msg.msg),
+            .src_loc = try eb.addSourceLocation(.{
+                .src_path = try eb.addString(file_path),
+                .span_start = token_starts[msg.tok],
+                .span_end = @intCast(u32, token_starts[msg.tok] + ast.tokenSlice(msg.tok).len),
+                .span_main = token_starts[msg.tok] + msg.off,
+                .line = @intCast(u32, start_loc.line),
+                .column = @intCast(u32, start_loc.column),
+                .source_line = try eb.addString(ast.source[start_loc.line_start..start_loc.line_end]),
+            }),
+            .notes_len = notes_len,
+        });
     }
 };
+
+const hex_multihash_len = 2 * Manifest.multihash_len;
+const MultiHashHexDigest = [hex_multihash_len]u8;
+/// This is to avoid creating multiple modules for the same build.zig file.
+pub const AllModules = std.AutoHashMapUnmanaged(MultiHashHexDigest, *Package);
 
 fn fetchAndUnpack(
     thread_pool: *ThreadPool,
@@ -410,6 +408,7 @@ fn fetchAndUnpack(
     report: Report,
     build_roots_source: *std.ArrayList(u8),
     fqn: []const u8,
+    all_modules: *AllModules,
 ) !*Package {
     const gpa = http_client.allocator;
     const s = fs.path.sep_str;
@@ -417,27 +416,35 @@ fn fetchAndUnpack(
     // Check if the expected_hash is already present in the global package
     // cache, and thereby avoid both fetching and unpacking.
     if (dep.hash) |h| cached: {
-        const hex_multihash_len = 2 * Manifest.multihash_len;
         const hex_digest = h[0..hex_multihash_len];
         const pkg_dir_sub_path = "p" ++ s ++ hex_digest;
+
+        const build_root = try global_cache_directory.join(gpa, &.{pkg_dir_sub_path});
+        errdefer gpa.free(build_root);
+
         var pkg_dir = global_cache_directory.handle.openDir(pkg_dir_sub_path, .{}) catch |err| switch (err) {
             error.FileNotFound => break :cached,
             else => |e| return e,
         };
         errdefer pkg_dir.close();
 
+        try build_roots_source.writer().print("    pub const {s} = \"{}\";\n", .{
+            std.zig.fmtId(fqn), std.zig.fmtEscapes(build_root),
+        });
+
+        // The compiler has a rule that a file must not be included in multiple modules,
+        // so we must detect if a module has been created for this package and reuse it.
+        const gop = try all_modules.getOrPut(gpa, hex_digest.*);
+        if (gop.found_existing) {
+            gpa.free(build_root);
+            return gop.value_ptr.*;
+        }
+
         const ptr = try gpa.create(Package);
         errdefer gpa.destroy(ptr);
 
         const owned_src_path = try gpa.dupe(u8, build_zig_basename);
         errdefer gpa.free(owned_src_path);
-
-        const build_root = try global_cache_directory.join(gpa, &.{pkg_dir_sub_path});
-        errdefer gpa.free(build_root);
-
-        try build_roots_source.writer().print("    pub const {s} = \"{}\";\n", .{
-            std.zig.fmtId(fqn), std.zig.fmtEscapes(build_root),
-        });
 
         ptr.* = .{
             .root_src_directory = .{
@@ -448,6 +455,7 @@ fn fetchAndUnpack(
             .root_src_path = owned_src_path,
         };
 
+        gop.value_ptr.* = ptr;
         return ptr;
     }
 
@@ -483,15 +491,18 @@ fn fetchAndUnpack(
             // by default, so the same logic applies for buffering the reader as for gzip.
             try unpackTarball(gpa, &req, tmp_directory.handle, std.compress.xz);
         } else {
-            return report.fail(dep.url_tok, "unknown file extension for path '{s}'", .{
-                uri.path,
-            });
+            return report.fail(dep.url_tok, "unknown file extension for path '{s}'", .{uri.path});
         }
 
         // TODO: delete files not included in the package prior to computing the package hash.
         // for example, if the ini file has directives to include/not include certain files,
         // apply those rules directly to the filesystem right here. This ensures that files
         // not protected by the hash are not present on the file system.
+
+        // TODO: raise an error for files that have illegal paths on some operating systems.
+        // For example, on Linux a path with a backslash should raise an error here.
+        // Of course, if the ignore rules above omit the file from the package, then everything
+        // is fine and no error should be raised.
 
         break :a try computePackageHash(thread_pool, .{ .dir = tmp_directory.handle });
     };
@@ -507,10 +518,21 @@ fn fetchAndUnpack(
             });
         }
     } else {
-        const notes: [1]Compilation.AllErrors.Message = .{.{ .plain = .{
-            .msg = try std.fmt.allocPrint(report.arena, "expected .hash = \"{s}\",", .{&actual_hex}),
-        } }};
-        return report.failWithNotes(&notes, dep.url_tok, "url field is missing corresponding hash field", .{});
+        const file_path = try report.directory.join(gpa, &.{Manifest.basename});
+        defer gpa.free(file_path);
+
+        const eb = report.error_bundle;
+        const notes_len = 1;
+        try Report.addErrorMessage(report.ast.*, file_path, eb, notes_len, .{
+            .tok = dep.url_tok,
+            .off = 0,
+            .msg = "url field is missing corresponding hash field",
+        });
+        const notes_start = try eb.reserveNotes(notes_len);
+        eb.extra.items[notes_start] = @enumToInt(try eb.addErrorMessage(.{
+            .msg = try eb.printString("expected .hash = \"{s}\",", .{&actual_hex}),
+        }));
+        return error.PackageFetchFailed;
     }
 
     const build_root = try global_cache_directory.join(gpa, &.{pkg_dir_sub_path});
@@ -546,7 +568,8 @@ fn unpackTarball(
 }
 
 const HashedFile = struct {
-    path: []const u8,
+    fs_path: []const u8,
+    normalized_path: []const u8,
     hash: [Manifest.Hash.digest_length]u8,
     failure: Error!void,
 
@@ -554,7 +577,7 @@ const HashedFile = struct {
 
     fn lessThan(context: void, lhs: *const HashedFile, rhs: *const HashedFile) bool {
         _ = context;
-        return mem.lessThan(u8, lhs.path, rhs.path);
+        return mem.lessThan(u8, lhs.normalized_path, rhs.normalized_path);
     }
 };
 
@@ -590,8 +613,10 @@ fn computePackageHash(
                 else => return error.IllegalFileTypeInPackage,
             }
             const hashed_file = try arena.create(HashedFile);
+            const fs_path = try arena.dupe(u8, entry.path);
             hashed_file.* = .{
-                .path = try arena.dupe(u8, entry.path),
+                .fs_path = fs_path,
+                .normalized_path = try normalizePath(arena, fs_path),
                 .hash = undefined, // to be populated by the worker
                 .failure = undefined, // to be populated by the worker
             };
@@ -609,12 +634,30 @@ fn computePackageHash(
     for (all_files.items) |hashed_file| {
         hashed_file.failure catch |err| {
             any_failures = true;
-            std.log.err("unable to hash '{s}': {s}", .{ hashed_file.path, @errorName(err) });
+            std.log.err("unable to hash '{s}': {s}", .{ hashed_file.fs_path, @errorName(err) });
         };
         hasher.update(&hashed_file.hash);
     }
     if (any_failures) return error.PackageHashUnavailable;
     return hasher.finalResult();
+}
+
+/// Make a file system path identical independently of operating system path inconsistencies.
+/// This converts backslashes into forward slashes.
+fn normalizePath(arena: Allocator, fs_path: []const u8) ![]const u8 {
+    const canonical_sep = '/';
+
+    if (fs.path.sep == canonical_sep)
+        return fs_path;
+
+    const normalized = try arena.dupe(u8, fs_path);
+    for (normalized) |*byte| {
+        switch (byte.*) {
+            fs.path.sep => byte.* = canonical_sep,
+            else => continue,
+        }
+    }
+    return normalized;
 }
 
 fn workerHashFile(dir: fs.Dir, hashed_file: *HashedFile, wg: *WaitGroup) void {
@@ -624,10 +667,10 @@ fn workerHashFile(dir: fs.Dir, hashed_file: *HashedFile, wg: *WaitGroup) void {
 
 fn hashFileFallible(dir: fs.Dir, hashed_file: *HashedFile) HashedFile.Error!void {
     var buf: [8000]u8 = undefined;
-    var file = try dir.openFile(hashed_file.path, .{});
+    var file = try dir.openFile(hashed_file.fs_path, .{});
     defer file.close();
     var hasher = Manifest.Hash.init(.{});
-    hasher.update(hashed_file.path);
+    hasher.update(hashed_file.normalized_path);
     hasher.update(&.{ 0, @boolToInt(try isExecutable(file)) });
     while (true) {
         const bytes_read = try file.read(&buf);

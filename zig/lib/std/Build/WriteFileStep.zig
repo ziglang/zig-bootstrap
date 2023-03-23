@@ -1,55 +1,189 @@
-const std = @import("../std.zig");
-const Step = std.Build.Step;
-const fs = std.fs;
-const ArrayList = std.ArrayList;
+//! WriteFileStep is primarily used to create a directory in an appropriate
+//! location inside the local cache which has a set of files that have either
+//! been generated during the build, or are copied from the source package.
+//!
+//! However, this step has an additional capability of writing data to paths
+//! relative to the package root, effectively mutating the package's source
+//! files. Be careful with the latter functionality; it should not be used
+//! during the normal build process, but as a utility run by a developer with
+//! intention to update source files, which will then be committed to version
+//! control.
 
-const WriteFileStep = @This();
+step: Step,
+/// The elements here are pointers because we need stable pointers for the
+/// GeneratedFile field.
+files: std.ArrayListUnmanaged(*File),
+output_source_files: std.ArrayListUnmanaged(OutputSourceFile),
+generated_directory: std.Build.GeneratedFile,
 
 pub const base_id = .write_file;
 
-step: Step,
-builder: *std.Build,
-files: std.TailQueue(File),
-
 pub const File = struct {
-    source: std.Build.GeneratedFile,
-    basename: []const u8,
-    bytes: []const u8,
+    generated_file: std.Build.GeneratedFile,
+    sub_path: []const u8,
+    contents: Contents,
 };
 
-pub fn init(builder: *std.Build) WriteFileStep {
-    return WriteFileStep{
-        .builder = builder,
-        .step = Step.init(.write_file, "writefile", builder.allocator, make),
+pub const OutputSourceFile = struct {
+    contents: Contents,
+    sub_path: []const u8,
+};
+
+pub const Contents = union(enum) {
+    bytes: []const u8,
+    copy: std.Build.FileSource,
+};
+
+pub fn create(owner: *std.Build) *WriteFileStep {
+    const wf = owner.allocator.create(WriteFileStep) catch @panic("OOM");
+    wf.* = .{
+        .step = Step.init(.{
+            .id = .write_file,
+            .name = "WriteFile",
+            .owner = owner,
+            .makeFn = make,
+        }),
         .files = .{},
+        .output_source_files = .{},
+        .generated_directory = .{ .step = &wf.step },
     };
+    return wf;
 }
 
-pub fn add(self: *WriteFileStep, basename: []const u8, bytes: []const u8) void {
-    const node = self.builder.allocator.create(std.TailQueue(File).Node) catch @panic("unhandled error");
-    node.* = .{
-        .data = .{
-            .source = std.Build.GeneratedFile{ .step = &self.step },
-            .basename = self.builder.dupePath(basename),
-            .bytes = self.builder.dupe(bytes),
-        },
+pub fn add(wf: *WriteFileStep, sub_path: []const u8, bytes: []const u8) void {
+    const b = wf.step.owner;
+    const gpa = b.allocator;
+    const file = gpa.create(File) catch @panic("OOM");
+    file.* = .{
+        .generated_file = .{ .step = &wf.step },
+        .sub_path = b.dupePath(sub_path),
+        .contents = .{ .bytes = b.dupe(bytes) },
     };
+    wf.files.append(gpa, file) catch @panic("OOM");
 
-    self.files.append(node);
+    wf.maybeUpdateName();
 }
 
-/// Gets a file source for the given basename. If the file does not exist, returns `null`.
-pub fn getFileSource(step: *WriteFileStep, basename: []const u8) ?std.Build.FileSource {
-    var it = step.files.first;
-    while (it) |node| : (it = node.next) {
-        if (std.mem.eql(u8, node.data.basename, basename))
-            return std.Build.FileSource{ .generated = &node.data.source };
+/// Place the file into the generated directory within the local cache,
+/// along with all the rest of the files added to this step. The parameter
+/// here is the destination path relative to the local cache directory
+/// associated with this WriteFileStep. It may be a basename, or it may
+/// include sub-directories, in which case this step will ensure the
+/// required sub-path exists.
+/// This is the option expected to be used most commonly with `addCopyFile`.
+pub fn addCopyFile(wf: *WriteFileStep, source: std.Build.FileSource, sub_path: []const u8) void {
+    const b = wf.step.owner;
+    const gpa = b.allocator;
+    const file = gpa.create(File) catch @panic("OOM");
+    file.* = .{
+        .generated_file = .{ .step = &wf.step },
+        .sub_path = b.dupePath(sub_path),
+        .contents = .{ .copy = source },
+    };
+    wf.files.append(gpa, file) catch @panic("OOM");
+
+    wf.maybeUpdateName();
+    source.addStepDependencies(&wf.step);
+}
+
+/// A path relative to the package root.
+/// Be careful with this because it updates source files. This should not be
+/// used as part of the normal build process, but as a utility occasionally
+/// run by a developer with intent to modify source files and then commit
+/// those changes to version control.
+/// A file added this way is not available with `getFileSource`.
+pub fn addCopyFileToSource(wf: *WriteFileStep, source: std.Build.FileSource, sub_path: []const u8) void {
+    const b = wf.step.owner;
+    wf.output_source_files.append(b.allocator, .{
+        .contents = .{ .copy = source },
+        .sub_path = sub_path,
+    }) catch @panic("OOM");
+    source.addStepDependencies(&wf.step);
+}
+
+/// A path relative to the package root.
+/// Be careful with this because it updates source files. This should not be
+/// used as part of the normal build process, but as a utility occasionally
+/// run by a developer with intent to modify source files and then commit
+/// those changes to version control.
+/// A file added this way is not available with `getFileSource`.
+pub fn addBytesToSource(wf: *WriteFileStep, bytes: []const u8, sub_path: []const u8) void {
+    const b = wf.step.owner;
+    wf.output_source_files.append(b.allocator, .{
+        .contents = .{ .bytes = bytes },
+        .sub_path = sub_path,
+    }) catch @panic("OOM");
+}
+
+/// Gets a file source for the given sub_path. If the file does not exist, returns `null`.
+pub fn getFileSource(wf: *WriteFileStep, sub_path: []const u8) ?std.Build.FileSource {
+    for (wf.files.items) |file| {
+        if (std.mem.eql(u8, file.sub_path, sub_path)) {
+            return .{ .generated = &file.generated_file };
+        }
     }
     return null;
 }
 
-fn make(step: *Step) !void {
-    const self = @fieldParentPtr(WriteFileStep, "step", step);
+/// Returns a `FileSource` representing the base directory that contains all the
+/// files from this `WriteFileStep`.
+pub fn getDirectorySource(wf: *WriteFileStep) std.Build.FileSource {
+    return .{ .generated = &wf.generated_directory };
+}
+
+fn maybeUpdateName(wf: *WriteFileStep) void {
+    if (wf.files.items.len == 1) {
+        // First time adding a file; update name.
+        if (std.mem.eql(u8, wf.step.name, "WriteFile")) {
+            wf.step.name = wf.step.owner.fmt("WriteFile {s}", .{wf.files.items[0].sub_path});
+        }
+    }
+}
+
+fn make(step: *Step, prog_node: *std.Progress.Node) !void {
+    _ = prog_node;
+    const b = step.owner;
+    const wf = @fieldParentPtr(WriteFileStep, "step", step);
+
+    // Writing to source files is kind of an extra capability of this
+    // WriteFileStep - arguably it should be a different step. But anyway here
+    // it is, it happens unconditionally and does not interact with the other
+    // files here.
+    var any_miss = false;
+    for (wf.output_source_files.items) |output_source_file| {
+        if (fs.path.dirname(output_source_file.sub_path)) |dirname| {
+            b.build_root.handle.makePath(dirname) catch |err| {
+                return step.fail("unable to make path '{}{s}': {s}", .{
+                    b.build_root, dirname, @errorName(err),
+                });
+            };
+        }
+        switch (output_source_file.contents) {
+            .bytes => |bytes| {
+                b.build_root.handle.writeFile(output_source_file.sub_path, bytes) catch |err| {
+                    return step.fail("unable to write file '{}{s}': {s}", .{
+                        b.build_root, output_source_file.sub_path, @errorName(err),
+                    });
+                };
+                any_miss = true;
+            },
+            .copy => |file_source| {
+                const source_path = file_source.getPath(b);
+                const prev_status = fs.Dir.updateFile(
+                    fs.cwd(),
+                    source_path,
+                    b.build_root.handle,
+                    output_source_file.sub_path,
+                    .{},
+                ) catch |err| {
+                    return step.fail("unable to update file from '{s}' to '{}{s}': {s}", .{
+                        source_path, b.build_root, output_source_file.sub_path, @errorName(err),
+                    });
+                };
+                any_miss = any_miss or prev_status == .stale;
+            },
+        }
+    }
 
     // The cache is used here not really as a way to speed things up - because writing
     // the data to a file would probably be very fast - but as a way to find a canonical
@@ -58,56 +192,102 @@ fn make(step: *Step) !void {
     // If, for example, a hard-coded path was used as the location to put WriteFileStep
     // files, then two WriteFileSteps executing in parallel might clobber each other.
 
-    // TODO port the cache system from the compiler to zig std lib. Until then
-    // we directly construct the path, and no "cache hit" detection happens;
-    // the files are always written.
-    // Note there is similar code over in ConfigHeaderStep.
-    const Hasher = std.crypto.auth.siphash.SipHash128(1, 3);
+    var man = b.cache.obtain();
+    defer man.deinit();
+
     // Random bytes to make WriteFileStep unique. Refresh this with
     // new random bytes when WriteFileStep implementation is modified
     // in a non-backwards-compatible way.
-    var hash = Hasher.init("eagVR1dYXoE7ARDP");
+    man.hash.add(@as(u32, 0xd767ee59));
 
-    {
-        var it = self.files.first;
-        while (it) |node| : (it = node.next) {
-            hash.update(node.data.basename);
-            hash.update(node.data.bytes);
-            hash.update("|");
+    for (wf.files.items) |file| {
+        man.hash.addBytes(file.sub_path);
+        switch (file.contents) {
+            .bytes => |bytes| {
+                man.hash.addBytes(bytes);
+            },
+            .copy => |file_source| {
+                _ = try man.addFile(file_source.getPath(b), null);
+            },
         }
     }
-    var digest: [16]u8 = undefined;
-    hash.final(&digest);
-    var hash_basename: [digest.len * 2]u8 = undefined;
-    _ = std.fmt.bufPrint(
-        &hash_basename,
-        "{s}",
-        .{std.fmt.fmtSliceHexLower(&digest)},
-    ) catch unreachable;
 
-    const output_dir = try self.builder.cache_root.join(self.builder.allocator, &.{
-        "o", &hash_basename,
-    });
-    var dir = fs.cwd().makeOpenPath(output_dir, .{}) catch |err| {
-        std.debug.print("unable to make path {s}: {s}\n", .{ output_dir, @errorName(err) });
-        return err;
+    if (try step.cacheHit(&man)) {
+        const digest = man.final();
+        for (wf.files.items) |file| {
+            file.generated_file.path = try b.cache_root.join(b.allocator, &.{
+                "o", &digest, file.sub_path,
+            });
+        }
+        wf.generated_directory.path = try b.cache_root.join(b.allocator, &.{ "o", &digest });
+        return;
+    }
+
+    const digest = man.final();
+    const cache_path = "o" ++ fs.path.sep_str ++ digest;
+
+    wf.generated_directory.path = try b.cache_root.join(b.allocator, &.{ "o", &digest });
+
+    var cache_dir = b.cache_root.handle.makeOpenPath(cache_path, .{}) catch |err| {
+        return step.fail("unable to make path '{}{s}': {s}", .{
+            b.cache_root, cache_path, @errorName(err),
+        });
     };
-    defer dir.close();
-    {
-        var it = self.files.first;
-        while (it) |node| : (it = node.next) {
-            dir.writeFile(node.data.basename, node.data.bytes) catch |err| {
-                std.debug.print("unable to write {s} into {s}: {s}\n", .{
-                    node.data.basename,
-                    output_dir,
-                    @errorName(err),
+    defer cache_dir.close();
+
+    for (wf.files.items) |file| {
+        if (fs.path.dirname(file.sub_path)) |dirname| {
+            cache_dir.makePath(dirname) catch |err| {
+                return step.fail("unable to make path '{}{s}{c}{s}': {s}", .{
+                    b.cache_root, cache_path, fs.path.sep, dirname, @errorName(err),
                 });
-                return err;
             };
-            node.data.source.path = try fs.path.join(
-                self.builder.allocator,
-                &[_][]const u8{ output_dir, node.data.basename },
-            );
         }
+        switch (file.contents) {
+            .bytes => |bytes| {
+                cache_dir.writeFile(file.sub_path, bytes) catch |err| {
+                    return step.fail("unable to write file '{}{s}{c}{s}': {s}", .{
+                        b.cache_root, cache_path, fs.path.sep, file.sub_path, @errorName(err),
+                    });
+                };
+            },
+            .copy => |file_source| {
+                const source_path = file_source.getPath(b);
+                const prev_status = fs.Dir.updateFile(
+                    fs.cwd(),
+                    source_path,
+                    cache_dir,
+                    file.sub_path,
+                    .{},
+                ) catch |err| {
+                    return step.fail("unable to update file from '{s}' to '{}{s}{c}{s}': {s}", .{
+                        source_path,
+                        b.cache_root,
+                        cache_path,
+                        fs.path.sep,
+                        file.sub_path,
+                        @errorName(err),
+                    });
+                };
+                // At this point we already will mark the step as a cache miss.
+                // But this is kind of a partial cache hit since individual
+                // file copies may be avoided. Oh well, this information is
+                // discarded.
+                _ = prev_status;
+            },
+        }
+
+        file.generated_file.path = try b.cache_root.join(b.allocator, &.{
+            cache_path, file.sub_path,
+        });
     }
+
+    try step.writeManifest(&man);
 }
+
+const std = @import("../std.zig");
+const Step = std.Build.Step;
+const fs = std.fs;
+const ArrayList = std.ArrayList;
+
+const WriteFileStep = @This();

@@ -17,10 +17,19 @@ const Os = std.builtin.Os;
 const TailQueue = std.TailQueue;
 const maxInt = std.math.maxInt;
 const assert = std.debug.assert;
+const is_darwin = builtin.target.isDarwin();
 
 pub const ChildProcess = struct {
-    pid: if (builtin.os.tag == .windows) void else i32,
-    handle: if (builtin.os.tag == .windows) windows.HANDLE else void,
+    pub const Id = switch (builtin.os.tag) {
+        .windows => windows.HANDLE,
+        .wasi => void,
+        else => os.pid_t,
+    };
+
+    /// Available after calling `spawn()`. This becomes `undefined` after calling `wait()`.
+    /// On Windows this is the hProcess.
+    /// On POSIX this is the pid.
+    id: Id,
     thread_handle: if (builtin.os.tag == .windows) windows.HANDLE else void,
 
     allocator: mem.Allocator,
@@ -63,6 +72,43 @@ pub const ChildProcess = struct {
     /// Darwin-only. Start child process in suspended state as if SIGSTOP was sent.
     start_suspended: bool = false,
 
+    /// Set to true to obtain rusage information for the child process.
+    /// Depending on the target platform and implementation status, the
+    /// requested statistics may or may not be available. If they are
+    /// available, then the `resource_usage_statistics` field will be populated
+    /// after calling `wait`.
+    /// On Linux, this obtains rusage statistics from wait4().
+    request_resource_usage_statistics: bool = false,
+
+    /// This is available after calling wait if
+    /// `request_resource_usage_statistics` was set to `true` before calling
+    /// `spawn`.
+    resource_usage_statistics: ResourceUsageStatistics = .{},
+
+    pub const ResourceUsageStatistics = struct {
+        rusage: @TypeOf(rusage_init) = rusage_init,
+
+        /// Returns the peak resident set size of the child process, in bytes,
+        /// if available.
+        pub inline fn getMaxRss(rus: ResourceUsageStatistics) ?usize {
+            switch (builtin.os.tag) {
+                .linux => {
+                    if (rus.rusage) |ru| {
+                        return @intCast(usize, ru.maxrss) * 1024;
+                    } else {
+                        return null;
+                    }
+                },
+                else => return null,
+            }
+        }
+
+        const rusage_init = switch (builtin.os.tag) {
+            .linux => @as(?std.os.rusage, null),
+            else => {},
+        };
+    };
+
     pub const Arg0Expand = os.Arg0Expand;
 
     pub const SpawnError = error{
@@ -83,8 +129,7 @@ pub const ChildProcess = struct {
         os.SetIdError ||
         os.ChangeCurDirError ||
         windows.CreateProcessError ||
-        windows.WaitForSingleObjectError ||
-        os.posix_spawn.Error;
+        windows.WaitForSingleObjectError;
 
     pub const Term = union(enum) {
         Exited: u8,
@@ -105,8 +150,7 @@ pub const ChildProcess = struct {
         return .{
             .allocator = allocator,
             .argv = argv,
-            .pid = undefined,
-            .handle = undefined,
+            .id = undefined,
             .thread_handle = undefined,
             .err_pipe = null,
             .term = null,
@@ -131,13 +175,10 @@ pub const ChildProcess = struct {
     }
 
     /// On success must call `kill` or `wait`.
+    /// After spawning the `id` is available.
     pub fn spawn(self: *ChildProcess) SpawnError!void {
         if (!std.process.can_spawn) {
             @compileError("the target operating system cannot spawn processes");
-        }
-
-        if (comptime builtin.target.isDarwin()) {
-            return self.spawnMacos();
         }
 
         if (builtin.os.tag == .windows) {
@@ -167,7 +208,7 @@ pub const ChildProcess = struct {
             return term;
         }
 
-        try windows.TerminateProcess(self.handle, exit_code);
+        try windows.TerminateProcess(self.id, exit_code);
         try self.waitUnwrappedWindows();
         return self.term.?;
     }
@@ -177,18 +218,21 @@ pub const ChildProcess = struct {
             self.cleanupStreams();
             return term;
         }
-        try os.kill(self.pid, os.SIG.TERM);
+        try os.kill(self.id, os.SIG.TERM);
         try self.waitUnwrapped();
         return self.term.?;
     }
 
     /// Blocks until child process terminates and then cleans up all resources.
     pub fn wait(self: *ChildProcess) !Term {
-        if (builtin.os.tag == .windows) {
-            return self.waitWindows();
-        } else {
-            return self.waitPosix();
-        }
+        const term = if (builtin.os.tag == .windows)
+            try self.waitWindows()
+        else
+            try self.waitPosix();
+
+        self.id = undefined;
+
+        return term;
     }
 
     pub const ExecResult = struct {
@@ -196,6 +240,19 @@ pub const ChildProcess = struct {
         stdout: []u8,
         stderr: []u8,
     };
+
+    fn fifoToOwnedArrayList(fifo: *std.io.PollFifo) std.ArrayList(u8) {
+        if (fifo.head > 0) {
+            std.mem.copy(u8, fifo.buf[0..fifo.count], fifo.buf[fifo.head .. fifo.head + fifo.count]);
+        }
+        const result = std.ArrayList(u8){
+            .items = fifo.buf[0..fifo.count],
+            .capacity = fifo.buf.len,
+            .allocator = fifo.allocator,
+        };
+        fifo.* = std.io.PollFifo.init(fifo.allocator);
+        return result;
+    }
 
     /// Collect the output from the process's stdout and stderr. Will return once all output
     /// has been collected. This does not mean that the process has ended. `wait` should still
@@ -210,196 +267,33 @@ pub const ChildProcess = struct {
     ) !void {
         debug.assert(child.stdout_behavior == .Pipe);
         debug.assert(child.stderr_behavior == .Pipe);
-        if (builtin.os.tag == .haiku) {
-            const stdout_in = child.stdout.?.reader();
-            const stderr_in = child.stderr.?.reader();
 
-            try stdout_in.readAllArrayList(stdout, max_output_bytes);
-            try stderr_in.readAllArrayList(stderr, max_output_bytes);
-        } else if (builtin.os.tag == .windows) {
-            try collectOutputWindows(child, stdout, stderr, max_output_bytes);
-        } else {
-            try collectOutputPosix(child, stdout, stderr, max_output_bytes);
+        // we could make this work with multiple allocators but YAGNI
+        if (stdout.allocator.ptr != stderr.allocator.ptr or
+            stdout.allocator.vtable != stderr.allocator.vtable)
+            @panic("ChildProcess.collectOutput only supports 1 allocator");
+
+        var poller = std.io.poll(stdout.allocator, enum { stdout, stderr }, .{
+            .stdout = child.stdout.?,
+            .stderr = child.stderr.?,
+        });
+        defer poller.deinit();
+
+        while (try poller.poll()) {
+            if (poller.fifo(.stdout).count > max_output_bytes)
+                return error.StdoutStreamTooLong;
+            if (poller.fifo(.stderr).count > max_output_bytes)
+                return error.StderrStreamTooLong;
         }
+
+        stdout.* = fifoToOwnedArrayList(poller.fifo(.stdout));
+        stderr.* = fifoToOwnedArrayList(poller.fifo(.stderr));
     }
 
-    fn collectOutputPosix(
-        child: ChildProcess,
-        stdout: *std.ArrayList(u8),
-        stderr: *std.ArrayList(u8),
-        max_output_bytes: usize,
-    ) !void {
-        var poll_fds = [_]os.pollfd{
-            .{ .fd = child.stdout.?.handle, .events = os.POLL.IN, .revents = undefined },
-            .{ .fd = child.stderr.?.handle, .events = os.POLL.IN, .revents = undefined },
-        };
-
-        var dead_fds: usize = 0;
-        // We ask for ensureTotalCapacity with this much extra space. This has more of an
-        // effect on small reads because once the reads start to get larger the amount
-        // of space an ArrayList will allocate grows exponentially.
-        const bump_amt = 512;
-
-        const err_mask = os.POLL.ERR | os.POLL.NVAL | os.POLL.HUP;
-
-        while (dead_fds < poll_fds.len) {
-            const events = try os.poll(&poll_fds, std.math.maxInt(i32));
-            if (events == 0) continue;
-
-            var remove_stdout = false;
-            var remove_stderr = false;
-            // Try reading whatever is available before checking the error
-            // conditions.
-            // It's still possible to read after a POLL.HUP is received, always
-            // check if there's some data waiting to be read first.
-            if (poll_fds[0].revents & os.POLL.IN != 0) {
-                // stdout is ready.
-                const new_capacity = std.math.min(stdout.items.len + bump_amt, max_output_bytes);
-                try stdout.ensureTotalCapacity(new_capacity);
-                const buf = stdout.unusedCapacitySlice();
-                if (buf.len == 0) return error.StdoutStreamTooLong;
-                const nread = try os.read(poll_fds[0].fd, buf);
-                stdout.items.len += nread;
-
-                // Remove the fd when the EOF condition is met.
-                remove_stdout = nread == 0;
-            } else {
-                remove_stdout = poll_fds[0].revents & err_mask != 0;
-            }
-
-            if (poll_fds[1].revents & os.POLL.IN != 0) {
-                // stderr is ready.
-                const new_capacity = std.math.min(stderr.items.len + bump_amt, max_output_bytes);
-                try stderr.ensureTotalCapacity(new_capacity);
-                const buf = stderr.unusedCapacitySlice();
-                if (buf.len == 0) return error.StderrStreamTooLong;
-                const nread = try os.read(poll_fds[1].fd, buf);
-                stderr.items.len += nread;
-
-                // Remove the fd when the EOF condition is met.
-                remove_stderr = nread == 0;
-            } else {
-                remove_stderr = poll_fds[1].revents & err_mask != 0;
-            }
-
-            // Exclude the fds that signaled an error.
-            if (remove_stdout) {
-                poll_fds[0].fd = -1;
-                dead_fds += 1;
-            }
-            if (remove_stderr) {
-                poll_fds[1].fd = -1;
-                dead_fds += 1;
-            }
-        }
-    }
-
-    const WindowsAsyncReadResult = enum {
-        pending,
-        closed,
-        full,
+    pub const ExecError = os.GetCwdError || os.ReadError || SpawnError || os.PollError || error{
+        StdoutStreamTooLong,
+        StderrStreamTooLong,
     };
-
-    fn windowsAsyncRead(
-        handle: windows.HANDLE,
-        overlapped: *windows.OVERLAPPED,
-        buf: *std.ArrayList(u8),
-        bump_amt: usize,
-        max_output_bytes: usize,
-    ) !WindowsAsyncReadResult {
-        while (true) {
-            const new_capacity = std.math.min(buf.items.len + bump_amt, max_output_bytes);
-            try buf.ensureTotalCapacity(new_capacity);
-            const next_buf = buf.unusedCapacitySlice();
-            if (next_buf.len == 0) return .full;
-            var read_bytes: u32 = undefined;
-            const read_result = windows.kernel32.ReadFile(handle, next_buf.ptr, math.cast(u32, next_buf.len) orelse maxInt(u32), &read_bytes, overlapped);
-            if (read_result == 0) return switch (windows.kernel32.GetLastError()) {
-                .IO_PENDING => .pending,
-                .BROKEN_PIPE => .closed,
-                else => |err| windows.unexpectedError(err),
-            };
-            buf.items.len += read_bytes;
-        }
-    }
-
-    fn collectOutputWindows(child: ChildProcess, stdout: *std.ArrayList(u8), stderr: *std.ArrayList(u8), max_output_bytes: usize) !void {
-        const bump_amt = 512;
-        const outs = [_]*std.ArrayList(u8){
-            stdout,
-            stderr,
-        };
-        const handles = [_]windows.HANDLE{
-            child.stdout.?.handle,
-            child.stderr.?.handle,
-        };
-
-        var overlapped = [_]windows.OVERLAPPED{
-            mem.zeroes(windows.OVERLAPPED),
-            mem.zeroes(windows.OVERLAPPED),
-        };
-
-        var wait_objects: [2]windows.HANDLE = undefined;
-        var wait_object_count: u2 = 0;
-
-        // we need to cancel all pending IO before returning so our OVERLAPPED values don't go out of scope
-        defer for (wait_objects[0..wait_object_count]) |o| {
-            _ = windows.kernel32.CancelIo(o);
-        };
-
-        // Windows Async IO requires an initial call to ReadFile before waiting on the handle
-        for ([_]u1{ 0, 1 }) |i| {
-            switch (try windowsAsyncRead(handles[i], &overlapped[i], outs[i], bump_amt, max_output_bytes)) {
-                .pending => {
-                    wait_objects[wait_object_count] = handles[i];
-                    wait_object_count += 1;
-                },
-                .closed => {}, // don't add to the wait_objects list
-                .full => return if (i == 0) error.StdoutStreamTooLong else error.StderrStreamTooLong,
-            }
-        }
-
-        while (wait_object_count > 0) {
-            const status = windows.kernel32.WaitForMultipleObjects(wait_object_count, &wait_objects, 0, windows.INFINITE);
-            if (status == windows.WAIT_FAILED) {
-                switch (windows.kernel32.GetLastError()) {
-                    else => |err| return windows.unexpectedError(err),
-                }
-            }
-            if (status < windows.WAIT_OBJECT_0 or status > windows.WAIT_OBJECT_0 + wait_object_count - 1)
-                unreachable;
-
-            const wait_idx = status - windows.WAIT_OBJECT_0;
-
-            // this extra `i` index is needed to map the wait handle back to the stdout or stderr
-            // values since the wait_idx can change which handle it corresponds with
-            const i: u1 = if (wait_objects[wait_idx] == handles[0]) 0 else 1;
-
-            // remove completed event from the wait list
-            wait_object_count -= 1;
-            if (wait_idx == 0)
-                wait_objects[0] = wait_objects[1];
-
-            var read_bytes: u32 = undefined;
-            if (windows.kernel32.GetOverlappedResult(handles[i], &overlapped[i], &read_bytes, 0) == 0) {
-                switch (windows.kernel32.GetLastError()) {
-                    .BROKEN_PIPE => continue,
-                    else => |err| return windows.unexpectedError(err),
-                }
-            }
-
-            outs[i].items.len += read_bytes;
-
-            switch (try windowsAsyncRead(handles[i], &overlapped[i], outs[i], bump_amt, max_output_bytes)) {
-                .pending => {
-                    wait_objects[wait_object_count] = handles[i];
-                    wait_object_count += 1;
-                },
-                .closed => {}, // don't add to the wait_objects list
-                .full => return if (i == 0) error.StdoutStreamTooLong else error.StderrStreamTooLong,
-            }
-        }
-    }
 
     /// Spawns a child process, waits for it, collecting stdout and stderr, and then returns.
     /// If it succeeds, the caller owns result.stdout and result.stderr memory.
@@ -411,7 +305,7 @@ pub const ChildProcess = struct {
         env_map: ?*const EnvMap = null,
         max_output_bytes: usize = 50 * 1024,
         expand_arg0: Arg0Expand = .no_expand,
-    }) !ExecResult {
+    }) ExecError!ExecResult {
         var child = ChildProcess.init(args.argv, args.allocator);
         child.stdin_behavior = .Ignore;
         child.stdout_behavior = .Pipe;
@@ -459,28 +353,34 @@ pub const ChildProcess = struct {
     }
 
     fn waitUnwrappedWindows(self: *ChildProcess) !void {
-        const result = windows.WaitForSingleObjectEx(self.handle, windows.INFINITE, false);
+        const result = windows.WaitForSingleObjectEx(self.id, windows.INFINITE, false);
 
         self.term = @as(SpawnError!Term, x: {
             var exit_code: windows.DWORD = undefined;
-            if (windows.kernel32.GetExitCodeProcess(self.handle, &exit_code) == 0) {
+            if (windows.kernel32.GetExitCodeProcess(self.id, &exit_code) == 0) {
                 break :x Term{ .Unknown = 0 };
             } else {
                 break :x Term{ .Exited = @truncate(u8, exit_code) };
             }
         });
 
-        os.close(self.handle);
+        os.close(self.id);
         os.close(self.thread_handle);
         self.cleanupStreams();
         return result;
     }
 
     fn waitUnwrapped(self: *ChildProcess) !void {
-        const res: os.WaitPidResult = if (comptime builtin.target.isDarwin())
-            try os.posix_spawn.waitpid(self.pid, 0)
-        else
-            os.waitpid(self.pid, 0);
+        const res: os.WaitPidResult = res: {
+            if (builtin.os.tag == .linux and self.request_resource_usage_statistics) {
+                var ru: std.os.rusage = undefined;
+                const res = os.wait4(self.id, 0, &ru);
+                self.resource_usage_statistics.rusage = ru;
+                break :res res;
+            }
+
+            break :res os.waitpid(self.id, 0);
+        };
         const status = res.status;
         self.cleanupStreams();
         self.handleWaitResult(status);
@@ -554,121 +454,6 @@ pub const ChildProcess = struct {
             Term{ .Stopped = os.W.STOPSIG(status) }
         else
             Term{ .Unknown = status };
-    }
-
-    fn spawnMacos(self: *ChildProcess) SpawnError!void {
-        const pipe_flags = if (io.is_async) os.O.NONBLOCK else 0;
-        const stdin_pipe = if (self.stdin_behavior == StdIo.Pipe) try os.pipe2(pipe_flags) else undefined;
-        errdefer if (self.stdin_behavior == StdIo.Pipe) destroyPipe(stdin_pipe);
-
-        const stdout_pipe = if (self.stdout_behavior == StdIo.Pipe) try os.pipe2(pipe_flags) else undefined;
-        errdefer if (self.stdout_behavior == StdIo.Pipe) destroyPipe(stdout_pipe);
-
-        const stderr_pipe = if (self.stderr_behavior == StdIo.Pipe) try os.pipe2(pipe_flags) else undefined;
-        errdefer if (self.stderr_behavior == StdIo.Pipe) destroyPipe(stderr_pipe);
-
-        const any_ignore = (self.stdin_behavior == StdIo.Ignore or self.stdout_behavior == StdIo.Ignore or self.stderr_behavior == StdIo.Ignore);
-        const dev_null_fd = if (any_ignore)
-            os.openZ("/dev/null", os.O.RDWR, 0) catch |err| switch (err) {
-                error.PathAlreadyExists => unreachable,
-                error.NoSpaceLeft => unreachable,
-                error.FileTooBig => unreachable,
-                error.DeviceBusy => unreachable,
-                error.FileLocksNotSupported => unreachable,
-                error.BadPathName => unreachable, // Windows-only
-                error.InvalidHandle => unreachable, // WASI-only
-                error.WouldBlock => unreachable,
-                else => |e| return e,
-            }
-        else
-            undefined;
-        defer if (any_ignore) os.close(dev_null_fd);
-
-        var attr = try os.posix_spawn.Attr.init();
-        defer attr.deinit();
-        var flags: u16 = os.darwin.POSIX_SPAWN_SETSIGDEF | os.darwin.POSIX_SPAWN_SETSIGMASK;
-        if (self.disable_aslr) {
-            flags |= os.darwin._POSIX_SPAWN_DISABLE_ASLR;
-        }
-        if (self.start_suspended) {
-            flags |= os.darwin.POSIX_SPAWN_START_SUSPENDED;
-        }
-        try attr.set(flags);
-
-        var actions = try os.posix_spawn.Actions.init();
-        defer actions.deinit();
-
-        try setUpChildIoPosixSpawn(self.stdin_behavior, &actions, stdin_pipe, os.STDIN_FILENO, dev_null_fd);
-        try setUpChildIoPosixSpawn(self.stdout_behavior, &actions, stdout_pipe, os.STDOUT_FILENO, dev_null_fd);
-        try setUpChildIoPosixSpawn(self.stderr_behavior, &actions, stderr_pipe, os.STDERR_FILENO, dev_null_fd);
-
-        if (self.cwd_dir) |cwd| {
-            try actions.fchdir(cwd.fd);
-        } else if (self.cwd) |cwd| {
-            try actions.chdir(cwd);
-        }
-
-        var arena_allocator = std.heap.ArenaAllocator.init(self.allocator);
-        defer arena_allocator.deinit();
-        const arena = arena_allocator.allocator();
-
-        const argv_buf = try arena.allocSentinel(?[*:0]u8, self.argv.len, null);
-        for (self.argv, 0..) |arg, i| argv_buf[i] = (try arena.dupeZ(u8, arg)).ptr;
-
-        const envp = if (self.env_map) |env_map| m: {
-            const envp_buf = try createNullDelimitedEnvMap(arena, env_map);
-            break :m envp_buf.ptr;
-        } else std.c.environ;
-
-        const pid = try os.posix_spawn.spawnp(self.argv[0], actions, attr, argv_buf, envp);
-
-        if (self.stdin_behavior == StdIo.Pipe) {
-            self.stdin = File{ .handle = stdin_pipe[1] };
-        } else {
-            self.stdin = null;
-        }
-        if (self.stdout_behavior == StdIo.Pipe) {
-            self.stdout = File{ .handle = stdout_pipe[0] };
-        } else {
-            self.stdout = null;
-        }
-        if (self.stderr_behavior == StdIo.Pipe) {
-            self.stderr = File{ .handle = stderr_pipe[0] };
-        } else {
-            self.stderr = null;
-        }
-
-        self.pid = pid;
-        self.term = null;
-
-        if (self.stdin_behavior == StdIo.Pipe) {
-            os.close(stdin_pipe[0]);
-        }
-        if (self.stdout_behavior == StdIo.Pipe) {
-            os.close(stdout_pipe[1]);
-        }
-        if (self.stderr_behavior == StdIo.Pipe) {
-            os.close(stderr_pipe[1]);
-        }
-    }
-
-    fn setUpChildIoPosixSpawn(
-        stdio: StdIo,
-        actions: *os.posix_spawn.Actions,
-        pipe_fd: [2]i32,
-        std_fileno: i32,
-        dev_null_fd: i32,
-    ) !void {
-        switch (stdio) {
-            .Pipe => {
-                const idx: usize = if (std_fileno == 0) 0 else 1;
-                try actions.dup2(pipe_fd[idx], std_fileno);
-                try actions.close(pipe_fd[1 - idx]);
-            },
-            .Close => try actions.close(std_fileno),
-            .Inherit => {},
-            .Ignore => try actions.dup2(dev_null_fd, std_fileno),
-        }
     }
 
     fn spawnPosix(self: *ChildProcess) SpawnError!void {
@@ -812,7 +597,7 @@ pub const ChildProcess = struct {
             self.stderr = null;
         }
 
-        self.pid = pid;
+        self.id = pid;
         self.err_pipe = err_pipe;
         self.term = null;
 
@@ -1078,7 +863,7 @@ pub const ChildProcess = struct {
             self.stderr = null;
         }
 
-        self.handle = piProcInfo.hProcess;
+        self.id = piProcInfo.hProcess;
         self.thread_handle = piProcInfo.hThread;
         self.term = null;
 
