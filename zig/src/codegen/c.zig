@@ -751,8 +751,8 @@ pub const DeclGen = struct {
                 .Int, .Enum, .ErrorSet => return writer.print("{x}", .{try dg.fmtIntLiteral(ty, val, location)}),
                 .Float => {
                     const bits = ty.floatBits(target);
-                    var int_pl = Type.Payload.Bits{ .base = .{ .tag = .int_signed }, .data = bits };
-                    const int_ty = Type.initPayload(&int_pl.base);
+                    var repr_pl = Type.Payload.Bits{ .base = .{ .tag = .int_unsigned }, .data = bits };
+                    const repr_ty = Type.initPayload(&repr_pl.base);
 
                     try writer.writeAll("zig_cast_");
                     try dg.renderTypeForBuiltinFnName(writer, ty);
@@ -768,7 +768,7 @@ pub const DeclGen = struct {
                         else => unreachable,
                     }
                     try writer.writeAll(", ");
-                    try dg.renderValue(writer, int_ty, Value.undef, .FunctionArgument);
+                    try dg.renderValue(writer, repr_ty, Value.undef, .FunctionArgument);
                     return writer.writeByte(')');
                 },
                 .Pointer => if (ty.isSlice()) {
@@ -935,31 +935,33 @@ pub const DeclGen = struct {
                 const bits = ty.floatBits(target);
                 const f128_val = val.toFloat(f128);
 
-                var int_ty_pl = Type.Payload.Bits{ .base = .{ .tag = .int_signed }, .data = bits };
-                const int_ty = Type.initPayload(&int_ty_pl.base);
+                var repr_ty_pl = Type.Payload.Bits{ .base = .{ .tag = .int_unsigned }, .data = bits };
+                const repr_ty = Type.initPayload(&repr_ty_pl.base);
 
                 assert(bits <= 128);
-                var int_val_limbs: [BigInt.calcTwosCompLimbCount(128)]BigIntLimb = undefined;
-                var int_val_big = BigInt.Mutable{
-                    .limbs = &int_val_limbs,
+                var repr_val_limbs: [BigInt.calcTwosCompLimbCount(128)]BigIntLimb = undefined;
+                var repr_val_big = BigInt.Mutable{
+                    .limbs = &repr_val_limbs,
                     .len = undefined,
                     .positive = undefined,
                 };
 
                 switch (bits) {
-                    16 => int_val_big.set(@bitCast(i16, val.toFloat(f16))),
-                    32 => int_val_big.set(@bitCast(i32, val.toFloat(f32))),
-                    64 => int_val_big.set(@bitCast(i64, val.toFloat(f64))),
-                    80 => int_val_big.set(@bitCast(i80, val.toFloat(f80))),
-                    128 => int_val_big.set(@bitCast(i128, f128_val)),
+                    16 => repr_val_big.set(@bitCast(u16, val.toFloat(f16))),
+                    32 => repr_val_big.set(@bitCast(u32, val.toFloat(f32))),
+                    64 => repr_val_big.set(@bitCast(u64, val.toFloat(f64))),
+                    80 => repr_val_big.set(@bitCast(u80, val.toFloat(f80))),
+                    128 => repr_val_big.set(@bitCast(u128, f128_val)),
                     else => unreachable,
                 }
 
-                var int_val_pl = Value.Payload.BigInt{
-                    .base = .{ .tag = if (int_val_big.positive) .int_big_positive else .int_big_negative },
-                    .data = int_val_big.limbs[0..int_val_big.len],
+                var repr_val_pl = Value.Payload.BigInt{
+                    .base = .{
+                        .tag = if (repr_val_big.positive) .int_big_positive else .int_big_negative,
+                    },
+                    .data = repr_val_big.limbs[0..repr_val_big.len],
                 };
-                const int_val = Value.initPayload(&int_val_pl.base);
+                const repr_val = Value.initPayload(&repr_val_pl.base);
 
                 try writer.writeAll("zig_cast_");
                 try dg.renderTypeForBuiltinFnName(writer, ty);
@@ -1023,7 +1025,7 @@ pub const DeclGen = struct {
                     try writer.writeAll(", ");
                     empty = false;
                 }
-                try writer.print("{x}", .{try dg.fmtIntLiteral(int_ty, int_val, location)});
+                try writer.print("{x}", .{try dg.fmtIntLiteral(repr_ty, repr_val, location)});
                 if (!empty) try writer.writeByte(')');
                 return;
             },
@@ -1069,7 +1071,7 @@ pub const DeclGen = struct {
                     const extern_fn = val.castTag(.extern_fn).?.data;
                     try dg.renderDeclName(writer, extern_fn.owner_decl, 0);
                 },
-                .int_u64, .one => {
+                .int_u64, .one, .int_big_positive, .lazy_align, .lazy_size => {
                     try writer.writeAll("((");
                     try dg.renderType(writer, ty);
                     return writer.print("){x})", .{try dg.fmtIntLiteral(Type.usize, val, .Other)});
@@ -2995,6 +2997,11 @@ fn genBodyInner(f: *Function, body: []const Air.Inst.Index) error{ AnalysisFail,
             .c_va_arg => try airCVaArg(f, inst),
             .c_va_end => try airCVaEnd(f, inst),
             .c_va_copy => try airCVaCopy(f, inst),
+
+            .work_item_id,
+            .work_group_size,
+            .work_group_id,
+            => unreachable,
             // zig fmt: on
         };
         if (result_value == .new_local) {
@@ -3592,10 +3599,6 @@ fn airStore(f: *Function, inst: Air.Inst.Index) !CValue {
     const ptr_ty = f.air.typeOf(bin_op.lhs);
     const ptr_scalar_ty = ptr_ty.scalarType();
     const ptr_info = ptr_scalar_ty.ptrInfo().data;
-    if (!ptr_info.pointee_type.hasRuntimeBitsIgnoreComptime()) {
-        try reap(f, inst, &.{ bin_op.lhs, bin_op.rhs });
-        return .none;
-    }
 
     const ptr_val = try f.resolveInst(bin_op.lhs);
     const src_ty = f.air.typeOf(bin_op.rhs);
@@ -4456,9 +4459,7 @@ fn airBr(f: *Function, inst: Air.Inst.Index) !CValue {
 fn airBitcast(f: *Function, inst: Air.Inst.Index) !CValue {
     const ty_op = f.air.instructions.items(.data)[inst].ty_op;
     const dest_ty = f.air.typeOfIndex(inst);
-    // No IgnoreComptime until Sema stops giving us garbage Air.
-    // https://github.com/ziglang/zig/issues/13410
-    if (f.liveness.isUnused(inst) or !dest_ty.hasRuntimeBits()) {
+    if (f.liveness.isUnused(inst)) {
         try reap(f, inst, &.{ty_op.operand});
         return .none;
     }

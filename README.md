@@ -8,10 +8,10 @@ end with a fully operational Zig compiler for any target.
 This repository copies sources from upstream. Patches listed below. Use git
 to find and inspect the patch diffs.
 
- * LLVM, LLD, Clang 15.0.7
+ * LLVM, LLD, Clang 16.0.1
  * zlib 1.2.13
  * zstd 1.5.2
- * zig 0.11.0-dev.2247+38ee46dda
+ * zig 0.11.0-dev.2441+eb19f73af
 
 For other versions, check the git tags of this repository.
 
@@ -19,7 +19,6 @@ For other versions, check the git tags of this repository.
 
  * all: Deleted unused files.
  * LLVM: Support .lib extension for static zstd.
- * LLVM: Copied CMake modules from out of tree.
  * LLVM: Portable handling of .def linker flag
  * Clang: Disable building of libclang-cpp.so.
  * LLD: Added additional include directory to Zig's libunwind.

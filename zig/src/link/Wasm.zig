@@ -1573,7 +1573,8 @@ pub fn lowerUnnamedConst(wasm: *Wasm, tv: TypedValue, decl_index: Module.Decl.In
 /// such as an exported or imported symbol.
 /// If the symbol does not yet exist, creates a new one symbol instead
 /// and then returns the index to it.
-pub fn getGlobalSymbol(wasm: *Wasm, name: []const u8) !u32 {
+pub fn getGlobalSymbol(wasm: *Wasm, name: []const u8, lib_name: ?[]const u8) !u32 {
+    _ = lib_name;
     const name_index = try wasm.string_table.put(wasm.base.allocator, name);
     const gop = try wasm.globals.getOrPut(wasm.base.allocator, name_index);
     if (gop.found_existing) {
@@ -3058,7 +3059,7 @@ fn linkWithZld(wasm: *Wasm, comp: *Compilation, prog_node: *std.Progress.Node) l
         // We are about to obtain this lock, so here we give other processes a chance first.
         wasm.base.releaseLock();
 
-        comptime assert(Compilation.link_hash_implementation_version == 7);
+        comptime assert(Compilation.link_hash_implementation_version == 8);
 
         for (options.objects) |obj| {
             _ = try man.addFile(obj.path, null);
@@ -4085,7 +4086,7 @@ fn linkWithLLD(wasm: *Wasm, comp: *Compilation, prog_node: *std.Progress.Node) !
         // We are about to obtain this lock, so here we give other processes a chance first.
         wasm.base.releaseLock();
 
-        comptime assert(Compilation.link_hash_implementation_version == 7);
+        comptime assert(Compilation.link_hash_implementation_version == 8);
 
         for (wasm.base.options.objects) |obj| {
             _ = try man.addFile(obj.path, null);

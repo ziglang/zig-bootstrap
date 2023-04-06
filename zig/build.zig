@@ -107,6 +107,11 @@ pub fn build(b: *std.Build) !void {
         "llvm-has-arc",
         "Whether LLVM has the experimental target arc enabled",
     ) orelse false;
+    const llvm_has_xtensa = b.option(
+        bool,
+        "llvm-has-xtensa",
+        "Whether LLVM has the experimental target xtensa enabled",
+    ) orelse false;
     const enable_macos_sdk = b.option(bool, "enable-macos-sdk", "Run tests requiring presence of macOS SDK and frameworks") orelse false;
     const enable_symlinks_windows = b.option(bool, "enable-symlinks-windows", "Run tests requiring presence of symlinks on Windows") orelse false;
     const config_h_path_option = b.option([]const u8, "config_h", "Path to the generated config.h");
@@ -202,6 +207,7 @@ pub fn build(b: *std.Build) !void {
     exe_options.addOption(bool, "llvm_has_m68k", llvm_has_m68k);
     exe_options.addOption(bool, "llvm_has_csky", llvm_has_csky);
     exe_options.addOption(bool, "llvm_has_arc", llvm_has_arc);
+    exe_options.addOption(bool, "llvm_has_xtensa", llvm_has_xtensa);
     exe_options.addOption(bool, "force_gpa", force_gpa);
     exe_options.addOption(bool, "only_c", only_c);
     exe_options.addOption(bool, "omit_pkg_fetching_code", only_c);
@@ -358,6 +364,7 @@ pub fn build(b: *std.Build) !void {
     test_cases_options.addOption(bool, "llvm_has_m68k", llvm_has_m68k);
     test_cases_options.addOption(bool, "llvm_has_csky", llvm_has_csky);
     test_cases_options.addOption(bool, "llvm_has_arc", llvm_has_arc);
+    test_cases_options.addOption(bool, "llvm_has_xtensa", llvm_has_xtensa);
     test_cases_options.addOption(bool, "force_gpa", force_gpa);
     test_cases_options.addOption(bool, "only_c", only_c);
     test_cases_options.addOption(bool, "enable_qemu", b.enable_qemu);
@@ -521,7 +528,12 @@ fn addWasiUpdateStep(b: *std.Build, version: [:0]const u8) !void {
     exe_options.addOption(bool, "value_tracing", false);
     exe_options.addOption(bool, "omit_pkg_fetching_code", true);
 
-    const run_opt = b.addSystemCommand(&.{ "wasm-opt", "-Oz", "--enable-bulk-memory" });
+    const run_opt = b.addSystemCommand(&.{
+        "wasm-opt",
+        "-Oz",
+        "--enable-bulk-memory",
+        "--enable-sign-ext",
+    });
     run_opt.addArtifactArg(exe);
     run_opt.addArg("-o");
     run_opt.addFileSourceArg(.{ .path = "stage1/zig1.wasm" });
@@ -550,7 +562,7 @@ fn addCompilerStep(
 }
 
 const exe_cflags = [_][]const u8{
-    "-std=c++14",
+    "-std=c++17",
     "-D__STDC_CONSTANT_MACROS",
     "-D__STDC_FORMAT_MACROS",
     "-D__STDC_LIMIT_MACROS",
@@ -942,7 +954,6 @@ const lld_libs = [_][]const u8{
 // from these libs.
 const llvm_libs = [_][]const u8{
     "LLVMWindowsManifest",
-    "LLVMWindowsDriver",
     "LLVMXRay",
     "LLVMLibDriver",
     "LLVMDlltoolDriver",
@@ -979,6 +990,7 @@ const llvm_libs = [_][]const u8{
     "LLVMSparcCodeGen",
     "LLVMSparcDesc",
     "LLVMSparcInfo",
+    "LLVMRISCVTargetMCA",
     "LLVMRISCVDisassembler",
     "LLVMRISCVAsmParser",
     "LLVMRISCVCodeGen",
@@ -1002,6 +1014,11 @@ const llvm_libs = [_][]const u8{
     "LLVMMipsCodeGen",
     "LLVMMipsDesc",
     "LLVMMipsInfo",
+    "LLVMLoongArchDisassembler",
+    "LLVMLoongArchAsmParser",
+    "LLVMLoongArchCodeGen",
+    "LLVMLoongArchDesc",
+    "LLVMLoongArchInfo",
     "LLVMLanaiDisassembler",
     "LLVMLanaiCodeGen",
     "LLVMLanaiAsmParser",
@@ -1042,6 +1059,7 @@ const llvm_libs = [_][]const u8{
     "LLVMAArch64Utils",
     "LLVMAArch64Info",
     "LLVMOrcJIT",
+    "LLVMWindowsDriver",
     "LLVMMCJIT",
     "LLVMJITLink",
     "LLVMInterpreter",
@@ -1050,6 +1068,7 @@ const llvm_libs = [_][]const u8{
     "LLVMOrcTargetProcess",
     "LLVMOrcShared",
     "LLVMDWP",
+    "LLVMDebugInfoLogicalView",
     "LLVMDebugInfoGSYM",
     "LLVMOption",
     "LLVMObjectYAML",
@@ -1060,22 +1079,23 @@ const llvm_libs = [_][]const u8{
     "LLVMPasses",
     "LLVMCFGuard",
     "LLVMCoroutines",
-    "LLVMObjCARCOpts",
     "LLVMipo",
     "LLVMVectorize",
     "LLVMLinker",
     "LLVMInstrumentation",
     "LLVMFrontendOpenMP",
     "LLVMFrontendOpenACC",
+    "LLVMFrontendHLSL",
     "LLVMExtensions",
+    "LLVMDWARFLinkerParallel",
     "LLVMDWARFLinker",
     "LLVMGlobalISel",
     "LLVMMIRParser",
     "LLVMAsmPrinter",
     "LLVMSelectionDAG",
     "LLVMCodeGen",
-    "LLVMIRReader",
-    "LLVMAsmParser",
+    "LLVMObjCARCOpts",
+    "LLVMIRPrinter",
     "LLVMInterfaceStub",
     "LLVMFileCheck",
     "LLVMFuzzMutate",
@@ -1094,6 +1114,8 @@ const llvm_libs = [_][]const u8{
     "LLVMObject",
     "LLVMTextAPI",
     "LLVMMCParser",
+    "LLVMIRReader",
+    "LLVMAsmParser",
     "LLVMMC",
     "LLVMDebugInfoCodeView",
     "LLVMBitReader",
@@ -1102,6 +1124,7 @@ const llvm_libs = [_][]const u8{
     "LLVMRemarks",
     "LLVMBitstreamReader",
     "LLVMBinaryFormat",
+    "LLVMTargetParser",
     "LLVMSupport",
     "LLVMDemangle",
 };

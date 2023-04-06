@@ -127,9 +127,9 @@ if(ZIG_AR_WORKAROUND)
   string(REPLACE "<CMAKE_AR>" "<CMAKE_AR> ar" CMAKE_CXX_ARCHIVE_CREATE ${CMAKE_CXX_ARCHIVE_CREATE})
 endif()
 
-find_package(llvm 15)
-find_package(clang 15)
-find_package(lld 15)
+find_package(llvm 16)
+find_package(clang 16)
+find_package(lld 16)
 
 if(ZIG_STATIC_ZLIB)
     if (MSVC)
@@ -583,6 +583,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/link/C.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Coff.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Coff/Atom.zig"
+    "${CMAKE_SOURCE_DIR}/src/link/Coff/ImportTable.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Coff/Object.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Coff/lld.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Elf.zig"
@@ -657,13 +658,13 @@ include_directories(
 )
 
 if(MSVC)
-  set(EXE_CXX_FLAGS "/std:c++14")
+  set(EXE_CXX_FLAGS "/std:c++17")
   set(EXE_LDFLAGS "/STACK:16777216")
   if(NOT "${CMAKE_BUILD_TYPE}" STREQUAL "Release" AND NOT "${CMAKE_BUILD_TYPE}" STREQUAL "MinSizeRel")
     set(EXE_LDFLAGS "${EXE_LDFLAGS} /debug:fastlink")
   endif()
 else()
-  set(EXE_CXX_FLAGS "-std=c++14 -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS -D_GNU_SOURCE -fvisibility-inlines-hidden -fno-exceptions -fno-rtti -Werror=type-limits -Wno-missing-braces -Wno-comment")
+  set(EXE_CXX_FLAGS "-std=c++17 -D__STDC_CONSTANT_MACROS -D__STDC_FORMAT_MACROS -D__STDC_LIMIT_MACROS -D_GNU_SOURCE -fvisibility-inlines-hidden -fno-exceptions -fno-rtti -Werror=type-limits -Wno-missing-braces -Wno-comment")
   set(EXE_LDFLAGS " ")
   if(MINGW)
     set(EXE_CXX_FLAGS "${EXE_CXX_FLAGS} -Wno-format")

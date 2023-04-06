@@ -186,8 +186,7 @@ pub const Options = struct {
 
     /// List of symbols forced as undefined in the symbol table
     /// thus forcing their resolution by the linker.
-    /// Corresponds to `-u <symbol>` for ELF and `/include:<symbol>` for COFF/PE.
-    /// TODO add handling for MachO.
+    /// Corresponds to `-u <symbol>` for ELF/MachO and `/include:<symbol>` for COFF/PE.
     force_undefined_symbols: std.StringArrayHashMapUnmanaged(void),
 
     version: ?std.builtin.Version,
@@ -379,23 +378,30 @@ pub const File = struct {
                 if (base.file != null) return;
                 const emit = base.options.emit orelse return;
                 if (base.child_pid) |pid| {
-                    // If we try to open the output file in write mode while it is running,
-                    // it will return ETXTBSY. So instead, we copy the file, atomically rename it
-                    // over top of the exe path, and then proceed normally. This changes the inode,
-                    // avoiding the error.
-                    const tmp_sub_path = try std.fmt.allocPrint(base.allocator, "{s}-{x}", .{
-                        emit.sub_path, std.crypto.random.int(u32),
-                    });
-                    try emit.directory.handle.copyFile(emit.sub_path, emit.directory.handle, tmp_sub_path, .{});
-                    try emit.directory.handle.rename(tmp_sub_path, emit.sub_path);
-                    switch (builtin.os.tag) {
-                        .linux => std.os.ptrace(std.os.linux.PTRACE.ATTACH, pid, 0, 0) catch |err| {
-                            log.warn("ptrace failure: {s}", .{@errorName(err)});
-                        },
-                        .macos => base.cast(MachO).?.ptraceAttach(pid) catch |err| {
+                    if (builtin.os.tag == .windows) {
+                        base.cast(Coff).?.ptraceAttach(pid) catch |err| {
                             log.warn("attaching failed with error: {s}", .{@errorName(err)});
-                        },
-                        else => return error.HotSwapUnavailableOnHostOperatingSystem,
+                        };
+                    } else {
+                        // If we try to open the output file in write mode while it is running,
+                        // it will return ETXTBSY. So instead, we copy the file, atomically rename it
+                        // over top of the exe path, and then proceed normally. This changes the inode,
+                        // avoiding the error.
+                        const tmp_sub_path = try std.fmt.allocPrint(base.allocator, "{s}-{x}", .{
+                            emit.sub_path, std.crypto.random.int(u32),
+                        });
+                        try emit.directory.handle.copyFile(emit.sub_path, emit.directory.handle, tmp_sub_path, .{});
+                        try emit.directory.handle.rename(tmp_sub_path, emit.sub_path);
+                        switch (builtin.os.tag) {
+                            .linux => std.os.ptrace(std.os.linux.PTRACE.ATTACH, pid, 0, 0) catch |err| {
+                                log.warn("ptrace failure: {s}", .{@errorName(err)});
+                            },
+                            .macos => base.cast(MachO).?.ptraceAttach(pid) catch |err| {
+                                log.warn("attaching failed with error: {s}", .{@errorName(err)});
+                            },
+                            .windows => unreachable,
+                            else => return error.HotSwapUnavailableOnHostOperatingSystem,
+                        }
                     }
                 }
                 base.file = try emit.directory.handle.createFile(emit.sub_path, .{
@@ -436,6 +442,7 @@ pub const File = struct {
                         .macos => base.cast(MachO).?.ptraceDetach(pid) catch |err| {
                             log.warn("detaching failed with error: {s}", .{@errorName(err)});
                         },
+                        .windows => base.cast(Coff).?.ptraceDetach(pid),
                         else => return error.HotSwapUnavailableOnHostOperatingSystem,
                     }
                 }
@@ -504,18 +511,20 @@ pub const File = struct {
     /// Called from within CodeGen to retrieve the symbol index of a global symbol.
     /// If no symbol exists yet with this name, a new undefined global symbol will
     /// be created. This symbol may get resolved once all relocatables are (re-)linked.
-    pub fn getGlobalSymbol(base: *File, name: []const u8) UpdateDeclError!u32 {
+    /// Optionally, it is possible to specify where to expect the symbol defined if it
+    /// is an import.
+    pub fn getGlobalSymbol(base: *File, name: []const u8, lib_name: ?[]const u8) UpdateDeclError!u32 {
         if (build_options.only_c) @compileError("unreachable");
-        log.debug("getGlobalSymbol '{s}'", .{name});
+        log.debug("getGlobalSymbol '{s}' (expected in '{?s}')", .{ name, lib_name });
         switch (base.tag) {
             // zig fmt: off
-            .coff  => return @fieldParentPtr(Coff, "base", base).getGlobalSymbol(name),
+            .coff  => return @fieldParentPtr(Coff, "base", base).getGlobalSymbol(name, lib_name),
             .elf   => unreachable,
-            .macho => return @fieldParentPtr(MachO, "base", base).getGlobalSymbol(name),
+            .macho => return @fieldParentPtr(MachO, "base", base).getGlobalSymbol(name, lib_name),
             .plan9 => unreachable,
             .spirv => unreachable,
             .c     => unreachable,
-            .wasm  => return @fieldParentPtr(Wasm,  "base", base).getGlobalSymbol(name),
+            .wasm  => return @fieldParentPtr(Wasm,  "base", base).getGlobalSymbol(name, lib_name),
             .nvptx => unreachable,
             // zig fmt: on
         }
@@ -678,6 +687,7 @@ pub const File = struct {
         FrameworkNotFound,
         FunctionSignatureMismatch,
         GlobalTypeMismatch,
+        HotSwapUnavailableOnHostOperatingSystem,
         InvalidCharacter,
         InvalidEntryKind,
         InvalidFeatureSet,
@@ -1093,6 +1103,24 @@ pub const File = struct {
     pub const ErrorFlags = struct {
         no_entry_point_found: bool = false,
         missing_libc: bool = false,
+    };
+
+    pub const LazySymbol = struct {
+        pub const Kind = enum { code, const_data };
+
+        kind: Kind,
+        ty: Type,
+
+        pub fn initDecl(kind: Kind, decl: Module.Decl.OptionalIndex, mod: *Module) LazySymbol {
+            return .{ .kind = kind, .ty = if (decl.unwrap()) |decl_index|
+                mod.declPtr(decl_index).val.castTag(.ty).?.data
+            else
+                Type.anyerror };
+        }
+
+        pub fn getDecl(self: LazySymbol) Module.Decl.OptionalIndex {
+            return Module.Decl.OptionalIndex.init(self.ty.getOwnerDeclOrNull());
+        }
     };
 
     pub const C = @import("link/C.zig");

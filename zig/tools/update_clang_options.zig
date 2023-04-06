@@ -469,6 +469,10 @@ const known_options = [_]KnownOpt{
         .ident = "entry",
     },
     .{
+        .name = "u",
+        .ident = "force_undefined_symbol",
+    },
+    .{
         .name = "weak-l",
         .ident = "weak_library",
     },
@@ -784,6 +788,8 @@ fn objSyntax(obj: *json.ObjectMap) ?Syntax {
         } else if (std.mem.eql(u8, superclass, "CLIgnoredJoined")) {
             return .joined;
         } else if (std.mem.eql(u8, superclass, "CLCompileJoined")) {
+            return .joined;
+        } else if (std.mem.eql(u8, superclass, "CLDXCJoined")) {
             return .joined;
         } else if (std.mem.eql(u8, superclass, "JoinedOrSeparate")) {
             return .joined_or_separate;

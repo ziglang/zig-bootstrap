@@ -1937,6 +1937,8 @@ pub fn getenv(key: []const u8) ?[]const u8 {
     if (builtin.os.tag == .windows) {
         @compileError("std.os.getenv is unavailable for Windows because environment string is in WTF-16 format. See std.process.getEnvVarOwned for cross-platform API or std.os.getenvW for Windows-specific API.");
     }
+    // The simplified start logic doesn't populate environ.
+    if (std.start.simplified_logic) return null;
     // TODO see https://github.com/ziglang/zig/issues/4524
     for (environ) |ptr| {
         var line_i: usize = 0;
@@ -6970,6 +6972,35 @@ pub fn setrlimit(resource: rlimit_resource, limits: rlimit) SetrlimitError!void 
         .PERM => return error.PermissionDenied,
         else => |err| return unexpectedErrno(err),
     }
+}
+
+pub const MincoreError = error{
+    /// A kernel resource was temporarily unavailable.
+    SystemResources,
+    /// vec points to an invalid address.
+    InvalidAddress,
+    /// addr is not page-aligned.
+    InvalidSyscall,
+    /// One of the following:
+    /// * length is greater than user space TASK_SIZE - addr
+    /// * addr + length contains unmapped memory
+    OutOfMemory,
+    /// The mincore syscall is not available on this version and configuration
+    /// of this UNIX-like kernel.
+    MincoreUnavailable,
+} || UnexpectedError;
+
+/// Determine whether pages are resident in memory.
+pub fn mincore(ptr: [*]align(mem.page_size) u8, length: usize, vec: [*]u8) MincoreError!void {
+    return switch (errno(system.mincore(ptr, length, vec))) {
+        .SUCCESS => {},
+        .AGAIN => error.SystemResources,
+        .FAULT => error.InvalidAddress,
+        .INVAL => error.InvalidSyscall,
+        .NOMEM => error.OutOfMemory,
+        .NOSYS => error.MincoreUnavailable,
+        else => |err| unexpectedErrno(err),
+    };
 }
 
 pub const MadviseError = error{

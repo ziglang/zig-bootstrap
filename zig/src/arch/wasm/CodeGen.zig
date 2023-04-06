@@ -1997,6 +1997,11 @@ fn genInst(func: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .reduce_optimized,
         .float_to_int_optimized,
         => return func.fail("TODO implement optimized float mode", .{}),
+
+        .work_item_id,
+        .work_group_size,
+        .work_group_id,
+        => unreachable,
     };
 }
 
@@ -6121,7 +6126,7 @@ fn callIntrinsic(
     args: []const WValue,
 ) InnerError!WValue {
     assert(param_types.len == args.len);
-    const symbol_index = func.bin_file.base.getGlobalSymbol(name) catch |err| {
+    const symbol_index = func.bin_file.base.getGlobalSymbol(name, null) catch |err| {
         return func.fail("Could not find or create global symbol '{s}'", .{@errorName(err)});
     };
 
