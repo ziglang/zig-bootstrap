@@ -142,13 +142,13 @@ pub fn main() !void {
                 };
             } else if (mem.eql(u8, arg, "--sysroot")) {
                 const sysroot = nextArg(args, &arg_idx) orelse {
-                    std.debug.print("Expected argument after --sysroot\n\n", .{});
+                    std.debug.print("Expected argument after {s}\n\n", .{arg});
                     usageAndErr(builder, false, stderr_stream);
                 };
                 builder.sysroot = sysroot;
             } else if (mem.eql(u8, arg, "--maxrss")) {
                 const max_rss_text = nextArg(args, &arg_idx) orelse {
-                    std.debug.print("Expected argument after --sysroot\n\n", .{});
+                    std.debug.print("Expected argument after {s}\n\n", .{arg});
                     usageAndErr(builder, false, stderr_stream);
                 };
                 // TODO: support shorthand such as "2GiB", "2GB", or "2G"
@@ -160,28 +160,28 @@ pub fn main() !void {
                 };
             } else if (mem.eql(u8, arg, "--search-prefix")) {
                 const search_prefix = nextArg(args, &arg_idx) orelse {
-                    std.debug.print("Expected argument after --search-prefix\n\n", .{});
+                    std.debug.print("Expected argument after {s}\n\n", .{arg});
                     usageAndErr(builder, false, stderr_stream);
                 };
                 builder.addSearchPrefix(search_prefix);
             } else if (mem.eql(u8, arg, "--libc")) {
                 const libc_file = nextArg(args, &arg_idx) orelse {
-                    std.debug.print("Expected argument after --libc\n\n", .{});
+                    std.debug.print("Expected argument after {s}\n\n", .{arg});
                     usageAndErr(builder, false, stderr_stream);
                 };
                 builder.libc_file = libc_file;
             } else if (mem.eql(u8, arg, "--color")) {
                 const next_arg = nextArg(args, &arg_idx) orelse {
-                    std.debug.print("expected [auto|on|off] after --color", .{});
+                    std.debug.print("Expected [auto|on|off] after {s}\n\n", .{arg});
                     usageAndErr(builder, false, stderr_stream);
                 };
                 color = std.meta.stringToEnum(Color, next_arg) orelse {
-                    std.debug.print("expected [auto|on|off] after --color, found '{s}'", .{next_arg});
+                    std.debug.print("Expected [auto|on|off] after {s}, found '{s}'\n\n", .{ arg, next_arg });
                     usageAndErr(builder, false, stderr_stream);
                 };
             } else if (mem.eql(u8, arg, "--zig-lib-dir")) {
                 builder.zig_lib_dir = nextArg(args, &arg_idx) orelse {
-                    std.debug.print("Expected argument after --zig-lib-dir\n\n", .{});
+                    std.debug.print("Expected argument after {s}\n\n", .{arg});
                     usageAndErr(builder, false, stderr_stream);
                 };
             } else if (mem.eql(u8, arg, "--debug-log")) {
@@ -196,7 +196,7 @@ pub fn main() !void {
                 builder.debug_compile_errors = true;
             } else if (mem.eql(u8, arg, "--glibc-runtimes")) {
                 builder.glibc_runtimes_dir = nextArg(args, &arg_idx) orelse {
-                    std.debug.print("Expected argument after --glibc-runtimes\n\n", .{});
+                    std.debug.print("Expected argument after {s}\n\n", .{arg});
                     usageAndErr(builder, false, stderr_stream);
                 };
             } else if (mem.eql(u8, arg, "--verbose-link")) {
@@ -204,7 +204,11 @@ pub fn main() !void {
             } else if (mem.eql(u8, arg, "--verbose-air")) {
                 builder.verbose_air = true;
             } else if (mem.eql(u8, arg, "--verbose-llvm-ir")) {
-                builder.verbose_llvm_ir = true;
+                builder.verbose_llvm_ir = "-";
+            } else if (mem.startsWith(u8, arg, "--verbose-llvm-ir=")) {
+                builder.verbose_llvm_ir = arg["--verbose-llvm-ir=".len..];
+            } else if (mem.eql(u8, arg, "--verbose-llvm-bc=")) {
+                builder.verbose_llvm_bc = arg["--verbose-llvm-bc=".len..];
             } else if (mem.eql(u8, arg, "--verbose-cimport")) {
                 builder.verbose_cimport = true;
             } else if (mem.eql(u8, arg, "--verbose-cc")) {
@@ -945,7 +949,6 @@ fn usage(builder: *std.Build, already_ran_build: bool, out_stream: anytype) !voi
         \\  -l, --list-steps             Print available steps
         \\  --verbose                    Print commands before executing them
         \\  --color [auto|off|on]        Enable or disable colored error messages
-        \\  --prominent-compile-errors   Output compile errors formatted for a human to read
         \\  -fsummary                    Print the build summary, even on success
         \\  -fno-summary                 Omit the build summary, even on failure
         \\  -j<N>                        Limit concurrent jobs (default is to use all CPU cores)
@@ -990,7 +993,8 @@ fn usage(builder: *std.Build, already_ran_build: bool, out_stream: anytype) !voi
         \\  --debug-pkg-config           Fail if unknown pkg-config flags encountered
         \\  --verbose-link               Enable compiler debug output for linking
         \\  --verbose-air                Enable compiler debug output for Zig AIR
-        \\  --verbose-llvm-ir            Enable compiler debug output for LLVM IR
+        \\  --verbose-llvm-ir[=file]     Enable compiler debug output for LLVM IR
+        \\  --verbose-llvm-bc=[file]     Enable compiler debug output for LLVM BC
         \\  --verbose-cimport            Enable compiler debug output for C imports
         \\  --verbose-cc                 Enable compiler debug output for C compilation
         \\  --verbose-llvm-cpu-features  Enable compiler debug output for LLVM CPU features
@@ -1003,13 +1007,13 @@ fn usageAndErr(builder: *std.Build, already_ran_build: bool, out_stream: anytype
     process.exit(1);
 }
 
-fn nextArg(args: [][]const u8, idx: *usize) ?[]const u8 {
+fn nextArg(args: [][:0]const u8, idx: *usize) ?[:0]const u8 {
     if (idx.* >= args.len) return null;
     defer idx.* += 1;
     return args[idx.*];
 }
 
-fn argsRest(args: [][]const u8, idx: usize) ?[][]const u8 {
+fn argsRest(args: [][:0]const u8, idx: usize) ?[][:0]const u8 {
     if (idx >= args.len) return null;
     return args[idx..];
 }

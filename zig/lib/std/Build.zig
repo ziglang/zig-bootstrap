@@ -54,12 +54,13 @@ verbose: bool,
 verbose_link: bool,
 verbose_cc: bool,
 verbose_air: bool,
-verbose_llvm_ir: bool,
+verbose_llvm_ir: ?[]const u8,
+verbose_llvm_bc: ?[]const u8,
 verbose_cimport: bool,
 verbose_llvm_cpu_features: bool,
 reference_trace: ?u32 = null,
 invalid_user_input: bool,
-zig_exe: []const u8,
+zig_exe: [:0]const u8,
 default_step: *Step,
 env_map: *EnvMap,
 top_level_steps: std.StringArrayHashMapUnmanaged(*TopLevelStep),
@@ -183,7 +184,7 @@ pub const DirList = struct {
 
 pub fn create(
     allocator: Allocator,
-    zig_exe: []const u8,
+    zig_exe: [:0]const u8,
     build_root: Cache.Directory,
     cache_root: Cache.Directory,
     global_cache_root: Cache.Directory,
@@ -204,7 +205,8 @@ pub fn create(
         .verbose_link = false,
         .verbose_cc = false,
         .verbose_air = false,
-        .verbose_llvm_ir = false,
+        .verbose_llvm_ir = null,
+        .verbose_llvm_bc = null,
         .verbose_cimport = false,
         .verbose_llvm_cpu_features = false,
         .invalid_user_input = false,
@@ -292,6 +294,7 @@ fn createChildOnly(parent: *Build, dep_name: []const u8, build_root: Cache.Direc
         .verbose_cc = parent.verbose_cc,
         .verbose_air = parent.verbose_air,
         .verbose_llvm_ir = parent.verbose_llvm_ir,
+        .verbose_llvm_bc = parent.verbose_llvm_bc,
         .verbose_cimport = parent.verbose_cimport,
         .verbose_llvm_cpu_features = parent.verbose_llvm_cpu_features,
         .reference_trace = parent.reference_trace,
@@ -1734,7 +1737,7 @@ pub fn makeTempPath(b: *Build) []const u8 {
     const rand_int = std.crypto.random.int(u64);
     const tmp_dir_sub_path = "tmp" ++ fs.path.sep_str ++ hex64(rand_int);
     const result_path = b.cache_root.join(b.allocator, &.{tmp_dir_sub_path}) catch @panic("OOM");
-    fs.cwd().makePath(result_path) catch |err| {
+    b.cache_root.handle.makePath(tmp_dir_sub_path) catch |err| {
         std.debug.print("unable to make tmp path '{s}': {s}\n", .{
             result_path, @errorName(err),
         });
@@ -1744,7 +1747,7 @@ pub fn makeTempPath(b: *Build) []const u8 {
 
 /// There are a few copies of this function in miscellaneous places. Would be nice to find
 /// a home for them.
-fn hex64(x: u64) [16]u8 {
+pub fn hex64(x: u64) [16]u8 {
     const hex_charset = "0123456789abcdef";
     var result: [16]u8 = undefined;
     var i: usize = 0;

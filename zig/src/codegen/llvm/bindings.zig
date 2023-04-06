@@ -254,9 +254,6 @@ pub const Value = opaque {
     pub const addFunctionAttr = ZigLLVMAddFunctionAttr;
     extern fn ZigLLVMAddFunctionAttr(Fn: *Value, attr_name: [*:0]const u8, attr_value: [*:0]const u8) void;
 
-    pub const getGEPResultElementType = ZigLLVMGetGEPResultElementType;
-    extern fn ZigLLVMGetGEPResultElementType(GEP: *Value) *Type;
-
     pub const addByValAttr = ZigLLVMAddByValAttr;
     extern fn ZigLLVMAddByValAttr(Fn: *Value, ArgNo: c_uint, type: *Type) void;
 };
@@ -422,6 +419,9 @@ pub const Module = opaque {
 
     pub const printModuleToFile = LLVMPrintModuleToFile;
     extern fn LLVMPrintModuleToFile(M: *Module, Filename: [*:0]const u8, ErrorMessage: *[*:0]const u8) Bool;
+
+    pub const writeBitcodeToFile = LLVMWriteBitcodeToFile;
+    extern fn LLVMWriteBitcodeToFile(M: *Module, Path: [*:0]const u8) c_int;
 };
 
 pub const lookupIntrinsicID = LLVMLookupIntrinsicID;

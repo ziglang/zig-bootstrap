@@ -140,6 +140,9 @@ link_function_sections: bool = false,
 /// exported symbols.
 link_gc_sections: ?bool = null,
 
+/// (Windows) Whether or not to enable ASLR. Maps to the /DYNAMICBASE[:NO] linker argument.
+linker_dynamicbase: bool = true,
+
 linker_allow_shlib_undefined: ?bool = null,
 
 /// Permit read-only relocations in read-only segments. Disallowed by default.
@@ -198,6 +201,11 @@ dll_export_fns: ?bool = null,
 subsystem: ?std.Target.SubSystem = null,
 
 entry_symbol_name: ?[]const u8 = null,
+
+/// List of symbols forced as undefined in the symbol table
+/// thus forcing their resolution by the linker.
+/// Corresponds to `-u <symbol>` for ELF/MachO and `/include:<symbol>` for COFF/PE.
+force_undefined_symbols: std.StringHashMap(void),
 
 /// Overrides the default stack size
 stack_size: ?u64 = null,
@@ -383,6 +391,7 @@ pub fn create(owner: *std.Build, options: Options) *CompileStep {
         .override_dest_dir = null,
         .installed_path = null,
         .install_step = null,
+        .force_undefined_symbols = StringHashMap(void).init(owner.allocator),
 
         .output_path_source = GeneratedFile{ .step = &self.step },
         .output_lib_path_source = GeneratedFile{ .step = &self.step },
@@ -563,6 +572,11 @@ pub fn setLinkerScriptPath(self: *CompileStep, source: FileSource) void {
     const b = self.step.owner;
     self.linker_script = source.dupe(b);
     source.addStepDependencies(&self.step);
+}
+
+pub fn forceUndefinedSymbol(self: *CompileStep, symbol_name: []const u8) void {
+    const b = self.step.owner;
+    self.force_undefined_symbols.put(b.dupe(symbol_name), {}) catch @panic("OOM");
 }
 
 pub fn linkFramework(self: *CompileStep, framework_name: []const u8) void {
@@ -1263,6 +1277,14 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
         try zig_args.append(entry);
     }
 
+    {
+        var it = self.force_undefined_symbols.keyIterator();
+        while (it.next()) |symbol_name| {
+            try zig_args.append("--force_undefined");
+            try zig_args.append(symbol_name.*);
+        }
+    }
+
     if (self.stack_size) |stack_size| {
         try zig_args.append("--stack");
         try zig_args.append(try std.fmt.allocPrint(b.allocator, "{}", .{stack_size}));
@@ -1438,7 +1460,8 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
 
     if (b.verbose_cimport) try zig_args.append("--verbose-cimport");
     if (b.verbose_air) try zig_args.append("--verbose-air");
-    if (b.verbose_llvm_ir) try zig_args.append("--verbose-llvm-ir");
+    if (b.verbose_llvm_ir) |path| try zig_args.append(b.fmt("--verbose-llvm-ir={s}", .{path}));
+    if (b.verbose_llvm_bc) |path| try zig_args.append(b.fmt("--verbose-llvm-bc={s}", .{path}));
     if (b.verbose_link or self.verbose_link) try zig_args.append("--verbose-link");
     if (b.verbose_cc or self.verbose_cc) try zig_args.append("--verbose-cc");
     if (b.verbose_llvm_cpu_features) try zig_args.append("--verbose-llvm-cpu-features");
@@ -1472,6 +1495,9 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
     }
     if (self.link_gc_sections) |x| {
         try zig_args.append(if (x) "--gc-sections" else "--no-gc-sections");
+    }
+    if (!self.linker_dynamicbase) {
+        try zig_args.append("--no-dynamicbase");
     }
     if (self.linker_allow_shlib_undefined) |x| {
         try zig_args.append(if (x) "-fallow-shlib-undefined" else "-fno-allow-shlib-undefined");
@@ -1724,6 +1750,22 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
     try zig_args.ensureUnusedCapacity(2 * self.rpaths.items.len);
     for (self.rpaths.items) |rpath| {
         zig_args.appendAssumeCapacity("-rpath");
+
+        if (self.target_info.target.isDarwin()) switch (rpath) {
+            .path => |path| {
+                // On Darwin, we should not try to expand special runtime paths such as
+                // * @executable_path
+                // * @loader_path
+                if (mem.startsWith(u8, path, "@executable_path") or
+                    mem.startsWith(u8, path, "@loader_path"))
+                {
+                    zig_args.appendAssumeCapacity(path);
+                    continue;
+                }
+            },
+            .generated => {},
+        };
+
         zig_args.appendAssumeCapacity(rpath.getPath2(b, step));
     }
 
