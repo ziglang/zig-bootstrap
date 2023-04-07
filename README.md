@@ -73,6 +73,8 @@ The script must be run within the `Developer Command Prompt for VS 2019` shell:
 build.bat <arch>-<os>-<abi> <mcpu>
 ```
 
+To build for x86 Windows, run the script within the `x86 Native Tools Command Prompt for VS 2019`.
+
 ### Supported Triples
 
 If you try a "not tested" one and find a problem please file an issue,
