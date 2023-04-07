@@ -14,6 +14,9 @@ if %ERRORLEVEL% neq 0 (
 
 if "%1" == "" (set "TARGET=x86_64-windows-gnu") ELSE (set TARGET=%~1)
 if "%2" == "" (set "MCPU=native") ELSE (set MCPU=%~2)
+if "%VSCMD_ARG_HOST_ARCH%"=="x86" set HOST_TARGET=x86-windows-msvc
+if "%VSCMD_ARG_HOST_ARCH%"=="x64" set HOST_TARGET=x86_64-windows-msvc
+echo Boostrapping targeting %TARGET% (%MCPU%), using %HOST_TARGET% as the host compiler
 
 set TARGET_ABI=
 set TARGET_OS_CMAKE=
@@ -26,6 +29,8 @@ FOR /F "tokens=2,3 delims=-" %%i IN ("%TARGET%") DO (
 )
 
 set OUTDIR=out-win
+if "%VSCMD_ARG_HOST_ARCH%"=="x86" set OUTDIR=out-win-x86
+
 set ROOTDIR=%~dp0
 set "ROOTDIR_CMAKE=%ROOTDIR:\=/%"
 set ZIG_VERSION=0.11.0-dev.995+7350f0d9b
@@ -53,23 +58,35 @@ mkdir "%ROOTDIR%%OUTDIR%\build-llvm-host"
 cd "%ROOTDIR%%OUTDIR%\build-llvm-host"
 cmake "%ROOTDIR%/llvm" ^
   -G "Ninja" ^
+  -DCMAKE_INSTALL_PREFIX="%ROOTDIR%/%OUTDIR%/host" ^
+  -DCMAKE_PREFIX_PATH="%ROOTDIR%/%OUTDIR%/host" ^
+  -DCMAKE_BUILD_TYPE=Release ^
   -DLLVM_ENABLE_PROJECTS="lld;clang" ^
   -DLLVM_ENABLE_LIBXML2=OFF ^
   -DLLVM_ENABLE_ZSTD=OFF ^
-  -DCMAKE_INSTALL_PREFIX="%ROOTDIR%/%OUTDIR%/host" ^
-  -DCMAKE_PREFIX_PATH="%ROOTDIR%/%OUTDIR%/host" ^
+  -DLLVM_INCLUDE_UTILS=OFF ^
   -DLLVM_INCLUDE_TESTS=OFF ^
-  -DLLVM_INCLUDE_GO_TESTS=OFF ^
   -DLLVM_INCLUDE_EXAMPLES=OFF ^
   -DLLVM_INCLUDE_BENCHMARKS=OFF ^
+  -DLLVM_INCLUDE_DOCS=OFF ^
   -DLLVM_ENABLE_BINDINGS=OFF ^
   -DLLVM_ENABLE_OCAMLDOC=OFF ^
   -DLLVM_ENABLE_Z3_SOLVER=OFF ^
+  -DLLVM_TOOL_LLVM_LTO2_BUILD=OFF ^
+  -DLLVM_TOOL_LLVM_LTO_BUILD=OFF ^
+  -DLLVM_TOOL_LTO_BUILD=OFF ^
+  -DLLVM_TOOL_REMARKS_SHLIB_BUILD=OFF ^
   -DCLANG_BUILD_TOOLS=OFF ^
   -DCLANG_INCLUDE_DOCS=OFF ^
   -DLLVM_INCLUDE_DOCS=OFF ^
+  -DCLANG_TOOL_CLANG_IMPORT_TEST_BUILD=OFF ^
+  -DCLANG_TOOL_CLANG_LINKER_WRAPPER_BUILD=OFF ^
+  -DCLANG_TOOL_C_INDEX_TEST_BUILD=OFF ^
+  -DCLANG_TOOL_ARCMT_TEST_BUILD=OFF ^
+  -DCLANG_TOOL_C_ARCMT_TEST_BUILD=OFF ^
+  -DCLANG_TOOL_LIBCLANG_BUILD=OFF ^
   -DLLVM_USE_CRT_RELEASE=MT ^
-  -DCMAKE_BUILD_TYPE=Release
+  -DLLVM_BUILD_LLVM_C_DYLIB=NO
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 cmake --build . %JOBS_ARG% --target install
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
@@ -84,8 +101,9 @@ cmake "%ROOTDIR%/zig" ^
   -DCMAKE_BUILD_TYPE=Release ^
   -DZIG_STATIC=ON ^
   -DZIG_STATIC_ZSTD=OFF ^
-  -DZIG_TARGET_TRIPLE=x86_64-windows-msvc ^
-  -DZIG_TARGET_MCPU=baseline
+  -DZIG_TARGET_TRIPLE="%HOST_TARGET%" ^
+  -DZIG_TARGET_MCPU=baseline ^
+  -DZIG_NO_LIB=ON
 
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 cmake --build . %JOBS_ARG% --target install
@@ -98,6 +116,7 @@ IF "%TARGET_ABI%"=="msvc" (
 
 set ZIG=%ROOTDIR%%OUTDIR%\host\bin\zig.exe
 set "ZIG=%ZIG:\=/%"
+set "ZIG_LIB_DIR=%ROOTDIR%/zig/lib"
 
 rem CMP0091=NEW is required in order for the CMAKE_MSVC_RUNTIME_LIBRARY value to be respected,
 rem which we need to be set to MultiThreaded when building msvc ABI targets
@@ -112,9 +131,9 @@ cmake "%ROOTDIR%/zlib" ^
   -DCMAKE_BUILD_TYPE=Release ^
   -DCMAKE_CROSSCOMPILING=True ^
   -DCMAKE_SYSTEM_NAME="%TARGET_OS_CMAKE%" ^
-  -DCMAKE_C_COMPILER="%ZIG%;cc;-fno-sanitize=all;-s;-target;%TARGET%;-mcpu=%MCPU%" ^
-  -DCMAKE_CXX_COMPILER="%ZIG%;c++;-fno-sanitize=all;-s;-target;%TARGET%;-mcpu=%MCPU%" ^
-  -DCMAKE_ASM_COMPILER="%ZIG%;cc;-fno-sanitize=all;-s;-target;%TARGET%;-mcpu=%MCPU%" ^
+  -DCMAKE_C_COMPILER="%ZIG%;cc;-fno-sanitize=all;-fno-stack-protector;-s;-target;%TARGET%;-mcpu=%MCPU%" ^
+  -DCMAKE_CXX_COMPILER="%ZIG%;c++;-fno-sanitize=all;-fno-stack-protector;-s;-target;%TARGET%;-mcpu=%MCPU%" ^
+  -DCMAKE_ASM_COMPILER="%ZIG%;cc;-fno-sanitize=all;-fno-stack-protector;-s;-target;%TARGET%;-mcpu=%MCPU%" ^
   -DCMAKE_RC_COMPILER="%ROOTDIR_CMAKE%%OUTDIR%/host/bin/llvm-rc.exe" ^
   -DCMAKE_AR="%ROOTDIR_CMAKE%%OUTDIR%/host/bin/llvm-ar.exe" ^
   -DCMAKE_RANLIB="%ROOTDIR_CMAKE%%OUTDIR%/host/bin/llvm-ranlib.exe" ^
@@ -188,14 +207,12 @@ cmake "%ROOTDIR%/llvm" ^
   -DCMAKE_BUILD_TYPE=Release ^
   -DCMAKE_CROSSCOMPILING=True ^
   -DCMAKE_SYSTEM_NAME="%TARGET_OS_CMAKE%" ^
-  -DCMAKE_C_COMPILER="%ZIG%;cc;-fno-sanitize=all;-s;-target;%TARGET%;-mcpu=%MCPU%" ^
-  -DCMAKE_CXX_COMPILER="%ZIG%;c++;-fno-sanitize=all;-s;-target;%TARGET%;-mcpu=%MCPU%" ^
-  -DCMAKE_ASM_COMPILER="%ZIG%;cc;-fno-sanitize=all;-s;-target;%TARGET%;-mcpu=%MCPU%" ^
+  -DCMAKE_C_COMPILER="%ZIG%;cc;-fno-sanitize=all;-fno-stack-protector;-s;-target;%TARGET%;-mcpu=%MCPU%" ^
+  -DCMAKE_CXX_COMPILER="%ZIG%;c++;-fno-sanitize=all;-fno-stack-protector;-s;-target;%TARGET%;-mcpu=%MCPU%" ^
+  -DCMAKE_ASM_COMPILER="%ZIG%;cc;-fno-sanitize=all;-fno-stack-protector;-s;-target;%TARGET%;-mcpu=%MCPU%" ^
   -DCMAKE_RC_COMPILER="%ROOTDIR_CMAKE%%OUTDIR%/host/bin/llvm-rc.exe" ^
   -DCMAKE_AR="%ROOTDIR_CMAKE%%OUTDIR%/host/bin/llvm-ar.exe" ^
   -DCMAKE_RANLIB="%ROOTDIR_CMAKE%%OUTDIR%/host/bin/llvm-ranlib.exe" ^
-  -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
-  -DCMAKE_POLICY_DEFAULT_CMP0091=NEW ^
   -DLLVM_ENABLE_BACKTRACES=OFF ^
   -DLLVM_ENABLE_BINDINGS=OFF ^
   -DLLVM_ENABLE_CRASH_OVERRIDES=OFF ^
@@ -215,7 +232,6 @@ cmake "%ROOTDIR%/llvm" ^
   -DLLVM_BUILD_STATIC=ON ^
   -DLLVM_INCLUDE_UTILS=OFF ^
   -DLLVM_INCLUDE_TESTS=OFF ^
-  -DLLVM_INCLUDE_GO_TESTS=OFF ^
   -DLLVM_INCLUDE_EXAMPLES=OFF ^
   -DLLVM_INCLUDE_BENCHMARKS=OFF ^
   -DLLVM_INCLUDE_DOCS=OFF ^
@@ -235,9 +251,9 @@ cmake "%ROOTDIR%/llvm" ^
   -DCLANG_TOOL_ARCMT_TEST_BUILD=OFF ^
   -DCLANG_TOOL_C_ARCMT_TEST_BUILD=OFF ^
   -DCLANG_TOOL_LIBCLANG_BUILD=OFF ^
-  -DZLIB_USE_STATIC_LIBS=ON ^
   %ZLIB_LIBRARY% ^
-  -DLIBCLANG_BUILD_STATIC=ON
+  -DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded ^
+  -DCMAKE_POLICY_DEFAULT_CMP0091=NEW
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 cmake --build . %JOBS_ARG% --target install
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
