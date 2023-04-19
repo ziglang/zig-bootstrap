@@ -197,7 +197,7 @@ typedef char bool;
 #elif defined(__i386__) || defined(__x86_64__)
 #define zig_trap() __asm__ volatile("ud2");
 #elif defined(__arm__) || defined(__aarch64__)
-#define zig_breakpoint() __asm__ volatile("udf #0");
+#define zig_trap() __asm__ volatile("udf #0");
 #else
 #include <stdlib.h>
 #define zig_trap() abort()
@@ -2877,7 +2877,7 @@ typedef zig_repr_f16 zig_f16;
 #undef zig_init_special_f16
 #define zig_init_special_f16(sign, name, arg, repr) repr
 #endif
-#if __APPLE__
+#if __APPLE__ && (defined(__i386__) || defined(__x86_64__))
 typedef zig_repr_f16 zig_compiler_rt_f16;
 #else
 typedef zig_f16 zig_compiler_rt_f16;

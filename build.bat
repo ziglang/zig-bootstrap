@@ -264,7 +264,7 @@ cd "%ROOTDIR%\zig"
   --prefix "%ROOTDIR%%OUTDIR%\zig-%TARGET%-%MCPU%" ^
   --search-prefix "%ROOTDIR%%OUTDIR%\%TARGET%-%MCPU%" ^
   -Dstatic-llvm ^
-  -Drelease ^
+  -Doptimize=ReleaseFast ^
   -Dstrip ^
   -Dtarget="%TARGET%" ^
   -Dcpu="%MCPU%" ^
