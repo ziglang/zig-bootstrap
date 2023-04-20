@@ -4,9 +4,38 @@ set -eu
 
 TARGET="$1" # Example: riscv64-linux-gnu
 MCPU="$2" # Examples: `baseline`, `native`, `generic+v7a`, or `arm1176jzf_s`
+BUILDMODE="$3" # Examples below
 
 ROOTDIR="$(pwd)"
 ZIG_VERSION="0.11.0-dev.2680+a1aa55ebe"
+
+case "$BUILDMODE" in
+    ReleaseSafeDbgSym)
+        OPTIMIZE=ReleaseSafe
+        DBGSYM=Yes
+        ZIG_STRIP=
+        ;;
+    ReleaseFastStrip)
+        OPTIMIZE=ReleaseFast
+        DBGSYM=No
+        ZIG_STRIP=-D
+        ;;
+    *)
+        >&2 printf "Unsupported build mode %s. Expecting %s or %s\n" \
+            "$BUILDMODE" ReleaseSafeDbgSym ReleaseFastStrip
+        exit 1
+        ;;
+esac
+
+cat <<EOF
+Build configuration:
+Version:       $ZIG_VERSION
+Target:        $TARGET
+MCPU:          $MCPU
+Optimize:      $OPTIMIZE
+Debug symbols: $DBGSYM
+
+EOF
 
 TARGET_OS_AND_ABI=${TARGET#*-} # Example: linux-gnu
 
@@ -192,7 +221,7 @@ $ZIG build \
   --search-prefix "$ROOTDIR/out/$TARGET-$MCPU" \
   -Dstatic-llvm \
   -Doptimize=ReleaseFast \
-  -Dstrip \
+  $ZIG_STRIP \
   -Dtarget="$TARGET" \
   -Dcpu="$MCPU" \
   -Dversion-string="$ZIG_VERSION"
