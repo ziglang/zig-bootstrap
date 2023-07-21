@@ -106,8 +106,8 @@ is more portable across Linux distributions.
 | `armeb-windows-gnu`        | [#100](https://github.com/ziglang/zig-bootstrap/issues/100) |
 | `arm-linux-gnueabi`        | [#101](https://github.com/ziglang/zig-bootstrap/issues/101) |
 | `arm-linux-gnueabihf`      | [#102](https://github.com/ziglang/zig-bootstrap/issues/102) |
-| `arm-linux-musleabi`       | [#103] (https://github.com/ziglang/zig-bootstrap/issues/103)             |
-| `arm-linux-musleabihf`     | [#104](https://github.com/ziglang/zig-bootstrap/issues/104)             |
+| `arm-linux-musleabi`       | [#103](https://github.com/ziglang/zig-bootstrap/issues/103) |
+| `arm-linux-musleabihf`     | [#104](https://github.com/ziglang/zig-bootstrap/issues/104) |
 | `arm-windows-gnu`          | [#105](https://github.com/ziglang/zig-bootstrap/issues/105) |
 | `i386-linux-gnu`           | not tested     |
 | `i386-linux-musl`          | OK             |
