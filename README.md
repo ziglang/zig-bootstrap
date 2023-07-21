@@ -22,6 +22,7 @@ For other versions, check the git tags of this repository.
  * LLVM: Portable handling of .def linker flag
  * Clang: Disable building of libclang-cpp.so.
  * LLD: Added additional include directory to Zig's libunwind.
+ * LLD: Respect `LLD_BUILD_TOOLS=OFF`
  * zlib: Delete the ability to build a shared library.
 
 ## Host System Dependencies
