@@ -11,7 +11,7 @@ to find and inspect the patch diffs.
  * LLVM, LLD, Clang 16.0.6
  * zlib 1.2.13
  * zstd 1.5.2
- * zig 0.11.0-dev.4088+c43ee5bb2
+ * zig 0.11.0-dev.4172+2ce9d5cad
 
 For other versions, check the git tags of this repository.
 
@@ -108,7 +108,7 @@ is more portable across Linux distributions.
 | `arm-linux-gnueabi`        | [#101](https://github.com/ziglang/zig-bootstrap/issues/101) |
 | `arm-linux-gnueabihf`      | [#102](https://github.com/ziglang/zig-bootstrap/issues/102) |
 | `arm-linux-musleabi`       | [#103](https://github.com/ziglang/zig-bootstrap/issues/103) |
-| `arm-linux-musleabihf`     | [#104](https://github.com/ziglang/zig-bootstrap/issues/104) |
+| `arm-linux-musleabihf`     | OK |
 | `arm-windows-gnu`          | [#105](https://github.com/ziglang/zig-bootstrap/issues/105) |
 | `i386-linux-gnu`           | not tested     |
 | `i386-linux-musl`          | OK             |
