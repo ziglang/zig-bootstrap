@@ -280,6 +280,12 @@ void LinkerDriver::addFile(StringRef path) {
   case file_magic::wasm_object:
     files.push_back(createObjectFile(mbref));
     break;
+  case file_magic::unknown:
+    if (mbref.getBuffer().starts_with("#STUB")) {
+      files.push_back(make<StubFile>(mbref));
+      break;
+    }
+    [[fallthrough]];
   default:
     error("unknown file type: " + mbref.getBufferIdentifier());
   }
@@ -450,6 +456,7 @@ static void readConfigs(opt::InputArgList &args) {
       parseCachePruningPolicy(args.getLastArgValue(OPT_thinlto_cache_policy)),
       "--thinlto-cache-policy: invalid cache policy");
   config->unresolvedSymbols = getUnresolvedSymbolPolicy(args);
+  config->whyExtract = args.getLastArgValue(OPT_why_extract);
   errorHandler().verbose = args.hasArg(OPT_verbose);
   LLVM_DEBUG(errorHandler().verbose = true);
 
@@ -631,7 +638,7 @@ static const char *getReproduceOption(opt::InputArgList &args) {
 }
 
 // Force Sym to be entered in the output. Used for -u or equivalent.
-static Symbol *handleUndefined(StringRef name) {
+static Symbol *handleUndefined(StringRef name, const char *option) {
   Symbol *sym = symtab->find(name);
   if (!sym)
     return nullptr;
@@ -640,8 +647,11 @@ static Symbol *handleUndefined(StringRef name) {
   // eliminate it. Mark the symbol as "used" to prevent it.
   sym->isUsedInRegularObj = true;
 
-  if (auto *lazySym = dyn_cast<LazySymbol>(sym))
+  if (auto *lazySym = dyn_cast<LazySymbol>(sym)) {
     lazySym->fetch();
+    if (!config->whyExtract.empty())
+      config->whyExtractRecords.emplace_back(option, sym->getFile(), *sym);
+  }
 
   return sym;
 }
@@ -653,8 +663,31 @@ static void handleLibcall(StringRef name) {
 
   if (auto *lazySym = dyn_cast<LazySymbol>(sym)) {
     MemoryBufferRef mb = lazySym->getMemberBuffer();
-    if (isBitcode(mb))
+    if (isBitcode(mb)) {
+      if (!config->whyExtract.empty())
+        config->whyExtractRecords.emplace_back("<libcall>", sym->getFile(),
+                                               *sym);
       lazySym->fetch();
+    }
+  }
+}
+
+static void writeWhyExtract() {
+  if (config->whyExtract.empty())
+    return;
+
+  std::error_code ec;
+  raw_fd_ostream os(config->whyExtract, ec, sys::fs::OF_None);
+  if (ec) {
+    error("cannot open --why-extract= file " + config->whyExtract + ": " +
+          ec.message());
+    return;
+  }
+
+  os << "reference\textracted\tsymbol\n";
+  for (auto &entry : config->whyExtractRecords) {
+    os << std::get<0>(entry) << '\t' << toString(std::get<1>(entry)) << '\t'
+       << toString(std::get<2>(entry)) << '\n';
   }
 }
 
@@ -805,6 +838,53 @@ static void createOptionalSymbols() {
   // needed for __wasm_init_tls (which we do not create in this case).
   if (!config->sharedMemory)
     WasmSym::tlsBase = createOptionalGlobal("__tls_base", false);
+}
+
+static void processStubLibraries() {
+  log("-- processStubLibraries");
+  for (auto &stub_file : symtab->stubFiles) {
+    LLVM_DEBUG(llvm::dbgs()
+               << "processing stub file: " << stub_file->getName() << "\n");
+    for (auto [name, deps]: stub_file->symbolDependencies) {
+      auto* sym = symtab->find(name);
+      if (!sym || !sym->isUndefined() || !sym->isUsedInRegularObj ||
+          sym->forceImport) {
+        LLVM_DEBUG(llvm::dbgs() << "stub not in needed: " << name << "\n");
+        continue;
+      }
+      // The first stub library to define a given symbol sets this and
+      // definitions in later stub libraries are ignored.
+      sym->forceImport = true;
+      if (sym->traced)
+        message(toString(stub_file) + ": importing " + name);
+      else
+        LLVM_DEBUG(llvm::dbgs()
+                   << toString(stub_file) << ": importing " << name << "\n");
+      for (const auto dep : deps) {
+        auto* needed = symtab->find(dep);
+        if (!needed) {
+          error(toString(stub_file) + ": undefined symbol: " + dep +
+                ". Required by " + toString(*sym));
+        } else if (needed->isUndefined()) {
+          error(toString(stub_file) +
+                ": undefined symbol: " + toString(*needed) +
+                ". Required by " + toString(*sym));
+        } else {
+          LLVM_DEBUG(llvm::dbgs()
+                     << "force export: " << toString(*needed) << "\n");
+          needed->forceExport = true;
+          needed->isUsedInRegularObj = true;
+          if (auto *lazy = dyn_cast<LazySymbol>(needed)) {
+            lazy->fetch();
+            if (!config->whyExtract.empty())
+              config->whyExtractRecords.emplace_back(stub_file->getName(),
+                                                     sym->getFile(), *sym);
+          }
+        }
+      }
+    }
+  }
+  log("-- done processStubLibraries");
 }
 
 // Reconstructs command line arguments so that so that you can re-run
@@ -1035,16 +1115,16 @@ void LinkerDriver::linkerMain(ArrayRef<const char *> argsArr) {
 
   // Handle the `--undefined <sym>` options.
   for (auto *arg : args.filtered(OPT_undefined))
-    handleUndefined(arg->getValue());
+    handleUndefined(arg->getValue(), "<internal>");
 
   // Handle the `--export <sym>` options
   // This works like --undefined but also exports the symbol if its found
   for (auto &iter : config->exportedSymbols)
-    handleUndefined(iter.first());
+    handleUndefined(iter.first(), "--export");
 
   Symbol *entrySym = nullptr;
   if (!config->relocatable && !config->entry.empty()) {
-    entrySym = handleUndefined(config->entry);
+    entrySym = handleUndefined(config->entry, "--entry");
     if (entrySym && entrySym->isDefined())
       entrySym->forceExport = true;
     else
@@ -1061,7 +1141,8 @@ void LinkerDriver::linkerMain(ArrayRef<const char *> argsArr) {
       !WasmSym::callCtors->isUsedInRegularObj &&
       WasmSym::callCtors->getName() != config->entry &&
       !config->exportedSymbols.count(WasmSym::callCtors->getName())) {
-    if (Symbol *callDtors = handleUndefined("__wasm_call_dtors")) {
+    if (Symbol *callDtors =
+            handleUndefined("__wasm_call_dtors", "<internal>")) {
       if (auto *callDtorsFunc = dyn_cast<DefinedFunction>(callDtors)) {
         if (callDtorsFunc->signature &&
             (!callDtorsFunc->signature->Params.empty() ||
@@ -1096,11 +1177,15 @@ void LinkerDriver::linkerMain(ArrayRef<const char *> argsArr) {
   if (errorCount())
     return;
 
+  writeWhyExtract();
+
   // Do link-time optimization if given files are LLVM bitcode files.
   // This compiles bitcode files into real object files.
   symtab->compileBitcodeFiles();
   if (errorCount())
     return;
+
+  processStubLibraries();
 
   createOptionalSymbols();
 
