@@ -47,8 +47,9 @@ pub const DictDecoder = struct {
         self.wr_pos = 0;
 
         if (dict != null) {
-            mem.copy(u8, self.hist, dict.?[dict.?.len -| self.hist.len..]);
-            self.wr_pos = @intCast(u32, dict.?.len);
+            const src = dict.?[dict.?.len -| self.hist.len..];
+            @memcpy(self.hist[0..src.len], src);
+            self.wr_pos = @as(u32, @intCast(dict.?.len));
         }
 
         if (self.wr_pos == self.hist.len) {
@@ -65,7 +66,7 @@ pub const DictDecoder = struct {
     // Reports the total amount of historical data in the dictionary.
     pub fn histSize(self: *Self) u32 {
         if (self.full) {
-            return @intCast(u32, self.hist.len);
+            return @as(u32, @intCast(self.hist.len));
         }
         return self.wr_pos;
     }
@@ -77,7 +78,7 @@ pub const DictDecoder = struct {
 
     // Reports the available amount of output buffer space.
     pub fn availWrite(self: *Self) u32 {
-        return @intCast(u32, self.hist.len - self.wr_pos);
+        return @as(u32, @intCast(self.hist.len - self.wr_pos));
     }
 
     // Returns a slice of the available buffer to write data to.
@@ -103,13 +104,16 @@ pub const DictDecoder = struct {
         self.wr_pos += 1;
     }
 
+    /// TODO: eliminate this function because the callsites should care about whether
+    /// or not their arguments alias and then they should directly call `@memcpy` or
+    /// `mem.copyForwards`.
     fn copy(dst: []u8, src: []const u8) u32 {
         if (src.len > dst.len) {
-            mem.copy(u8, dst, src[0..dst.len]);
-            return @intCast(u32, dst.len);
+            mem.copyForwards(u8, dst, src[0..dst.len]);
+            return @as(u32, @intCast(dst.len));
         }
-        mem.copy(u8, dst, src);
-        return @intCast(u32, src.len);
+        mem.copyForwards(u8, dst[0..src.len], src);
+        return @as(u32, @intCast(src.len));
     }
 
     // Copies a string at a given (dist, length) to the output.
@@ -121,10 +125,10 @@ pub const DictDecoder = struct {
         assert(0 < dist and dist <= self.histSize());
         var dst_base = self.wr_pos;
         var dst_pos = dst_base;
-        var src_pos: i32 = @intCast(i32, dst_pos) - @intCast(i32, dist);
+        var src_pos: i32 = @as(i32, @intCast(dst_pos)) - @as(i32, @intCast(dist));
         var end_pos = dst_pos + length;
         if (end_pos > self.hist.len) {
-            end_pos = @intCast(u32, self.hist.len);
+            end_pos = @as(u32, @intCast(self.hist.len));
         }
 
         // Copy non-overlapping section after destination position.
@@ -135,8 +139,8 @@ pub const DictDecoder = struct {
         // Thus, a backwards copy is performed here; that is, the exact bytes in
         // the source prior to the copy is placed in the destination.
         if (src_pos < 0) {
-            src_pos += @intCast(i32, self.hist.len);
-            dst_pos += copy(self.hist[dst_pos..end_pos], self.hist[@intCast(usize, src_pos)..]);
+            src_pos += @as(i32, @intCast(self.hist.len));
+            dst_pos += copy(self.hist[dst_pos..end_pos], self.hist[@as(usize, @intCast(src_pos))..]);
             src_pos = 0;
         }
 
@@ -156,7 +160,7 @@ pub const DictDecoder = struct {
         //    dst_pos = end_pos;
         //
         while (dst_pos < end_pos) {
-            dst_pos += copy(self.hist[dst_pos..end_pos], self.hist[@intCast(usize, src_pos)..dst_pos]);
+            dst_pos += copy(self.hist[dst_pos..end_pos], self.hist[@as(usize, @intCast(src_pos))..dst_pos]);
         }
 
         self.wr_pos = dst_pos;

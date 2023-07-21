@@ -33,7 +33,7 @@ pub fn PackedIntIo(comptime Int: type, comptime endian: Endian) type {
     // In the worst case, this is the number of bytes we need to touch
     // to read or write a value, as bits. To calculate for int_bits > 1,
     // set aside 2 bits to touch the first and last bytes, then divide
-    // by 8 to see how many bytes can be filled up inbetween.
+    // by 8 to see how many bytes can be filled up in between.
     const max_io_bits = switch (int_bits) {
         0 => 0,
         1 => 8,
@@ -73,25 +73,25 @@ pub fn PackedIntIo(comptime Int: type, comptime endian: Endian) type {
             const tail_keep_bits = container_bits - (int_bits + head_keep_bits);
 
             //read bytes as container
-            const value_ptr = @ptrCast(*align(1) const Container, &bytes[start_byte]);
+            const value_ptr = @as(*align(1) const Container, @ptrCast(&bytes[start_byte]));
             var value = value_ptr.*;
 
             if (endian != native_endian) value = @byteSwap(value);
 
             switch (endian) {
                 .Big => {
-                    value <<= @intCast(Shift, head_keep_bits);
-                    value >>= @intCast(Shift, head_keep_bits);
-                    value >>= @intCast(Shift, tail_keep_bits);
+                    value <<= @as(Shift, @intCast(head_keep_bits));
+                    value >>= @as(Shift, @intCast(head_keep_bits));
+                    value >>= @as(Shift, @intCast(tail_keep_bits));
                 },
                 .Little => {
-                    value <<= @intCast(Shift, tail_keep_bits);
-                    value >>= @intCast(Shift, tail_keep_bits);
-                    value >>= @intCast(Shift, head_keep_bits);
+                    value <<= @as(Shift, @intCast(tail_keep_bits));
+                    value >>= @as(Shift, @intCast(tail_keep_bits));
+                    value >>= @as(Shift, @intCast(head_keep_bits));
                 },
             }
 
-            return @bitCast(Int, @truncate(UnInt, value));
+            return @as(Int, @bitCast(@as(UnInt, @truncate(value))));
         }
 
         /// Sets the integer at `index` to `val` within the packed data beginning
@@ -115,21 +115,21 @@ pub fn PackedIntIo(comptime Int: type, comptime endian: Endian) type {
             const head_keep_bits = bit_index - (start_byte * 8);
             const tail_keep_bits = container_bits - (int_bits + head_keep_bits);
             const keep_shift = switch (endian) {
-                .Big => @intCast(Shift, tail_keep_bits),
-                .Little => @intCast(Shift, head_keep_bits),
+                .Big => @as(Shift, @intCast(tail_keep_bits)),
+                .Little => @as(Shift, @intCast(head_keep_bits)),
             };
 
             //position the bits where they need to be in the container
-            const value = @intCast(Container, @bitCast(UnInt, int)) << keep_shift;
+            const value = @as(Container, @intCast(@as(UnInt, @bitCast(int)))) << keep_shift;
 
             //read existing bytes
-            const target_ptr = @ptrCast(*align(1) Container, &bytes[start_byte]);
+            const target_ptr = @as(*align(1) Container, @ptrCast(&bytes[start_byte]));
             var target = target_ptr.*;
 
             if (endian != native_endian) target = @byteSwap(target);
 
             //zero the bits we want to replace in the existing bytes
-            const inv_mask = @intCast(Container, std.math.maxInt(UnInt)) << keep_shift;
+            const inv_mask = @as(Container, @intCast(std.math.maxInt(UnInt))) << keep_shift;
             const mask = ~inv_mask;
             target &= mask;
 
@@ -156,7 +156,7 @@ pub fn PackedIntIo(comptime Int: type, comptime endian: Endian) type {
             if (length == 0) return PackedIntSliceEndian(Int, endian).init(new_bytes[0..0], 0);
 
             var new_slice = PackedIntSliceEndian(Int, endian).init(new_bytes, length);
-            new_slice.bit_offset = @intCast(u3, (bit_index - (start_byte * 8)));
+            new_slice.bit_offset = @as(u3, @intCast((bit_index - (start_byte * 8))));
             return new_slice;
         }
 
@@ -182,7 +182,7 @@ pub fn PackedIntIo(comptime Int: type, comptime endian: Endian) type {
 
 /// Creates a bit-packed array of `Int`. Non-byte-multiple integers
 /// will take up less memory in PackedIntArray than in a normal array.
-/// Elements are packed using native endianess and without storing any
+/// Elements are packed using native endianness and without storing any
 /// meta data. PackedArray(i3, 8) will occupy exactly 3 bytes
 /// of memory.
 pub fn PackedIntArray(comptime Int: type, comptime int_count: usize) type {
@@ -261,7 +261,7 @@ pub fn PackedIntArrayEndian(comptime Int: type, comptime endian: Endian, comptim
         }
 
         /// Create a PackedIntSliceEndian of the array using `NewInt` as the integer type
-        /// and `new_endian` as the new endianess. `NewInt`'s bit width must fit evenly
+        /// and `new_endian` as the new endianness. `NewInt`'s bit width must fit evenly
         /// within the array's `Int`'s total bits.
         pub fn sliceCastEndian(self: *Self, comptime NewInt: type, comptime new_endian: Endian) PackedIntSliceEndian(NewInt, new_endian) {
             return Io.sliceCast(&self.bytes, NewInt, new_endian, 0, int_count);
@@ -298,7 +298,7 @@ pub fn PackedIntSliceEndian(comptime Int: type, comptime endian: Endian) type {
         }
 
         /// Initialize a packed slice using the memory at `bytes`, with `int_count`
-        /// elements. `bytes` must be large enough to accomodate the requested
+        /// elements. `bytes` must be large enough to accommodate the requested
         /// count.
         pub fn init(bytes: []u8, int_count: usize) Self {
             debug.assert(bytes.len >= bytesRequired(int_count));
@@ -336,7 +336,7 @@ pub fn PackedIntSliceEndian(comptime Int: type, comptime endian: Endian) type {
         }
 
         /// Create a PackedIntSliceEndian of the slice using `NewInt` as the integer type
-        /// and `new_endian` as the new endianess. `NewInt`'s bit width must fit evenly
+        /// and `new_endian` as the new endianness. `NewInt`'s bit width must fit evenly
         /// within the slice's `Int`'s total bits.
         pub fn sliceCastEndian(self: Self, comptime NewInt: type, comptime new_endian: Endian) PackedIntSliceEndian(NewInt, new_endian) {
             return Io.sliceCast(self.bytes, NewInt, new_endian, self.bit_offset, self.len);
@@ -398,7 +398,7 @@ test "PackedIntArray init" {
     const PackedArray = PackedIntArray(u3, 8);
     var packed_array = PackedArray.init([_]u3{ 0, 1, 2, 3, 4, 5, 6, 7 });
     var i = @as(usize, 0);
-    while (i < packed_array.len) : (i += 1) try testing.expectEqual(@intCast(u3, i), packed_array.get(i));
+    while (i < packed_array.len) : (i += 1) try testing.expectEqual(@as(u3, @intCast(i)), packed_array.get(i));
 }
 
 test "PackedIntArray initAllTo" {
@@ -469,7 +469,7 @@ test "PackedIntSlice of PackedInt(Array/Slice)" {
 
         var i = @as(usize, 0);
         while (i < packed_array.len) : (i += 1) {
-            packed_array.set(i, @intCast(Int, i % limit));
+            packed_array.set(i, @as(Int, @intCast(i % limit)));
         }
 
         //slice of array

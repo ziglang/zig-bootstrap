@@ -15,11 +15,13 @@ pub fn build(b: *std.Build) void {
 
         const check = exe.checkObject();
         check.checkInSymtab();
-        check.checkNext("{*} (__TEXT,__text) external _iAmUnused");
+        check.checkContains("(__TEXT,__text) external _iAmUnused");
+        test_step.dependOn(&check.step);
 
-        const run_cmd = check.runAndCompare();
-        run_cmd.expectStdOutEqual("Hello!\n");
-        test_step.dependOn(&run_cmd.step);
+        const run = b.addRunArtifact(exe);
+        run.skip_foreign_checks = true;
+        run.expectStdOutEqual("Hello!\n");
+        test_step.dependOn(&run.step);
     }
 
     {
@@ -29,11 +31,13 @@ pub fn build(b: *std.Build) void {
 
         const check = exe.checkObject();
         check.checkInSymtab();
-        check.checkNotPresent("{*} (__TEXT,__text) external _iAmUnused");
+        check.checkNotPresent("(__TEXT,__text) external _iAmUnused");
+        test_step.dependOn(&check.step);
 
-        const run_cmd = check.runAndCompare();
-        run_cmd.expectStdOutEqual("Hello!\n");
-        test_step.dependOn(&run_cmd.step);
+        const run = b.addRunArtifact(exe);
+        run.skip_foreign_checks = true;
+        run.expectStdOutEqual("Hello!\n");
+        test_step.dependOn(&run.step);
     }
 }
 
@@ -42,7 +46,7 @@ fn createScenario(
     optimize: std.builtin.OptimizeMode,
     target: std.zig.CrossTarget,
     name: []const u8,
-) *std.Build.CompileStep {
+) *std.Build.Step.Compile {
     const exe = b.addExecutable(.{
         .name = name,
         .optimize = optimize,

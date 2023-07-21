@@ -117,7 +117,7 @@ pub const APFloatBaseSemantics = enum(c_int) {
 
 pub const APInt = opaque {
     pub fn getLimitedValue(self: *const APInt, comptime T: type) T {
-        return @truncate(T, ZigClangAPInt_getLimitedValue(self, std.math.maxInt(T)));
+        return @as(T, @truncate(ZigClangAPInt_getLimitedValue(self, std.math.maxInt(T))));
     }
     extern fn ZigClangAPInt_getLimitedValue(*const APInt, limit: u64) u64;
 };
@@ -460,6 +460,9 @@ pub const Expr = opaque {
 
     pub const evaluateAsConstantExpr = ZigClangExpr_EvaluateAsConstantExpr;
     extern fn ZigClangExpr_EvaluateAsConstantExpr(*const Expr, *ExprEvalResult, Expr_ConstantExprKind, *const ASTContext) bool;
+
+    pub const castToStringLiteral = ZigClangExpr_castToStringLiteral;
+    extern fn ZigClangExpr_castToStringLiteral(*const Expr) ?*const StringLiteral;
 };
 
 pub const FieldDecl = opaque {
@@ -1053,6 +1056,12 @@ pub const InitListExpr = opaque {
     pub const getArrayFiller = ZigClangInitListExpr_getArrayFiller;
     extern fn ZigClangInitListExpr_getArrayFiller(*const InitListExpr) *const Expr;
 
+    pub const hasArrayFiller = ZigClangInitListExpr_hasArrayFiller;
+    extern fn ZigClangInitListExpr_hasArrayFiller(*const InitListExpr) bool;
+
+    pub const isStringLiteralInit = ZigClangInitListExpr_isStringLiteralInit;
+    extern fn ZigClangInitListExpr_isStringLiteralInit(*const InitListExpr) bool;
+
     pub const getNumInits = ZigClangInitListExpr_getNumInits;
     extern fn ZigClangInitListExpr_getNumInits(*const InitListExpr) c_uint;
 
@@ -1439,7 +1448,7 @@ pub const CK = enum(c_int) {
     IntegralToBoolean,
     IntegralToFloating,
     FloatingToFixedPoint,
-    FixedPointToFloating,
+    FixedPofloatFromInting,
     FixedPointCast,
     FixedPointToIntegral,
     IntegralToFixedPoint,

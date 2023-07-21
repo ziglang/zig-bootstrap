@@ -166,10 +166,10 @@ test "zig fmt: respect line breaks after var declarations" {
         \\    lookup_tables[1][p[6]] ^
         \\    lookup_tables[2][p[5]] ^
         \\    lookup_tables[3][p[4]] ^
-        \\    lookup_tables[4][@truncate(u8, self.crc >> 24)] ^
-        \\    lookup_tables[5][@truncate(u8, self.crc >> 16)] ^
-        \\    lookup_tables[6][@truncate(u8, self.crc >> 8)] ^
-        \\    lookup_tables[7][@truncate(u8, self.crc >> 0)];
+        \\    lookup_tables[4][@as(u8, self.crc >> 24)] ^
+        \\    lookup_tables[5][@as(u8, self.crc >> 16)] ^
+        \\    lookup_tables[6][@as(u8, self.crc >> 8)] ^
+        \\    lookup_tables[7][@as(u8, self.crc >> 0)];
         \\
     );
 }
@@ -239,7 +239,7 @@ test "zig fmt: file ends in comment after var decl" {
     );
 }
 
-test "zig fmt: if statment" {
+test "zig fmt: if statement" {
     try testCanonical(
         \\test "" {
         \\    if (optional()) |some|
@@ -529,7 +529,7 @@ test "zig fmt: remove empty lines at start/end of block" {
     );
 }
 
-test "zig fmt: allow empty line before commment at start of block" {
+test "zig fmt: allow empty line before comment at start of block" {
     try testCanonical(
         \\test {
         \\
@@ -628,7 +628,7 @@ test "zig fmt: builtin call with trailing comma" {
     try testCanonical(
         \\pub fn main() void {
         \\    @breakpoint();
-        \\    _ = @boolToInt(a);
+        \\    _ = @intFromBool(a);
         \\    _ = @call(
         \\        a,
         \\        b,
@@ -1108,7 +1108,7 @@ test "zig fmt: async function" {
         \\    handleRequestFn: fn (*Server, *const std.net.Address, File) callconv(.Async) void,
         \\};
         \\test "hi" {
-        \\    var ptr = @ptrCast(fn (i32) callconv(.Async) void, other);
+        \\    var ptr: fn (i32) callconv(.Async) void = @ptrCast(other);
         \\}
         \\
     );
@@ -1240,7 +1240,7 @@ test "zig fmt: infix operator and then multiline string literal" {
     );
 }
 
-test "zig fmt: infix operator and then multiline string literal" {
+test "zig fmt: infix operator and then multiline string literal over multiple lines" {
     try testCanonical(
         \\const x = "" ++
         \\    \\ hi0
@@ -1825,10 +1825,10 @@ test "zig fmt: respect line breaks after infix operators" {
         \\        lookup_tables[1][p[6]] ^
         \\        lookup_tables[2][p[5]] ^
         \\        lookup_tables[3][p[4]] ^
-        \\        lookup_tables[4][@truncate(u8, self.crc >> 24)] ^
-        \\        lookup_tables[5][@truncate(u8, self.crc >> 16)] ^
-        \\        lookup_tables[6][@truncate(u8, self.crc >> 8)] ^
-        \\        lookup_tables[7][@truncate(u8, self.crc >> 0)];
+        \\        lookup_tables[4][@as(u8, self.crc >> 24)] ^
+        \\        lookup_tables[5][@as(u8, self.crc >> 16)] ^
+        \\        lookup_tables[6][@as(u8, self.crc >> 8)] ^
+        \\        lookup_tables[7][@as(u8, self.crc >> 0)];
         \\}
         \\
     );
@@ -4310,7 +4310,7 @@ test "zig fmt: comptime before comptime field" {
     });
 }
 
-test "zig fmt: invalid else branch statement" {
+test "zig fmt: invalid doc comments on comptime and test blocks" {
     try testError(
         \\/// This is a doc comment for a comptime block.
         \\comptime {}
@@ -4371,7 +4371,7 @@ test "zig fmt: same line doc comment returns error" {
         \\const Foo = struct{
         \\    bar: u32, /// comment
         \\    foo: u32, /// comment
-        \\    /// commment
+        \\    /// comment
         \\};
         \\
         \\const a = 42; /// comment
@@ -4814,8 +4814,8 @@ test "zig fmt: use of comments and multiline string literals may force the param
         \\        \\ unknown-length pointers and C pointers cannot be hashed deeply.
         \\        \\ Consider providing your own hash function.
         \\    );
-        \\    return @intCast(i1, doMemCheckClientRequestExpr(0, // default return
-        \\        .MakeMemUndefined, @ptrToInt(qzz.ptr), qzz.len, 0, 0, 0));
+        \\    return @intCast(doMemCheckClientRequestExpr(0, // default return
+        \\        .MakeMemUndefined, @intFromPtr(qzz.ptr), qzz.len, 0, 0, 0));
         \\}
         \\
         \\// This looks like garbage don't do this
@@ -5191,7 +5191,7 @@ test "zig fmt: preserve container doc comment in container without trailing comm
     );
 }
 
-test "zig fmt: make single-line if no trailing comma" {
+test "zig fmt: make single-line if no trailing comma, fmt: off" {
     try testCanonical(
         \\// Test trailing comma syntax
         \\// zig fmt: off
@@ -5270,7 +5270,7 @@ test "zig fmt: variable initialized with ==" {
     , &.{.wrong_equal_var_decl});
 }
 
-test "zig fmt: missing const/var before local variable" {
+test "zig fmt: missing const/var before local variable in comptime block" {
     try testError(
         \\comptime {
         \\    z: u32;
@@ -5728,6 +5728,62 @@ test "zig fmt: canonicalize symbols (asm)" {
         \\        : [two] "{rax}" (@"false"),
         \\    );
         \\}
+        \\
+    );
+}
+
+test "zig fmt: don't canonicalize _ in enums" {
+    try testTransform(
+        \\const A = enum {
+        \\    first,
+        \\    second,
+        \\    third,
+        \\    _,
+        \\};
+        \\const B = enum {
+        \\    @"_",
+        \\    @"__",
+        \\    @"___",
+        \\    @"____",
+        \\};
+        \\const C = struct {
+        \\    @"_": u8,
+        \\    @"__": u8,
+        \\    @"___": u8,
+        \\    @"____": u8,
+        \\};
+        \\const D = union {
+        \\    @"_": u8,
+        \\    @"__": u8,
+        \\    @"___": u8,
+        \\    @"____": u8,
+        \\};
+        \\
+    ,
+        \\const A = enum {
+        \\    first,
+        \\    second,
+        \\    third,
+        \\    _,
+        \\};
+        \\const B = enum {
+        \\    @"_",
+        \\    __,
+        \\    ___,
+        \\    ____,
+        \\};
+        \\const C = struct {
+        \\    _: u8,
+        \\    __: u8,
+        \\    ___: u8,
+        \\    ____: u8,
+        \\};
+        \\const D = union {
+        \\    _: u8,
+        \\    __: u8,
+        \\    ___: u8,
+        \\    ____: u8,
+        \\};
         \\
     );
 }

@@ -39,14 +39,16 @@ pub fn BoundedArrayAligned(
 ) type {
     return struct {
         const Self = @This();
+        const Len = std.math.IntFittingRange(0, buffer_capacity);
+
         buffer: [buffer_capacity]T align(alignment) = undefined,
-        len: usize = 0,
+        len: Len = 0,
 
         /// Set the actual length of the slice.
         /// Returns error.Overflow if it exceeds the length of the backing array.
         pub fn init(len: usize) error{Overflow}!Self {
             if (len > buffer_capacity) return error.Overflow;
-            return Self{ .len = len };
+            return Self{ .len = @intCast(len) };
         }
 
         /// View the internal array as a slice whose size was previously set.
@@ -67,13 +69,13 @@ pub fn BoundedArrayAligned(
         /// Does not initialize added items if any.
         pub fn resize(self: *Self, len: usize) error{Overflow}!void {
             if (len > buffer_capacity) return error.Overflow;
-            self.len = len;
+            self.len = @intCast(len);
         }
 
         /// Copy the content of an existing slice.
         pub fn fromSlice(m: []const T) error{Overflow}!Self {
             var list = try init(m.len);
-            std.mem.copy(T, list.slice(), m);
+            @memcpy(list.slice(), m);
             return list;
         }
 
@@ -163,12 +165,12 @@ pub fn BoundedArrayAligned(
         /// This operation is O(N).
         pub fn insertSlice(self: *Self, i: usize, items: []const T) error{Overflow}!void {
             try self.ensureUnusedCapacity(items.len);
-            self.len += items.len;
+            self.len = @intCast(self.len + items.len);
             mem.copyBackwards(T, self.slice()[i + items.len .. self.len], self.constSlice()[i .. self.len - items.len]);
-            mem.copy(T, self.slice()[i .. i + items.len], items);
+            @memcpy(self.slice()[i..][0..items.len], items);
         }
 
-        /// Replace range of elements `slice[start..start+len]` with `new_items`.
+        /// Replace range of elements `slice[start..][0..len]` with `new_items`.
         /// Grows slice if `len < new_items.len`.
         /// Shrinks slice if `len > new_items.len`.
         pub fn replaceRange(
@@ -181,19 +183,19 @@ pub fn BoundedArrayAligned(
             var range = self.slice()[start..after_range];
 
             if (range.len == new_items.len) {
-                mem.copy(T, range, new_items);
+                @memcpy(range[0..new_items.len], new_items);
             } else if (range.len < new_items.len) {
                 const first = new_items[0..range.len];
                 const rest = new_items[range.len..];
-                mem.copy(T, range, first);
+                @memcpy(range[0..first.len], first);
                 try self.insertSlice(after_range, rest);
             } else {
-                mem.copy(T, range, new_items);
+                @memcpy(range[0..new_items.len], new_items);
                 const after_subrange = start + new_items.len;
                 for (self.constSlice()[after_range..], 0..) |item, i| {
                     self.slice()[after_subrange..][i] = item;
                 }
-                self.len -= len - new_items.len;
+                self.len = @intCast(self.len - len + new_items.len);
             }
         }
 
@@ -243,9 +245,9 @@ pub fn BoundedArrayAligned(
         /// Append the slice of items to the slice, asserting the capacity is already
         /// enough to store the new items.
         pub fn appendSliceAssumeCapacity(self: *Self, items: []const T) void {
-            const oldlen = self.len;
-            self.len += items.len;
-            mem.copy(T, self.slice()[oldlen..], items);
+            const old_len = self.len;
+            self.len = @intCast(self.len + items.len);
+            @memcpy(self.slice()[old_len..][0..items.len], items);
         }
 
         /// Append a value to the slice `n` times.
@@ -253,16 +255,16 @@ pub fn BoundedArrayAligned(
         pub fn appendNTimes(self: *Self, value: T, n: usize) error{Overflow}!void {
             const old_len = self.len;
             try self.resize(old_len + n);
-            mem.set(T, self.slice()[old_len..self.len], value);
+            @memset(self.slice()[old_len..self.len], value);
         }
 
         /// Append a value to the slice `n` times.
         /// Asserts the capacity is enough.
         pub fn appendNTimesAssumeCapacity(self: *Self, value: T, n: usize) void {
             const old_len = self.len;
-            self.len += n;
-            assert(self.len <= buffer_capacity);
-            mem.set(T, self.slice()[old_len..self.len], value);
+            assert(self.len + n <= buffer_capacity);
+            self.len = @intCast(self.len + n);
+            @memset(self.slice()[old_len..self.len], value);
         }
 
         pub const Writer = if (T != u8)
@@ -329,7 +331,7 @@ test "BoundedArray" {
     try testing.expectEqual(a.popOrNull(), 0);
     try testing.expectEqual(a.popOrNull(), null);
     var unused = a.unusedCapacitySlice();
-    mem.set(u8, unused[0..8], 2);
+    @memset(unused[0..8], 2);
     unused[8] = 3;
     unused[9] = 4;
     try testing.expectEqual(unused.len, a.capacity());
@@ -387,6 +389,18 @@ test "BoundedArray" {
     try testing.expectEqualStrings(s, a.constSlice());
 }
 
+test "BoundedArray sizeOf" {
+    // Just sanity check size on one CPU
+    if (@import("builtin").cpu.arch != .x86_64)
+        return;
+
+    try testing.expectEqual(@sizeOf(BoundedArray(u8, 3)), 4);
+
+    // `len` is the minimum required size to hold the maximum capacity
+    try testing.expectEqual(@TypeOf(@as(BoundedArray(u8, 15), undefined).len), u4);
+    try testing.expectEqual(@TypeOf(@as(BoundedArray(u8, 16), undefined).len), u5);
+}
+
 test "BoundedArrayAligned" {
     var a = try BoundedArrayAligned(u8, 16, 4).init(0);
     try a.append(0);
@@ -394,7 +408,7 @@ test "BoundedArrayAligned" {
     try a.append(255);
     try a.append(255);
 
-    const b = @ptrCast(*const [2]u16, a.constSlice().ptr);
+    const b = @as(*const [2]u16, @ptrCast(a.constSlice().ptr));
     try testing.expectEqual(@as(u16, 0), b[0]);
     try testing.expectEqual(@as(u16, 65535), b[1]);
 }

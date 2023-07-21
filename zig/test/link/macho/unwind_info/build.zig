@@ -32,23 +32,26 @@ fn testUnwindInfo(
     exe.link_gc_sections = dead_strip;
 
     const check = exe.checkObject();
-    check.checkStart("segname __TEXT");
-    check.checkNext("sectname __gcc_except_tab");
-    check.checkNext("sectname __unwind_info");
+    check.checkStart();
+    check.checkExact("segname __TEXT");
+    check.checkExact("sectname __gcc_except_tab");
+    check.checkExact("sectname __unwind_info");
 
     switch (builtin.cpu.arch) {
         .aarch64 => {
-            check.checkNext("sectname __eh_frame");
+            check.checkExact("sectname __eh_frame");
         },
         .x86_64 => {}, // We do not expect `__eh_frame` section on x86_64 in this case
         else => unreachable,
     }
 
     check.checkInSymtab();
-    check.checkNext("{*} (__TEXT,__text) external ___gxx_personality_v0");
+    check.checkContains("(__TEXT,__text) external ___gxx_personality_v0");
+    test_step.dependOn(&check.step);
 
-    const run_cmd = check.runAndCompare();
-    run_cmd.expectStdOutEqual(
+    const run = b.addRunArtifact(exe);
+    run.skip_foreign_checks = true;
+    run.expectStdOutEqual(
         \\Constructed: a
         \\Constructed: b
         \\About to destroy: b
@@ -57,7 +60,7 @@ fn testUnwindInfo(
         \\
     );
 
-    test_step.dependOn(&run_cmd.step);
+    test_step.dependOn(&run.step);
 }
 
 fn createScenario(
@@ -65,7 +68,7 @@ fn createScenario(
     optimize: std.builtin.OptimizeMode,
     target: std.zig.CrossTarget,
     name: []const u8,
-) *std.Build.CompileStep {
+) *std.Build.Step.Compile {
     const exe = b.addExecutable(.{
         .name = name,
         .optimize = optimize,

@@ -179,8 +179,8 @@ test "Dir.Iterator" {
     }
 
     try testing.expect(entries.items.len == 2); // note that the Iterator skips '.' and '..'
-    try testing.expect(contains(&entries, .{ .name = "some_file", .kind = .File }));
-    try testing.expect(contains(&entries, .{ .name = "some_dir", .kind = .Directory }));
+    try testing.expect(contains(&entries, .{ .name = "some_file", .kind = .file }));
+    try testing.expect(contains(&entries, .{ .name = "some_dir", .kind = .directory }));
 }
 
 test "Dir.Iterator many entries" {
@@ -214,7 +214,7 @@ test "Dir.Iterator many entries" {
     i = 0;
     while (i < num) : (i += 1) {
         const name = try std.fmt.bufPrint(&buf, "{}", .{i});
-        try testing.expect(contains(&entries, .{ .name = name, .kind = .File }));
+        try testing.expect(contains(&entries, .{ .name = name, .kind = .file }));
     }
 }
 
@@ -246,8 +246,8 @@ test "Dir.Iterator twice" {
         }
 
         try testing.expect(entries.items.len == 2); // note that the Iterator skips '.' and '..'
-        try testing.expect(contains(&entries, .{ .name = "some_file", .kind = .File }));
-        try testing.expect(contains(&entries, .{ .name = "some_dir", .kind = .Directory }));
+        try testing.expect(contains(&entries, .{ .name = "some_file", .kind = .file }));
+        try testing.expect(contains(&entries, .{ .name = "some_dir", .kind = .directory }));
     }
 }
 
@@ -280,8 +280,8 @@ test "Dir.Iterator reset" {
         }
 
         try testing.expect(entries.items.len == 2); // note that the Iterator skips '.' and '..'
-        try testing.expect(contains(&entries, .{ .name = "some_file", .kind = .File }));
-        try testing.expect(contains(&entries, .{ .name = "some_dir", .kind = .Directory }));
+        try testing.expect(contains(&entries, .{ .name = "some_file", .kind = .file }));
+        try testing.expect(contains(&entries, .{ .name = "some_dir", .kind = .directory }));
 
         iter.reset();
     }
@@ -336,7 +336,7 @@ test "Dir.realpath smoke test" {
     var tmp_dir = tmpDir(.{});
     defer tmp_dir.cleanup();
 
-    var file = try tmp_dir.dir.createFile("test_file", .{ .lock = File.Lock.Shared });
+    var file = try tmp_dir.dir.createFile("test_file", .{ .lock = .shared });
     // We need to close the file immediately as otherwise on Windows we'll end up
     // with a sharing violation.
     file.close();
@@ -428,7 +428,7 @@ test "directory operations on files" {
     // ensure the file still exists and is a file as a sanity check
     file = try tmp_dir.dir.openFile(test_file_name, .{});
     const stat = try file.stat();
-    try testing.expect(stat.kind == .File);
+    try testing.expect(stat.kind == .file);
     file.close();
 }
 
@@ -488,10 +488,7 @@ test "deleteDir" {
     dir.close();
 
     // deleting a non-empty directory
-    // TODO: Re-enable this check on Windows, see https://github.com/ziglang/zig/issues/5537
-    if (builtin.os.tag != .windows) {
-        try testing.expectError(error.DirNotEmpty, tmp_dir.dir.deleteDir("test_dir"));
-    }
+    try testing.expectError(error.DirNotEmpty, tmp_dir.dir.deleteDir("test_dir"));
 
     dir = try tmp_dir.dir.openDir("test_dir", .{});
     try dir.deleteFile("test_file");
@@ -667,7 +664,7 @@ test "renameAbsolute" {
     try testing.expectError(error.FileNotFound, tmp_dir.dir.openFile(test_file_name, .{}));
     file = try tmp_dir.dir.openFile(renamed_test_file_name, .{});
     const stat = try file.stat();
-    try testing.expect(stat.kind == .File);
+    try testing.expect(stat.kind == .file);
     file.close();
 
     // Renaming directories
@@ -1038,10 +1035,10 @@ test "open file with exclusive nonblocking lock twice" {
     var tmp = tmpDir(.{});
     defer tmp.cleanup();
 
-    const file1 = try tmp.dir.createFile(filename, .{ .lock = .Exclusive, .lock_nonblocking = true });
+    const file1 = try tmp.dir.createFile(filename, .{ .lock = .exclusive, .lock_nonblocking = true });
     defer file1.close();
 
-    const file2 = tmp.dir.createFile(filename, .{ .lock = .Exclusive, .lock_nonblocking = true });
+    const file2 = tmp.dir.createFile(filename, .{ .lock = .exclusive, .lock_nonblocking = true });
     try testing.expectError(error.WouldBlock, file2);
 }
 
@@ -1053,10 +1050,10 @@ test "open file with shared and exclusive nonblocking lock" {
     var tmp = tmpDir(.{});
     defer tmp.cleanup();
 
-    const file1 = try tmp.dir.createFile(filename, .{ .lock = .Shared, .lock_nonblocking = true });
+    const file1 = try tmp.dir.createFile(filename, .{ .lock = .shared, .lock_nonblocking = true });
     defer file1.close();
 
-    const file2 = tmp.dir.createFile(filename, .{ .lock = .Exclusive, .lock_nonblocking = true });
+    const file2 = tmp.dir.createFile(filename, .{ .lock = .exclusive, .lock_nonblocking = true });
     try testing.expectError(error.WouldBlock, file2);
 }
 
@@ -1068,10 +1065,10 @@ test "open file with exclusive and shared nonblocking lock" {
     var tmp = tmpDir(.{});
     defer tmp.cleanup();
 
-    const file1 = try tmp.dir.createFile(filename, .{ .lock = .Exclusive, .lock_nonblocking = true });
+    const file1 = try tmp.dir.createFile(filename, .{ .lock = .exclusive, .lock_nonblocking = true });
     defer file1.close();
 
-    const file2 = tmp.dir.createFile(filename, .{ .lock = .Shared, .lock_nonblocking = true });
+    const file2 = tmp.dir.createFile(filename, .{ .lock = .shared, .lock_nonblocking = true });
     try testing.expectError(error.WouldBlock, file2);
 }
 
@@ -1088,13 +1085,13 @@ test "open file with exclusive lock twice, make sure second lock waits" {
     var tmp = tmpDir(.{});
     defer tmp.cleanup();
 
-    const file = try tmp.dir.createFile(filename, .{ .lock = .Exclusive });
+    const file = try tmp.dir.createFile(filename, .{ .lock = .exclusive });
     errdefer file.close();
 
     const S = struct {
         fn checkFn(dir: *fs.Dir, started: *std.Thread.ResetEvent, locked: *std.Thread.ResetEvent) !void {
             started.set();
-            const file1 = try dir.createFile(filename, .{ .lock = .Exclusive });
+            const file1 = try dir.createFile(filename, .{ .lock = .exclusive });
 
             locked.set();
             file1.close();
@@ -1141,12 +1138,12 @@ test "open file with exclusive nonblocking lock twice (absolute paths)" {
     defer gpa.free(filename);
 
     const file1 = try fs.createFileAbsolute(filename, .{
-        .lock = .Exclusive,
+        .lock = .exclusive,
         .lock_nonblocking = true,
     });
 
     const file2 = fs.createFileAbsolute(filename, .{
-        .lock = .Exclusive,
+        .lock = .exclusive,
         .lock_nonblocking = true,
     });
     file1.close();
@@ -1351,7 +1348,7 @@ test "File.Metadata" {
     defer file.close();
 
     const metadata = try file.metadata();
-    try testing.expect(metadata.kind() == .File);
+    try testing.expect(metadata.kind() == .file);
     try testing.expect(metadata.size() == 0);
     _ = metadata.accessed();
     _ = metadata.modified();
@@ -1417,4 +1414,57 @@ test "File.PermissionsUnix" {
     const permissions_unix = File.PermissionsUnix.unixNew(0o754);
     try testing.expect(permissions_unix.unixHas(.user, .execute));
     try testing.expect(!permissions_unix.unixHas(.other, .execute));
+}
+
+test "delete a read-only file on windows with file pending semantics" {
+    if (builtin.os.tag != .windows or builtin.target.os.version_range.windows.min.isAtLeast(.win10_rs1))
+        return error.SkipZigTest;
+
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+    {
+        const file = try tmp.dir.createFile("test_file", .{ .read = true });
+        defer file.close();
+        // Create a file and make it read-only
+        const metadata = try file.metadata();
+        var permissions = metadata.permissions();
+        permissions.setReadOnly(true);
+        try file.setPermissions(permissions);
+        try testing.expectError(error.AccessDenied, tmp.dir.deleteFile("test_file"));
+        // Now make the file not read-only
+        permissions.setReadOnly(false);
+        try file.setPermissions(permissions);
+    }
+    try tmp.dir.deleteFile("test_file");
+}
+
+test "delete a read-only file on windows with posix semantis" {
+    if (builtin.os.tag != .windows or !builtin.target.os.version_range.windows.min.isAtLeast(.win10_rs1))
+        return error.SkipZigTest;
+
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+    const file = try tmp.dir.createFile("test_file", .{ .read = true });
+    defer file.close();
+    // Create a file and make it read-only
+    const metadata = try file.metadata();
+    var permissions = metadata.permissions();
+    permissions.setReadOnly(true);
+    try file.setPermissions(permissions);
+    try tmp.dir.deleteFile("test_file"); // file is unmapped and deleted once last handle closed
+}
+
+test "delete a setAsCwd directory on Windows" {
+    if (builtin.os.tag != .windows) return error.SkipZigTest;
+
+    var tmp = tmpDir(.{});
+    // Set tmp dir as current working directory.
+    try tmp.dir.setAsCwd();
+    tmp.dir.close();
+    try testing.expectError(error.FileBusy, tmp.parent_dir.deleteTree(&tmp.sub_path));
+    // Now set the parent dir as the current working dir for clean up.
+    try tmp.parent_dir.setAsCwd();
+    try tmp.parent_dir.deleteTree(&tmp.sub_path);
+    // Close the parent "tmp" so we don't leak the HANDLE.
+    tmp.parent_dir.close();
 }

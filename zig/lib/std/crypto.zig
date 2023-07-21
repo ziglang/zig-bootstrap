@@ -41,7 +41,9 @@ pub const auth = struct {
     pub const siphash = @import("crypto/siphash.zig");
     pub const aegis = struct {
         pub const Aegis128LMac = @import("crypto/aegis.zig").Aegis128LMac;
+        pub const Aegis128LMac_128 = @import("crypto/aegis.zig").Aegis128LMac_128;
         pub const Aegis256Mac = @import("crypto/aegis.zig").Aegis256Mac;
+        pub const Aegis256Mac_128 = @import("crypto/aegis.zig").Aegis256Mac_128;
     };
     pub const cmac = @import("crypto/cmac.zig");
 };
@@ -177,6 +179,9 @@ pub const nacl = struct {
 
 pub const utils = @import("crypto/utils.zig");
 
+/// Finite-field arithmetic.
+pub const ff = @import("crypto/ff.zig");
+
 /// This is a thread-local, cryptographically secure pseudo random number generator.
 pub const random = @import("crypto/tlcsprng.zig").interface;
 
@@ -294,6 +299,7 @@ test {
     _ = nacl.SealedBox;
 
     _ = utils;
+    _ = ff;
     _ = random;
     _ = errors;
     _ = tls;

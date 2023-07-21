@@ -120,7 +120,7 @@ pub fn Field(comptime params: FieldParams) type {
         /// Return true if the element is odd.
         pub fn isOdd(fe: Fe) bool {
             const s = fe.toBytes(.Little);
-            return @truncate(u1, s[0]) != 0;
+            return @as(u1, @truncate(s[0])) != 0;
         }
 
         /// Conditonally replace a field element with `a` if `c` is positive.
@@ -179,7 +179,7 @@ pub fn Field(comptime params: FieldParams) type {
             var x: T = n;
             var t = a;
             while (true) {
-                if (@truncate(u1, x) != 0) fe = fe.mul(t);
+                if (@as(u1, @truncate(x)) != 0) fe = fe.mul(t);
                 x >>= 1;
                 if (x == 0) break;
                 t = t.sq();
@@ -228,12 +228,12 @@ pub fn Field(comptime params: FieldParams) type {
             }
             if (iterations % 2 != 0) {
                 fiat.divstep(&out1, &out2, &out3, &out4, &out5, d, f, g, v, r);
-                mem.copy(Word, &v, &out4);
-                mem.copy(Word, &f, &out2);
+                v = out4;
+                f = out2;
             }
             var v_opp: Limbs = undefined;
             fiat.opp(&v_opp, v);
-            fiat.selectznz(&v, @truncate(u1, f[f.len - 1] >> (@bitSizeOf(Word) - 1)), v, v_opp);
+            fiat.selectznz(&v, @as(u1, @truncate(f[f.len - 1] >> (@bitSizeOf(Word) - 1))), v, v_opp);
 
             const precomp = blk: {
                 var precomp: Limbs = undefined;

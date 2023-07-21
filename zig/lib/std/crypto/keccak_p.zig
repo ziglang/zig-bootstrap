@@ -33,7 +33,7 @@ pub fn KeccakF(comptime f: u11) type {
                 0x8000000080008081, 0x8000000000008080, 0x0000000080000001, 0x8000000080008008,
             };
             var rc: [max_rounds]T = undefined;
-            for (&rc, RC64[0..max_rounds]) |*t, c| t.* = @truncate(T, c);
+            for (&rc, RC64[0..max_rounds]) |*t, c| t.* = @as(T, @truncate(c));
             break :rc rc;
         };
 
@@ -56,7 +56,7 @@ pub fn KeccakF(comptime f: u11) type {
         /// Byte-swap the entire state if the architecture doesn't match the required endianness.
         pub fn endianSwap(self: *Self) void {
             for (&self.st) |*w| {
-                w.* = mem.littleTooNative(T, w.*);
+                w.* = mem.littleToNative(T, w.*);
             }
         }
 
@@ -68,14 +68,14 @@ pub fn KeccakF(comptime f: u11) type {
             }
             if (i < bytes.len) {
                 var padded = [_]u8{0} ** @sizeOf(T);
-                mem.copy(u8, padded[0 .. bytes.len - i], bytes[i..]);
+                @memcpy(padded[0 .. bytes.len - i], bytes[i..]);
                 self.st[i / @sizeOf(T)] = mem.readIntLittle(T, padded[0..]);
             }
         }
 
         /// XOR a byte into the state at a given offset.
         pub fn addByte(self: *Self, byte: u8, offset: usize) void {
-            const z = @sizeOf(T) * @truncate(math.Log2Int(T), offset % @sizeOf(T));
+            const z = @sizeOf(T) * @as(math.Log2Int(T), @truncate(offset % @sizeOf(T)));
             self.st[offset / @sizeOf(T)] ^= @as(T, byte) << z;
         }
 
@@ -87,7 +87,7 @@ pub fn KeccakF(comptime f: u11) type {
             }
             if (i < bytes.len) {
                 var padded = [_]u8{0} ** @sizeOf(T);
-                mem.copy(u8, padded[0 .. bytes.len - i], bytes[i..]);
+                @memcpy(padded[0 .. bytes.len - i], bytes[i..]);
                 self.st[i / @sizeOf(T)] ^= mem.readIntLittle(T, padded[0..]);
             }
         }
@@ -101,7 +101,7 @@ pub fn KeccakF(comptime f: u11) type {
             if (i < out.len) {
                 var padded = [_]u8{0} ** @sizeOf(T);
                 mem.writeIntLittle(T, padded[0..], self.st[i / @sizeOf(T)]);
-                mem.copy(u8, out[i..], padded[0 .. out.len - i]);
+                @memcpy(out[i..], padded[0 .. out.len - i]);
             }
         }
 
@@ -116,16 +116,16 @@ pub fn KeccakF(comptime f: u11) type {
             }
             if (i < in.len) {
                 var padded = [_]u8{0} ** @sizeOf(T);
-                mem.copy(u8, padded[0 .. in.len - i], in[i..]);
+                @memcpy(padded[0 .. in.len - i], in[i..]);
                 const x = mem.readIntNative(T, &padded) ^ mem.nativeToLittle(T, self.st[i / @sizeOf(T)]);
                 mem.writeIntNative(T, &padded, x);
-                mem.copy(u8, out[i..], padded[0 .. in.len - i]);
+                @memcpy(out[i..], padded[0 .. in.len - i]);
             }
         }
 
         /// Set the words storing the bytes of a given range to zero.
         pub fn clear(self: *Self, from: usize, to: usize) void {
-            mem.set(T, self.st[from / @sizeOf(T) .. (to + @sizeOf(T) - 1) / @sizeOf(T)], 0);
+            @memset(self.st[from / @sizeOf(T) .. (to + @sizeOf(T) - 1) / @sizeOf(T)], 0);
         }
 
         /// Clear the entire state, disabling compiler optimizations.
@@ -214,8 +214,8 @@ pub fn State(comptime f: u11, comptime capacity: u11, comptime delim: u8, compti
         pub fn absorb(self: *Self, bytes_: []const u8) void {
             var bytes = bytes_;
             if (self.offset > 0) {
-                const left = math.min(rate - self.offset, bytes.len);
-                mem.copy(u8, self.buf[self.offset..], bytes[0..left]);
+                const left = @min(rate - self.offset, bytes.len);
+                @memcpy(self.buf[self.offset..][0..left], bytes[0..left]);
                 self.offset += left;
                 if (self.offset == rate) {
                     self.offset = 0;
@@ -231,7 +231,7 @@ pub fn State(comptime f: u11, comptime capacity: u11, comptime delim: u8, compti
                 bytes = bytes[rate..];
             }
             if (bytes.len > 0) {
-                mem.copy(u8, &self.buf, bytes);
+                @memcpy(self.buf[0..bytes.len], bytes);
                 self.offset = bytes.len;
             }
         }
@@ -249,7 +249,7 @@ pub fn State(comptime f: u11, comptime capacity: u11, comptime delim: u8, compti
         pub fn squeeze(self: *Self, out: []u8) void {
             var i: usize = 0;
             while (i < out.len) : (i += rate) {
-                const left = math.min(rate, out.len - i);
+                const left = @min(rate, out.len - i);
                 self.st.extractBytes(out[i..][0..left]);
                 self.st.permuteR(rounds);
             }

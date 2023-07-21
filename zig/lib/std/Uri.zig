@@ -1,4 +1,4 @@
-//! Implements URI parsing roughly adhering to <https://tools.ietf.org/html/rfc3986>.
+//! Uniform Resource Identifier (URI) parsing roughly adhering to <https://tools.ietf.org/html/rfc3986>.
 //! Does not do perfect grammar and character class checking, but should be robust against URIs in the wild.
 
 const Uri = @This();
@@ -15,15 +15,15 @@ query: ?[]const u8,
 fragment: ?[]const u8,
 
 /// Applies URI encoding and replaces all reserved characters with their respective %XX code.
-pub fn escapeString(allocator: std.mem.Allocator, input: []const u8) error{OutOfMemory}![]const u8 {
+pub fn escapeString(allocator: std.mem.Allocator, input: []const u8) error{OutOfMemory}![]u8 {
     return escapeStringWithFn(allocator, input, isUnreserved);
 }
 
-pub fn escapePath(allocator: std.mem.Allocator, input: []const u8) error{OutOfMemory}![]const u8 {
+pub fn escapePath(allocator: std.mem.Allocator, input: []const u8) error{OutOfMemory}![]u8 {
     return escapeStringWithFn(allocator, input, isPathChar);
 }
 
-pub fn escapeQuery(allocator: std.mem.Allocator, input: []const u8) error{OutOfMemory}![]const u8 {
+pub fn escapeQuery(allocator: std.mem.Allocator, input: []const u8) error{OutOfMemory}![]u8 {
     return escapeStringWithFn(allocator, input, isQueryChar);
 }
 
@@ -39,7 +39,7 @@ pub fn writeEscapedQuery(writer: anytype, input: []const u8) !void {
     return writeEscapedStringWithFn(writer, input, isQueryChar);
 }
 
-pub fn escapeStringWithFn(allocator: std.mem.Allocator, input: []const u8, comptime keepUnescaped: fn (c: u8) bool) std.mem.Allocator.Error![]const u8 {
+pub fn escapeStringWithFn(allocator: std.mem.Allocator, input: []const u8, comptime keepUnescaped: fn (c: u8) bool) std.mem.Allocator.Error![]u8 {
     var outsize: usize = 0;
     for (input) |c| {
         outsize += if (keepUnescaped(c)) @as(usize, 1) else 3;
@@ -76,7 +76,7 @@ pub fn writeEscapedStringWithFn(writer: anytype, input: []const u8, comptime kee
 
 /// Parses a URI string and unescapes all %XX where XX is a valid hex number. Otherwise, verbatim copies
 /// them to the output.
-pub fn unescapeString(allocator: std.mem.Allocator, input: []const u8) error{OutOfMemory}![]const u8 {
+pub fn unescapeString(allocator: std.mem.Allocator, input: []const u8) error{OutOfMemory}![]u8 {
     var outsize: usize = 0;
     var inptr: usize = 0;
     while (inptr < input.len) {
@@ -177,13 +177,13 @@ pub fn parseWithoutScheme(text: []const u8) ParseError!Uri {
 
             if (std.mem.lastIndexOf(u8, authority, ":")) |index| {
                 if (index >= end_of_host) { // if not part of the V6 address field
-                    end_of_host = std.math.min(end_of_host, index);
+                    end_of_host = @min(end_of_host, index);
                     uri.port = std.fmt.parseInt(u16, authority[index + 1 ..], 10) catch return error.InvalidPort;
                 }
             }
         } else if (std.mem.lastIndexOf(u8, authority, ":")) |index| {
             if (index >= start_of_host) { // if not part of the userinfo field
-                end_of_host = std.math.min(end_of_host, index);
+                end_of_host = @min(end_of_host, index);
                 uri.port = std.fmt.parseInt(u16, authority[index + 1 ..], 10) catch return error.InvalidPort;
             }
         }
@@ -216,6 +216,7 @@ pub fn format(
 
     const needs_absolute = comptime std.mem.indexOf(u8, fmt, "+") != null;
     const needs_path = comptime std.mem.indexOf(u8, fmt, "/") != null or fmt.len == 0;
+    const needs_fragment = comptime std.mem.indexOf(u8, fmt, "#") != null;
 
     if (needs_absolute) {
         try writer.writeAll(uri.scheme);
@@ -253,9 +254,11 @@ pub fn format(
             try Uri.writeEscapedQuery(writer, q);
         }
 
-        if (uri.fragment) |f| {
-            try writer.writeAll("#");
-            try Uri.writeEscapedQuery(writer, f);
+        if (needs_fragment) {
+            if (uri.fragment) |f| {
+                try writer.writeAll("#");
+                try Uri.writeEscapedQuery(writer, f);
+            }
         }
     }
 }
@@ -581,7 +584,7 @@ test "RFC example 1" {
     }, try parse(uri));
 }
 
-test "RFX example 2" {
+test "RFC example 2" {
     const uri = "urn:example:animal:ferret:nose";
     try std.testing.expectEqual(Uri{
         .scheme = uri[0..3],

@@ -20,7 +20,6 @@ pub const Pool = @import("Thread/Pool.zig");
 pub const WaitGroup = @import("Thread/WaitGroup.zig");
 
 pub const use_pthreads = target.os.tag != .windows and target.os.tag != .wasi and builtin.link_libc;
-const is_gnu = target.abi.isGnu();
 
 const Thread = @This();
 const Impl = if (target.os.tag == .windows)
@@ -29,6 +28,8 @@ else if (use_pthreads)
     PosixThreadImpl
 else if (target.os.tag == .linux)
     LinuxThreadImpl
+else if (target.os.tag == .wasi)
+    WasiThreadImpl
 else
     UnsupportedImpl;
 
@@ -57,25 +58,27 @@ pub fn setName(self: Thread, name: []const u8) SetNameError!void {
 
     const name_with_terminator = blk: {
         var name_buf: [max_name_len:0]u8 = undefined;
-        std.mem.copy(u8, &name_buf, name);
+        @memcpy(name_buf[0..name.len], name);
         name_buf[name.len] = 0;
         break :blk name_buf[0..name.len :0];
     };
 
     switch (target.os.tag) {
         .linux => if (use_pthreads) {
-            const err = std.c.pthread_setname_np(self.getHandle(), name_with_terminator.ptr);
-            switch (err) {
-                .SUCCESS => return,
-                .RANGE => unreachable,
-                else => |e| return os.unexpectedErrno(e),
-            }
-        } else if (use_pthreads and self.getHandle() == std.c.pthread_self()) {
-            // TODO: this is dead code. what did the author of this code intend to happen here?
-            const err = try os.prctl(.SET_NAME, .{@ptrToInt(name_with_terminator.ptr)});
-            switch (@intToEnum(os.E, err)) {
-                .SUCCESS => return,
-                else => |e| return os.unexpectedErrno(e),
+            if (self.getHandle() == std.c.pthread_self()) {
+                // Set the name of the calling thread (no thread id required).
+                const err = try os.prctl(.SET_NAME, .{@intFromPtr(name_with_terminator.ptr)});
+                switch (@as(os.E, @enumFromInt(err))) {
+                    .SUCCESS => return,
+                    else => |e| return os.unexpectedErrno(e),
+                }
+            } else {
+                const err = std.c.pthread_setname_np(self.getHandle(), name_with_terminator.ptr);
+                switch (err) {
+                    .SUCCESS => return,
+                    .RANGE => unreachable,
+                    else => |e| return os.unexpectedErrno(e),
+                }
             }
         } else {
             var buf: [32]u8 = undefined;
@@ -171,20 +174,23 @@ pub fn getName(self: Thread, buffer_ptr: *[max_name_len:0]u8) GetNameError!?[]co
     var buffer: [:0]u8 = buffer_ptr;
 
     switch (target.os.tag) {
-        .linux => if (use_pthreads and is_gnu) {
-            const err = std.c.pthread_getname_np(self.getHandle(), buffer.ptr, max_name_len + 1);
-            switch (err) {
-                .SUCCESS => return std.mem.sliceTo(buffer, 0),
-                .RANGE => unreachable,
-                else => |e| return os.unexpectedErrno(e),
+        .linux => if (use_pthreads) {
+            if (self.getHandle() == std.c.pthread_self()) {
+                // Get the name of the calling thread (no thread id required).
+                const err = try os.prctl(.GET_NAME, .{@intFromPtr(buffer.ptr)});
+                switch (@as(os.E, @enumFromInt(err))) {
+                    .SUCCESS => return std.mem.sliceTo(buffer, 0),
+                    else => |e| return os.unexpectedErrno(e),
+                }
+            } else {
+                const err = std.c.pthread_getname_np(self.getHandle(), buffer.ptr, max_name_len + 1);
+                switch (err) {
+                    .SUCCESS => return std.mem.sliceTo(buffer, 0),
+                    .RANGE => unreachable,
+                    else => |e| return os.unexpectedErrno(e),
+                }
             }
-        } else if (use_pthreads and self.getHandle() == std.c.pthread_self()) {
-            const err = try os.prctl(.GET_NAME, .{@ptrToInt(buffer.ptr)});
-            switch (@intToEnum(os.E, err)) {
-                .SUCCESS => return std.mem.sliceTo(buffer, 0),
-                else => |e| return os.unexpectedErrno(e),
-            }
-        } else if (!use_pthreads) {
+        } else {
             var buf: [32]u8 = undefined;
             const path = try std.fmt.bufPrint(&buf, "/proc/self/task/{d}/comm", .{self.getHandle()});
 
@@ -194,9 +200,6 @@ pub fn getName(self: Thread, buffer_ptr: *[max_name_len:0]u8) GetNameError!?[]co
             const data_len = try file.reader().readAll(buffer_ptr[0 .. max_name_len + 1]);
 
             return if (data_len >= 1) buffer[0 .. data_len - 1] else null;
-        } else {
-            // musl doesn't provide pthread_getname_np and there's no way to retrieve the thread id of an arbitrary thread.
-            return error.Unsupported;
         },
         .windows => {
             const buf_capacity = @sizeOf(os.windows.UNICODE_STRING) + (@sizeOf(u16) * max_name_len);
@@ -210,7 +213,7 @@ pub fn getName(self: Thread, buffer_ptr: *[max_name_len:0]u8) GetNameError!?[]co
                 null,
             )) {
                 .SUCCESS => {
-                    const string = @ptrCast(*const os.windows.UNICODE_STRING, &buf);
+                    const string = @as(*const os.windows.UNICODE_STRING, @ptrCast(&buf));
                     const len = try std.unicode.utf16leToUtf8(buffer, string.Buffer[0 .. string.Length / 2]);
                     return if (len > 0) buffer[0..len] else null;
                 },
@@ -265,6 +268,7 @@ pub const Id = switch (target.os.tag) {
     .freebsd,
     .openbsd,
     .haiku,
+    .wasi,
     => u32,
     .macos, .ios, .watchos, .tvos => u64,
     .windows => os.windows.DWORD,
@@ -295,6 +299,8 @@ pub const SpawnConfig = struct {
 
     /// Size in bytes of the Thread's stack
     stack_size: usize = 16 * 1024 * 1024,
+    /// The allocator to be used to allocate memory for the to-be-spawned thread
+    allocator: ?std.mem.Allocator = null,
 };
 
 pub const SpawnError = error{
@@ -327,10 +333,10 @@ pub const SpawnError = error{
     Unexpected,
 };
 
-/// Spawns a new thread which executes `function` using `args` and returns a handle the spawned thread.
+/// Spawns a new thread which executes `function` using `args` and returns a handle to the spawned thread.
 /// `config` can be used as hints to the platform for now to spawn and execute the `function`.
 /// The caller must eventually either call `join()` to wait for the thread to finish and free its resources
-/// or call `detach()` to excuse the caller from calling `join()` and have the thread clean up its resources on completion`.
+/// or call `detach()` to excuse the caller from calling `join()` and have the thread clean up its resources on completion.
 pub fn spawn(config: SpawnConfig, comptime function: anytype, args: anytype) SpawnError!Thread {
     if (builtin.single_threaded) {
         @compileError("Cannot spawn thread when building in single-threaded mode");
@@ -468,8 +474,8 @@ const UnsupportedImpl = struct {
         return unsupported(self);
     }
 
-    fn unsupported(unusued: anytype) noreturn {
-        _ = unusued;
+    fn unsupported(unused: anytype) noreturn {
+        _ = unused;
         @compileError("Unsupported operating system " ++ @tagName(target.os.tag));
     }
 };
@@ -509,7 +515,7 @@ const WindowsThreadImpl = struct {
             thread: ThreadCompletion,
 
             fn entryFn(raw_ptr: windows.PVOID) callconv(.C) windows.DWORD {
-                const self = @ptrCast(*@This(), @alignCast(@alignOf(@This()), raw_ptr));
+                const self: *@This() = @ptrCast(@alignCast(raw_ptr));
                 defer switch (self.thread.completion.swap(.completed, .SeqCst)) {
                     .running => {},
                     .completed => unreachable,
@@ -524,7 +530,7 @@ const WindowsThreadImpl = struct {
         const alloc_ptr = windows.kernel32.HeapAlloc(heap_handle, 0, alloc_bytes) orelse return error.OutOfMemory;
         errdefer assert(windows.kernel32.HeapFree(heap_handle, 0, alloc_ptr) != 0);
 
-        const instance_bytes = @ptrCast([*]u8, alloc_ptr)[0..alloc_bytes];
+        const instance_bytes = @as([*]u8, @ptrCast(alloc_ptr))[0..alloc_bytes];
         var fba = std.heap.FixedBufferAllocator.init(instance_bytes);
         const instance = fba.allocator().create(Instance) catch unreachable;
         instance.* = .{
@@ -540,13 +546,13 @@ const WindowsThreadImpl = struct {
         // Going lower makes it default to that specified in the executable (~1mb).
         // Its also fine if the limit here is incorrect as stack size is only a hint.
         var stack_size = std.math.cast(u32, config.stack_size) orelse std.math.maxInt(u32);
-        stack_size = std.math.max(64 * 1024, stack_size);
+        stack_size = @max(64 * 1024, stack_size);
 
         instance.thread.thread_handle = windows.kernel32.CreateThread(
             null,
             stack_size,
             Instance.entryFn,
-            @ptrCast(*anyopaque, instance),
+            @as(*anyopaque, @ptrCast(instance)),
             0,
             null,
         ) orelse {
@@ -595,22 +601,22 @@ const PosixThreadImpl = struct {
                 return thread_id;
             },
             .dragonfly => {
-                return @bitCast(u32, c.lwp_gettid());
+                return @as(u32, @bitCast(c.lwp_gettid()));
             },
             .netbsd => {
-                return @bitCast(u32, c._lwp_self());
+                return @as(u32, @bitCast(c._lwp_self()));
             },
             .freebsd => {
-                return @bitCast(u32, c.pthread_getthreadid_np());
+                return @as(u32, @bitCast(c.pthread_getthreadid_np()));
             },
             .openbsd => {
-                return @bitCast(u32, c.getthrid());
+                return @as(u32, @bitCast(c.getthrid()));
             },
             .haiku => {
-                return @bitCast(u32, c.find_thread(null));
+                return @as(u32, @bitCast(c.find_thread(null)));
             },
             else => {
-                return @ptrToInt(c.pthread_self());
+                return @intFromPtr(c.pthread_self());
             },
         }
     }
@@ -623,12 +629,12 @@ const PosixThreadImpl = struct {
             .openbsd => {
                 var count: c_int = undefined;
                 var count_size: usize = @sizeOf(c_int);
-                const mib = [_]c_int{ os.CTL.HW, os.system.HW_NCPUONLINE };
+                const mib = [_]c_int{ os.CTL.HW, os.system.HW.NCPUONLINE };
                 os.sysctl(&mib, &count, &count_size, null, 0) catch |err| switch (err) {
                     error.NameTooLong, error.UnknownName => unreachable,
                     else => |e| return e,
                 };
-                return @intCast(usize, count);
+                return @as(usize, @intCast(count));
             },
             .solaris => {
                 // The "proper" way to get the cpu count would be to query
@@ -636,7 +642,7 @@ const PosixThreadImpl = struct {
                 // cpu.
                 const rc = c.sysconf(os._SC.NPROCESSORS_ONLN);
                 return switch (os.errno(rc)) {
-                    .SUCCESS => @intCast(usize, rc),
+                    .SUCCESS => @as(usize, @intCast(rc)),
                     else => |err| os.unexpectedErrno(err),
                 };
             },
@@ -644,7 +650,7 @@ const PosixThreadImpl = struct {
                 var system_info: os.system.system_info = undefined;
                 const rc = os.system.get_system_info(&system_info); // always returns B_OK
                 return switch (os.errno(rc)) {
-                    .SUCCESS => @intCast(usize, system_info.cpu_count),
+                    .SUCCESS => @as(usize, @intCast(system_info.cpu_count)),
                     else => |err| os.unexpectedErrno(err),
                 };
             },
@@ -656,7 +662,7 @@ const PosixThreadImpl = struct {
                     error.NameTooLong, error.UnknownName => unreachable,
                     else => |e| return e,
                 };
-                return @intCast(usize, count);
+                return @as(usize, @intCast(count));
             },
         }
     }
@@ -674,7 +680,7 @@ const PosixThreadImpl = struct {
                     return callFn(f, @as(Args, undefined));
                 }
 
-                const args_ptr = @ptrCast(*Args, @alignCast(@alignOf(Args), raw_arg));
+                const args_ptr: *Args = @ptrCast(@alignCast(raw_arg));
                 defer allocator.destroy(args_ptr);
                 return callFn(f, args_ptr.*);
             }
@@ -689,7 +695,7 @@ const PosixThreadImpl = struct {
         defer assert(c.pthread_attr_destroy(&attr) == .SUCCESS);
 
         // Use the same set of parameters used by the libc-less impl.
-        const stack_size = std.math.max(config.stack_size, 16 * 1024);
+        const stack_size = @max(config.stack_size, c.PTHREAD_STACK_MIN);
         assert(c.pthread_attr_setstacksize(&attr, stack_size) == .SUCCESS);
         assert(c.pthread_attr_setguardsize(&attr, std.mem.page_size) == .SUCCESS);
 
@@ -698,7 +704,7 @@ const PosixThreadImpl = struct {
             &handle,
             &attr,
             Instance.entryFn,
-            if (@sizeOf(Args) > 1) @ptrCast(*anyopaque, args_ptr) else undefined,
+            if (@sizeOf(Args) > 1) @as(*anyopaque, @ptrCast(args_ptr)) else undefined,
         )) {
             .SUCCESS => return Impl{ .handle = handle },
             .AGAIN => return error.SystemResources,
@@ -732,6 +738,291 @@ const PosixThreadImpl = struct {
     }
 };
 
+const WasiThreadImpl = struct {
+    thread: *WasiThread,
+
+    pub const ThreadHandle = i32;
+    threadlocal var tls_thread_id: Id = 0;
+
+    const WasiThread = struct {
+        /// Thread ID
+        tid: Atomic(i32) = Atomic(i32).init(0),
+        /// Contains all memory which was allocated to bootstrap this thread, including:
+        /// - Guard page
+        /// - Stack
+        /// - TLS segment
+        /// - `Instance`
+        /// All memory is freed upon call to `join`
+        memory: []u8,
+        /// The allocator used to allocate the thread's memory,
+        /// which is also used during `join` to ensure clean-up.
+        allocator: std.mem.Allocator,
+        /// The current state of the thread.
+        state: State = State.init(.running),
+    };
+
+    /// A meta-data structure used to bootstrap a thread
+    const Instance = struct {
+        thread: WasiThread,
+        /// Contains the offset to the new __tls_base.
+        /// The offset starting from the memory's base.
+        tls_offset: usize,
+        /// Contains the offset to the stack for the newly spawned thread.
+        /// The offset is calculated starting from the memory's base.
+        stack_offset: usize,
+        /// Contains the raw pointer value to the wrapper which holds all arguments
+        /// for the callback.
+        raw_ptr: usize,
+        /// Function pointer to a wrapping function which will call the user's
+        /// function upon thread spawn. The above mentioned pointer will be passed
+        /// to this function pointer as its argument.
+        call_back: *const fn (usize) void,
+        /// When a thread is in `detached` state, we must free all of its memory
+        /// upon thread completion. However, as this is done while still within
+        /// the thread, we must first jump back to the main thread's stack or else
+        /// we end up freeing the stack that we're currently using.
+        original_stack_pointer: [*]u8,
+    };
+
+    const State = Atomic(enum(u8) { running, completed, detached });
+
+    fn getCurrentId() Id {
+        return tls_thread_id;
+    }
+
+    fn getHandle(self: Impl) ThreadHandle {
+        return self.thread.tid.load(.SeqCst);
+    }
+
+    fn detach(self: Impl) void {
+        switch (self.thread.state.swap(.detached, .SeqCst)) {
+            .running => {},
+            .completed => self.join(),
+            .detached => unreachable,
+        }
+    }
+
+    fn join(self: Impl) void {
+        defer {
+            // Create a copy of the allocator so we do not free the reference to the
+            // original allocator while freeing the memory.
+            var allocator = self.thread.allocator;
+            allocator.free(self.thread.memory);
+        }
+
+        var spin: u8 = 10;
+        while (true) {
+            const tid = self.thread.tid.load(.SeqCst);
+            if (tid == 0) {
+                break;
+            }
+
+            if (spin > 0) {
+                spin -= 1;
+                std.atomic.spinLoopHint();
+                continue;
+            }
+
+            const result = asm (
+                \\ local.get %[ptr]
+                \\ local.get %[expected]
+                \\ i64.const -1 # infinite
+                \\ memory.atomic.wait32 0
+                \\ local.set %[ret]
+                : [ret] "=r" (-> u32),
+                : [ptr] "r" (&self.thread.tid.value),
+                  [expected] "r" (tid),
+            );
+            switch (result) {
+                0 => continue, // ok
+                1 => continue, // expected =! loaded
+                2 => unreachable, // timeout (infinite)
+                else => unreachable,
+            }
+        }
+    }
+
+    fn spawn(config: std.Thread.SpawnConfig, comptime f: anytype, args: anytype) !WasiThreadImpl {
+        if (config.allocator == null) return error.OutOfMemory; // an allocator is required to spawn a WASI-thread
+
+        // Wrapping struct required to hold the user-provided function arguments.
+        const Wrapper = struct {
+            args: @TypeOf(args),
+            fn entry(ptr: usize) void {
+                const w: *@This() = @ptrFromInt(ptr);
+                @call(.auto, f, w.args);
+            }
+        };
+
+        var stack_offset: usize = undefined;
+        var tls_offset: usize = undefined;
+        var wrapper_offset: usize = undefined;
+        var instance_offset: usize = undefined;
+
+        // Calculate the bytes we have to allocate to store all thread information, including:
+        // - The actual stack for the thread
+        // - The TLS segment
+        // - `Instance` - containing information about how to call the user's function.
+        const map_bytes = blk: {
+            // start with atleast a single page, which is used as a guard to prevent
+            // other threads clobbering our new thread.
+            // Unfortunately, WebAssembly has no notion of read-only segments, so this
+            // is only a best effort.
+            var bytes: usize = std.wasm.page_size;
+
+            bytes = std.mem.alignForward(usize, bytes, 16); // align stack to 16 bytes
+            stack_offset = bytes;
+            bytes += @max(std.wasm.page_size, config.stack_size);
+
+            bytes = std.mem.alignForward(usize, bytes, __tls_align());
+            tls_offset = bytes;
+            bytes += __tls_size();
+
+            bytes = std.mem.alignForward(usize, bytes, @alignOf(Wrapper));
+            wrapper_offset = bytes;
+            bytes += @sizeOf(Wrapper);
+
+            bytes = std.mem.alignForward(usize, bytes, @alignOf(Instance));
+            instance_offset = bytes;
+            bytes += @sizeOf(Instance);
+
+            bytes = std.mem.alignForward(usize, bytes, std.wasm.page_size);
+            break :blk bytes;
+        };
+
+        // Allocate the amount of memory required for all meta data.
+        const allocated_memory = try config.allocator.?.alloc(u8, map_bytes);
+
+        const wrapper: *Wrapper = @ptrCast(@alignCast(&allocated_memory[wrapper_offset]));
+        wrapper.* = .{ .args = args };
+
+        const instance: *Instance = @ptrCast(@alignCast(&allocated_memory[instance_offset]));
+        instance.* = .{
+            .thread = .{ .memory = allocated_memory, .allocator = config.allocator.? },
+            .tls_offset = tls_offset,
+            .stack_offset = stack_offset,
+            .raw_ptr = @intFromPtr(wrapper),
+            .call_back = &Wrapper.entry,
+            .original_stack_pointer = __get_stack_pointer(),
+        };
+
+        const tid = spawnWasiThread(instance);
+        // The specification says any value lower than 0 indicates an error.
+        // The values of such error are unspecified. WASI-Libc treats it as EAGAIN.
+        if (tid < 0) {
+            return error.SystemResources;
+        }
+        instance.thread.tid.store(tid, .SeqCst);
+
+        return .{ .thread = &instance.thread };
+    }
+
+    /// Bootstrap procedure, called by the host environment after thread creation.
+    export fn wasi_thread_start(tid: i32, arg: *Instance) void {
+        if (builtin.single_threaded) {
+            // ensure function is not analyzed in single-threaded mode
+            return;
+        }
+        __set_stack_pointer(arg.thread.memory.ptr + arg.stack_offset);
+        __wasm_init_tls(arg.thread.memory.ptr + arg.tls_offset);
+        @atomicStore(u32, &WasiThreadImpl.tls_thread_id, @intCast(tid), .SeqCst);
+
+        // Finished bootstrapping, call user's procedure.
+        arg.call_back(arg.raw_ptr);
+
+        switch (arg.thread.state.swap(.completed, .SeqCst)) {
+            .running => {
+                // reset the Thread ID
+                asm volatile (
+                    \\ local.get %[ptr]
+                    \\ i32.const 0
+                    \\ i32.atomic.store 0
+                    :
+                    : [ptr] "r" (&arg.thread.tid.value),
+                );
+
+                // Wake the main thread listening to this thread
+                asm volatile (
+                    \\ local.get %[ptr]
+                    \\ i32.const 1 # waiters
+                    \\ memory.atomic.notify 0
+                    \\ drop # no need to know the waiters
+                    :
+                    : [ptr] "r" (&arg.thread.tid.value),
+                );
+            },
+            .completed => unreachable,
+            .detached => {
+                // restore the original stack pointer so we can free the memory
+                // without having to worry about freeing the stack
+                __set_stack_pointer(arg.original_stack_pointer);
+                // Ensure a copy so we don't free the allocator reference itself
+                var allocator = arg.thread.allocator;
+                allocator.free(arg.thread.memory);
+            },
+        }
+    }
+
+    /// Asks the host to create a new thread for us.
+    /// Newly created thread will call `wasi_tread_start` with the thread ID as well
+    /// as the input `arg` that was provided to `spawnWasiThread`
+    const spawnWasiThread = @"thread-spawn";
+    extern "wasi" fn @"thread-spawn"(arg: *Instance) i32;
+
+    /// Initializes the TLS data segment starting at `memory`.
+    /// This is a synthetic function, generated by the linker.
+    extern fn __wasm_init_tls(memory: [*]u8) void;
+
+    /// Returns a pointer to the base of the TLS data segment for the current thread
+    inline fn __tls_base() [*]u8 {
+        return asm (
+            \\ .globaltype __tls_base, i32
+            \\ global.get __tls_base
+            \\ local.set %[ret]
+            : [ret] "=r" (-> [*]u8),
+        );
+    }
+
+    /// Returns the size of the TLS segment
+    inline fn __tls_size() u32 {
+        return asm volatile (
+            \\ .globaltype __tls_size, i32, immutable
+            \\ global.get __tls_size
+            \\ local.set %[ret]
+            : [ret] "=r" (-> u32),
+        );
+    }
+
+    /// Returns the alignment of the TLS segment
+    inline fn __tls_align() u32 {
+        return asm (
+            \\ .globaltype __tls_align, i32, immutable
+            \\ global.get __tls_align
+            \\ local.set %[ret]
+            : [ret] "=r" (-> u32),
+        );
+    }
+
+    /// Allows for setting the stack pointer in the WebAssembly module.
+    inline fn __set_stack_pointer(addr: [*]u8) void {
+        asm volatile (
+            \\ local.get %[ptr]
+            \\ global.set __stack_pointer
+            :
+            : [ptr] "r" (addr),
+        );
+    }
+
+    /// Returns the current value of the stack pointer
+    inline fn __get_stack_pointer() [*]u8 {
+        return asm (
+            \\ global.get __stack_pointer
+            \\ local.set %[stack_ptr]
+            : [stack_ptr] "=r" (-> [*]u8),
+        );
+    }
+};
+
 const LinuxThreadImpl = struct {
     const linux = os.linux;
 
@@ -741,7 +1032,7 @@ const LinuxThreadImpl = struct {
 
     fn getCurrentId() Id {
         return tls_thread_id orelse {
-            const tid = @bitCast(u32, linux.gettid());
+            const tid = @as(u32, @bitCast(linux.gettid()));
             tls_thread_id = tid;
             return tid;
         };
@@ -775,7 +1066,7 @@ const LinuxThreadImpl = struct {
                     \\  movl $0, %%ebx
                     \\  int $128
                     :
-                    : [ptr] "r" (@ptrToInt(self.mapped.ptr)),
+                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
                       [len] "r" (self.mapped.len),
                     : "memory"
                 ),
@@ -786,7 +1077,7 @@ const LinuxThreadImpl = struct {
                     \\  movq $1, %%rdi
                     \\  syscall
                     :
-                    : [ptr] "{rdi}" (@ptrToInt(self.mapped.ptr)),
+                    : [ptr] "{rdi}" (@intFromPtr(self.mapped.ptr)),
                       [len] "{rsi}" (self.mapped.len),
                 ),
                 .arm, .armeb, .thumb, .thumbeb => asm volatile (
@@ -798,7 +1089,7 @@ const LinuxThreadImpl = struct {
                     \\  mov r0, #0
                     \\  svc 0
                     :
-                    : [ptr] "r" (@ptrToInt(self.mapped.ptr)),
+                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
                       [len] "r" (self.mapped.len),
                     : "memory"
                 ),
@@ -811,7 +1102,7 @@ const LinuxThreadImpl = struct {
                     \\  mov x0, #0
                     \\  svc 0
                     :
-                    : [ptr] "r" (@ptrToInt(self.mapped.ptr)),
+                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
                       [len] "r" (self.mapped.len),
                     : "memory"
                 ),
@@ -825,7 +1116,7 @@ const LinuxThreadImpl = struct {
                     \\  li $4, 0
                     \\  syscall
                     :
-                    : [ptr] "r" (@ptrToInt(self.mapped.ptr)),
+                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
                       [len] "r" (self.mapped.len),
                     : "memory"
                 ),
@@ -838,7 +1129,7 @@ const LinuxThreadImpl = struct {
                     \\  li $4, 0
                     \\  syscall
                     :
-                    : [ptr] "r" (@ptrToInt(self.mapped.ptr)),
+                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
                       [len] "r" (self.mapped.len),
                     : "memory"
                 ),
@@ -852,7 +1143,7 @@ const LinuxThreadImpl = struct {
                     \\  sc
                     \\  blr
                     :
-                    : [ptr] "r" (@ptrToInt(self.mapped.ptr)),
+                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
                       [len] "r" (self.mapped.len),
                     : "memory"
                 ),
@@ -865,7 +1156,7 @@ const LinuxThreadImpl = struct {
                     \\  mv a0, zero
                     \\  ecall
                     :
-                    : [ptr] "r" (@ptrToInt(self.mapped.ptr)),
+                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
                       [len] "r" (self.mapped.len),
                     : "memory"
                 ),
@@ -892,7 +1183,7 @@ const LinuxThreadImpl = struct {
                     \\  mov 1, %%o0
                     \\  t 0x6d
                     :
-                    : [ptr] "r" (@ptrToInt(self.mapped.ptr)),
+                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
                       [len] "r" (self.mapped.len),
                     : "memory"
                 ),
@@ -910,7 +1201,7 @@ const LinuxThreadImpl = struct {
             thread: ThreadCompletion,
 
             fn entryFn(raw_arg: usize) callconv(.C) u8 {
-                const self = @intToPtr(*@This(), raw_arg);
+                const self = @as(*@This(), @ptrFromInt(raw_arg));
                 defer switch (self.thread.completion.swap(.completed, .SeqCst)) {
                     .running => {},
                     .completed => unreachable,
@@ -929,19 +1220,19 @@ const LinuxThreadImpl = struct {
             var bytes: usize = page_size;
             guard_offset = bytes;
 
-            bytes += std.math.max(page_size, config.stack_size);
-            bytes = std.mem.alignForward(bytes, page_size);
+            bytes += @max(page_size, config.stack_size);
+            bytes = std.mem.alignForward(usize, bytes, page_size);
             stack_offset = bytes;
 
-            bytes = std.mem.alignForward(bytes, linux.tls.tls_image.alloc_align);
+            bytes = std.mem.alignForward(usize, bytes, linux.tls.tls_image.alloc_align);
             tls_offset = bytes;
             bytes += linux.tls.tls_image.alloc_size;
 
-            bytes = std.mem.alignForward(bytes, @alignOf(Instance));
+            bytes = std.mem.alignForward(usize, bytes, @alignOf(Instance));
             instance_offset = bytes;
             bytes += @sizeOf(Instance);
 
-            bytes = std.mem.alignForward(bytes, page_size);
+            bytes = std.mem.alignForward(usize, bytes, page_size);
             break :blk bytes;
         };
 
@@ -968,7 +1259,7 @@ const LinuxThreadImpl = struct {
 
         // map everything but the guard page as read/write
         os.mprotect(
-            @alignCast(page_size, mapped[guard_offset..]),
+            @alignCast(mapped[guard_offset..]),
             os.PROT.READ | os.PROT.WRITE,
         ) catch |err| switch (err) {
             error.AccessDenied => unreachable,
@@ -979,7 +1270,7 @@ const LinuxThreadImpl = struct {
         var tls_ptr = os.linux.tls.prepareTLS(mapped[tls_offset..]);
         var user_desc: if (target.cpu.arch == .x86) os.linux.user_desc else void = undefined;
         if (target.cpu.arch == .x86) {
-            defer tls_ptr = @ptrToInt(&user_desc);
+            defer tls_ptr = @intFromPtr(&user_desc);
             user_desc = .{
                 .entry_number = os.linux.tls.tls_image.gdt_entry_number,
                 .base_addr = tls_ptr,
@@ -993,7 +1284,7 @@ const LinuxThreadImpl = struct {
             };
         }
 
-        const instance = @ptrCast(*Instance, @alignCast(@alignOf(Instance), &mapped[instance_offset]));
+        const instance: *Instance = @ptrCast(@alignCast(&mapped[instance_offset]));
         instance.* = .{
             .fn_args = args,
             .thread = .{ .mapped = mapped },
@@ -1006,9 +1297,9 @@ const LinuxThreadImpl = struct {
 
         switch (linux.getErrno(linux.clone(
             Instance.entryFn,
-            @ptrToInt(&mapped[stack_offset]),
+            @intFromPtr(&mapped[stack_offset]),
             flags,
-            @ptrToInt(instance),
+            @intFromPtr(instance),
             &instance.thread.parent_tid,
             tls_ptr,
             &instance.thread.child_tid.value,
@@ -1133,23 +1424,14 @@ test "setName, getName" {
             error.Unsupported => return error.SkipZigTest,
             else => return err,
         },
-        else => |tag| if (tag == .linux and use_pthreads and comptime target.abi.isMusl()) {
-            try thread.setName("foobar");
-
-            var name_buffer: [max_name_len:0]u8 = undefined;
-            const res = thread.getName(&name_buffer);
-
-            try std.testing.expectError(error.Unsupported, res);
-        } else {
-            try testThreadName(&thread);
-        },
+        else => try testThreadName(&thread),
     }
 
     context.thread_done_event.set();
     thread.join();
 }
 
-test "std.Thread" {
+test {
     // Doesn't use testing.refAllDecls() since that would pull in the compileError spinLoopHint.
     _ = Futex;
     _ = ResetEvent;

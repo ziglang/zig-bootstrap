@@ -21,6 +21,10 @@ pub const cases = [_]Case{
         .import = @import("link/interdependent_static_c_libs/build.zig"),
     },
     .{
+        .build_root = "test/link/static_libs_from_object_files",
+        .import = @import("link/static_libs_from_object_files/build.zig"),
+    },
+    .{
         .build_root = "test/link/glibc_compat",
         .import = @import("link/glibc_compat/build.zig"),
     },
@@ -164,15 +168,6 @@ pub const cases = [_]Case{
         .build_root = "test/link/macho/unwind_info",
         .import = @import("link/macho/unwind_info/build.zig"),
     },
-    // TODO: re-enable this test. It currently has some incompatibilities with
-    // the new build system API. In particular, it depends on installing the build
-    // artifacts, which should be unnecessary, and it has a custom build step that
-    // prints directly to stderr instead of failing the step with an error message.
-    //.{
-    //    .build_root = "test/link/macho/uuid",
-    //    .import = @import("link/macho/uuid/build.zig"),
-    //},
-
     .{
         .build_root = "test/link/macho/weak_library",
         .import = @import("link/macho/weak_library/build.zig"),

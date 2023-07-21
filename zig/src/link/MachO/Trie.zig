@@ -220,7 +220,7 @@ pub const Node = struct {
             try writer.writeByte(0);
         }
         // Write number of edges (max legal number of edges is 256).
-        try writer.writeByte(@intCast(u8, self.edges.items.len));
+        try writer.writeByte(@as(u8, @intCast(self.edges.items.len)));
 
         for (self.edges.items) |edge| {
             // Write edge label and offset to next node in trie.
@@ -499,7 +499,7 @@ fn expectEqualHexStrings(expected: []const u8, given: []const u8) !void {
     const idx = mem.indexOfDiff(u8, expected_fmt, given_fmt).?;
     var padding = try testing.allocator.alloc(u8, idx + 5);
     defer testing.allocator.free(padding);
-    mem.set(u8, padding, ' ');
+    @memset(padding, ' ');
     std.debug.print("\nEXP: {s}\nGIV: {s}\n{s}^ -- first differing byte\n", .{ expected_fmt, given_fmt, padding });
     return error.TestFailed;
 }

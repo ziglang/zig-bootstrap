@@ -55,6 +55,10 @@ pub const simple_cases = [_]SimpleCase{
         .os_filter = .windows,
         .link_libc = true,
     },
+    .{
+        .src_path = "test/standalone/http.zig",
+        .all_modes = true,
+    },
 
     // Ensure the development tools are buildable. Alphabetically sorted.
     // No need to build `tools/spirv/grammar.zig`.
@@ -209,10 +213,6 @@ pub const build_cases = [_]BuildCase{
     //    .build_root = "test/standalone/sigpipe",
     //    .import = @import("standalone/sigpipe/build.zig"),
     //},
-    .{
-        .build_root = "test/standalone/issue_13030",
-        .import = @import("standalone/issue_13030/build.zig"),
-    },
     // TODO restore this test
     //.{
     //    .build_root = "test/standalone/options",
@@ -221,6 +221,14 @@ pub const build_cases = [_]BuildCase{
     .{
         .build_root = "test/standalone/strip_empty_loop",
         .import = @import("standalone/strip_empty_loop/build.zig"),
+    },
+    .{
+        .build_root = "test/standalone/cmakedefine",
+        .import = @import("standalone/cmakedefine/build.zig"),
+    },
+    .{
+        .build_root = "test/standalone/zerolength_check",
+        .import = @import("standalone/zerolength_check/build.zig"),
     },
 };
 

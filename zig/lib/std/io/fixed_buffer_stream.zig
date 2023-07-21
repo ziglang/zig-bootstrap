@@ -45,10 +45,10 @@ pub fn FixedBufferStream(comptime Buffer: type) type {
         }
 
         pub fn read(self: *Self, dest: []u8) ReadError!usize {
-            const size = std.math.min(dest.len, self.buffer.len - self.pos);
+            const size = @min(dest.len, self.buffer.len - self.pos);
             const end = self.pos + size;
 
-            mem.copy(u8, dest[0..size], self.buffer[self.pos..end]);
+            @memcpy(dest[0..size], self.buffer[self.pos..end]);
             self.pos = end;
 
             return size;
@@ -67,7 +67,7 @@ pub fn FixedBufferStream(comptime Buffer: type) type {
             else
                 self.buffer.len - self.pos;
 
-            mem.copy(u8, self.buffer[self.pos .. self.pos + n], bytes[0..n]);
+            @memcpy(self.buffer[self.pos..][0..n], bytes[0..n]);
             self.pos += n;
 
             if (n == 0) return error.NoSpaceLeft;
@@ -76,7 +76,7 @@ pub fn FixedBufferStream(comptime Buffer: type) type {
         }
 
         pub fn seekTo(self: *Self, pos: u64) SeekError!void {
-            self.pos = if (std.math.cast(usize, pos)) |x| std.math.min(self.buffer.len, x) else self.buffer.len;
+            self.pos = if (std.math.cast(usize, pos)) |x| @min(self.buffer.len, x) else self.buffer.len;
         }
 
         pub fn seekBy(self: *Self, amt: i64) SeekError!void {
@@ -91,7 +91,7 @@ pub fn FixedBufferStream(comptime Buffer: type) type {
             } else {
                 const amt_usize = std.math.cast(usize, amt) orelse std.math.maxInt(usize);
                 const new_pos = std.math.add(usize, self.pos, amt_usize) catch std.math.maxInt(usize);
-                self.pos = std.math.min(self.buffer.len, new_pos);
+                self.pos = @min(self.buffer.len, new_pos);
             }
         }
 

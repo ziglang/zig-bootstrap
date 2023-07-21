@@ -15,6 +15,7 @@ const bits = @import("bits.zig");
 const Air = @import("../../Air.zig");
 
 const Instruction = bits.Instruction;
+const ASI = bits.Instruction.ASI;
 const Register = bits.Register;
 
 instructions: std.MultiArrayList(Inst).Slice,
@@ -69,6 +70,16 @@ pub const Inst = struct {
         lduh,
         lduw,
         ldx,
+
+        /// A.28 Load Integer from Alternate Space
+        /// This uses the mem_asi field.
+        /// Note that the ldda variant of this instruction is deprecated, so do not emit
+        /// it unless specifically requested (e.g. by inline assembly).
+        // TODO add other operations.
+        lduba,
+        lduha,
+        lduwa,
+        ldxa,
 
         /// A.31 Logical Operations
         /// This uses the arithmetic_3op field.
@@ -131,6 +142,16 @@ pub const Inst = struct {
         sth,
         stw,
         stx,
+
+        /// A.55 Store Integer into Alternate Space
+        /// This uses the mem_asi field.
+        /// Note that the stda variant of this instruction is deprecated, so do not emit
+        /// it unless specifically requested (e.g. by inline assembly).
+        // TODO add other operations.
+        stba,
+        stha,
+        stwa,
+        stxa,
 
         /// A.56 Subtract
         /// This uses the arithmetic_3op field.
@@ -241,6 +262,15 @@ pub const Inst = struct {
             inst: Index,
         },
 
+        /// ASI-tagged memory operations.
+        /// Used by e.g. ldxa, stxa
+        mem_asi: struct {
+            rd: Register,
+            rs1: Register,
+            rs2: Register = .g0,
+            asi: ASI,
+        },
+
         /// Membar mask, controls the barrier behavior
         /// Used by e.g. membar
         membar_mask: struct {
@@ -349,7 +379,7 @@ pub fn extraData(mir: Mir, comptime T: type, index: usize) struct { data: T, end
     inline for (fields) |field| {
         @field(result, field.name) = switch (field.type) {
             u32 => mir.extra[i],
-            i32 => @bitCast(i32, mir.extra[i]),
+            i32 => @as(i32, @bitCast(mir.extra[i])),
             else => @compileError("bad field type"),
         };
         i += 1;

@@ -12,10 +12,7 @@ var cmdline_buffer: [4096]u8 = undefined;
 var fba = std.heap.FixedBufferAllocator.init(&cmdline_buffer);
 
 pub fn main() void {
-    if (builtin.zig_backend == .stage2_wasm or
-        builtin.zig_backend == .stage2_x86_64 or
-        builtin.zig_backend == .stage2_aarch64)
-    {
+    if (builtin.zig_backend == .stage2_aarch64) {
         return mainSimple() catch @panic("test failure");
     }
 
@@ -56,7 +53,7 @@ fn mainServer() !void {
             },
             .query_test_metadata => {
                 std.testing.allocator_instance = .{};
-                defer if (std.testing.allocator_instance.deinit()) {
+                defer if (std.testing.allocator_instance.deinit() == .leak) {
                     @panic("internal test runner memory leak");
                 };
 
@@ -73,12 +70,12 @@ fn mainServer() !void {
                 defer std.testing.allocator.free(expected_panic_msgs);
 
                 for (test_fns, names, async_frame_sizes, expected_panic_msgs) |test_fn, *name, *async_frame_size, *expected_panic_msg| {
-                    name.* = @intCast(u32, string_bytes.items.len);
+                    name.* = @as(u32, @intCast(string_bytes.items.len));
                     try string_bytes.ensureUnusedCapacity(std.testing.allocator, test_fn.name.len + 1);
                     string_bytes.appendSliceAssumeCapacity(test_fn.name);
                     string_bytes.appendAssumeCapacity(0);
 
-                    async_frame_size.* = @intCast(u32, test_fn.async_frame_size orelse 0);
+                    async_frame_size.* = @as(u32, @intCast(test_fn.async_frame_size orelse 0));
                     expected_panic_msg.* = 0;
                 }
 
@@ -108,7 +105,7 @@ fn mainServer() !void {
                         }
                     },
                 };
-                leak = std.testing.allocator_instance.deinit();
+                leak = std.testing.allocator_instance.deinit() == .leak;
                 try server.serveTestResults(.{
                     .index = index,
                     .flags = .{
@@ -120,7 +117,7 @@ fn mainServer() !void {
             },
 
             else => {
-                std.debug.print("unsupported message: {x}", .{@enumToInt(hdr.tag)});
+                std.debug.print("unsupported message: {x}", .{@intFromEnum(hdr.tag)});
                 std.process.exit(1);
             },
         }
@@ -139,7 +136,7 @@ fn mainTerminal() void {
     const have_tty = progress.terminal != null and
         (progress.supports_ansi_escape_codes or progress.is_windows_terminal);
 
-    var async_frame_buffer: []align(std.Target.stack_align) u8 = undefined;
+    var async_frame_buffer: []align(builtin.target.stackAlignment()) u8 = undefined;
     // TODO this is on the next line (using `undefined` above) because otherwise zig incorrectly
     // ignores the alignment of the slice.
     async_frame_buffer = &[_]u8{};
@@ -148,7 +145,7 @@ fn mainTerminal() void {
     for (test_fn_list, 0..) |test_fn, i| {
         std.testing.allocator_instance = .{};
         defer {
-            if (std.testing.allocator_instance.deinit()) {
+            if (std.testing.allocator_instance.deinit() == .leak) {
                 leaks += 1;
             }
         }
@@ -166,7 +163,7 @@ fn mainTerminal() void {
                     std.heap.page_allocator.free(async_frame_buffer);
                     async_frame_buffer = std.heap.page_allocator.alignedAlloc(u8, std.Target.stack_align, size) catch @panic("out of memory");
                 }
-                const casted_fn = @ptrCast(fn () callconv(.Async) anyerror!void, test_fn.func);
+                const casted_fn = @as(fn () callconv(.Async) anyerror!void, @ptrCast(test_fn.func));
                 break :blk await @asyncCall(async_frame_buffer, {}, casted_fn, .{});
             },
             .blocking => {
@@ -219,10 +216,10 @@ pub fn log(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    if (@enumToInt(message_level) <= @enumToInt(std.log.Level.err)) {
+    if (@intFromEnum(message_level) <= @intFromEnum(std.log.Level.err)) {
         log_err_count += 1;
     }
-    if (@enumToInt(message_level) <= @enumToInt(std.testing.log_level)) {
+    if (@intFromEnum(message_level) <= @intFromEnum(std.testing.log_level)) {
         std.debug.print(
             "[" ++ @tagName(scope) ++ "] (" ++ @tagName(message_level) ++ "): " ++ format ++ "\n",
             args,
@@ -233,14 +230,38 @@ pub fn log(
 /// Simpler main(), exercising fewer language features, so that
 /// work-in-progress backends can handle it.
 pub fn mainSimple() anyerror!void {
-    //const stderr = std.io.getStdErr();
+    const enable_print = false;
+    const print_all = false;
+
+    var passed: u64 = 0;
+    var skipped: u64 = 0;
+    var failed: u64 = 0;
+    const stderr = if (enable_print) std.io.getStdErr() else {};
     for (builtin.test_functions) |test_fn| {
+        if (enable_print and print_all) {
+            stderr.writeAll(test_fn.name) catch {};
+            stderr.writeAll("... ") catch {};
+        }
         test_fn.func() catch |err| {
-            if (err != error.SkipZigTest) {
-                //stderr.writeAll(test_fn.name) catch {};
-                //stderr.writeAll("\n") catch {};
-                return err;
+            if (enable_print and !print_all) {
+                stderr.writeAll(test_fn.name) catch {};
+                stderr.writeAll("... ") catch {};
             }
+            if (err != error.SkipZigTest) {
+                if (enable_print) stderr.writeAll("FAIL\n") catch {};
+                failed += 1;
+                if (!enable_print) return err;
+                continue;
+            }
+            if (enable_print) stderr.writeAll("SKIP\n") catch {};
+            skipped += 1;
+            continue;
         };
+        if (enable_print and print_all) stderr.writeAll("PASS\n") catch {};
+        passed += 1;
+    }
+    if (enable_print) {
+        stderr.writer().print("{} passed, {} skipped, {} failed\n", .{ passed, skipped, failed }) catch {};
+        if (failed != 0) std.process.exit(1);
     }
 }

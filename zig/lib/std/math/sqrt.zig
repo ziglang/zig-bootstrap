@@ -11,7 +11,7 @@ const maxInt = std.math.maxInt;
 ///  - sqrt(+-0)   = +-0
 ///  - sqrt(x)     = nan if x < 0
 ///  - sqrt(nan)   = nan
-/// TODO Decide if all this logic should be implemented directly in the @sqrt bultin function.
+/// TODO Decide if all this logic should be implemented directly in the @sqrt builtin function.
 pub fn sqrt(x: anytype) Sqrt(@TypeOf(x)) {
     const T = @TypeOf(x);
     switch (@typeInfo(T)) {
@@ -57,7 +57,7 @@ fn sqrt_int(comptime T: type, value: T) Sqrt(T) {
             one >>= 2;
         }
 
-        return @intCast(Sqrt(T), res);
+        return @as(Sqrt(T), @intCast(res));
     }
 }
 

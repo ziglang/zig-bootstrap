@@ -1,4 +1,4 @@
-//! NVidia PTX (Paralle Thread Execution)
+//! NVidia PTX (Parallel Thread Execution)
 //! https://docs.nvidia.com/cuda/parallel-thread-execution/index.html
 //! For this we rely on the nvptx backend of LLVM
 //! Kernel functions need to be marked both as "export" and "callconv(.Kernel)"
@@ -13,6 +13,7 @@ const assert = std.debug.assert;
 const log = std.log.scoped(.link);
 
 const Module = @import("../Module.zig");
+const InternPool = @import("../InternPool.zig");
 const Compilation = @import("../Compilation.zig");
 const link = @import("../link.zig");
 const trace = @import("../tracy.zig").trace;
@@ -68,9 +69,9 @@ pub fn deinit(self: *NvPtx) void {
     self.base.allocator.free(self.ptx_file_name);
 }
 
-pub fn updateFunc(self: *NvPtx, module: *Module, func: *Module.Fn, air: Air, liveness: Liveness) !void {
+pub fn updateFunc(self: *NvPtx, module: *Module, func_index: InternPool.Index, air: Air, liveness: Liveness) !void {
     if (!build_options.have_llvm) return;
-    try self.llvm_object.updateFunc(module, func, air, liveness);
+    try self.llvm_object.updateFunc(module, func_index, air, liveness);
 }
 
 pub fn updateDecl(self: *NvPtx, module: *Module, decl_index: Module.Decl.Index) !void {

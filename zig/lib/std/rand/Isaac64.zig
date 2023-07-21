@@ -38,10 +38,10 @@ fn step(self: *Isaac64, mix: u64, base: usize, comptime m1: usize, comptime m2: 
     const x = self.m[base + m1];
     self.a = mix +% self.m[base + m2];
 
-    const y = self.a +% self.b +% self.m[@intCast(usize, (x >> 3) % self.m.len)];
+    const y = self.a +% self.b +% self.m[@as(usize, @intCast((x >> 3) % self.m.len))];
     self.m[base + m1] = y;
 
-    self.b = x +% self.m[@intCast(usize, (y >> 11) % self.m.len)];
+    self.b = x +% self.m[@as(usize, @intCast((y >> 11) % self.m.len))];
     self.r[self.r.len - 1 - base - m1] = self.b;
 }
 
@@ -87,7 +87,7 @@ fn next(self: *Isaac64) u64 {
 fn seed(self: *Isaac64, init_s: u64, comptime rounds: usize) void {
     // We ignore the multi-pass requirement since we don't currently expose full access to
     // seeding the self.m array completely.
-    mem.set(u64, self.m[0..], 0);
+    @memset(self.m[0..], 0);
     self.m[0] = init_s;
 
     // prescrambled golden ratio constants
@@ -143,7 +143,7 @@ fn seed(self: *Isaac64, init_s: u64, comptime rounds: usize) void {
         }
     }
 
-    mem.set(u64, self.r[0..], 0);
+    @memset(self.r[0..], 0);
     self.a = 0;
     self.b = 0;
     self.c = 0;
@@ -159,7 +159,7 @@ pub fn fill(self: *Isaac64, buf: []u8) void {
         var n = self.next();
         comptime var j: usize = 0;
         inline while (j < 8) : (j += 1) {
-            buf[i + j] = @truncate(u8, n);
+            buf[i + j] = @as(u8, @truncate(n));
             n >>= 8;
         }
     }
@@ -168,7 +168,7 @@ pub fn fill(self: *Isaac64, buf: []u8) void {
     if (i != buf.len) {
         var n = self.next();
         while (i < buf.len) : (i += 1) {
-            buf[i] = @truncate(u8, n);
+            buf[i] = @as(u8, @truncate(n));
             n >>= 8;
         }
     }

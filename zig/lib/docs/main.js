@@ -4,11 +4,12 @@ var zigAnalysis;
 
 const NAV_MODES = {
   API: "#A;",
-  API_INTERNAL: "#a;",
   GUIDES: "#G;",
 };
 
-(function () {
+(function() {
+  const domBanner = document.getElementById("banner");
+  const domMain = document.getElementById("main");
   const domStatus = document.getElementById("status");
   const domSectNav = document.getElementById("sectNav");
   const domListNav = document.getElementById("listNav");
@@ -17,9 +18,9 @@ const NAV_MODES = {
   const domGuidesMenu = document.getElementById("guidesMenu");
   const domApiMenu = document.getElementById("apiMenu");
   const domGuidesList = document.getElementById("guidesList");
-  const domSectMainPkg = document.getElementById("sectMainPkg");
-  const domSectPkgs = document.getElementById("sectPkgs");
-  const domListPkgs = document.getElementById("listPkgs");
+  const domSectMainMod = document.getElementById("sectMainMod");
+  const domSectMods = document.getElementById("sectMods");
+  const domListMods = document.getElementById("listMods");
   const domSectTypes = document.getElementById("sectTypes");
   const domListTypes = document.getElementById("listTypes");
   const domSectTests = document.getElementById("sectTests");
@@ -56,18 +57,27 @@ const NAV_MODES = {
   const domSectSearchResults = document.getElementById("sectSearchResults");
   const domSectSearchAllResultsLink = document.getElementById("sectSearchAllResultsLink");
   const domDocs = document.getElementById("docs");
-  const domGuides = document.getElementById("guides");
+  const domGuidesSection = document.getElementById("guides");
+  const domActiveGuide = document.getElementById("activeGuide");
+
   const domListSearchResults = document.getElementById("listSearchResults");
   const domSectSearchNoResults = document.getElementById("sectSearchNoResults");
   const domSectInfo = document.getElementById("sectInfo");
   // const domTdTarget = (document.getElementById("tdTarget"));
-  const domPrivDeclsBox = document.getElementById("privDeclsBox");
   const domTdZigVer = document.getElementById("tdZigVer");
   const domHdrName = document.getElementById("hdrName");
   const domHelpModal = document.getElementById("helpModal");
+  const domSearchKeys = document.getElementById("searchKeys");
+  const domPrefsModal = document.getElementById("prefsModal");
   const domSearchPlaceholder = document.getElementById("searchPlaceholder");
-  const sourceFileUrlTemplate = "src/{{file}}.html#L{{line}}"
+  const sourceFileUrlTemplate = "src/{{mod}}/{{file}}.html#L{{line}}"
   const domLangRefLink = document.getElementById("langRefLink");
+
+  const domPrefSlashSearch = document.getElementById("prefSlashSearch");
+  const prefs = getLocalStorage();
+  loadPrefs();
+
+  domPrefSlashSearch.addEventListener("change", () => setPrefSlashSearch(domPrefSlashSearch.checked));
 
   let searchTimer = null;
   let searchTrimResults = true;
@@ -83,27 +93,28 @@ const NAV_MODES = {
   let typeTypeId = findTypeTypeId();
   let pointerSizeEnum = { One: 0, Many: 1, Slice: 2, C: 3 };
 
-  // for each package, is an array with packages to get to this one
-  let canonPkgPaths = computeCanonicalPackagePaths();
+  let declSearchIndex = new RadixTree();
+  window.search = declSearchIndex;
 
-  // for each decl, is an array with {declNames, pkgNames} to get to this one
+  // for each module, is an array with modules to get to this one
+  let canonModPaths = computeCanonicalModulePaths();
 
+  // for each decl, is an array with {declNames, modNames} to get to this one
   let canonDeclPaths = null; // lazy; use getCanonDeclPath
 
-  // for each type, is an array with {declNames, pkgNames} to get to this one
-
+  // for each type, is an array with {declNames, modNames} to get to this one
   let canonTypeDecls = null; // lazy; use getCanonTypeDecl
 
   let curNav = {
     mode: NAV_MODES.API,
     activeGuide: "",
-    // each element is a package name, e.g. @import("a") then within there @import("b")
-    // starting implicitly from root package
-    pkgNames: [],
-    // same as above except actual packages, not names
-    pkgObjs: [],
+    // each element is a module name, e.g. @import("a") then within there @import("b")
+    // starting implicitly from root module
+    modNames: [],
+    // same as above except actual modules, not names
+    modObjs: [],
     // Each element is a decl name, `a.b.c`, a is 0, b is 1, c is 2, etc.
-    // empty array means refers to the package itself
+    // empty array means refers to the module itself
     declNames: [],
     // these will be all types, except the last one may be a type or a decl
     declObjs: [],
@@ -122,14 +133,25 @@ const NAV_MODES = {
   // map of decl index to list of comptime fn calls
   // let nodesToCallsMap = indexNodesToCalls();
 
+  let guidesSearchIndex = {};
+  window.guideSearch = guidesSearchIndex;
+  parseGuides();
+
+  // identifiers can contain modal trigger characters so we want to allow typing
+  // such characters when the search is focused instead of toggling the modal
+  let canToggleModal = true;
+
   domSearch.disabled = false;
   domSearch.addEventListener("keydown", onSearchKeyDown, false);
+  domSearch.addEventListener("input", onSearchInput, false);
   domSearch.addEventListener("focus", ev => {
     domSearchPlaceholder.classList.add("hidden");
+    canToggleModal = false;
   });
   domSearch.addEventListener("blur", ev => {
     if (domSearch.value.length == 0)
       domSearchPlaceholder.classList.remove("hidden");
+    canToggleModal = true;
   });
   domSectSearchAllResultsLink.addEventListener('click', onClickSearchShowAllResults, false);
   function onClickSearchShowAllResults(ev) {
@@ -139,40 +161,18 @@ const NAV_MODES = {
     onHashChange();
   }
 
-  domPrivDeclsBox.addEventListener(
-    "change",
-    function () {
-      if (this.checked != curNav.showPrivDecls) {
-        if (
-          this.checked &&
-          location.hash.length > 1 &&
-          location.hash[1] != "*"
-        ) {
-          location.hash = "#*" + location.hash.substring(1);
-          return;
-        }
-        if (
-          !this.checked &&
-          location.hash.length > 1 &&
-          location.hash[1] == "*"
-        ) {
-          location.hash = "#" + location.hash.substring(2);
-          return;
-        }
-      }
-    },
-    false
-  );
-
   if (location.hash == "") {
     location.hash = "#A;";
   }
 
   // make the modal disappear if you click outside it
-  domHelpModal.addEventListener("click", ev => {
-    if (ev.target.className == "help-modal")
-      domHelpModal.classList.add("hidden");
-  });
+  function handleModalClick(ev) {
+    if (ev.target.classList.contains("modal-container")) {
+      hideModal(this);
+    }
+  }
+  domHelpModal.addEventListener("click", handleModalClick);
+  domPrefsModal.addEventListener("click", handleModalClick);
 
   window.addEventListener("hashchange", onHashChange, false);
   window.addEventListener("keydown", onWindowKeyDown, false);
@@ -189,10 +189,9 @@ const NAV_MODES = {
     let suffix = " - Zig";
     switch (curNav.mode) {
       case NAV_MODES.API:
-      case NAV_MODES.API_INTERNAL:
-        let list = curNav.pkgNames.concat(curNav.declNames);
+        let list = curNav.modNames.concat(curNav.declNames);
         if (list.length === 0) {
-          document.title = zigAnalysis.packages[zigAnalysis.rootPkg].name + suffix;
+          document.title = zigAnalysis.modules[zigAnalysis.rootMod].name + suffix;
         } else {
           document.title = list.join(".") + suffix;
         }
@@ -249,7 +248,7 @@ const NAV_MODES = {
     } else if (type.kind === typeKinds.Union) {
       name = "union";
     } else {
-      console.log("TODO: unhalndled case in typeShortName");
+      console.log("TODO: unhandled case in typeShortName");
       return null;
     }
 
@@ -282,10 +281,14 @@ const NAV_MODES = {
   //     return null;
   // }
 
-  function resolveValue(value) {
+  function resolveValue(value, trackDecls) {
+    let seenDecls = [];
     let i = 0;
-    while (i < 1000) {
+    while (true) {
       i += 1;
+      if (i >= 10000) {
+        throw "resolveValue quota exceeded"
+      }
 
       if ("refPath" in value.expr) {
         value = { expr: value.expr.refPath[value.expr.refPath.length - 1] };
@@ -293,6 +296,7 @@ const NAV_MODES = {
       }
 
       if ("declRef" in value.expr) {
+        seenDecls.push(value.expr.declRef);
         value = getDecl(value.expr.declRef).value;
         continue;
       }
@@ -305,10 +309,34 @@ const NAV_MODES = {
         continue;
       }
 
+      if (trackDecls) return { value, seenDecls };
       return value;
     }
-    console.assert(false);
-    return {};
+  }
+
+  function resolveGenericRet(genericFunc) {
+    if (genericFunc.generic_ret == null) return null;
+    let result = resolveValue({ expr: genericFunc.generic_ret });
+
+    let i = 0;
+    while (true) {
+      i += 1;
+      if (i >= 10000) {
+        throw "resolveGenericRet quota exceeded"
+      }
+
+      if ("call" in result.expr) {
+        let call = zigAnalysis.calls[result.expr.call];
+        let resolvedFunc = resolveValue({ expr: call.func });
+        if (!("type" in resolvedFunc.expr)) return null;
+        let callee = getType(resolvedFunc.expr.type);
+        if (!callee.generic_ret) return null;
+        result = resolveValue({ expr: callee.generic_ret });
+        continue;
+      }
+
+      return result;
+    }
   }
 
   //    function typeOfDecl(decl){
@@ -401,34 +429,43 @@ const NAV_MODES = {
     domGuideSwitch.classList.add("active");
     domApiSwitch.classList.remove("active");
     domDocs.classList.add("hidden");
-    domGuides.classList.remove("hidden");
+    domGuidesSection.classList.remove("hidden");
+    domActiveGuide.classList.add("hidden");
     domApiMenu.classList.add("hidden");
+    domSectSearchResults.classList.add("hidden");
+    domSectSearchAllResultsLink.classList.add("hidden");
+    domSectSearchNoResults.classList.add("hidden");
 
     // sidebar guides list
     const section_list = zigAnalysis.guide_sections;
-    resizeDomList(domGuidesList, section_list.length, '<div><h2><span></span></h2><ul class="packages"></ul></div>');
+    resizeDomList(domGuidesList, section_list.length, '<div><h2><span></span></h2><ul class="modules"></ul></div>');
     for (let j = 0; j < section_list.length; j += 1) {
-        const section = section_list[j];
-        const domSectionName = domGuidesList.children[j].children[0].children[0];
-        const domGuides = domGuidesList.children[j].children[1];
-        domSectionName.textContent = section.name;
-        resizeDomList(domGuides, section.guides.length, '<li><a href="#"></a></li>');
-        for (let i = 0; i < section.guides.length; i += 1) {
-          const guide = section.guides[i];
-          let liDom = domGuides.children[i];
-          let aDom = liDom.children[0];
-          aDom.textContent = guide.name;
-          aDom.setAttribute("href", NAV_MODES.GUIDES + guide.name);
-          if (guide.name === curNav.activeGuide) {
-            aDom.classList.add("active");
-          } else {
-            aDom.classList.remove("active");
-          }
+      const section = section_list[j];
+      const domSectionName = domGuidesList.children[j].children[0].children[0];
+      const domGuides = domGuidesList.children[j].children[1];
+      domSectionName.textContent = section.name;
+      resizeDomList(domGuides, section.guides.length, '<li><a href="#"></a></li>');
+      for (let i = 0; i < section.guides.length; i += 1) {
+        const guide = section.guides[i];
+        let liDom = domGuides.children[i];
+        let aDom = liDom.children[0];
+        aDom.textContent = guide.title;
+        aDom.setAttribute("href", NAV_MODES.GUIDES + guide.name);
+        if (guide.name === curNav.activeGuide) {
+          aDom.classList.add("active");
+        } else {
+          aDom.classList.remove("active");
         }
+      }
     }
-  
+
     if (section_list.length > 0) {
       domGuidesMenu.classList.remove("hidden");
+    }
+
+
+    if (curNavSearch !== "") {
+      return renderSearchGuides();
     }
 
     // main content
@@ -442,48 +479,57 @@ const NAV_MODES = {
           break outer;
         }
       }
-    }        
-    
-    if (activeGuide == undefined) {
-      const root_file_idx = zigAnalysis.packages[zigAnalysis.rootPkg].file;
-      const root_file_name = zigAnalysis.files[root_file_idx];
-      domGuides.innerHTML = markdown(`
-          # Zig Guides
-          These autodocs don't contain any guide.
-
-          While the API section is a reference guide autogenerated from Zig source code,
-          guides are meant to be handwritten explanations that provide for example:
-
-          - how-to explanations for common use-cases 
-          - technical documentation 
-          - information about advanced usage patterns
-          
-          You can add guides by specifying which markdown files to include
-          in the top level doc comment of your root file, like so:
-
-          (At the top of \`${root_file_name}\`)
-          \`\`\`
-          //!zig-autodoc-guide: intro.md
-          //!zig-autodoc-guide: quickstart.md
-          //!zig-autodoc-section: Advanced topics
-          //!zig-autodoc-guide: ../advanced-docs/advanced-stuff.md
-          \`\`\`
-        
-          **Note that this feature is still under heavy development so expect bugs**
-          **and missing features!**
-
-          Happy writing!
-        `);
-    } else {
-      domGuides.innerHTML = markdown(activeGuide.body);
     }
+
+    if (activeGuide == undefined) {
+      const root_file_idx = zigAnalysis.modules[zigAnalysis.rootMod].file;
+      const root_file_name = getFile(root_file_idx).name;
+      domActiveGuide.innerHTML = markdown(`
+# Zig Guides
+These autodocs don't contain any guide.
+
+While the API section is a reference guide autogenerated from Zig source code,
+guides are meant to be handwritten explanations that provide for example:
+
+- how-to explanations for common use-cases 
+- technical documentation 
+- information about advanced usage patterns
+
+You can add guides by specifying which markdown files to include
+in the top level doc comment of your root file, like so:
+
+(At the top of *${root_file_name}*)
+\`\`\`
+//!zig-autodoc-guide: intro.md
+//!zig-autodoc-guide: quickstart.md
+//!zig-autodoc-guide: advanced-docs/advanced-stuff.md
+\`\`\`
+
+You can also create sections to group guides together:
+
+\`\`\`
+//!zig-autodoc-section: CLI Usage
+//!zig-autodoc-guide: cli-basics.md
+//!zig-autodoc-guide: cli-advanced.md
+\`\`\`
+  
+
+**Note that this feature is still under heavy development so expect bugs**
+**and missing features!**
+
+Happy writing!
+`);
+    } else {
+      domActiveGuide.innerHTML = markdown(activeGuide.body);
+    }
+    domActiveGuide.classList.remove("hidden");
   }
 
   function renderApi() {
     // set Api mode
     domApiSwitch.classList.add("active");
     domGuideSwitch.classList.remove("active");
-    domGuides.classList.add("hidden");
+    domGuidesSection.classList.add("hidden");
     domDocs.classList.remove("hidden");
     domApiMenu.classList.remove("hidden");
     domGuidesMenu.classList.add("hidden");
@@ -492,8 +538,8 @@ const NAV_MODES = {
     domFnProto.classList.add("hidden");
     domSectParams.classList.add("hidden");
     domTldDocs.classList.add("hidden");
-    domSectMainPkg.classList.add("hidden");
-    domSectPkgs.classList.add("hidden");
+    domSectMainMod.classList.add("hidden");
+    domSectMods.classList.add("hidden");
     domSectTypes.classList.add("hidden");
     domSectTests.classList.add("hidden");
     domSectDocTests.classList.add("hidden");
@@ -518,33 +564,34 @@ const NAV_MODES = {
 
     renderTitle();
     renderInfo();
-    renderPkgList();
-
-    domPrivDeclsBox.checked = curNav.mode == NAV_MODES.API_INTERNAL;
+    renderModList();
 
     if (curNavSearch !== "") {
-      return renderSearch();
+      return renderSearchAPI();
     }
 
-    let rootPkg = zigAnalysis.packages[zigAnalysis.rootPkg];
-    let pkg = rootPkg;
-    curNav.pkgObjs = [pkg];
-    for (let i = 1; i < curNav.pkgNames.length; i += 1) {
-      let childPkg = zigAnalysis.packages[pkg.table[curNav.pkgNames[i]]];
-      if (childPkg == null) {
+    let rootMod = zigAnalysis.modules[zigAnalysis.rootMod];
+    let mod = rootMod;
+    curNav.modObjs = [mod];
+    for (let i = 0; i < curNav.modNames.length; i += 1) {
+      let childMod = zigAnalysis.modules[mod.table[curNav.modNames[i]]];
+      if (childMod == null) {
         return render404();
       }
-      pkg = childPkg;
-      curNav.pkgObjs.push(pkg);
+      mod = childMod;
+      curNav.modObjs.push(mod);
     }
 
-    let currentType = getType(pkg.main);
+    let currentType = getType(mod.main);
     curNav.declObjs = [currentType];
+    let lastDecl = mod.main;
     for (let i = 0; i < curNav.declNames.length; i += 1) {
       let childDecl = findSubDecl(currentType, curNav.declNames[i]);
-      if (childDecl == null) {
+      window.last_decl = childDecl;
+      if (childDecl == null || childDecl.is_private === true) {
         return render404();
       }
+      lastDecl = childDecl;
 
       let childDeclValue = resolveValue(childDecl.value).expr;
       if ("type" in childDeclValue) {
@@ -569,9 +616,7 @@ const NAV_MODES = {
     let lastIsType = isType(last);
     let lastIsContainerType = isContainerType(last);
 
-    if (lastIsDecl) {
-      renderDocTest(last);
-    }
+    renderDocTest(lastDecl);
 
     if (lastIsContainerType) {
       return renderContainer(last);
@@ -605,7 +650,6 @@ const NAV_MODES = {
   function render() {
     switch (curNav.mode) {
       case NAV_MODES.API:
-      case NAV_MODES.API_INTERNAL:
         return renderApi();
       case NAV_MODES.GUIDES:
         return renderGuides();
@@ -619,7 +663,8 @@ const NAV_MODES = {
     if (!decl.decltest) return;
     const astNode = getAstNode(decl.decltest);
     domSectDocTests.classList.remove("hidden");
-    domDocTestsCode.innerHTML = astNode.code;
+    domDocTestsCode.innerHTML = renderTokens(
+      DecoratedTokenizer(astNode.code, decl));
   }
 
   function renderUnknownDecl(decl) {
@@ -666,11 +711,7 @@ const NAV_MODES = {
     console.assert("type" in value.expr);
     let typeObj = getType(value.expr.type);
 
-    domFnProtoCode.innerHTML = exprName(value.expr, {
-      wantHtml: true,
-      wantLink: true,
-      fnDecl,
-    });
+    domFnProtoCode.innerHTML = renderTokens(ex(value.expr, { fnDecl: fnDecl }));
 
     domFnSourceLink.innerHTML = "[<a target=\"_blank\" href=\"" + sourceFileLink(fnDecl) + "\">src</a>]";
 
@@ -799,15 +840,21 @@ const NAV_MODES = {
 
       let value = typeObj.params[i];
       let preClass = docsNonEmpty ? ' class="fieldHasDocs"' : "";
-      let html = "<pre" + preClass + ">" + escapeHtml(fieldNode.name) + ": ";
-      if (isVarArgs && i === typeObj.params.length - 1) {
-        html += "...";
-      } else {
-        let name = exprName(value, { wantHtml: false, wantLink: false });
-        html += '<span class="tok-kw">' + name + "</span>";
-      }
+      let html = "<pre" + preClass + ">" + renderTokens((function*() {
+        yield Tok.identifier(fieldNode.name);
+        yield Tok.colon;
+        yield Tok.space;
+        if (isVarArgs && i === typeObj.params.length - 1) {
+          yield Tok.period;
+          yield Tok.period;
+          yield Tok.period;
+        } else {
+          yield* ex(value, {});
+        }
+        yield Tok.comma;
+      }()));
 
-      html += ",</pre>";
+      html += "</pre>";
 
       if (docsNonEmpty) {
         html += '<div class="fieldDocs">' + markdown(docs) + "</div>";
@@ -818,24 +865,24 @@ const NAV_MODES = {
   }
 
   function renderNav() {
-    let len = curNav.pkgNames.length + curNav.declNames.length;
+    let len = curNav.modNames.length + curNav.declNames.length;
     resizeDomList(domListNav, len, '<li><a href="#"></a></li>');
     let list = [];
-    let hrefPkgNames = [];
+    let hrefModNames = [];
     let hrefDeclNames = [];
-    for (let i = 0; i < curNav.pkgNames.length; i += 1) {
-      hrefPkgNames.push(curNav.pkgNames[i]);
-      let name = curNav.pkgNames[i];
+    for (let i = 0; i < curNav.modNames.length; i += 1) {
+      hrefModNames.push(curNav.modNames[i]);
+      let name = curNav.modNames[i];
       list.push({
         name: name,
-        link: navLink(hrefPkgNames, hrefDeclNames),
+        link: navLink(hrefModNames, hrefDeclNames),
       });
     }
     for (let i = 0; i < curNav.declNames.length; i += 1) {
       hrefDeclNames.push(curNav.declNames[i]);
       list.push({
         name: curNav.declNames[i],
-        link: navLink(hrefPkgNames, hrefDeclNames),
+        link: navLink(hrefModNames, hrefDeclNames),
       });
     }
 
@@ -866,75 +913,75 @@ const NAV_MODES = {
     domStatus.classList.remove("hidden");
   }
 
-  function renderPkgList() {
-    const rootPkg = zigAnalysis.packages[zigAnalysis.rootPkg];
+  function renderModList() {
+    const rootMod = zigAnalysis.modules[zigAnalysis.rootMod];
     let list = [];
-    for (let key in rootPkg.table) {
-      let pkgIndex = rootPkg.table[key];
-      if (zigAnalysis.packages[pkgIndex] == null) continue;
-      if (key == rootPkg.name) continue;
+    for (let key in rootMod.table) {
+      let modIndex = rootMod.table[key];
+      if (zigAnalysis.modules[modIndex] == null) continue;
+      if (key == rootMod.name) continue;
       list.push({
         name: key,
-        pkg: pkgIndex,
+        mod: modIndex,
       });
     }
 
     {
-      let aDom = domSectMainPkg.children[1].children[0].children[0];
-      aDom.textContent = rootPkg.name;
-      aDom.setAttribute("href", navLinkPkg(zigAnalysis.rootPkg));
-      if (rootPkg.name === curNav.pkgNames[0]) {
+      let aDom = domSectMainMod.children[1].children[0].children[0];
+      aDom.textContent = rootMod.name;
+      aDom.setAttribute("href", navLinkMod(zigAnalysis.rootMod));
+      if (rootMod.name === curNav.modNames[0]) {
         aDom.classList.add("active");
       } else {
         aDom.classList.remove("active");
       }
-      domSectMainPkg.classList.remove("hidden");
+      domSectMainMod.classList.remove("hidden");
     }
 
-    list.sort(function (a, b) {
+    list.sort(function(a, b) {
       return operatorCompare(a.name.toLowerCase(), b.name.toLowerCase());
     });
 
     if (list.length !== 0) {
-      resizeDomList(domListPkgs, list.length, '<li><a href="#"></a></li>');
+      resizeDomList(domListMods, list.length, '<li><a href="#"></a></li>');
       for (let i = 0; i < list.length; i += 1) {
-        let liDom = domListPkgs.children[i];
+        let liDom = domListMods.children[i];
         let aDom = liDom.children[0];
         aDom.textContent = list[i].name;
-        aDom.setAttribute("href", navLinkPkg(list[i].pkg));
-        if (list[i].name === curNav.pkgNames[0]) {
+        aDom.setAttribute("href", navLinkMod(list[i].mod));
+        if (list[i].name === curNav.modNames[0]) {
           aDom.classList.add("active");
         } else {
           aDom.classList.remove("active");
         }
       }
 
-      domSectPkgs.classList.remove("hidden");
+      domSectMods.classList.remove("hidden");
     }
   }
 
-  function navLink(pkgNames, declNames, callName) {
+  function navLink(modNames, declNames, callName) {
     let base = curNav.mode;
 
-    if (pkgNames.length === 0 && declNames.length === 0) {
+    if (modNames.length === 0 && declNames.length === 0) {
       return base;
     } else if (declNames.length === 0 && callName == null) {
-      return base + pkgNames.join(".");
+      return base + modNames.join(".");
     } else if (callName == null) {
-      return base + pkgNames.join(".") + ":" + declNames.join(".");
+      return base + modNames.join(".") + ":" + declNames.join(".");
     } else {
       return (
-        base + pkgNames.join(".") + ":" + declNames.join(".") + ";" + callName
+        base + modNames.join(".") + ":" + declNames.join(".") + ";" + callName
       );
     }
   }
 
-  function navLinkPkg(pkgIndex) {
-    return navLink(canonPkgPaths[pkgIndex], []);
+  function navLinkMod(modIndex) {
+    return navLink(canonModPaths[modIndex], []);
   }
 
   function navLinkDecl(childName) {
-    return navLink(curNav.pkgNames, curNav.declNames.concat([childName]));
+    return navLink(curNav.modNames, curNav.declNames.concat([childName]));
   }
 
   function findDeclNavLink(declName) {
@@ -946,12 +993,18 @@ const NAV_MODES = {
       const curDeclName = curNav.declNames[i - 1];
       if (curDeclName == declName) {
         const declPath = curNav.declNames.slice(0, i);
-        return navLink(curNav.pkgNames, declPath);
+        return navLink(curNav.modNames, declPath);
       }
 
-      if (findSubDecl(curDecl, declName) != null) {
-        const declPath = curNav.declNames.slice(0, i).concat([declName]);
-        return navLink(curNav.pkgNames, declPath);
+      const subDecl = findSubDecl(curDecl, declName);
+
+      if (subDecl != null) {
+        if (subDecl.is_private === true) {
+          return sourceFileLink(subDecl);
+        } else {
+          const declPath = curNav.declNames.slice(0, i).concat([declName]);
+          return navLink(curNav.modNames, declPath);
+        }
       }
     }
 
@@ -972,7 +1025,7 @@ const NAV_MODES = {
   //          callName += ')';
 
   //      declNamesCopy.push(callName);
-  //      return navLink(curNav.pkgNames, declNamesCopy);
+  //      return navLink(curNav.modNames, declNamesCopy);
   //  }
 
   function resizeDomListDl(dlDom, desiredLen) {
@@ -1002,794 +1055,582 @@ const NAV_MODES = {
     if (wr.typeRef) return wr.typeRef;
     let resolved = resolveValue(wr);
     if (wr === resolved) {
-      return { type: 0 };
+      return { "undefined": {} };
     }
     return walkResultTypeRef(resolved);
   }
 
-  function exprName(expr, opts) {
+  function* DecoratedTokenizer(src, context) {
+    let tok_it = Tokenizer(src);
+    for (let t of tok_it) {
+      if (t.tag == Tag.identifier) {
+        const link = detectDeclPath(t.src, context);
+        if (link) {
+          t.link = link;
+        }
+      }
+
+      yield t;
+    }
+  }
+
+
+  function renderSingleToken(t) {
+
+    if (t.tag == Tag.whitespace) {
+      return t.src;
+    }
+
+    let src = t.src;
+    // if (t.tag == Tag.identifier) {
+    //     src = escapeHtml(src);
+    // }
+    let result = "";
+    if (t.tag == Tag.identifier && isSimpleType(t.src)) {
+      result = `<span class="zig_type">${src}</span>`;
+    } else if (t.tag == Tag.identifier && isSpecialIndentifier(t.src)) {
+      result = `<span class="zig_special">${src}</span>`;
+    } else if (t.tag == Tag.identifier && t.fnDecl) {
+      result = `<span class="zig_fn">${src}</span>`;
+    } else {
+      result = `<span class="zig_${t.tag}">${src}</span>`;
+    }
+
+    if (t.link) {
+      result = `<a href="${t.link}">` + result + "</a>";
+    }
+
+    return result;
+  }
+
+  function renderTokens(tok_it) {
+    var html = [];
+
+    const max_iter = 100000;
+    let i = 0;
+    for (const t of tok_it) {
+      i += 1;
+      if (i > max_iter)
+        throw "too many iterations";
+
+      if (t.tag == Tag.eof)
+        break;
+
+      html.push(renderSingleToken(t));
+    }
+
+    return html.join("");
+  }
+
+  function* ex(expr, opts) {
     switch (Object.keys(expr)[0]) {
       default:
-        throw "this expression is not implemented yet";
-      case "bool": {
-        if (expr.bool) {
-          return "true";
+        throw "this expression is not implemented yet: " + Object.keys(expr)[0];
+      case "comptimeExpr": {
+        const src = zigAnalysis.comptimeExprs[expr.comptimeExpr].code;
+        yield* DecoratedTokenizer(src);
+        return;
+      }
+      case "declName": {
+        yield { src: expr.declName, tag: Tag.identifier };
+        return;
+      }
+      case "declRef": {
+        const name = getDecl(expr.declRef).name;
+        const link = declLinkOrSrcLink(expr.declRef);
+        if (link) {
+          yield { src: name, tag: Tag.identifier, link };
+        } else {
+          yield { src: name, tag: Tag.identifier };
         }
-        return "false";
+        return;
       }
-      case "&": {
-        return "&" + exprName(zigAnalysis.exprs[expr["&"]], opts);
-      }
-      case "compileError": {
-        let compileError = expr.compileError;
-        return "@compileError(" + exprName(zigAnalysis.exprs[compileError], opts) + ")";
-      }
-      case "enumLiteral": {
-        let literal = expr.enumLiteral;
-        return "." + literal;
-      }
-      case "void": {
-        return "void";
-      }
-      case "slice": {
-        let payloadHtml = "";
-        const lhsExpr = zigAnalysis.exprs[expr.slice.lhs];
-        const startExpr = zigAnalysis.exprs[expr.slice.start];
-        let decl = exprName(lhsExpr, opts);
-        let start = exprName(startExpr, opts);
-        let end = "";
-        let sentinel = "";
-        if (expr.slice["end"]) {
-          const endExpr = zigAnalysis.exprs[expr.slice.end];
-          let end_ = exprName(endExpr, opts);
-          end += end_;
+      case "refPath": {
+        for (let i = 0; i < expr.refPath.length; i += 1) {
+          if (i > 0) yield Tok.period;
+          yield* ex(expr.refPath[i]);
         }
-        if (expr.slice["sentinel"]) {
-          const sentinelExpr = zigAnalysis.exprs[expr.slice.sentinel];
-          let sentinel_ = exprName(sentinelExpr, opts);
-          sentinel += " :" + sentinel_;
-        }
-        payloadHtml += decl + "[" + start + ".." + end + sentinel + "]";
-        return payloadHtml;
-      }
-      case "sliceIndex": {
-        const sliceIndex = zigAnalysis.exprs[expr.sliceIndex];
-        return exprName(sliceIndex, opts, opts);
-      }
-      case "cmpxchg": {
-        const typeIndex = zigAnalysis.exprs[expr.cmpxchg.type];
-        const ptrIndex = zigAnalysis.exprs[expr.cmpxchg.ptr];
-        const expectedValueIndex =
-          zigAnalysis.exprs[expr.cmpxchg.expected_value];
-        const newValueIndex = zigAnalysis.exprs[expr.cmpxchg.new_value];
-        const successOrderIndex = zigAnalysis.exprs[expr.cmpxchg.success_order];
-        const failureOrderIndex = zigAnalysis.exprs[expr.cmpxchg.failure_order];
-
-        const type = exprName(typeIndex, opts);
-        const ptr = exprName(ptrIndex, opts);
-        const expectedValue = exprName(expectedValueIndex, opts);
-        const newValue = exprName(newValueIndex, opts);
-        const successOrder = exprName(successOrderIndex, opts);
-        const failureOrder = exprName(failureOrderIndex, opts);
-
-        let fnName = "@";
-
-        switch (expr.cmpxchg.name) {
-          case "cmpxchg_strong": {
-            fnName += "cmpxchgStrong";
-            break;
-          }
-          case "cmpxchg_weak": {
-            fnName += "cmpxchgWeak";
-            break;
-          }
-          default: {
-            console.log("There's only cmpxchg_strong and cmpxchg_weak");
-          }
-        }
-
-        return (
-          fnName +
-          "(" +
-          type +
-          ", " +
-          ptr +
-          ", " +
-          expectedValue +
-          ", " +
-          newValue +
-          ", " +
-          "." +
-          successOrder +
-          ", " +
-          "." +
-          failureOrder +
-          ")"
-        );
-      }
-      case "cmpxchgIndex": {
-        const cmpxchgIndex = zigAnalysis.exprs[expr.cmpxchgIndex];
-        return exprName(cmpxchgIndex, opts);
-      }
-      case "switchOp": {
-        let condExpr = zigAnalysis.exprs[expr.switchOp.cond_index];
-        let ast = getAstNode(expr.switchOp.src);
-        let file_name = expr.switchOp.file_name;
-        let outer_decl_index = expr.switchOp.outer_decl;
-        let outer_decl = getType(outer_decl_index);
-        let line = 0;
-        // console.log(expr.switchOp)
-        // console.log(outer_decl)
-        while (outer_decl_index !== 0 && outer_decl.line_number > 0) {
-          line += outer_decl.line_number;
-          outer_decl_index = outer_decl.outer_decl;
-          outer_decl = getType(outer_decl_index);
-          // console.log(outer_decl)
-        }
-        line += ast.line + 1;
-        let payloadHtml = "";
-        let cond = exprName(condExpr, opts);
-
-        payloadHtml +=
-          "</br>" +
-          "node_name: " +
-          ast.name +
-          "</br>" +
-          "file: " +
-          file_name +
-          "</br>" +
-          "line: " +
-          line +
-          "</br>";
-        payloadHtml +=
-          "switch(" +
-          cond +
-          ") {" +
-          '<a href="/src/' +
-          file_name +
-          "#L" +
-          line +
-          '">' +
-          "..." +
-          "</a>}";
-        return payloadHtml;
-      }
-      case "switchIndex": {
-        const switchIndex = zigAnalysis.exprs[expr.switchIndex];
-        return exprName(switchIndex, opts);
+        return;
       }
       case "fieldRef": {
         const field_idx = expr.fieldRef.index;
         const type = getType(expr.fieldRef.type);
         const field = getAstNode(type.src).fields[field_idx];
         const name = getAstNode(field).name;
-        return name;
+        yield { src: name, tag: Tag.identifier };
+        return;
       }
-      case "enumToInt": {
-        const enumToInt = zigAnalysis.exprs[expr.enumToInt];
-        return "@enumToInt(" + exprName(enumToInt, opts) + ")";
-      }
-      case "bitSizeOf": {
-        const bitSizeOf = zigAnalysis.exprs[expr.bitSizeOf];
-        return "@bitSizeOf(" + exprName(bitSizeOf, opts) + ")";
-      }
-      case "sizeOf": {
-        const sizeOf = zigAnalysis.exprs[expr.sizeOf];
-        return "@sizeOf(" + exprName(sizeOf, opts) + ")";
-      }
-      case "builtinIndex": {
-        const builtinIndex = zigAnalysis.exprs[expr.builtinIndex];
-        return exprName(builtinIndex, opts);
-      }
-      case "builtin": {
-        const param_expr = zigAnalysis.exprs[expr.builtin.param];
-        let param = exprName(param_expr, opts);
-
-        let payloadHtml = "@";
-        switch (expr.builtin.name) {
-          case "align_of": {
-            payloadHtml += "alignOf";
-            break;
-          }
-          case "bool_to_int": {
-            payloadHtml += "boolToInt";
-            break;
-          }
-          case "embed_file": {
-            payloadHtml += "embedFile";
-            break;
-          }
-          case "error_name": {
-            payloadHtml += "errorName";
-            break;
-          }
-          case "panic": {
-            payloadHtml += "panic";
-            break;
-          }
-          case "set_runtime_safety": {
-            payloadHtml += "setRuntimeSafety";
-            break;
-          }
-          case "sqrt": {
-            payloadHtml += "sqrt";
-            break;
-          }
-          case "sin": {
-            payloadHtml += "sin";
-            break;
-          }
-          case "cos": {
-            payloadHtml += "cos";
-            break;
-          }
-          case "tan": {
-            payloadHtml += "tan";
-            break;
-          }
-          case "exp": {
-            payloadHtml += "exp";
-            break;
-          }
-          case "exp2": {
-            payloadHtml += "exp2";
-            break;
-          }
-          case "log": {
-            payloadHtml += "log";
-            break;
-          }
-          case "log2": {
-            payloadHtml += "log2";
-            break;
-          }
-          case "log10": {
-            payloadHtml += "log10";
-            break;
-          }
-          case "fabs": {
-            payloadHtml += "fabs";
-            break;
-          }
-          case "floor": {
-            payloadHtml += "floor";
-            break;
-          }
-          case "ceil": {
-            payloadHtml += "ceil";
-            break;
-          }
-          case "trunc": {
-            payloadHtml += "trunc";
-            break;
-          }
-          case "round": {
-            payloadHtml += "round";
-            break;
-          }
-          case "tag_name": {
-            payloadHtml += "tagName";
-            break;
-          }
-          case "reify": {
-            payloadHtml += "Type";
-            break;
-          }
-          case "type_name": {
-            payloadHtml += "typeName";
-            break;
-          }
-          case "frame_type": {
-            payloadHtml += "Frame";
-            break;
-          }
-          case "frame_size": {
-            payloadHtml += "frameSize";
-            break;
-          }
-          case "work_item_id": {
-            payloadHtml += "workItemId";
-            break;
-          }
-          case "work_group_size": {
-            payloadHtml += "workGroupSize";
-            break;
-          }
-          case "work_group_id": {
-            payloadHtml += "workGroupId";
-            break;
-          }
-          case "ptr_to_int": {
-            payloadHtml += "ptrToInt";
-            break;
-          }
-          case "error_to_int": {
-            payloadHtml += "errorToInt";
-            break;
-          }
-          case "int_to_error": {
-            payloadHtml += "intToError";
-            break;
-          }
-          case "max": {
-            payloadHtml += "max";
-            break;
-          }
-          case "min": {
-            payloadHtml += "min";
-            break;
-          }
-          case "bit_not": {
-            return "~" + param;
-          }
-          case "clz": {
-            return "@clz(T" + ", " + param + ")";
-          }
-          case "ctz": {
-            return "@ctz(T" + ", " + param + ")";
-          }
-          case "pop_count": {
-            return "@popCount(T" + ", " + param + ")";
-          }
-          case "byte_swap": {
-            return "@byteSwap(T" + ", " + param + ")";
-          }
-          case "bit_reverse": {
-            return "@bitReverse(T" + ", " + param + ")";
-          }
-          default:
-            console.log("builtin function not handled yet or doesn't exist!");
+      case "bool": {
+        if (expr.bool) {
+          yield { src: "true", tag: Tag.identifier };
+          return;
         }
-        return payloadHtml + "(" + param + ")";
+        yield { src: "false", tag: Tag.identifier };
+        return;
       }
-      case "builtinBinIndex": {
-        const builtinBinIndex = zigAnalysis.exprs[expr.builtinBinIndex];
-        return exprName(builtinBinIndex, opts);
-      }
-      case "builtinBin": {
-        const lhsOp = zigAnalysis.exprs[expr.builtinBin.lhs];
-        const rhsOp = zigAnalysis.exprs[expr.builtinBin.rhs];
-        let lhs = exprName(lhsOp, opts);
-        let rhs = exprName(rhsOp, opts);
-
-        let payloadHtml = "@";
-        switch (expr.builtinBin.name) {
-          case "float_to_int": {
-            payloadHtml += "floatToInt";
-            break;
-          }
-          case "int_to_float": {
-            payloadHtml += "intToFloat";
-            break;
-          }
-          case "int_to_ptr": {
-            payloadHtml += "intToPtr";
-            break;
-          }
-          case "int_to_enum": {
-            payloadHtml += "intToEnum";
-            break;
-          }
-          case "float_cast": {
-            payloadHtml += "floatCast";
-            break;
-          }
-          case "int_cast": {
-            payloadHtml += "intCast";
-            break;
-          }
-          case "ptr_cast": {
-            payloadHtml += "ptrCast";
-            break;
-          }
-          case "const_cast": {
-            payloadHtml += "constCast";
-            break;
-          }
-          case "volatile_cast": {
-            payloadHtml += "volatileCast";
-            break;
-          }
-          case "truncate": {
-            payloadHtml += "truncate";
-            break;
-          }
-          case "has_decl": {
-            payloadHtml += "hasDecl";
-            break;
-          }
-          case "has_field": {
-            payloadHtml += "hasField";
-            break;
-          }
-          case "bit_reverse": {
-            payloadHtml += "bitReverse";
-            break;
-          }
-          case "div_exact": {
-            payloadHtml += "divExact";
-            break;
-          }
-          case "div_floor": {
-            payloadHtml += "divFloor";
-            break;
-          }
-          case "div_trunc": {
-            payloadHtml += "divTrunc";
-            break;
-          }
-          case "mod": {
-            payloadHtml += "mod";
-            break;
-          }
-          case "rem": {
-            payloadHtml += "rem";
-            break;
-          }
-          case "mod_rem": {
-            payloadHtml += "rem";
-            break;
-          }
-          case "shl_exact": {
-            payloadHtml += "shlExact";
-            break;
-          }
-          case "shr_exact": {
-            payloadHtml += "shrExact";
-            break;
-          }
-          case "bitcast": {
-            payloadHtml += "bitCast";
-            break;
-          }
-          case "align_cast": {
-            payloadHtml += "alignCast";
-            break;
-          }
-          case "vector_type": {
-            payloadHtml += "Vector";
-            break;
-          }
-          case "reduce": {
-            payloadHtml += "reduce";
-            break;
-          }
-          case "splat": {
-            payloadHtml += "splat";
-            break;
-          }
-          case "offset_of": {
-            payloadHtml += "offsetOf";
-            break;
-          }
-          case "bit_offset_of": {
-            payloadHtml += "bitOffsetOf";
-            break;
-          }
-          default:
-            console.log("builtin function not handled yet or doesn't exist!");
-        }
-        return payloadHtml + "(" + lhs + ", " + rhs + ")";
-      }
-      case "binOpIndex": {
-        const binOpIndex = zigAnalysis.exprs[expr.binOpIndex];
-        return exprName(binOpIndex, opts);
-      }
-      case "binOp": {
-        const lhsOp = zigAnalysis.exprs[expr.binOp.lhs];
-        const rhsOp = zigAnalysis.exprs[expr.binOp.rhs];
-        let lhs = exprName(lhsOp, opts);
-        let rhs = exprName(rhsOp, opts);
-
-        let print_lhs = "";
-        let print_rhs = "";
-
-        if (lhsOp["binOpIndex"]) {
-          print_lhs = "(" + lhs + ")";
-        } else {
-          print_lhs = lhs;
-        }
-        if (rhsOp["binOpIndex"]) {
-          print_rhs = "(" + rhs + ")";
-        } else {
-          print_rhs = rhs;
-        }
-
-        let operator = "";
-
-        switch (expr.binOp.name) {
-          case "add": {
-            operator += "+";
-            break;
-          }
-          case "addwrap": {
-            operator += "+%";
-            break;
-          }
-          case "add_sat": {
-            operator += "+|";
-            break;
-          }
-          case "sub": {
-            operator += "-";
-            break;
-          }
-          case "subwrap": {
-            operator += "-%";
-            break;
-          }
-          case "sub_sat": {
-            operator += "-|";
-            break;
-          }
-          case "mul": {
-            operator += "*";
-            break;
-          }
-          case "mulwrap": {
-            operator += "*%";
-            break;
-          }
-          case "mul_sat": {
-            operator += "*|";
-            break;
-          }
-          case "div": {
-            operator += "/";
-            break;
-          }
-          case "shl": {
-            operator += "<<";
-            break;
-          }
-          case "shl_sat": {
-            operator += "<<|";
-            break;
-          }
-          case "shr": {
-            operator += ">>";
-            break;
-          }
-          case "bit_or": {
-            operator += "|";
-            break;
-          }
-          case "bit_and": {
-            operator += "&";
-            break;
-          }
-          case "array_cat": {
-            operator += "++";
-            break;
-          }
-          case "array_mul": {
-            operator += "**";
-            break;
-          }
-          case "cmp_eq": {
-            operator += "==";
-            break;
-          }
-          case "cmp_neq": {
-            operator += "!=";
-            break;
-          }
-          case "cmp_gt": {
-            operator += ">";
-            break;
-          }
-          case "cmp_gte": {
-            operator += ">=";
-            break;
-          }
-          case "cmp_lt": {
-            operator += "<";
-            break;
-          }
-          case "cmp_lte": {
-            operator += "<=";
-            break;
-          }
-          default:
-            console.log("operator not handled yet or doesn't exist!");
-        }
-
-        return print_lhs + " " + operator + " " + print_rhs;
-      }
-      case "errorSets": {
-        const errUnionObj = getType(expr.errorSets);
-        let lhs = exprName(errUnionObj.lhs, opts);
-        let rhs = exprName(errUnionObj.rhs, opts);
-        return lhs + " || " + rhs;
-      }
-      case "errorUnion": {
-        const errUnionObj = getType(expr.errorUnion);
-        let lhs = exprName(errUnionObj.lhs, opts);
-        let rhs = exprName(errUnionObj.rhs, opts);
-        return lhs + "!" + rhs;
-      }
-      case "struct": {
-        // const struct_name =
-        //   zigAnalysis.decls[expr.struct[0].val.typeRef.refPath[0].declRef].name;
-        const struct_name = ".";
-        let struct_body = "";
-        struct_body += struct_name + "{ ";
-        for (let i = 0; i < expr.struct.length; i++) {
-          const fv = expr.struct[i];
-          const field_name = fv.name;
-          const field_value = exprName(fv.val.expr, opts);
-          // TODO: commented out because it seems not needed. if it deals
-          //       with a corner case, please add a comment when re-enabling it.
-          // let field_value = exprArg[Object.keys(exprArg)[0]];
-          // if (field_value instanceof Object) {
-          //   value_field = exprName(value_field)
-          //     zigAnalysis.decls[value_field[0].val.typeRef.refPath[0].declRef]
-          //       .name;
-          // }
-          struct_body += "." + field_name + " = " + field_value;
-          if (i !== expr.struct.length - 1) {
-            struct_body += ", ";
-          } else {
-            struct_body += " ";
-          }
-        }
-        struct_body += "}";
-        return struct_body;
-      }
-      case "typeOf_peer": {
-        let payloadHtml = "@TypeOf(";
-        for (let i = 0; i < expr.typeOf_peer.length; i++) {
-          let elem = zigAnalysis.exprs[expr.typeOf_peer[i]];
-          payloadHtml += exprName(elem, { wantHtml: true, wantLink: true });
-          if (i !== expr.typeOf_peer.length - 1) {
-            payloadHtml += ", ";
-          }
-        }
-        payloadHtml += ")";
-        return payloadHtml;
-      }
-      case "alignOf": {
-        const alignRefArg = zigAnalysis.exprs[expr.alignOf];
-        let payloadHtml =
-          "@alignOf(" +
-          exprName(alignRefArg, { wantHtml: true, wantLink: true }) +
-          ")";
-        return payloadHtml;
-      }
-      case "typeOf": {
-        const typeRefArg = zigAnalysis.exprs[expr.typeOf];
-        let payloadHtml =
-          "@TypeOf(" +
-          exprName(typeRefArg, { wantHtml: true, wantLink: true }) +
-          ")";
-        return payloadHtml;
-      }
-      case "typeInfo": {
-        const typeRefArg = zigAnalysis.exprs[expr.typeInfo];
-        let payloadHtml =
-          "@typeInfo(" +
-          exprName(typeRefArg, { wantHtml: true, wantLink: true }) +
-          ")";
-        return payloadHtml;
-      }
-      case "null": {
-        if (opts.wantHtml) {
-          return '<span class="tok-null">null</span>';
-        } else {
-          return "null";
-        }
-      }
-      case "array": {
-        let payloadHtml = ".{";
-        for (let i = 0; i < expr.array.length; i++) {
-          if (i != 0) payloadHtml += ", ";
-          let elem = zigAnalysis.exprs[expr.array[i]];
-          payloadHtml += exprName(elem, opts);
-        }
-        return payloadHtml + "}";
-      }
-      case "comptimeExpr": {
-        return zigAnalysis.comptimeExprs[expr.comptimeExpr].code;
+      case "&": {
+        yield { src: "&", tag: Tag.ampersand };
+        yield* ex(zigAnalysis.exprs[expr["&"]], opts);
+        return;
       }
       case "call": {
+
         let call = zigAnalysis.calls[expr.call];
-        let payloadHtml = "";
 
         switch (Object.keys(call.func)[0]) {
           default:
             throw "TODO";
           case "declRef":
           case "refPath": {
-            payloadHtml += exprName(call.func, opts);
+            yield* ex(call.func, opts);
             break;
           }
         }
-        payloadHtml += "(";
+        yield Tok.l_paren;
 
         for (let i = 0; i < call.args.length; i++) {
-          if (i != 0) payloadHtml += ", ";
-          payloadHtml += exprName(call.args[i], opts);
+          if (i != 0) {
+            yield Tok.comma;
+            yield Tok.space;
+          }
+          yield* ex(call.args[i], opts);
         }
 
-        payloadHtml += ")";
-        return payloadHtml;
+        yield Tok.r_paren;
+        return;
       }
+      case "sizeOf": {
+        const sizeOf = zigAnalysis.exprs[expr.sizeOf];
+        yield { src: "@sizeOf", tag: Tag.builtin };
+        yield { src: "(", tag: Tag.l_paren };
+        yield* ex(sizeOf, opts);
+        yield { src: ")", tag: Tag.r_paren };
+        return;
+      }
+
       case "as": {
-        // @Check : this should be done in backend because there are legit @as() calls
-        // const typeRefArg = zigAnalysis.exprs[expr.as.typeRefArg];
         const exprArg = zigAnalysis.exprs[expr.as.exprArg];
-        // return "@as(" + exprName(typeRefArg, opts) +
-        //   ", " + exprName(exprArg, opts) + ")";
-        return exprName(exprArg, opts);
+        yield* ex(exprArg, opts);
+        return;
       }
-      case "declRef": {
-        const name = getDecl(expr.declRef).name;
 
-        if (opts.wantHtml) {
-          let payloadHtml = "";
-          if (opts.wantLink) {
-            payloadHtml += '<a href="' + findDeclNavLink(name) + '">';
-          }
-          payloadHtml +=
-            '<span class="tok-kw" style="color:lightblue;">' +
-            name +
-            "</span>";
-          if (opts.wantLink) payloadHtml += "</a>";
-          return payloadHtml;
-        } else {
-          return name;
-        }
-      }
-      case "refPath": {
-        let firstComponent = expr.refPath[0];
-        let name = exprName(firstComponent, opts);
-        let url = undefined;
-        if (opts.wantLink && "declRef" in firstComponent) {
-          url = findDeclNavLink(getDecl(firstComponent.declRef).name);
-        }
-        for (let i = 1; i < expr.refPath.length; i++) {
-          let component = undefined;
-          if ("string" in expr.refPath[i]) {
-            component = expr.refPath[i].string;
-          } else {
-            component = exprName(expr.refPath[i], { ...opts, wantLink: false });
-            if (opts.wantLink && "declRef" in expr.refPath[i]) {
-              url += "." + getDecl(expr.refPath[i].declRef).name;
-              component = '<a href="' + url + '">' +
-                component +
-                "</a>";
-            }
-          }
-          name += "." + component;
-        }
-        return name;
-      }
       case "int": {
-        return "" + expr.int;
-      }
-      case "float": {
-        return "" + expr.float.toFixed(2);
-      }
-      case "float128": {
-        return "" + expr.float128.toFixed(2);
-      }
-      case "undefined": {
-        return "undefined";
-      }
-      case "string": {
-        return '"' + escapeHtml(expr.string) + '"';
+        yield { src: expr.int, tag: Tag.number_literal };
+        return;
       }
 
       case "int_big": {
-        return (expr.int_big.negated ? "-" : "") + expr.int_big.value;
+        if (expr.int_big.negated) {
+          yield { src: "-", tag: Tag.minus };
+        }
+        yield { src: expr.int_big.value, tag: Tag.number_literal };
+        return;
+      }
+
+      case "float": {
+        yield { src: expr.float, tag: Tag.number_literal };
+        return;
+      }
+
+      case "float128": {
+        yield { src: expr.float128, tag: Tag.number_literal };
+        return;
+      }
+
+      case "array": {
+        yield { src: ".", tag: Tag.period };
+        yield Tok.l_brace;
+        for (let i = 0; i < expr.array.length; i++) {
+          if (i != 0) {
+            yield { src: ",", tag: Tag.comma };
+            yield Tok.space;
+          }
+          let elem = zigAnalysis.exprs[expr.array[i]];
+          yield* ex(elem, opts);
+        }
+        yield Tok.r_brace;
+        return;
+      }
+
+      case "compileError": {
+        yield { src: "@compileError", tag: Tag.builtin };
+        yield Tok.l_paren;
+        yield* ex(zigAnalysis.exprs[expr.compileError], opts);
+        yield Tok.r_paren;
+        return;
+      }
+
+      case "string": {
+        yield { src: '"' + expr.string + '"', tag: Tag.string_literal };
+        return;
+      }
+
+      case "struct": {
+        yield Tok.period;
+        yield Tok.l_brace;
+        yield Tok.space;
+
+        for (let i = 0; i < expr.struct.length; i++) {
+          const fv = expr.struct[i];
+          const field_name = fv.name;
+          const field_value = ex(fv.val.expr, opts);
+          yield Tok.period;
+          yield { src: field_name, tag: Tag.identifier };
+          yield Tok.space;
+          yield Tok.eql;
+          yield Tok.space;
+          yield* field_value;
+          if (i !== expr.struct.length - 1) {
+            yield Tok.comma;
+            yield Tok.space;
+          } else {
+            yield Tok.space;
+          }
+        }
+        yield Tok.r_brace;
+        return;
+      }
+
+      case "binOpIndex": {
+        const binOp = zigAnalysis.exprs[expr.binOpIndex];
+        yield* ex(binOp, opts);
+        return;
+      }
+
+      case "binOp": {
+        const lhsOp = zigAnalysis.exprs[expr.binOp.lhs];
+        const rhsOp = zigAnalysis.exprs[expr.binOp.rhs];
+
+        if (lhsOp["binOpIndex"] !== undefined) {
+          yield Tok.l_paren;
+          yield* ex(lhsOp, opts);
+          yield Tok.r_paren;
+        } else {
+          yield* ex(lhsOp, opts);
+        }
+
+        yield Tok.space;
+
+        switch (expr.binOp.name) {
+          case "add": {
+            yield { src: "+", tag: Tag.plus };
+            break;
+          }
+          case "addwrap": {
+            yield { src: "+%", tag: Tag.plus_percent };
+            break;
+          }
+          case "add_sat": {
+            yield { src: "+|", tag: Tag.plus_pipe };
+            break;
+          }
+          case "sub": {
+            yield { src: "-", tag: Tag.minus };
+            break;
+          }
+          case "subwrap": {
+            yield { src: "-%", tag: Tag.minus_percent };
+            break;
+          }
+          case "sub_sat": {
+            yield { src: "-|", tag: Tag.minus_pipe };
+            break;
+          }
+          case "mul": {
+            yield { src: "*", tag: Tag.asterisk };
+            break;
+          }
+          case "mulwrap": {
+            yield { src: "*%", tag: Tag.asterisk_percent };
+            break;
+          }
+          case "mul_sat": {
+            yield { src: "*|", tag: Tag.asterisk_pipe };
+            break;
+          }
+          case "div": {
+            yield { src: "/", tag: Tag.slash };
+            break;
+          }
+          case "shl": {
+            yield { src: "<<", tag: Tag.angle_bracket_angle_bracket_left };
+            break;
+          }
+          case "shl_sat": {
+            yield { src: "<<|", tag: Tag.angle_bracket_angle_bracket_left_pipe };
+            break;
+          }
+          case "shr": {
+            yield { src: ">>", tag: Tag.angle_bracket_angle_bracket_right };
+            break;
+          }
+          case "bit_or": {
+            yield { src: "|", tag: Tag.pipe };
+            break;
+          }
+          case "bit_and": {
+            yield { src: "&", tag: Tag.ampersand };
+            break;
+          }
+          case "array_cat": {
+            yield { src: "++", tag: Tag.plus_plus };
+            break;
+          }
+          case "array_mul": {
+            yield { src: "**", tag: Tag.asterisk_asterisk };
+            break;
+          }
+          case "cmp_eq": {
+            yield { src: "==", tag: Tag.equal_equal };
+            break;
+          }
+          case "cmp_neq": {
+            yield { src: "!=", tag: Tag.bang_equal };
+            break;
+          }
+          case "cmp_gt": {
+            yield { src: ">", tag: Tag.angle_bracket_right };
+            break;
+          }
+          case "cmp_gte": {
+            yield { src: ">=", tag: Tag.angle_bracket_right_equal };
+            break;
+          }
+          case "cmp_lt": {
+            yield { src: "<", tag: Tag.angle_bracket_left };
+            break;
+          }
+          case "cmp_lte": {
+            yield { src: "<=", tag: Tag.angle_bracket_left_equal };
+            break;
+          }
+          case "bool_br_and": {
+            yield { src: "and", tag: Tag.keyword_and };
+            break;
+          }
+          case "bool_br_or": {
+            yield { src: "or", tag: Tag.keyword_or };
+            break;
+          }
+          default:
+            console.log("operator not handled yet or doesn't exist!");
+        }
+
+        yield Tok.space;
+
+        if (rhsOp["binOpIndex"] !== undefined) {
+          yield Tok.l_paren;
+          yield* ex(rhsOp, opts);
+          yield Tok.r_paren;
+        } else {
+          yield* ex(rhsOp, opts);
+        }
+        return;
+      }
+
+      case "builtinBinIndex": {
+        const builtinBinIndex = zigAnalysis.exprs[expr.builtinBinIndex];
+        yield* ex(builtinBinIndex, opts);
+        return;
+      }
+
+      case "builtinBin": {
+        const lhsOp = zigAnalysis.exprs[expr.builtinBin.lhs];
+        const rhsOp = zigAnalysis.exprs[expr.builtinBin.rhs];
+
+        let builtinName = "@";
+        switch (expr.builtinBin.name) {
+          case "int_from_float": {
+            builtinName += "intFromFloat";
+            break;
+          }
+          case "float_from_int": {
+            builtinName += "floatFromInt";
+            break;
+          }
+          case "ptr_from_int": {
+            builtinName += "ptrFromInt";
+            break;
+          }
+          case "enum_from_int": {
+            builtinName += "enumFromInt";
+            break;
+          }
+          case "float_cast": {
+            builtinName += "floatCast";
+            break;
+          }
+          case "int_cast": {
+            builtinName += "intCast";
+            break;
+          }
+          case "ptr_cast": {
+            builtinName += "ptrCast";
+            break;
+          }
+          case "const_cast": {
+            builtinName += "constCast";
+            break;
+          }
+          case "volatile_cast": {
+            builtinName += "volatileCast";
+            break;
+          }
+          case "truncate": {
+            builtinName += "truncate";
+            break;
+          }
+          case "has_decl": {
+            builtinName += "hasDecl";
+            break;
+          }
+          case "has_field": {
+            builtinName += "hasField";
+            break;
+          }
+          case "bit_reverse": {
+            builtinName += "bitReverse";
+            break;
+          }
+          case "div_exact": {
+            builtinName += "divExact";
+            break;
+          }
+          case "div_floor": {
+            builtinName += "divFloor";
+            break;
+          }
+          case "div_trunc": {
+            builtinName += "divTrunc";
+            break;
+          }
+          case "mod": {
+            builtinName += "mod";
+            break;
+          }
+          case "rem": {
+            builtinName += "rem";
+            break;
+          }
+          case "mod_rem": {
+            builtinName += "rem";
+            break;
+          }
+          case "shl_exact": {
+            builtinName += "shlExact";
+            break;
+          }
+          case "shr_exact": {
+            builtinName += "shrExact";
+            break;
+          }
+          case "bitcast": {
+            builtinName += "bitCast";
+            break;
+          }
+          case "align_cast": {
+            builtinName += "alignCast";
+            break;
+          }
+          case "vector_type": {
+            builtinName += "Vector";
+            break;
+          }
+          case "reduce": {
+            builtinName += "reduce";
+            break;
+          }
+          case "splat": {
+            builtinName += "splat";
+            break;
+          }
+          case "offset_of": {
+            builtinName += "offsetOf";
+            break;
+          }
+          case "bit_offset_of": {
+            builtinName += "bitOffsetOf";
+            break;
+          }
+          default:
+            console.log("builtin function not handled yet or doesn't exist!");
+        }
+
+        yield { src: builtinName, tag: Tag.builtin };
+        yield Tok.l_paren;
+        yield* ex(lhsOp, opts);
+        yield Tok.comma;
+        yield Tok.space;
+        yield* ex(rhsOp, opts);
+        yield Tok.r_paren;
+        return;
+      }
+
+      case "enumLiteral": {
+        let literal = expr.enumLiteral;
+        yield Tok.period;
+        yield { src: literal, tag: Tag.identifier };
+        return;
+      }
+
+      case "void": {
+        yield { src: "void", tag: Tag.identifier };
+        return;
+      }
+
+      case "null": {
+        yield { src: "null", tag: Tag.identifier };
+        return;
+      }
+
+      case "undefined": {
+        yield { src: "undefined", tag: Tag.identifier };
+        return;
       }
 
       case "anytype": {
-        return "anytype";
+        yield { src: "anytype", tag: Tag.keyword_anytype };
+        return;
       }
 
       case "this": {
-        return "@This()";
+        yield { src: "@This", tag: Tag.builtin };
+        yield Tok.l_paren;
+        yield Tok.r_paren;
+        return;
+      }
+
+      case "typeInfo": {
+        const arg = zigAnalysis.exprs[expr.typeInfo];
+        yield { src: "@typeInfo", tag: Tag.builtin };
+        yield Tok.l_paren;
+        yield* ex(arg, opts);
+        yield Tok.r_paren;
+        return;
+      }
+
+      case "switchIndex": {
+        const switchIndex = zigAnalysis.exprs[expr.switchIndex];
+        yield* ex(switchIndex, opts);
+        return;
+      }
+
+      case "errorSets": {
+        const errSetsObj = getType(expr.errorSets);
+        yield* ex(errSetsObj.lhs, opts);
+        yield Tok.space;
+        yield { src: "||", tag: Tag.pipe_pipe };
+        yield Tok.space;
+        yield* ex(errSetsObj.rhs, opts);
+        return;
+      }
+
+      case "errorUnion": {
+        const errUnionObj = getType(expr.errorUnion);
+        yield* ex(errUnionObj.lhs, opts);
+        yield { src: "!", tag: Tag.bang };
+        yield* ex(errUnionObj.rhs, opts);
+        return;
       }
 
       case "type": {
@@ -1799,394 +1640,389 @@ const NAV_MODES = {
         if (typeof typeObj === "number") typeObj = getType(typeObj);
         switch (typeObj.kind) {
           default:
-            throw "TODO";
+            throw "TODO: " + typeObj.kind;
+          case typeKinds.Type: {
+            yield { src: typeObj.name, tag: Tag.identifier };
+            return;
+          }
+          case typeKinds.Void: {
+            yield { src: "void", tag: Tag.identifier };
+            return;
+          }
+          case typeKinds.NoReturn: {
+            yield { src: "noreturn", tag: Tag.identifier };
+            return;
+          }
+          case typeKinds.ComptimeExpr: {
+            yield { src: "anyopaque", tag: Tag.identifier };
+            return;
+          }
+          case typeKinds.Bool: {
+            yield { src: "bool", tag: Tag.identifier };
+            return;
+          }
+          case typeKinds.ComptimeInt: {
+            yield { src: "comptime_int", tag: Tag.identifier };
+            return;
+          }
+          case typeKinds.ComptimeFloat: {
+            yield { src: "comptime_float", tag: Tag.identifier };
+            return;
+          }
+          case typeKinds.Int: {
+            yield { src: typeObj.name, tag: Tag.identifier };
+            return;
+          }
+          case typeKinds.Float: {
+            yield { src: typeObj.name, tag: Tag.identifier };
+            return;
+          }
+          case typeKinds.Array: {
+            yield Tok.l_bracket;
+            yield* ex(typeObj.len, opts);
+            if (typeObj.sentinel) {
+              yield Tok.colon;
+              yield* ex(typeObj.sentinel, opts);
+            }
+            yield Tok.r_bracket;
+            yield* ex(typeObj.child, opts);
+            return;
+          }
+          case typeKinds.Optional: {
+            yield { src: "?", tag: Tag.question_mark };
+            yield* ex(typeObj.child, opts);
+            return;
+          }
+          case typeKinds.Pointer: {
+            let ptrObj = typeObj;
+            switch (ptrObj.size) {
+              default:
+                console.log("TODO: implement unhandled pointer size case");
+              case pointerSizeEnum.One:
+                yield { src: "*", tag: Tag.asterisk };
+                break;
+              case pointerSizeEnum.Many:
+                yield Tok.l_bracket;
+                yield { src: "*", tag: Tag.asterisk };
+                if (ptrObj.sentinel !== null) {
+                  yield Tok.colon;
+                  yield* ex(ptrObj.sentinel, opts);
+                }
+                yield Tok.r_bracket;
+                break;
+              case pointerSizeEnum.Slice:
+                if (ptrObj.is_ref) {
+                  yield { src: "*", tag: Tag.asterisk };
+                }
+                yield Tok.l_bracket;
+                if (ptrObj.sentinel !== null) {
+                  yield Tok.colon;
+                  yield* ex(ptrObj.sentinel, opts);
+                }
+                yield Tok.r_bracket;
+                break;
+              case pointerSizeEnum.C:
+                yield Tok.l_bracket;
+                yield { src: "*", tag: Tag.asterisk };
+                yield { src: "c", tag: Tag.identifier };
+                if (typeObj.sentinel !== null) {
+                  yield Tok.colon;
+                  yield* ex(ptrObj.sentinel, opts);
+                }
+                yield Tok.r_bracket;
+                break;
+            }
+            if (!ptrObj.is_mutable) {
+              yield Tok.const;
+              yield Tok.space;
+            }
+            if (ptrObj.is_allowzero) {
+              yield { src: "allowzero", tag: Tag.keyword_allowzero };
+              yield Tok.space;
+            }
+            if (ptrObj.is_volatile) {
+              yield { src: "volatile", tag: Tag.keyword_volatile };
+            }
+            if (ptrObj.has_addrspace) {
+              yield { src: "addrspace", tag: Tag.keyword_addrspace };
+              yield Tok.l_paren;
+              yield Tok.period;
+              yield Tok.r_paren;
+            }
+            if (ptrObj.has_align) {
+              yield { src: "align", tag: Tag.keyword_align };
+              yield Tok.l_paren;
+              yield* ex(ptrObj.align, opts);
+              if (ptrObj.hostIntBytes !== undefined && ptrObj.hostIntBytes !== null) {
+                yield Tok.colon;
+                yield* ex(ptrObj.bitOffsetInHost, opts);
+                yield Tok.colon;
+                yield* ex(ptrObj.hostIntBytes, opts);
+              }
+              yield Tok.r_paren;
+              yield Tok.space;
+            }
+            yield* ex(ptrObj.child, opts);
+            return;
+          }
           case typeKinds.Struct: {
             let structObj = typeObj;
-            let name = "";
-            if (opts.wantHtml) {
-              if (structObj.is_tuple) {
-                name = "<span class='tok-kw'>tuple</span> { ";
-              } else {
-                name = "<span class='tok-kw'>struct</span> { ";
+            if (structObj.layout !== null) {
+              switch (structObj.layout.enumLiteral) {
+                case "Packed": {
+                  yield { src: "packed", tag: Tag.keyword_packed };
+                  break;
+                }
+                case "Extern": {
+                  yield { src: "extern", tag: Tag.keyword_extern };
+                  break;
+                }
               }
+              yield Tok.space;
+            }
+            yield { src: "struct", tag: Tag.keyword_struct };
+            if (structObj.backing_int !== null) {
+              yield Tok.l_paren;
+              yield* ex(structObj.backing_int, opts);
+              yield Tok.r_paren;
+            }
+            yield Tok.space;
+            yield Tok.l_brace;
+
+            if (structObj.field_types.length > 1) {
+              yield Tok.enter;
             } else {
-              if (structObj.is_tuple) {
-                name = "tuple { ";
-              } else {
-                name = "struct { ";
-              }
-            }
-            if (structObj.field_types.length > 1 && opts.wantHtml) { name += "</br>"; }
-            let indent = "";
-            if (structObj.field_types.length > 1 && opts.wantHtml) {
-              indent = "&nbsp;&nbsp;&nbsp;&nbsp;"
-            }
-            if (opts.indent && structObj.field_types.length > 1) {
-              indent = opts.indent + indent;
-            }
-            let structNode = getAstNode(structObj.src);
-            let field_end = ",";
-            if (structObj.field_types.length > 1 && opts.wantHtml) {
-              field_end += "</br>";
-            } else {
-              field_end += " ";
+              yield Tok.space;
             }
 
+            let indent = 0;
+            if (structObj.field_types.length > 1) {
+              indent = 1;
+            }
+            if (opts.indent && structObj.field_types.length > 1) {
+              indent += opts.ident;
+            }
+
+            let structNode = getAstNode(structObj.src);
             for (let i = 0; i < structObj.field_types.length; i += 1) {
               let fieldNode = getAstNode(structNode.fields[i]);
               let fieldName = fieldNode.name;
-              let html = indent;
-              if (!structObj.is_tuple) {
-                html += escapeHtml(fieldName);
+
+              for (let j = 0; j < indent; j += 1) {
+                yield Tok.tab;
+              }
+
+              if (!typeObj.is_tuple) {
+                yield { src: fieldName, tag: Tag.identifier };
               }
 
               let fieldTypeExpr = structObj.field_types[i];
-              if (!structObj.is_tuple) {
-                html += ": ";
+              if (!typeObj.is_tuple) {
+                yield Tok.colon;
+                yield Tok.space;
               }
-
-              html += exprName(fieldTypeExpr, { ...opts, indent: indent });
+              yield* ex(fieldTypeExpr, { ...opts, indent: indent });
 
               if (structObj.field_defaults[i] !== null) {
-                html += " = " + exprName(structObj.field_defaults[i], opts);
+                yield Tok.space;
+                yield Tok.eql;
+                yield Tok.space;
+                yield* ex(structObj.field_defaults[i], opts);
               }
 
-              html += field_end;
-
-              name += html;
+              if (structObj.field_types.length > 1) {
+                yield Tok.comma;
+                yield Tok.enter;
+              } else {
+                yield Tok.space;
+              }
             }
-            if (opts.indent && structObj.field_types.length > 1) {
-              name += opts.indent;
-            }
-            name += "}";
-            return name;
+            yield Tok.r_brace;
+            return;
           }
           case typeKinds.Enum: {
             let enumObj = typeObj;
-            let name = "";
-            if (opts.wantHtml) {
-              name = "<span class='tok-kw'>enum</span>";
-            } else {
-              name = "enum";
-            }
+            yield { src: "enum", tag: Tag.keyword_enum };
             if (enumObj.tag) {
-              name += " (" + exprName(enumObj.tag, opts) + ")";
+              yield Tok.l_paren;
+              yield* ex(enumObj.tag, opts);
+              yield Tok.r_paren;
             }
-            name += " { ";
+            yield Tok.space;
+            yield Tok.l_brace;
+
             let enumNode = getAstNode(enumObj.src);
             let fields_len = enumNode.fields.length;
             if (enumObj.nonexhaustive) {
               fields_len += 1;
             }
-            if (fields_len > 1 && opts.wantHtml) { name += "</br>"; }
-            let indent = "";
+
             if (fields_len > 1) {
-              if (opts.wantHtml) {
-                indent = "&nbsp;&nbsp;&nbsp;&nbsp;";
-              } else {
-                indent = "    ";
-              }
+              yield Tok.enter;
+            } else {
+              yield Tok.space;
+            }
+
+            let indent = 0;
+            if (fields_len > 1) {
+              indent = 1;
             }
             if (opts.indent) {
-              indent = opts.indent + indent;
+              indent += opts.indent;
             }
-            let field_end = ",";
-            if (fields_len > 1 && opts.wantHtml) {
-              field_end += "</br>";
-            } else {
-              field_end += " ";
-            }
+
             for (let i = 0; i < enumNode.fields.length; i += 1) {
               let fieldNode = getAstNode(enumNode.fields[i]);
               let fieldName = fieldNode.name;
-              let html = indent + escapeHtml(fieldName);
+
+              for (let j = 0; j < indent; j += 1) yield Tok.tab;
+              yield { src: fieldName, tag: Tag.identifier };
 
               if (enumObj.values[i] !== null) {
-                html += " = " + exprName(enumObj.values[i], opts);
+                yield Tok.space;
+                yield Tok.eql;
+                yield Tok.space;
+                yield* ex(enumObj.values[i], opts);
               }
 
-              html += field_end;
-
-              name += html;
+              if (fields_len > 1) {
+                yield Tok.comma;
+                yield Tok.enter;
+              }
             }
-            if (enumObj.nonexhaustive) {
-              name += indent + "_" + field_end;
+            for (let j = 0; j < indent; j += 1) yield Tok.tab;
+            yield { src: "_", tag: Tag.identifier };
+            if (fields_len > 1) {
+              yield Tok.comma;
+              yield Tok.enter;
             }
             if (opts.indent) {
-              name += opts.indent;
+              for (let j = 0; j < opts.indent; j += 1) yield Tok.tab;
             }
-            name += "}";
-            return name;
+            yield Tok.r_brace;
+            return;
           }
           case typeKinds.Union: {
             let unionObj = typeObj;
-            let name = "";
-            if (opts.wantHtml) {
-              name = "<span class='tok-kw'>union</span>";
-            } else {
-              name = "union";
-            }
-            if (unionObj.auto_tag) {
-              if (opts.wantHtml) {
-                name += " (<span class='tok-kw'>enum</span>";
-              } else {
-                name += " (enum";
+            if (unionObj.layout !== null) {
+              switch (unionObj.layout.enumLiteral) {
+                case "Packed": {
+                  yield { src: "packed", tag: Tag.keyword_packed };
+                  break;
+                }
+                case "Extern": {
+                  yield { src: "extern", tag: Tag.keyword_extern };
+                  break;
+                }
               }
+              yield Tok.space;
+            }
+            yield { src: "union", tag: Tag.keyword_union };
+            if (unionObj.auto_tag) {
+              yield Tok.l_paren;
+              yield { src: "enum", tag: Tag.keyword_enum };
               if (unionObj.tag) {
-                name += "(" + exprName(unionObj.tag, opts) + "))";
+                yield Tok.l_paren;
+                yield* ex(unionObj.tag, opts);
+                yield Tok.r_paren;
+                yield Tok.r_paren;
               } else {
-                name += ")";
+                yield Tok.r_paren;
               }
             } else if (unionObj.tag) {
-              name += " (" + exprName(unionObj.tag, opts) + ")";
+              yield Tok.l_paren;
+              yield* ex(unionObj.tag, opts);
+              yield Tok.r_paren;
             }
-            name += " { ";
-            if (unionObj.fields.length > 1 && opts.wantHtml) {
-              name += "</br>";
+            yield Tok.space;
+            yield Tok.l_brace;
+            if (unionObj.field_types.length > 1) {
+              yield Tok.enter;
+            } else {
+              yield Tok.space;
             }
-            let indent = "";
-            if (unionObj.fields.length > 1 && opts.wantHtml) {
-              indent = "&nbsp;&nbsp;&nbsp;&nbsp;"
+            let indent = 0;
+            if (unionObj.field_types.length > 1) {
+              indent = 1;
             }
             if (opts.indent) {
-              indent = opts.indent + indent;
+              indent += opts.indent;
             }
             let unionNode = getAstNode(unionObj.src);
-            let field_end = ",";
-            if (unionObj.fields.length > 1 && opts.wantHtml) {
-              field_end += "</br>";
-            } else {
-              field_end += " ";
-            }
-            for (let i = 0; i < unionObj.fields.length; i += 1) {
+            for (let i = 0; i < unionObj.field_types.length; i += 1) {
               let fieldNode = getAstNode(unionNode.fields[i]);
               let fieldName = fieldNode.name;
-              let html = indent + escapeHtml(fieldName);
+              for (let j = 0; j < indent; j += 1) yield Tok.tab;
+              yield { src: fieldName, tag: Tag.identifier };
 
-              let fieldTypeExpr = unionObj.fields[i];
-              html += ": ";
+              let fieldTypeExpr = unionObj.field_types[i];
+              yield Tok.colon;
+              yield Tok.space;
 
-              html += exprName(fieldTypeExpr, { ...opts, indent: indent });
+              yield* ex(fieldTypeExpr, { ...opts, indent: indent });
 
-              html += field_end;
-
-              name += html;
+              if (unionObj.field_types.length > 1) {
+                yield Tok.comma;
+                yield Tok.enter;
+              } else {
+                yield Tok.space;
+              }
             }
             if (opts.indent) {
-              name += opts.indent;
+              for (let j = 0; j < opts.indent; j += 1) yield Tok.tab;
             }
-            name += "}";
-            return name;
+            yield Tok.r_brace;
+            return;
           }
           case typeKinds.Opaque: {
-            let opaqueObj = typeObj;
-            return opaqueObj;
+            yield { src: "opaque", tag: Tag.keyword_opaque };
+            yield Tok.space;
+            yield Tok.l_brace;
+            yield Tok.r_brace;
+            return;
           }
-          case typeKinds.ComptimeExpr: {
-            return "anyopaque";
+          case typeKinds.EnumLiteral: {
+            yield { src: "(enum literal)", tag: Tag.identifier };
+            return;
           }
-          case typeKinds.Array: {
-            let arrayObj = typeObj;
-            let name = "[";
-            let lenName = exprName(arrayObj.len, opts);
-            let sentinel = arrayObj.sentinel
-              ? ":" + exprName(arrayObj.sentinel, opts)
-              : "";
-            // let is_mutable = arrayObj.is_multable ? "const " : "";
-
-            if (opts.wantHtml) {
-              name +=
-                '<span class="tok-number">' + lenName + sentinel + "</span>";
-            } else {
-              name += lenName + sentinel;
-            }
-            name += "]";
-            // name += is_mutable;
-            name += exprName(arrayObj.child, opts);
-            return name;
-          }
-          case typeKinds.Optional:
-            return "?" + exprName(typeObj.child, opts);
-          case typeKinds.Pointer: {
-            let ptrObj = typeObj;
-            let sentinel = ptrObj.sentinel
-              ? ":" + exprName(ptrObj.sentinel, opts)
-              : "";
-            let is_mutable = !ptrObj.is_mutable ? "const " : "";
-            let name = "";
-            switch (ptrObj.size) {
-              default:
-                console.log("TODO: implement unhandled pointer size case");
-              case pointerSizeEnum.One:
-                name += "*";
-                name += is_mutable;
-                break;
-              case pointerSizeEnum.Many:
-                name += "[*";
-                name += sentinel;
-                name += "]";
-                name += is_mutable;
-                break;
-              case pointerSizeEnum.Slice:
-                if (ptrObj.is_ref) {
-                  name += "*";
-                }
-                name += "[";
-                name += sentinel;
-                name += "]";
-                name += is_mutable;
-                break;
-              case pointerSizeEnum.C:
-                name += "[*c";
-                name += sentinel;
-                name += "]";
-                name += is_mutable;
-                break;
-            }
-            // @check: after the major changes in arrays the consts are came from switch above
-            // if (!ptrObj.is_mutable) {
-            //     if (opts.wantHtml) {
-            //         name += '<span class="tok-kw">const</span> ';
-            //     } else {
-            //         name += "const ";
-            //     }
-            // }
-            if (ptrObj.is_allowzero) {
-              name += "allowzero ";
-            }
-            if (ptrObj.is_volatile) {
-              name += "volatile ";
-            }
-            if (ptrObj.has_addrspace) {
-              name += "addrspace(";
-              name += "." + "";
-              name += ") ";
-            }
-            if (ptrObj.has_align) {
-              let align = exprName(ptrObj.align, opts);
-              if (opts.wantHtml) {
-                name += '<span class="tok-kw">align</span>(';
-              } else {
-                name += "align(";
-              }
-              if (opts.wantHtml) {
-                name += '<span class="tok-number">' + align + "</span>";
-              } else {
-                name += align;
-              }
-              if (ptrObj.hostIntBytes != null) {
-                name += ":";
-                if (opts.wantHtml) {
-                  name +=
-                    '<span class="tok-number">' +
-                    ptrObj.bitOffsetInHost +
-                    "</span>";
-                } else {
-                  name += ptrObj.bitOffsetInHost;
-                }
-                name += ":";
-                if (opts.wantHtml) {
-                  name +=
-                    '<span class="tok-number">' +
-                    ptrObj.hostIntBytes +
-                    "</span>";
-                } else {
-                  name += ptrObj.hostIntBytes;
-                }
-              }
-              name += ") ";
-            }
-            //name += typeValueName(ptrObj.child, wantHtml, wantSubLink, null);
-            name += exprName(ptrObj.child, opts);
-            return name;
-          }
-          case typeKinds.Float: {
-            let floatObj = typeObj;
-
-            if (opts.wantHtml) {
-              return '<span class="tok-type">' + floatObj.name + "</span>";
-            } else {
-              return floatObj.name;
-            }
-          }
-          case typeKinds.Int: {
-            let intObj = typeObj;
-            let name = intObj.name;
-            if (opts.wantHtml) {
-              return '<span class="tok-type">' + name + "</span>";
-            } else {
-              return name;
-            }
-          }
-          case typeKinds.ComptimeInt:
-            if (opts.wantHtml) {
-              return '<span class="tok-type">comptime_int</span>';
-            } else {
-              return "comptime_int";
-            }
-          case typeKinds.ComptimeFloat:
-            if (opts.wantHtml) {
-              return '<span class="tok-type">comptime_float</span>';
-            } else {
-              return "comptime_float";
-            }
-          case typeKinds.Type:
-            if (opts.wantHtml) {
-              return '<span class="tok-type">type</span>';
-            } else {
-              return "type";
-            }
-          case typeKinds.Bool:
-            if (opts.wantHtml) {
-              return '<span class="tok-type">bool</span>';
-            } else {
-              return "bool";
-            }
-          case typeKinds.Void:
-            if (opts.wantHtml) {
-              return '<span class="tok-type">void</span>';
-            } else {
-              return "void";
-            }
-          case typeKinds.EnumLiteral:
-            if (opts.wantHtml) {
-              return '<span class="tok-type">(enum literal)</span>';
-            } else {
-              return "(enum literal)";
-            }
-          case typeKinds.NoReturn:
-            if (opts.wantHtml) {
-              return '<span class="tok-type">noreturn</span>';
-            } else {
-              return "noreturn";
-            }
           case typeKinds.ErrorSet: {
             let errSetObj = typeObj;
-            if (errSetObj.fields == null) {
-              return '<span class="tok-type">anyerror</span>';
+            if (errSetObj.fields === null) {
+              yield { src: "anyerror", tag: Tag.identifier };
             } else if (errSetObj.fields.length == 0) {
-              return "error{}";
+              yield { src: "error", tag: Tag.keyword_error };
+              yield Tok.l_brace;
+              yield Tok.r_brace;
             } else if (errSetObj.fields.length == 1) {
-              return "error{" + errSetObj.fields[0].name + "}";
+              yield { src: "error", tag: Tag.keyword_error };
+              yield Tok.l_brace;
+              yield { src: errSetObj.fields[0].name, tag: Tag.identifier };
+              yield Tok.r_brace;
             } else {
-              // throw "TODO";
-              let html = "error{ " + errSetObj.fields[0].name;
-              for (let i = 1; i < errSetObj.fields.length; i++) html += ", " + errSetObj.fields[i].name;
-              html += " }";
-              return html;
+              yield { src: "error", tag: Tag.keyword_error };
+              yield Tok.l_brace;
+              yield { src: errSetObj.fields[0].name, tag: Tag.identifier };
+              for (let i = 1; i < errSetObj.fields.length; i++) {
+                yield Tok.comma;
+                yield Tok.space;
+                yield { src: errSetObj.fields[i].name, tag: Tag.identifier };
+              }
+              yield Tok.r_brace;
             }
+            return;
           }
-
           case typeKinds.ErrorUnion: {
             let errUnionObj = typeObj;
-            let lhs = exprName(errUnionObj.lhs, opts);
-            let rhs = exprName(errUnionObj.rhs, opts);
-            return lhs + "!" + rhs;
+            yield* ex(errUnionObj.lhs, opts);
+            yield { src: "!", tag: Tag.bang };
+            yield* ex(errUnionObj.rhs, opts);
+            return;
           }
           case typeKinds.InferredErrorUnion: {
             let errUnionObj = typeObj;
-            let payload = exprName(errUnionObj.payload, opts);
-            return "!" + payload;
+            yield { src: "!", tag: Tag.bang };
+            yield* ex(errUnionObj.payload, opts);
+            return;
           }
           case typeKinds.Fn: {
             let fnObj = typeObj;
@@ -2194,34 +2030,33 @@ const NAV_MODES = {
             let linkFnNameDecl = opts.linkFnNameDecl;
             opts.fnDecl = null;
             opts.linkFnNameDecl = null;
-            let payloadHtml = "";
             if (opts.addParensIfFnSignature && fnObj.src == 0) {
-              payloadHtml += "(";
+              yield Tok.l_paren;
             }
-            if (opts.wantHtml) {
-              if (fnObj.is_extern) {
-                payloadHtml += "pub extern ";
+            if (fnObj.is_extern) {
+              yield { src: "extern", tag: Tag.keyword_extern };
+              yield Tok.space;
+            } else if (fnObj.has_cc) {
+              let cc_expr = zigAnalysis.exprs[fnObj.cc];
+              if (cc_expr.enumLiteral === "Inline") {
+                yield { src: "inline", tag: Tag.keyword_inline };
+                yield Tok.space;
               }
-              if (fnObj.has_lib_name) {
-                payloadHtml += '"' + fnObj.lib_name + '" ';
-              }
-              payloadHtml += '<span class="tok-kw">fn </span>';
-              if (fnDecl) {
-                payloadHtml += '<span class="tok-fn">';
-                if (linkFnNameDecl) {
-                  payloadHtml +=
-                    '<a href="' + linkFnNameDecl + '">' +
-                    escapeHtml(fnDecl.name) +
-                    "</a>";
-                } else {
-                  payloadHtml += escapeHtml(fnDecl.name);
-                }
-                payloadHtml += "</span>";
-              }
-            } else {
-              payloadHtml += "fn ";
             }
-            payloadHtml += "(";
+            if (fnObj.has_lib_name) {
+              yield { src: '"' + fnObj.lib_name + '"', tag: Tag.string_literal };
+              yield Tok.space;
+            }
+            yield { src: "fn", tag: Tag.keyword_fn };
+            yield Tok.space;
+            if (fnDecl) {
+              if (linkFnNameDecl) {
+                yield { src: fnDecl.name, tag: Tag.identifier, link: linkFnNameDecl, fnDecl: false };
+              } else {
+                yield { src: fnDecl.name, tag: Tag.identifier, fnDecl: true };
+              }
+            }
+            yield Tok.l_paren;
             if (fnObj.params) {
               let fields = null;
               let isVarArgs = false;
@@ -2233,13 +2068,10 @@ const NAV_MODES = {
 
               for (let i = 0; i < fnObj.params.length; i += 1) {
                 if (i != 0) {
-                  payloadHtml += ", ";
+                  yield Tok.comma;
+                  yield Tok.space;
                 }
 
-                if (opts.wantHtml) {
-                  payloadHtml +=
-                    "<span class='argBreaker'><br>&nbsp;&nbsp;&nbsp;&nbsp;</span>";
-                }
                 let value = fnObj.params[i];
                 let paramValue = resolveValue({ expr: value });
 
@@ -2247,115 +2079,125 @@ const NAV_MODES = {
                   let paramNode = getAstNode(fields[i]);
 
                   if (paramNode.varArgs) {
-                    payloadHtml += "...";
+                    yield Tok.period;
+                    yield Tok.period;
+                    yield Tok.period;
                     continue;
                   }
 
                   if (paramNode.noalias) {
-                    if (opts.wantHtml) {
-                      payloadHtml += '<span class="tok-kw">noalias</span> ';
-                    } else {
-                      payloadHtml += "noalias ";
-                    }
+                    yield { src: "noalias", tag: Tag.keyword_noalias };
+                    yield Tok.space;
                   }
 
                   if (paramNode.comptime) {
-                    if (opts.wantHtml) {
-                      payloadHtml += '<span class="tok-kw">comptime</span> ';
-                    } else {
-                      payloadHtml += "comptime ";
-                    }
+                    yield { src: "comptime", tag: Tag.keyword_comptime };
+                    yield Tok.space;
                   }
 
                   let paramName = paramNode.name;
                   if (paramName != null) {
                     // skip if it matches the type name
                     if (!shouldSkipParamName(paramValue, paramName)) {
-                      payloadHtml += paramName + ": ";
+                      if (paramName === "") {
+                        paramName = "_";
+                      }
+                      yield { src: paramName, tag: Tag.identifier };
+                      yield Tok.colon;
+                      yield Tok.space;
                     }
                   }
                 }
 
+                // TODO: most of this seems redundant
                 if (isVarArgs && i === fnObj.params.length - 1) {
-                  payloadHtml += "...";
+                  yield Tok.period;
+                  yield Tok.period;
+                  yield Tok.period;
                 } else if ("alignOf" in value) {
-                  payloadHtml += exprName(value, opts);
+                  yield* ex(value, opts);
                 } else if ("typeOf" in value) {
-                  payloadHtml += exprName(value, opts);
+                  yield* ex(value, opts);
                 } else if ("typeOf_peer" in value) {
-                  payloadHtml += exprName(value, opts);
+                  yield* ex(value, opts);
                 } else if ("declRef" in value) {
-                  payloadHtml += exprName(value, opts);
+                  yield* ex(value, opts);
                 } else if ("call" in value) {
-                  payloadHtml += exprName(value, opts);
+                  yield* ex(value, opts);
                 } else if ("refPath" in value) {
-                  payloadHtml += exprName(value, opts);
+                  yield* ex(value, opts);
                 } else if ("type" in value) {
-                  payloadHtml += exprName(value, opts);
+                  yield* ex(value, opts);
                   //payloadHtml += '<span class="tok-kw">' + name + "</span>";
                 } else if ("binOpIndex" in value) {
-                  payloadHtml += exprName(value, opts);
+                  yield* ex(value, opts);
                 } else if ("comptimeExpr" in value) {
                   let comptimeExpr =
                     zigAnalysis.comptimeExprs[value.comptimeExpr].code;
-                  if (opts.wantHtml) {
-                    payloadHtml +=
-                      '<span class="tok-kw">' + comptimeExpr + "</span>";
-                  } else {
-                    payloadHtml += comptimeExpr;
-                  }
-                } else if (opts.wantHtml) {
-                  payloadHtml += '<span class="tok-kw">anytype</span>';
+                  yield* Tokenizer(comptimeExpr);
                 } else {
-                  payloadHtml += "anytype";
+                  yield { src: "anytype", tag: Tag.keyword_anytype };
                 }
               }
             }
 
-            if (opts.wantHtml) {
-              payloadHtml += "<span class='argBreaker'>,<br></span>";
-            }
-            payloadHtml += ") ";
+            yield Tok.r_paren;
+            yield Tok.space;
 
             if (fnObj.has_align) {
               let align = zigAnalysis.exprs[fnObj.align];
-              payloadHtml += "align(" + exprName(align, opts) + ") ";
+              yield { src: "align", tag: Tag.keyword_align };
+              yield Tok.l_paren;
+              yield* ex(align, opts);
+              yield Tok.r_paren;
+              yield Tok.space;
             }
             if (fnObj.has_cc) {
               let cc = zigAnalysis.exprs[fnObj.cc];
               if (cc) {
-                payloadHtml += "callconv(." + cc.enumLiteral + ") ";
+                if (cc.enumLiteral !== "Inline") {
+                  yield { src: "callconv", tag: Tag.keyword_callconv };
+                  yield Tok.l_paren;
+                  yield* ex(cc, opts);
+                  yield Tok.r_paren;
+                  yield Tok.space;
+                }
               }
             }
 
             if (fnObj.is_inferred_error) {
-              payloadHtml += "!";
+              yield { src: "!", tag: Tag.bang };
             }
             if (fnObj.ret != null) {
-              payloadHtml += exprName(fnObj.ret, {
+              yield* ex(fnObj.ret, {
                 ...opts,
                 addParensIfFnSignature: true,
               });
-            } else if (opts.wantHtml) {
-              payloadHtml += '<span class="tok-kw">anytype</span>';
             } else {
-              payloadHtml += "anytype";
+              yield { src: "anytype", tag: Tag.keyword_anytype };
             }
 
             if (opts.addParensIfFnSignature && fnObj.src == 0) {
-              payloadHtml += ")";
+              yield Tok.r_paren;
             }
-            return payloadHtml;
+            return;
           }
-          // if (wantHtml) {
-          //     return escapeHtml(typeObj.name);
-          // } else {
-          //     return typeObj.name;
-          // }
         }
       }
+      case "typeOf": {
+        const typeRefArg = zigAnalysis.exprs[expr.typeOf];
+        yield { src: "@TypeOf", tag: Tag.builtin };
+        yield Tok.l_paren;
+        yield* ex(typeRefArg, opts);
+        yield Tok.r_paren;
+        return;
+      }
     }
+
+
   }
+
+
 
   function shouldSkipParamName(typeRef, paramName) {
     let resolvedTypeRef = resolveValue({ expr: typeRef });
@@ -2381,15 +2223,15 @@ const NAV_MODES = {
     if (
       rootIsStd &&
       typeObj ===
-      getType(zigAnalysis.packages[zigAnalysis.rootPkg].main)
+      getType(zigAnalysis.modules[zigAnalysis.rootMod].main)
     ) {
-      name = "std";
+      name = renderSingleToken(Tok.identifier("std"));
     } else {
-      name = exprName({ type: typeObj }, { wantHtml: false, wantLink: false });
+      name = renderTokens(ex({ type: typeObj }));
     }
     if (name != null && name != "") {
-      domHdrName.innerText =
-        name + " (" + zigAnalysis.typeKinds[typeObj.kind] + ")";
+      domHdrName.innerHTML = "<pre class='inline'>" + name + "</pre> ("
+        + zigAnalysis.typeKinds[typeObj.kind] + ")";
       domHdrName.classList.remove("hidden");
     }
     if (typeObj.kind == typeKinds.ErrorSet) {
@@ -2407,7 +2249,7 @@ const NAV_MODES = {
         //let srcObj = zigAnalysis.astNodes[errObj.src];
         errorList.push(errObj);
       }
-      errorList.sort(function (a, b) {
+      errorList.sort(function(a, b) {
         return operatorCompare(a.name.toLowerCase(), b.name.toLowerCase());
       });
 
@@ -2500,55 +2342,83 @@ const NAV_MODES = {
 
   function renderValue(decl) {
     let resolvedValue = resolveValue(decl.value);
-
     if (resolvedValue.expr.fieldRef) {
       const declRef = decl.value.expr.refPath[0].declRef;
       const type = getDecl(declRef);
-      domFnProtoCode.innerHTML =
-        '<span class="tok-kw">const</span> ' +
-        escapeHtml(decl.name) +
-        ": " +
-        type.name +
-        " = " +
-        exprName(decl.value.expr, { wantHtml: true, wantLink: true }) +
-        ";";
+
+      domFnProtoCode.innerHTML = renderTokens(
+        (function*() {
+          yield Tok.const;
+          yield Tok.space;
+          yield Tok.identifier(decl.name);
+          yield Tok.colon;
+          yield Tok.space;
+          yield Tok.identifier(type.name);
+          yield Tok.space;
+          yield Tok.eql;
+          yield Tok.space;
+          yield* ex(decl.value.expr, {});
+          yield Tok.semi;
+        })());
     } else if (
       resolvedValue.expr.string !== undefined ||
       resolvedValue.expr.call !== undefined ||
-      resolvedValue.expr.comptimeExpr
+      resolvedValue.expr.comptimeExpr !== undefined
     ) {
-      domFnProtoCode.innerHTML =
-        '<span class="tok-kw">const</span> ' +
-        escapeHtml(decl.name) +
-        ": " +
-        exprName(resolvedValue.expr, { wantHtml: true, wantLink: true }) +
-        " = " +
-        exprName(decl.value.expr, { wantHtml: true, wantLink: true }) +
-        ";";
+      domFnProtoCode.innerHTML = renderTokens(
+        (function*() {
+          yield Tok.const;
+          yield Tok.space;
+          yield Tok.identifier(decl.name);
+          if (decl.value.typeRef) {
+            yield Tok.colon;
+            yield Tok.space;
+            yield* ex(decl.value.typeRef, {});
+          }
+          yield Tok.space;
+          yield Tok.eql;
+          yield Tok.space;
+          yield* ex(decl.value.expr, {});
+          yield Tok.semi;
+        })());
     } else if (resolvedValue.expr.compileError) {
-      domFnProtoCode.innerHTML =
-        '<span class="tok-kw">const</span> ' +
-        escapeHtml(decl.name) +
-        " = " +
-        exprName(decl.value.expr, { wantHtml: true, wantLink: true }) +
-        ";";
+      domFnProtoCode.innerHTML = renderTokens(
+        (function*() {
+          yield Tok.const;
+          yield Tok.space;
+          yield Tok.identifier(decl.name);
+          yield Tok.space;
+          yield Tok.eql;
+          yield Tok.space;
+          yield* ex(decl.value.expr, {});
+          yield Tok.semi;
+        })());
     } else {
-      domFnProtoCode.innerHTML =
-        '<span class="tok-kw">const</span> ' +
-        escapeHtml(decl.name) +
-        ": " +
-        exprName(resolvedValue.typeRef, { wantHtml: true, wantLink: true }) +
-        " = " +
-        exprName(decl.value.expr, { wantHtml: true, wantLink: true }) +
-        ";";
+      const parent = getType(decl.parent_container);
+      domFnProtoCode.innerHTML = renderTokens(
+        (function*() {
+          yield Tok.const;
+          yield Tok.space;
+          yield Tok.identifier(decl.name);
+          if (decl.value.typeRef !== null) {
+            yield Tok.colon;
+            yield Tok.space;
+            yield* ex(decl.value.typeRef, {});
+          }
+          yield Tok.space;
+          yield Tok.eql;
+          yield Tok.space;
+          yield* ex(decl.value.expr, {});
+          yield Tok.semi;
+        })());
     }
 
     let docs = getAstNode(decl.src).docs;
     if (docs != null) {
       // TODO: it shouldn't just be decl.parent_container, but rather 
       //       the type that the decl holds (if the value is a type)
-      domTldDocs.innerHTML = markdown(docs, getType(decl.parent_container));
-      
+      domTldDocs.innerHTML = markdown(docs, decl);
+
       domTldDocs.classList.remove("hidden");
     }
 
@@ -2561,43 +2431,68 @@ const NAV_MODES = {
     if (resolvedVar.expr.fieldRef) {
       const declRef = decl.value.expr.refPath[0].declRef;
       const type = getDecl(declRef);
-      domFnProtoCode.innerHTML =
-        '<span class="tok-kw">var</span> ' +
-        escapeHtml(decl.name) +
-        ": " +
-        type.name +
-        " = " +
-        exprName(decl.value.expr, { wantHtml: true, wantLink: true }) +
-        ";";
+      domFnProtoCode.innerHTML = renderTokens(
+        (function*() {
+          yield Tok.var;
+          yield Tok.space;
+          yield Tok.identifier(decl.name);
+          yield Tok.colon;
+          yield Tok.space;
+          yield Tok.identifier(type.name);
+          yield Tok.space;
+          yield Tok.eql;
+          yield Tok.space;
+          yield* ex(decl.value.expr, {});
+          yield Tok.semi;
+        })());
     } else if (
       resolvedVar.expr.string !== undefined ||
       resolvedVar.expr.call !== undefined ||
-      resolvedVar.expr.comptimeExpr
+      resolvedVar.expr.comptimeExpr !== undefined
     ) {
-      domFnProtoCode.innerHTML =
-        '<span class="tok-kw">var</span> ' +
-        escapeHtml(decl.name) +
-        ": " +
-        exprName(resolvedVar.expr, { wantHtml: true, wantLink: true }) +
-        " = " +
-        exprName(decl.value.expr, { wantHtml: true, wantLink: true }) +
-        ";";
+      domFnProtoCode.innerHTML = renderTokens(
+        (function*() {
+          yield Tok.var;
+          yield Tok.space;
+          yield Tok.identifier(decl.name);
+          if (decl.value.typeRef) {
+            yield Tok.colon;
+            yield Tok.space;
+            yield* ex(decl.value.typeRef, {});
+          }
+          yield Tok.space;
+          yield Tok.eql;
+          yield Tok.space;
+          yield* ex(decl.value.expr, {});
+          yield Tok.semi;
+        })());
     } else if (resolvedVar.expr.compileError) {
-      domFnProtoCode.innerHTML =
-        '<span class="tok-kw">var</span> ' +
-        escapeHtml(decl.name) +
-        " = " +
-        exprName(decl.value.expr, { wantHtml: true, wantLink: true }) +
-        ";";
+      domFnProtoCode.innerHTML = renderTokens(
+        (function*() {
+          yield Tok.var;
+          yield Tok.space;
+          yield Tok.identifier(decl.name);
+          yield Tok.space;
+          yield Tok.eql;
+          yield Tok.space;
+          yield* ex(decl.value.expr, {});
+          yield Tok.semi;
+        })());
     } else {
-      domFnProtoCode.innerHTML =
-        '<span class="tok-kw">var</span> ' +
-        escapeHtml(decl.name) +
-        ": " +
-        exprName(resolvedVar.typeRef, { wantHtml: true, wantLink: true }) +
-        " = " +
-        exprName(decl.value.expr, { wantHtml: true, wantLink: true }) +
-        ";";
+      domFnProtoCode.innerHTML = renderTokens(
+        (function*() {
+          yield Tok.var;
+          yield Tok.space;
+          yield Tok.identifier(decl.name);
+          yield Tok.colon;
+          yield Tok.space;
+          yield* ex(resolvedVar.typeRef, {});
+          yield Tok.space;
+          yield Tok.eql;
+          yield Tok.space;
+          yield* ex(decl.value.expr, {});
+          yield Tok.semi;
+        })());
     }
 
     let docs = getAstNode(decl.src).docs;
@@ -2685,8 +2580,10 @@ const NAV_MODES = {
 
   function sourceFileLink(decl) {
     const srcNode = getAstNode(decl.src);
+    const srcFile = getFile(srcNode.file);
     return sourceFileUrlTemplate.
-      replace("{{file}}", zigAnalysis.files[srcNode.file]).
+      replace("{{mod}}", zigAnalysis.modules[srcFile.modIndex].name).
+      replace("{{file}}", srcFile.name).
       replace("{{line}}", srcNode.line + 1);
   }
 
@@ -2829,7 +2726,7 @@ const NAV_MODES = {
       resizeDomList(
         domListFns,
         fnsList.length,
-        "<div><dt><div class=\"fnSignature\"></div><div></div></dt><dd></dd></div>"
+        '<div><dt><pre class="inline fnSignature"></pre><div></div></dt><dd></dd></div>'
       );
 
       for (let i = 0; i < fnsList.length; i += 1) {
@@ -2842,12 +2739,10 @@ const NAV_MODES = {
 
         let declType = resolveValue(decl.value);
         console.assert("type" in declType.expr);
-        tdFnSignature.innerHTML = exprName(declType.expr, {
-          wantHtml: true,
-          wantLink: true,
+        tdFnSignature.innerHTML = renderTokens(ex(declType.expr, {
           fnDecl: decl,
           linkFnNameDecl: navLinkDecl(decl.name),
-        });
+        }));
         tdFnSrc.innerHTML = "<a style=\"float: right;\" target=\"_blank\" href=\"" +
           sourceFileLink(decl) + "\">[src]</a>";
 
@@ -2892,14 +2787,22 @@ const NAV_MODES = {
         if (container.kind === typeKinds.Enum) {
           let value = container.values[i];
           if (value !== null) {
-            html += " = " + exprName(value, { wantHtml: true, wantLink: true });
+            html += renderTokens((function*() {
+              yield Tok.space;
+              yield Tok.eql;
+              yield Tok.space;
+              yield* ex(value, {});
+            })());
           }
         } else {
           let fieldTypeExpr = container.field_types[i];
           if (container.kind !== typeKinds.Struct || !container.is_tuple) {
-            html += ": ";
+            html += renderTokens((function*() {
+              yield Tok.colon;
+              yield Tok.space;
+            })());
           }
-          html += exprName(fieldTypeExpr, { wantHtml: true, wantLink: true });
+          html += renderTokens(ex(fieldTypeExpr, {}));
           let tsn = typeShorthandName(fieldTypeExpr);
           if (tsn) {
             html += "<span> (" + tsn + ")</span>";
@@ -2907,7 +2810,12 @@ const NAV_MODES = {
           if (container.kind === typeKinds.Struct && !container.is_tuple) {
             let defaultInitExpr = container.field_defaults[i];
             if (defaultInitExpr !== null) {
-              html += " = " + exprName(defaultInitExpr, { wantHtml: true, wantLink: true });
+              html += renderTokens((function*() {
+                yield Tok.space;
+                yield Tok.eql;
+                yield Tok.space;
+                yield* ex(defaultInitExpr, {});
+              })());
             }
           }
         }
@@ -2926,7 +2834,7 @@ const NAV_MODES = {
       resizeDomList(
         domListGlobalVars,
         varsList.length,
-        '<tr><td><a href="#"></a></td><td></td><td></td></tr>'
+        '<tr><td><a href="#"></a></td><td><pre class="inline"></pre></td><td></td></tr>'
       );
       for (let i = 0; i < varsList.length; i += 1) {
         let decl = varsList[i];
@@ -2935,15 +2843,13 @@ const NAV_MODES = {
         let tdName = trDom.children[0];
         let tdNameA = tdName.children[0];
         let tdType = trDom.children[1];
+        let preType = tdType.children[0];
         let tdDesc = trDom.children[2];
 
         tdNameA.setAttribute("href", navLinkDecl(decl.name));
         tdNameA.textContent = decl.name;
 
-        tdType.innerHTML = exprName(walkResultTypeRef(decl.value), {
-          wantHtml: true,
-          wantLink: true,
-        });
+        preType.innerHTML = renderTokens(ex(walkResultTypeRef(decl.value), {}));
 
         let docs = getAstNode(decl.src).docs;
         if (docs != null) {
@@ -2959,7 +2865,7 @@ const NAV_MODES = {
       resizeDomList(
         domListValues,
         valsList.length,
-        '<tr><td><a href="#"></a></td><td></td><td></td></tr>'
+        '<tr><td><a href="#"></a></td><td><pre class="inline"></pre></td><td></td></tr>'
       );
       for (let i = 0; i < valsList.length; i += 1) {
         let decl = valsList[i];
@@ -2968,15 +2874,13 @@ const NAV_MODES = {
         let tdName = trDom.children[0];
         let tdNameA = tdName.children[0];
         let tdType = trDom.children[1];
+        let preType = tdType.children[0];
         let tdDesc = trDom.children[2];
 
         tdNameA.setAttribute("href", navLinkDecl(decl.name));
         tdNameA.textContent = decl.name;
 
-        tdType.innerHTML = exprName(walkResultTypeRef(decl.value), {
-          wantHtml: true,
-          wantLink: true,
-        });
+        preType.innerHTML = renderTokens(ex(walkResultTypeRef(decl.value), {}));
 
         let docs = getAstNode(decl.src).docs;
         if (docs != null) {
@@ -2992,24 +2896,21 @@ const NAV_MODES = {
       resizeDomList(
         domListTests,
         testsList.length,
-        '<tr><td><a href="#"></a></td><td></td><td></td></tr>'
+        '<tr><td><pre class="inline"></pre></td><td><pre class="inline"></pre></td><td></td></tr>'
       );
       for (let i = 0; i < testsList.length; i += 1) {
         let decl = testsList[i];
         let trDom = domListTests.children[i];
 
         let tdName = trDom.children[0];
-        let tdNameA = tdName.children[0];
+        let tdNamePre = tdName.children[0];
         let tdType = trDom.children[1];
+        let tdTypePre = tdType.children[0];
         let tdDesc = trDom.children[2];
 
-        tdNameA.setAttribute("href", navLinkDecl(decl.name));
-        tdNameA.textContent = decl.name;
+        tdNamePre.innerHTML = renderSingleToken(Tok.identifier(decl.name));
 
-        tdType.innerHTML = exprName(walkResultTypeRef(decl.value), {
-          wantHtml: true,
-          wantLink: true,
-        });
+        tdTypePre.innerHTML = ex(walkResultTypeRef(decl.value), {});
 
         let docs = getAstNode(decl.src).docs;
         if (docs != null) {
@@ -3033,14 +2934,14 @@ const NAV_MODES = {
   }
 
   function detectRootIsStd() {
-    let rootPkg = zigAnalysis.packages[zigAnalysis.rootPkg];
-    if (rootPkg.table["std"] == null) {
-      // no std mapped into the root package
+    let rootMod = zigAnalysis.modules[zigAnalysis.rootMod];
+    if (rootMod.table["std"] == null) {
+      // no std mapped into the root module
       return false;
     }
-    let stdPkg = zigAnalysis.packages[rootPkg.table["std"]];
-    if (stdPkg == null) return false;
-    return rootPkg.file === stdPkg.file;
+    let stdMod = zigAnalysis.modules[rootMod.table["std"]];
+    if (stdMod == null) return false;
+    return rootMod.file === stdMod.file;
   }
 
   function indexTypeKinds() {
@@ -3095,8 +2996,8 @@ const NAV_MODES = {
   function updateCurNav() {
     curNav = {
       mode: NAV_MODES.API,
-      pkgNames: [],
-      pkgObjs: [],
+      modNames: [],
+      modObjs: [],
       declNames: [],
       declObjs: [],
       callName: null,
@@ -3106,27 +3007,26 @@ const NAV_MODES = {
     const mode = location.hash.substring(0, 3);
     let query = location.hash.substring(3);
 
-    const DEFAULT_HASH = NAV_MODES.API + zigAnalysis.packages[zigAnalysis.rootPkg].name;
+    let qpos = query.indexOf("?");
+    let nonSearchPart;
+    if (qpos === -1) {
+      nonSearchPart = query;
+    } else {
+      nonSearchPart = query.substring(0, qpos);
+      curNavSearch = decodeURIComponent(query.substring(qpos + 1));
+    }
+
+    const DEFAULT_HASH = NAV_MODES.API + zigAnalysis.modules[zigAnalysis.rootMod].name;
     switch (mode) {
       case NAV_MODES.API:
-      case NAV_MODES.API_INTERNAL:
-        // #A;PACKAGE:decl.decl.decl?search-term
+        // #A;MODULE:decl.decl.decl?search-term
         curNav.mode = mode;
-
-        let qpos = query.indexOf("?");
-        let nonSearchPart;
-        if (qpos === -1) {
-          nonSearchPart = query;
-        } else {
-          nonSearchPart = query.substring(0, qpos);
-          curNavSearch = decodeURIComponent(query.substring(qpos + 1));
-        }
 
         let parts = nonSearchPart.split(":");
         if (parts[0] == "") {
           location.hash = DEFAULT_HASH;
         } else {
-          curNav.pkgNames = decodeURIComponent(parts[0]).split(".");
+          curNav.modNames = decodeURIComponent(parts[0]).split(".");
         }
 
         if (parts[1] != null) {
@@ -3135,14 +3035,18 @@ const NAV_MODES = {
 
         return;
       case NAV_MODES.GUIDES:
+
         const sections = zigAnalysis.guide_sections;
-        if (sections.length != 0 && sections[0].guides.length != 0 && query == "") {
+        if (sections.length != 0 && sections[0].guides.length != 0 && nonSearchPart == "") {
           location.hash = NAV_MODES.GUIDES + sections[0].guides[0].name;
+          if (qpos != -1) {
+            location.hash += query.substring(qpos);
+          }
           return;
         }
 
         curNav.mode = mode;
-        curNav.activeGuide = query;
+        curNav.activeGuide = nonSearchPart;
 
         return;
       default:
@@ -3219,45 +3123,54 @@ const NAV_MODES = {
         let childDecl = getDecl(declIndex);
         if (childDecl.name === childName) {
           childDecl.find_subdecl_idx = declIndex;
+          childDecl.is_private = true;
           return childDecl;
         } else if (childDecl.is_uns) {
           let declValue = resolveValue(childDecl.value);
           if (!("type" in declValue.expr)) continue;
           let uns_container = getType(declValue.expr.type);
           let uns_res = findSubDecl(uns_container, childName);
+          uns_res.is_private = true;
           if (uns_res !== null) return uns_res;
         }
       }
     }
+
     return null;
   }
 
-  function computeCanonicalPackagePaths() {
-    let list = new Array(zigAnalysis.packages.length);
-    // Now we try to find all the packages from root.
-    let rootPkg = zigAnalysis.packages[zigAnalysis.rootPkg];
+  function computeCanonicalModulePaths() {
+    let list = new Array(zigAnalysis.modules.length);
+    // Now we try to find all the modules from root.
+    let rootMod = zigAnalysis.modules[zigAnalysis.rootMod];
     // Breadth-first to keep the path shortest possible.
     let stack = [
       {
         path: [],
-        pkg: rootPkg,
+        mod: rootMod,
       },
     ];
     while (stack.length !== 0) {
       let item = stack.shift();
-      for (let key in item.pkg.table) {
-        let childPkgIndex = item.pkg.table[key];
-        if (list[childPkgIndex] != null) continue;
-        let childPkg = zigAnalysis.packages[childPkgIndex];
-        if (childPkg == null) continue;
+      for (let key in item.mod.table) {
+        let childModIndex = item.mod.table[key];
+        if (list[childModIndex] != null) continue;
+        let childMod = zigAnalysis.modules[childModIndex];
+        if (childMod == null) continue;
 
         let newPath = item.path.concat([key]);
-        list[childPkgIndex] = newPath;
+        list[childModIndex] = newPath;
         stack.push({
           path: newPath,
-          pkg: childPkg,
+          mod: childMod,
         });
       }
+    }
+
+    for (let i = 0; i < zigAnalysis.modules.length; i += 1) {
+      const p = zigAnalysis.modules[i];
+      // TODO
+      // declSearchIndex.add(p.name, {moduleId: i});
     }
     return list;
   }
@@ -3266,15 +3179,16 @@ const NAV_MODES = {
     let list = new Array(zigAnalysis.decls.length);
     canonTypeDecls = new Array(zigAnalysis.types.length);
 
-    for (let pkgI = 0; pkgI < zigAnalysis.packages.length; pkgI += 1) {
-      let pkg = zigAnalysis.packages[pkgI];
-      let pkgNames = canonPkgPaths[pkgI];
-      if (pkgNames === undefined) continue;
+    for (let modI = 0; modI < zigAnalysis.modules.length; modI += 1) {
+      let mod = zigAnalysis.modules[modI];
+      let modNames = canonModPaths[modI];
+      if (modNames === undefined) continue;
 
       let stack = [
         {
           declNames: [],
-          type: getType(pkg.main),
+          declIndexes: [],
+          type: getType(mod.main),
         },
       ];
       while (stack.length !== 0) {
@@ -3289,10 +3203,10 @@ const NAV_MODES = {
             if (list[declIndex] != null) continue;
 
             let decl = getDecl(declIndex);
-              
+
             if (decl.is_uns) {
               let unsDeclList = [decl];
-              while(unsDeclList.length != 0) {
+              while (unsDeclList.length != 0) {
                 let unsDecl = unsDeclList.pop();
                 let unsDeclVal = resolveValue(unsDecl.value);
                 if (!("type" in unsDeclVal.expr)) continue;
@@ -3302,69 +3216,137 @@ const NAV_MODES = {
                 for (let unsDeclI = 0; unsDeclI < unsPubDeclLen; unsDeclI += 1) {
                   let childDeclIndex = unsType.pubDecls[unsDeclI];
                   let childDecl = getDecl(childDeclIndex);
-                  
+
                   if (childDecl.is_uns) {
                     unsDeclList.push(childDecl);
                   } else {
-                    addDeclToSearchResults(childDecl, childDeclIndex, pkgNames, item, list, stack);
+                    addDeclToSearchResults(childDecl, childDeclIndex, modNames, item, list, stack);
                   }
                 }
               }
             } else {
-              addDeclToSearchResults(decl, declIndex, pkgNames, item, list, stack);
+              addDeclToSearchResults(decl, declIndex, modNames, item, list, stack);
             }
           }
         }
       }
     }
+    window.cdp = list;
     return list;
   }
 
-function addDeclToSearchResults(decl, declIndex, pkgNames, item, list, stack) {
-  let declVal = resolveValue(decl.value);
-  let declNames = item.declNames.concat([decl.name]);
+  function addDeclToSearchResults(decl, declIndex, modNames, item, list, stack) {
+    let {value: declVal, seenDecls} = resolveValue(decl.value, true);
+    let declNames = item.declNames.concat([decl.name]);
+    let declIndexes = item.declIndexes.concat([declIndex]);
 
-  if (list[declIndex] != null) return;
-  list[declIndex] = {
-    pkgNames: pkgNames,
-    declNames: declNames,
-  };
-  
-  if ("type" in declVal.expr) {
-    let value = getType(declVal.expr.type);
-    if (declCanRepresentTypeKind(value.kind)) {
-      canonTypeDecls[declVal.type] = declIndex;
-    }
+    if (list[declIndex] != null) return;
+    list[declIndex] = {
+      modNames: modNames,
+      declNames: declNames,
+      declIndexes: declIndexes,
+    };
 
-    if (isContainerType(value)) {
-      stack.push({
+    for (let sd of seenDecls) {
+      if (list[sd] != null) continue;
+      list[sd] = {
+        modNames: modNames,
         declNames: declNames,
-        type: value,
-      });
+        declIndexes: declIndexes,
+      };
     }
 
-    // Generic function
-    if (value.kind == typeKinds.Fn && value.generic_ret != null) {
-      let resolvedVal = resolveValue({ expr: value.generic_ret });
-      if ("type" in resolvedVal.expr) {
-        let generic_type = getType(resolvedVal.expr.type);
-        if (isContainerType(generic_type)) {
-          stack.push({
-            declNames: declNames,
-            type: generic_type,
-          });
+    // add to search index
+    {
+      declSearchIndex.add(decl.name, { declIndex });
+    }
+
+
+    if ("type" in declVal.expr) {
+      let value = getType(declVal.expr.type);
+      if (declCanRepresentTypeKind(value.kind)) {
+        canonTypeDecls[declVal.type] = declIndex;
+      }
+
+      if (isContainerType(value)) {
+        stack.push({
+          declNames: declNames,
+          declIndexes: declIndexes,
+          type: value,
+        });
+      }
+
+      // Generic function
+      if (typeIsGenericFn(declVal.expr.type)) {
+        let ret = resolveGenericRet(value);
+        if (ret != null && "type" in ret.expr) {
+          let generic_type = getType(ret.expr.type);
+          if (isContainerType(generic_type)) {
+            stack.push({
+              declNames: declNames,
+              declIndexes: declIndexes,
+              type: generic_type,
+            });
+          }
         }
       }
     }
   }
-}
+
+  function declLinkOrSrcLink(index) {
+    
+    let match = getCanonDeclPath(index);
+    if (match) return navLink(match.modNames, match.declNames);
+
+    // could not find a precomputed decl path
+    const decl = getDecl(index);
+    
+    // try to find a public decl by scanning declRefs and declPaths
+    let value = decl.value;    
+    let i = 0;
+    while (true) {
+      i += 1;
+      if (i >= 10000) {
+        throw "getCanonDeclPath quota exceeded"
+      }
+
+      if ("refPath" in value.expr) {
+        value = { expr: value.expr.refPath[value.expr.refPath.length - 1] };
+        continue;
+      }
+
+      if ("declRef" in value.expr) {
+        let cp = canonDeclPaths[value.expr.declRef];
+        if (cp) return navLink(cp.modNames, cp.declNames);
+        
+        value = getDecl(value.expr.declRef).value;
+        continue;
+      }
+
+      if ("as" in value.expr) {
+        value = {
+          typeRef: zigAnalysis.exprs[value.expr.as.typeRefArg],
+          expr: zigAnalysis.exprs[value.expr.as.exprArg],
+        };
+        continue;
+      }
+
+      // if we got here it means that we failed 
+      // produce a link to source code instead
+      return sourceFileLink(decl);
+
+    }
+    
+  }
 
   function getCanonDeclPath(index) {
     if (canonDeclPaths == null) {
       canonDeclPaths = computeCanonDeclPaths();
     }
-    //let cd = (canonDeclPaths);
+    
     return canonDeclPaths[index];
+
+      
   }
 
   function getCanonTypeDecl(index) {
@@ -3374,7 +3356,7 @@ function addDeclToSearchResults(decl, declIndex, pkgNames, item, list, stack) {
   }
 
   function escapeHtml(text) {
-    return text.replace(/[&"<>]/g, function (m) {
+    return text.replace(/[&"<>]/g, function(m) {
       return escapeHtmlReplacements[m];
     });
   }
@@ -3402,393 +3384,141 @@ function addDeclToSearchResults(decl, declIndex, pkgNames, item, list, stack) {
     return markdown(shortDesc(docs));
   }
 
-  function markdown(input, contextType) {
-    const raw_lines = input.split("\n"); // zig allows no '\r', so we don't need to split on CR
+  function parseGuides() {
+    for (let j = 0; j < zigAnalysis.guide_sections.length; j += 1) {
+      const section = zigAnalysis.guide_sections[j];
+      for (let i = 0; i < section.guides.length; i += 1) {
+        let reader = new commonmark.Parser({ smart: true });
+        const guide = section.guides[i];
+        const ast = reader.parse(guide.body);
 
-    const lines = [];
-
-    // PHASE 1:
-    // Dissect lines and determine the type for each line.
-    // Also computes indentation level and removes unnecessary whitespace
-
-    let is_reading_code = false;
-    let code_indent = 0;
-    for (let line_no = 0; line_no < raw_lines.length; line_no++) {
-      const raw_line = raw_lines[line_no];
-
-      const line = {
-        indent: 0,
-        raw_text: raw_line,
-        text: raw_line.trim(),
-        type: "p", // p, h1 … h6, code, ul, ol, blockquote, skip, empty
-        ordered_number: -1, // NOTE: hack to make the type checker happy
-      };
-
-      if (!is_reading_code) {
-        while (
-          line.indent < line.raw_text.length &&
-          line.raw_text[line.indent] == " "
-        ) {
-          line.indent += 1;
-        }
-
-        if (line.text.startsWith("######")) {
-          line.type = "h6";
-          line.text = line.text.substr(6);
-        } else if (line.text.startsWith("#####")) {
-          line.type = "h5";
-          line.text = line.text.substr(5);
-        } else if (line.text.startsWith("####")) {
-          line.type = "h4";
-          line.text = line.text.substr(4);
-        } else if (line.text.startsWith("###")) {
-          line.type = "h3";
-          line.text = line.text.substr(3);
-        } else if (line.text.startsWith("##")) {
-          line.type = "h2";
-          line.text = line.text.substr(2);
-        } else if (line.text.startsWith("#")) {
-          line.type = "h1";
-          line.text = line.text.substr(1);
-        } else if (line.text.match(/^-[ \t]+.*$/)) {
-          // line starts with a hyphen, followed by spaces or tabs
-          const match = line.text.match(/^-[ \t]+/);
-          line.type = "ul";
-          line.text = line.text.substr(match[0].length);
-        } else if (line.text.match(/^\d+\.[ \t]+.*$/)) {
-          // line starts with {number}{dot}{spaces or tabs}
-          const match = line.text.match(/(\d+)\.[ \t]+/);
-          line.type = "ol";
-          line.text = line.text.substr(match[0].length);
-          line.ordered_number = Number(match[1].length);
-        } else if (line.text == "```") {
-          line.type = "skip";
-          is_reading_code = true;
-          code_indent = line.indent;
-        } else if (line.text == "") {
-          line.type = "empty";
-        }
-      } else {
-        if (line.text == "```") {
-          is_reading_code = false;
-          line.type = "skip";
-        } else {
-          line.type = "code";
-          line.text = line.raw_text.substr(code_indent); // remove the indent of the ``` from all the code block
-        }
-      }
-
-      if (line.type != "skip") {
-        lines.push(line);
-      }
-    }
-
-    // PHASE 2:
-    // Render HTML from markdown lines.
-    // Look at each line and emit fitting HTML code
-
-    function markdownInlines(innerText, contextType) {
-      // inline types:
-      // **{INLINE}**       : <strong>
-      // __{INLINE}__       : <u>
-      // ~~{INLINE}~~       : <s>
-      //  *{INLINE}*        : <emph>
-      //  _{INLINE}_        : <emph>
-      //  `{TEXT}`          : <code>
-      //  [{INLINE}]({URL}) : <a>
-      // ![{TEXT}]({URL})   : <img>
-      // [[std;format.fmt]] : <a> (inner link)
-
-      const formats = [
+        // Find the first text thing to use as a sidebar title
+        guide.title = "[empty guide]";
         {
-          marker: "**",
-          tag: "strong",
-        },
-        {
-          marker: "~~",
-          tag: "s",
-        },
-        {
-          marker: "__",
-          tag: "u",
-        },
-        {
-          marker: "*",
-          tag: "em",
-        },
-      ];
-
-      const stack = [];
-
-      let innerHTML = "";
-      let currentRun = "";
-
-      function flushRun() {
-        if (currentRun != "") {
-          innerHTML += escapeHtml(currentRun);
-        }
-        currentRun = "";
-      }
-
-      let parsing_code = false;
-      let codetag = "";
-      let in_code = false;
-
-      // state used to link decl references
-      let quote_start = undefined;
-      let quote_start_html = undefined;
-
-      for (let i = 0; i < innerText.length; i++) {
-        if (parsing_code && in_code) {
-          if (innerText.substr(i, codetag.length) == codetag) {
-            // remove leading and trailing whitespace if string both starts and ends with one.
-            if (
-              currentRun[0] == " " &&
-              currentRun[currentRun.length - 1] == " "
-            ) {
-              currentRun = currentRun.substr(1, currentRun.length - 2);
-            }
-            flushRun();
-            i += codetag.length - 1;
-            in_code = false;
-            parsing_code = false;
-            innerHTML += "</code>";
-            codetag = "";
-
-            // find out if this is a decl that should be linked
-            const maybe_decl_path = innerText.substr(quote_start, i-quote_start);
-            const decl_hash = detectDeclPath(maybe_decl_path, contextType);
-            if (decl_hash) {
-              const anchor_opening_tag = "<a href='"+ decl_hash +"'>";
-              innerHTML = innerHTML.slice(0, quote_start_html) 
-                + anchor_opening_tag
-                + innerHTML.slice(quote_start_html) + "</a>";
-            }
-          } else {
-            currentRun += innerText[i];
-          }
-          continue;
-        }
-
-        if (innerText[i] == "`") {
-          flushRun();
-          if (!parsing_code) {
-            quote_start = i + 1;
-            quote_start_html = innerHTML.length;
-            innerHTML += "<code>";
-          }
-          parsing_code = true;
-          codetag += "`";
-          continue;
-        }
-
-        if (parsing_code) {
-          currentRun += innerText[i];
-          in_code = true;
-        } else {
-          let any = false;
-          for (
-            let idx = stack.length > 0 ? -1 : 0;
-            idx < formats.length;
-            idx++
-          ) {
-            const fmt = idx >= 0 ? formats[idx] : stack[stack.length - 1];
-            if (innerText.substr(i, fmt.marker.length) == fmt.marker) {
-              flushRun();
-              if (stack[stack.length - 1] == fmt) {
-                stack.pop();
-                innerHTML += "</" + fmt.tag + ">";
-              } else {
-                stack.push(fmt);
-                innerHTML += "<" + fmt.tag + ">";
-              }
-              i += fmt.marker.length - 1;
-              any = true;
+          let walker = ast.walker();
+          let event, node;
+          while ((event = walker.next())) {
+            node = event.node;
+            if (node.type === 'text') {
+              guide.title = node.literal;
               break;
             }
           }
-          if (!any) {
-            currentRun += innerText[i];
+        }
+        // Index this guide
+        {
+          let walker = ast.walker();
+          let event, node;
+          while ((event = walker.next())) {
+            node = event.node;
+            if (event.entering == true && node.type === 'text') {
+              indexTextForGuide(j, i, node);
+            }
           }
         }
       }
-      flushRun();
+    }
+  }
 
-      if (in_code) {
-        in_code = false;
-        parsing_code = false;
-        innerHTML += "</code>";
-        codetag = "";
+  function indexTextForGuide(section_idx, guide_idx, node) {
+    const terms = node.literal.split(" ");
+    for (let i = 0; i < terms.length; i += 1) {
+      const t = terms[i];
+      if (!guidesSearchIndex[t]) guidesSearchIndex[t] = new Set();
+      node.guide = { section_idx, guide_idx };
+      guidesSearchIndex[t].add(node);
+    }
+  }
+
+
+  function markdown(input, contextType) {
+    const parsed = new commonmark.Parser({ smart: true }).parse(input);
+
+    // Look for decl references in inline code (`ref`)
+    const walker = parsed.walker();
+    let event;
+    while ((event = walker.next())) {
+      const node = event.node;
+      if (node.type === "code") {
+        const declHash = detectDeclPath(node.literal, contextType);
+        if (declHash) {
+          const link = new commonmark.Node("link");
+          link.destination = declHash;
+          node.insertBefore(link);
+          link.appendChild(node);
+        }
       }
-
-      while (stack.length > 0) {
-        const fmt = stack.pop();
-        innerHTML += "</" + fmt.tag + ">";
-      }
-
-      return innerHTML;
     }
 
-    function detectDeclPath(text, context) {
-      let result = "";
-      let separator = ":";
-      const components = text.split(".");
-      let curDeclOrType = undefined;
-      
-      let curContext = context;
-      let limit = 10000;
-      while (curContext) {
-        limit -= 1;
-        
-        if (limit == 0) {
-          throw "too many iterations";
-        }
-        
-        curDeclOrType = findSubDecl(curContext, components[0]);
-        
-        if (!curDeclOrType) {
-          if (curContext.parent_container == null) break;
-          curContext = getType(curContext.parent_container);
-          continue;
-        }
+    return new commonmark.HtmlRenderer({ safe: true }).render(parsed);
 
-        if (curContext == context) {
-          separator = '.';
-          result = location.hash + separator + components[0];
-        } else {
-          // We had to go up, which means we need a new path!
-          const canonPath = getCanonDeclPath(curDeclOrType.find_subdecl_idx);
-          if (!canonPath) return;
-          
-          let lastPkgName = canonPath.pkgNames[canonPath.pkgNames.length - 1];
-          let fullPath = lastPkgName + ":" + canonPath.declNames.join(".");
-        
-          separator = '.';
-          result = "#A;" + fullPath;
-        }
+  }
 
-        break;
-      } 
+
+
+  function detectDeclPath(text, context) {
+    let result = "";
+    let separator = ":";
+    const components = text.split(".");
+    let curDeclOrType = undefined;
+
+    let curContext = context;
+    let limit = 10000;
+    while (curContext) {
+      limit -= 1;
+
+      if (limit == 0) {
+        throw "too many iterations";
+      }
+
+      curDeclOrType = findSubDecl(curContext, components[0]);
 
       if (!curDeclOrType) {
-        for (let i = 0; i < zigAnalysis.packages.length; i += 1){
-          const p = zigAnalysis.packages[i];
-          if (p.name == components[0]) {
-            curDeclOrType = getType(p.main);
-            result += "#A;" + components[0];
-            break;
-          }
+        if (curContext.parent_container == null) break;
+        curContext = getType(curContext.parent_container);
+        continue;
+      }
+
+      if (curContext == context) {
+        separator = '.';
+        result = location.hash + separator + components[0];
+      } else {
+        // We had to go up, which means we need a new path!
+        const canonPath = getCanonDeclPath(curDeclOrType.find_subdecl_idx);
+        if (!canonPath) return;
+
+        let lastModName = canonPath.modNames[canonPath.modNames.length - 1];
+        let fullPath = lastModName + ":" + canonPath.declNames.join(".");
+
+        separator = '.';
+        result = "#A;" + fullPath;
+      }
+
+      break;
+    }
+
+    if (!curDeclOrType) {
+      for (let i = 0; i < zigAnalysis.modules.length; i += 1) {
+        const p = zigAnalysis.modules[i];
+        if (p.name == components[0]) {
+          curDeclOrType = getType(p.main);
+          result += "#A;" + components[0];
+          break;
         }
       }
+    }
 
+    if (!curDeclOrType) return null;
+
+    for (let i = 1; i < components.length; i += 1) {
+      curDeclOrType = findSubDecl(curDeclOrType, components[i]);
       if (!curDeclOrType) return null;
-      
-      for (let i = 1; i < components.length; i += 1) {
-        curDeclOrType = findSubDecl(curDeclOrType, components[i]);
-        if (!curDeclOrType) return null;
-        result += separator + components[i];
-        separator = '.';
-      }
-
-      return result;
-      
+      result += separator + components[i];
+      separator = '.';
     }
 
-    function previousLineIs(type, line_no) {
-      if (line_no > 0) {
-        return lines[line_no - 1].type == type;
-      } else {
-        return false;
-      }
-    }
+    return result;
 
-    function nextLineIs(type, line_no) {
-      if (line_no < lines.length - 1) {
-        return lines[line_no + 1].type == type;
-      } else {
-        return false;
-      }
-    }
-
-    function getPreviousLineIndent(line_no) {
-      if (line_no > 0) {
-        return lines[line_no - 1].indent;
-      } else {
-        return 0;
-      }
-    }
-
-    function getNextLineIndent(line_no) {
-      if (line_no < lines.length - 1) {
-        return lines[line_no + 1].indent;
-      } else {
-        return 0;
-      }
-    }
-
-    let html = "";
-    for (let line_no = 0; line_no < lines.length; line_no++) {
-      const line = lines[line_no];
-
-      switch (line.type) {
-        case "h1":
-        case "h2":
-        case "h3":
-        case "h4":
-        case "h5":
-        case "h6":
-          html +=
-            "<" +
-            line.type +
-            ">" +
-            markdownInlines(line.text, contextType) +
-            "</" +
-            line.type +
-            ">\n";
-          break;
-
-        case "ul":
-        case "ol":
-          if (
-            !previousLineIs(line.type, line_no) ||
-            getPreviousLineIndent(line_no) < line.indent
-          ) {
-            html += "<" + line.type + ">\n";
-          }
-
-          html += "<li>" + markdownInlines(line.text, contextType) + "</li>\n";
-
-          if (
-            !nextLineIs(line.type, line_no) ||
-            getNextLineIndent(line_no) < line.indent
-          ) {
-            html += "</" + line.type + ">\n";
-          }
-          break;
-
-        case "p":
-          if (!previousLineIs("p", line_no)) {
-            html += "<p>\n";
-          }
-          html += markdownInlines(line.text, contextType) + "\n";
-          if (!nextLineIs("p", line_no)) {
-            html += "</p>\n";
-          }
-          break;
-
-        case "code":
-          if (!previousLineIs("code", line_no)) {
-            html += "<pre><code>";
-          }
-          html += escapeHtml(line.text) + "\n";
-          if (!nextLineIs("code", line_no)) {
-            html += "</code></pre>\n";
-          }
-          break;
-      }
-    }
-
-    return html;
   }
 
   function activateSelectedResult() {
@@ -3810,8 +3540,12 @@ function addDeclToSearchResults(decl, declIndex, pkgNames, item, list, stack) {
 
   // hide the modal if it's visible or return to the previous result page and unfocus the search
   function onEscape(ev) {
-    if (!domHelpModal.classList.contains("hidden")) {
-      domHelpModal.classList.add("hidden");
+    if (isModalVisible(domHelpModal)) {
+      hideModal(domHelpModal);
+      ev.preventDefault();
+      ev.stopPropagation();
+    } else if (isModalVisible(domPrefsModal)) {
+      hideModal(domPrefsModal);
       ev.preventDefault();
       ev.stopPropagation();
     } else {
@@ -3824,6 +3558,7 @@ function addDeclToSearchResults(decl, declIndex, pkgNames, item, list, stack) {
       startSearch();
     }
   }
+
 
   function onSearchKeyDown(ev) {
     switch (getKeyString(ev)) {
@@ -3855,13 +3590,15 @@ function addDeclToSearchResults(decl, declIndex, pkgNames, item, list, stack) {
         ev.stopPropagation();
         return;
       default:
-        if (ev.shiftKey || ev.ctrlKey || ev.altKey) return;
-
-        curSearchIndex = -1;
+        // Search is triggered via an `input` event handler, not on arbitrary `keydown` events.
         ev.stopPropagation();
-        startAsyncSearch();
         return;
     }
+  }
+
+  function onSearchInput(ev) {
+    curSearchIndex = -1;
+    startAsyncSearch();
   }
 
   function moveSearchCursor(dir) {
@@ -3920,8 +3657,11 @@ function addDeclToSearchResults(decl, declIndex, pkgNames, item, list, stack) {
       case "Esc":
         onEscape(ev);
         break;
+      case "/":
+        if (!getPrefSlashSearch()) break;
+      // fallthrough
       case "s":
-        if (domHelpModal.classList.contains("hidden")) {
+        if (!isModalVisible(domHelpModal) && !isModalVisible(domPrefsModal)) {
           if (ev.target == domSearch) break;
 
           domSearch.focus();
@@ -3933,21 +3673,65 @@ function addDeclToSearchResults(decl, declIndex, pkgNames, item, list, stack) {
         }
         break;
       case "?":
+        if (!canToggleModal) break;
+
+        if (isModalVisible(domPrefsModal)) {
+          hideModal(domPrefsModal);
+        }
+
+        // toggle the help modal
+        if (isModalVisible(domHelpModal)) {
+          hideModal(domHelpModal);
+        } else {
+          showModal(domHelpModal);
+        }
         ev.preventDefault();
         ev.stopPropagation();
-        showHelpModal();
         break;
+      case "p":
+        if (!canToggleModal) break;
+
+        if (isModalVisible(domHelpModal)) {
+          hideModal(domHelpModal);
+        }
+
+        // toggle the preferences modal
+        if (isModalVisible(domPrefsModal)) {
+          hideModal(domPrefsModal);
+        } else {
+          showModal(domPrefsModal);
+        }
+        ev.preventDefault();
+        ev.stopPropagation();
     }
   }
 
-  function showHelpModal() {
-    domHelpModal.classList.remove("hidden");
-    domHelpModal.style.left =
-      window.innerWidth / 2 - domHelpModal.clientWidth / 2 + "px";
-    domHelpModal.style.top =
-      window.innerHeight / 2 - domHelpModal.clientHeight / 2 + "px";
-    domHelpModal.focus();
+  function isModalVisible(modal) {
+    return !modal.classList.contains("hidden");
+  }
+
+  function showModal(modal) {
+    modal.classList.remove("hidden");
+    modal.style.left =
+      window.innerWidth / 2 - modal.clientWidth / 2 + "px";
+    modal.style.top =
+      window.innerHeight / 2 - modal.clientHeight / 2 + "px";
+    const firstInput = modal.querySelector("input");
+    if (firstInput) {
+      firstInput.focus();
+    } else {
+      modal.focus();
+    }
     domSearch.blur();
+    domBanner.inert = true;
+    domMain.inert = true;
+  }
+
+  function hideModal(modal) {
+    modal.classList.add("hidden");
+    domBanner.inert = false;
+    domMain.inert = false;
+    modal.blur();
   }
 
   function clearAsyncSearch() {
@@ -3965,102 +3749,41 @@ function addDeclToSearchResults(decl, declIndex, pkgNames, item, list, stack) {
     clearAsyncSearch();
     let oldHash = location.hash;
     let parts = oldHash.split("?");
-    let newPart2 = domSearch.value === "" ? "" : "?" + domSearch.value;
+    // TODO: make a tooltip that shows the user that we've replaced their dots
+    let box_text = domSearch.value.replaceAll(".", " ");
+    let newPart2 = box_text === "" ? "" : "?" + box_text;
     location.replace(parts.length === 1 ? oldHash + newPart2 : parts[0] + newPart2);
   }
   function getSearchTerms() {
     let list = curNavSearch.trim().split(/[ \r\n\t]+/);
-    list.sort();
     return list;
   }
 
-  function renderSearch() {
-    let matchedItems = [];
+  function renderSearchGuides() {
+    const searchTrimmed = false;
     let ignoreCase = curNavSearch.toLowerCase() === curNavSearch;
+
     let terms = getSearchTerms();
+    let matchedItems = new Set();
 
-    decl_loop: for (
-      let declIndex = 0;
-      declIndex < zigAnalysis.decls.length;
-      declIndex += 1
-    ) {
-      let canonPath = getCanonDeclPath(declIndex);
-      if (canonPath == null) continue;
-
-      let decl = getDecl(declIndex);
-      let lastPkgName = canonPath.pkgNames[canonPath.pkgNames.length - 1];
-      let fullPathSearchText =
-        lastPkgName + "." + canonPath.declNames.join(".");
-      let astNode = getAstNode(decl.src);
-      let fileAndDocs = ""; //zigAnalysis.files[astNode.file];
-      // TODO: understand what this piece of code is trying to achieve
-      //       also right now `files` are expressed as a hashmap.
-      if (astNode.docs != null) {
-        fileAndDocs += "\n" + astNode.docs;
+    for (let i = 0; i < terms.length; i += 1) {
+      const nodes = guidesSearchIndex[terms[i]];
+      if (nodes) {
+        for (const n of nodes) {
+          matchedItems.add(n);
+        }
       }
-      let fullPathSearchTextLower = fullPathSearchText;
-      if (ignoreCase) {
-        fullPathSearchTextLower = fullPathSearchTextLower.toLowerCase();
-        fileAndDocs = fileAndDocs.toLowerCase();
-      }
-
-      let points = 0;
-      for (let termIndex = 0; termIndex < terms.length; termIndex += 1) {
-        let term = terms[termIndex];
-
-        // exact, case sensitive match of full decl path
-        if (fullPathSearchText === term) {
-          points += 4;
-          continue;
-        }
-        // exact, case sensitive match of just decl name
-        if (decl.name == term) {
-          points += 3;
-          continue;
-        }
-        // substring, case insensitive match of full decl path
-        if (fullPathSearchTextLower.indexOf(term) >= 0) {
-          points += 2;
-          continue;
-        }
-        if (fileAndDocs.indexOf(term) >= 0) {
-          points += 1;
-          continue;
-        }
-
-        continue decl_loop;
-      }
-
-      matchedItems.push({
-        decl: decl,
-        path: canonPath,
-        points: points,
-      });
     }
 
-    if (matchedItems.length !== 0) {
-      matchedItems.sort(function (a, b) {
-        let cmp = operatorCompare(b.points, a.points);
-        if (cmp != 0) return cmp;
-        return operatorCompare(a.decl.name, b.decl.name);
-      });
 
-      let searchTrimmed = false;
-      const searchTrimResultsMaxItems = 200;
-      if (searchTrimResults && matchedItems.length > searchTrimResultsMaxItems) {
-        matchedItems = matchedItems.slice(0, searchTrimResultsMaxItems);
-        searchTrimmed = true;
-      }
 
+    if (matchedItems.size !== 0) {
       // Build up the list of search results
       let matchedItemsHTML = "";
 
-      for (let i = 0; i < matchedItems.length; i += 1) {
-        const match = matchedItems[i];
-        const lastPkgName = match.path.pkgNames[match.path.pkgNames.length - 1];
-
-        const text = lastPkgName + "." + match.path.declNames.join(".");
-        const href = navLink(match.path.pkgNames, match.path.declNames);
+      for (const node of matchedItems) {
+        const text = node.literal;
+        const href = "";
 
         matchedItemsHTML += "<li><a href=\"" + href + "\">" + text + "</a></li>";
       }
@@ -4077,6 +3800,156 @@ function addDeclToSearchResults(decl, declIndex, pkgNames, item, list, stack) {
       domSectSearchNoResults.classList.remove("hidden");
     }
   }
+
+  function renderSearchAPI() {
+    if (canonDeclPaths == null) {
+      canonDeclPaths = computeCanonDeclPaths();
+    }
+    let declSet = new Set();
+    let otherDeclSet = new Set(); // for low quality results
+    let declScores = {};
+
+    let ignoreCase = curNavSearch.toLowerCase() === curNavSearch;
+    let term_list = getSearchTerms();
+    for (let i = 0; i < term_list.length; i += 1) {
+      let term = term_list[i];
+      let result = declSearchIndex.search(term.toLowerCase());
+      if (result == null) {
+        domSectSearchNoResults.classList.remove("hidden");
+        domSectSearchResults.classList.add("hidden");
+        return;
+      }
+
+      let termSet = new Set();
+      let termOtherSet = new Set();
+
+      for (let list of [result.full, result.partial]) {
+        for (let r of list) {
+          const d = r.declIndex;
+          const decl = getDecl(d);
+          const canonPath = getCanonDeclPath(d);
+
+          // collect unconditionally for the first term
+          if (i == 0) {
+            declSet.add(d);
+          } else {
+            // path intersection for subsequent terms
+            let found = false;
+            for (let p of canonPath.declIndexes) {
+              if (declSet.has(p)) {
+                found = true;
+                break;
+              }
+            }
+            if (!found) {
+              otherDeclSet.add(d);
+            } else {
+              termSet.add(d);
+            }
+          }
+
+          if (declScores[d] == undefined) declScores[d] = 0;
+
+          // scores (lower is better)
+          let decl_name = decl.name;
+          if (ignoreCase) decl_name = decl_name.toLowerCase();
+
+          // shallow path are preferable
+          const path_depth = canonPath.declNames.length * 50;
+          // matching the start of a decl name is good
+          const match_from_start = decl_name.startsWith(term) ? -term.length * (2 - ignoreCase) : (decl_name.length - term.length) + 1;
+          // being a perfect match is good
+          const is_full_match = (decl_name === term) ? -decl_name.length * (1 - ignoreCase) : Math.abs(decl_name.length - term.length);
+          // matching the end of a decl name is good
+          const matches_the_end = decl_name.endsWith(term) ? -term.length * (1 - ignoreCase) : (decl_name.length - term.length) + 1;
+          // explicitly penalizing scream case decls
+          const decl_is_scream_case = decl.name.toUpperCase() != decl.name ? 0 : decl.name.length;
+
+          const score = path_depth
+            + match_from_start
+            + is_full_match
+            + matches_the_end
+            + decl_is_scream_case;
+
+          declScores[d] += score;
+        }
+      }
+      if (i != 0) {
+        for (let d of declSet) {
+          if (termSet.has(d)) continue;
+          let found = false;
+          for (let p of getCanonDeclPath(d).declIndexes) {
+            if (termSet.has(p) || otherDeclSet.has(p)) {
+              found = true;
+              break;
+            }
+          }
+          if (found) {
+            declScores[d] = declScores[d] / term_list.length;
+          }
+
+          termOtherSet.add(d);
+        }
+        declSet = termSet;
+        for (let d of termOtherSet) {
+          otherDeclSet.add(d);
+        }
+
+      }
+    }
+
+    let matchedItems = {
+      high_quality: [],
+      low_quality: [],
+    };
+    for (let idx of declSet) {
+      matchedItems.high_quality.push({ points: declScores[idx], declIndex: idx })
+    }
+    for (let idx of otherDeclSet) {
+      matchedItems.low_quality.push({ points: declScores[idx], declIndex: idx })
+    }
+
+    matchedItems.high_quality.sort(function(a, b) {
+      let cmp = operatorCompare(a.points, b.points);
+      return cmp;
+    });
+    matchedItems.low_quality.sort(function(a, b) {
+      let cmp = operatorCompare(a.points, b.points);
+      return cmp;
+    });
+
+    // Build up the list of search results
+    let matchedItemsHTML = "";
+
+    for (let list of [matchedItems.high_quality, matchedItems.low_quality]) {
+      if (list == matchedItems.low_quality && list.length > 0) {
+        matchedItemsHTML += "<hr class='other-results'>"
+      }
+      for (let result of list) {
+        const points = result.points;
+        const match = result.declIndex;
+
+        let canonPath = getCanonDeclPath(match);
+        if (canonPath == null) continue;
+
+        let lastModName = canonPath.modNames[canonPath.modNames.length - 1];
+        let text = lastModName + "." + canonPath.declNames.join(".");
+
+
+        const href = navLink(canonPath.modNames, canonPath.declNames);
+
+        matchedItemsHTML += "<li><a href=\"" + href + "\">" + text + "</a></li>";
+      }
+    }
+
+    // Replace the search results using our newly constructed HTML string
+    domListSearchResults.innerHTML = matchedItemsHTML;
+    renderSearchCursor();
+
+    domSectSearchResults.classList.remove("hidden");
+  }
+
+  
 
   function renderSearchCursor() {
     for (let i = 0; i < domListSearchResults.children.length; i += 1) {
@@ -4135,6 +4008,14 @@ function addDeclToSearchResults(decl, declIndex, pkgNames, item, list, stack) {
     };
   }
 
+  function getFile(idx) {
+    const file = zigAnalysis.files[idx];
+    return {
+      name: file[0],
+      modIndex: file[1],
+    };
+  }
+
   function getType(idx) {
     const ty = zigAnalysis.types[idx];
     switch (ty[0]) {
@@ -4184,9 +4065,11 @@ function addDeclToSearchResults(decl, declIndex, pkgNames, item, list, stack) {
           pubDecls: ty[4],
           field_types: ty[5],
           field_defaults: ty[6],
-          is_tuple: ty[7],
-          line_number: ty[8],
-          parent_container: ty[9],
+          backing_int: ty[7],
+          is_tuple: ty[8],
+          line_number: ty[9],
+          parent_container: ty[10],
+          layout: ty[11],
         };
       case 10: // ComptimeExpr
       case 11: // ComptimeFloat
@@ -4240,6 +4123,7 @@ function addDeclToSearchResults(decl, declIndex, pkgNames, item, list, stack) {
           tag: ty[6],
           auto_tag: ty[7],
           parent_container: ty[8],
+          layout: ty[9],
         };
       case 21: // Fn
         return {
@@ -4279,6 +4163,47 @@ function addDeclToSearchResults(decl, declIndex, pkgNames, item, list, stack) {
     }
   }
 
+  function getLocalStorage() {
+    if ("localStorage" in window) {
+      try {
+        return window.localStorage;
+      } catch (ignored) {
+        // localStorage may be disabled (SecurityError)
+      }
+    }
+    // If localStorage isn't available, persist preferences only for the current session
+    const sessionPrefs = {};
+    return {
+      getItem(key) {
+        return key in sessionPrefs ? sessionPrefs[key] : null;
+      },
+      setItem(key, value) {
+        sessionPrefs[key] = String(value);
+      },
+    };
+  }
+
+  function loadPrefs() {
+    const storedPrefSlashSearch = prefs.getItem("slashSearch");
+    if (storedPrefSlashSearch === null) {
+      // Slash search defaults to enabled for all browsers except Firefox
+      setPrefSlashSearch(navigator.userAgent.indexOf("Firefox") === -1);
+    } else {
+      setPrefSlashSearch(storedPrefSlashSearch === "true");
+    }
+  }
+
+  function getPrefSlashSearch() {
+    return prefs.getItem("slashSearch") === "true";
+  }
+
+  function setPrefSlashSearch(enabled) {
+    prefs.setItem("slashSearch", String(enabled));
+    domPrefSlashSearch.checked = enabled;
+    const searchKeys = enabled ? "<kbd>/</kbd> or <kbd>s</kbd>" : "<kbd>s</kbd>";
+    domSearchKeys.innerHTML = searchKeys;
+    domSearchPlaceholder.innerHTML = searchKeys + " to search, <kbd>?</kbd> for more options";
+  }
 })();
 
 function toggleExpand(event) {
@@ -4289,3 +4214,232 @@ function toggleExpand(event) {
     parent.parentElement.parentElement.scrollIntoView(true);
   }
 }
+
+function RadixTree() {
+  this.root = null;
+
+  RadixTree.prototype.search = function(query) {
+    return this.root.search(query);
+
+  }
+
+  RadixTree.prototype.add = function(declName, value) {
+    if (this.root == null) {
+      this.root = new Node(declName.toLowerCase(), null, [value]);
+    } else {
+      this.root.add(declName.toLowerCase(), value);
+    }
+
+    const not_scream_case = declName.toUpperCase() != declName;
+    let found_separator = false;
+    for (let i = 1; i < declName.length; i += 1) {
+      if (declName[i] == '_' || declName[i] == '.') {
+        found_separator = true;
+        continue;
+      }
+
+
+      if (found_separator || (declName[i].toLowerCase() !== declName[i])) {
+        if (declName.length > i + 1
+          && declName[i + 1].toLowerCase() != declName[i + 1]) continue;
+        let suffix = declName.slice(i);
+        this.root.add(suffix.toLowerCase(), value);
+        found_separator = false;
+      }
+    }
+  }
+
+  function Node(labels, next, values) {
+    this.labels = labels;
+    this.next = next;
+    this.values = values;
+  }
+
+  Node.prototype.isCompressed = function() {
+    return !Array.isArray(this.next);
+  }
+
+  Node.prototype.search = function(word) {
+    let full_matches = [];
+    let partial_matches = [];
+    let subtree_root = null;
+
+    let cn = this;
+    char_loop: for (let i = 0; i < word.length;) {
+      if (cn.isCompressed()) {
+        for (let j = 0; j < cn.labels.length; j += 1) {
+          let current_idx = i + j;
+
+          if (current_idx == word.length) {
+            partial_matches = cn.values;
+            subtree_root = cn.next;
+            break char_loop;
+          }
+
+          if (word[current_idx] != cn.labels[j]) return null;
+        }
+
+        // the full label matched
+        let new_idx = i + cn.labels.length;
+        if (new_idx == word.length) {
+          full_matches = cn.values;
+          subtree_root = cn.next;
+          break char_loop;
+        }
+
+
+        i = new_idx;
+        cn = cn.next;
+        continue;
+      } else {
+        for (let j = 0; j < cn.labels.length; j += 1) {
+          if (word[i] == cn.labels[j]) {
+            if (i == word.length - 1) {
+              full_matches = cn.values[j];
+              subtree_root = cn.next[j];
+              break char_loop;
+            }
+
+            let next = cn.next[j];
+            if (next == null) return null;
+            cn = next;
+            i += 1;
+            continue char_loop;
+          }
+        }
+
+        // didn't find a match
+        return null;
+      }
+    }
+
+    // Match was found, let's collect all other 
+    // partial matches from the subtree
+    let stack = [subtree_root];
+    let node;
+    while (node = stack.pop()) {
+      if (node.isCompressed()) {
+        partial_matches = partial_matches.concat(node.values);
+        if (node.next != null) {
+          stack.push(node.next);
+        }
+      } else {
+        for (let v of node.values) {
+          partial_matches = partial_matches.concat(v);
+        }
+
+        for (let n of node.next) {
+          if (n != null) stack.push(n);
+        }
+      }
+    }
+
+    return { full: full_matches, partial: partial_matches };
+  }
+
+  Node.prototype.add = function(word, value) {
+    let cn = this;
+    char_loop: for (let i = 0; i < word.length;) {
+      if (cn.isCompressed()) {
+        for (let j = 0; j < cn.labels.length; j += 1) {
+          let current_idx = i + j;
+
+          if (current_idx == word.length) {
+            if (j < cn.labels.length - 1) {
+              let node = new Node(cn.labels.slice(j), cn.next, cn.values);
+              cn.labels = cn.labels.slice(0, j);
+              cn.next = node;
+              cn.values = [];
+            }
+            cn.values.push(value);
+            return;
+          }
+
+          if (word[current_idx] == cn.labels[j]) continue;
+
+          // if we're here, a mismatch was found
+          if (j != cn.labels.length - 1) {
+            // create a suffix node
+            const label_suffix = cn.labels.slice(j + 1);
+            let node = new Node(label_suffix, cn.next, [...cn.values]);
+            cn.next = node;
+            cn.values = [];
+          }
+
+          // turn current node into a split node
+          let node = null;
+          let word_values = [];
+          if (current_idx == word.length - 1) {
+            // mismatch happened in the last character of word
+            // meaning that the current node should hold its value
+            word_values.push(value);
+          } else {
+            node = new Node(word.slice(current_idx + 1), null, [value]);
+          }
+
+          cn.labels = cn.labels[j] + word[current_idx];
+          cn.next = [cn.next, node];
+          cn.values = [cn.values, word_values];
+
+          if (j != 0) {
+            // current node must be turned into a prefix node
+            let splitNode = new Node(cn.labels, cn.next, cn.values);
+            cn.labels = word.slice(i, current_idx);
+            cn.next = splitNode;
+            cn.values = [];
+          }
+
+          return;
+        }
+        // label matched fully with word, are there any more chars?
+        const new_idx = i + cn.labels.length;
+        if (new_idx == word.length) {
+          cn.values.push(value);
+          return;
+        } else {
+          if (cn.next == null) {
+            let node = new Node(word.slice(new_idx), null, [value]);
+            cn.next = node;
+            return;
+          } else {
+            cn = cn.next;
+            i = new_idx;
+            continue;
+          }
+        }
+      } else { // node is not compressed
+        let letter = word[i];
+        for (let j = 0; j < cn.labels.length; j += 1) {
+          if (letter == cn.labels[j]) {
+            if (i == word.length - 1) {
+              cn.values[j].push(value);
+              return;
+            }
+            if (cn.next[j] == null) {
+              let node = new Node(word.slice(i + 1), null, [value]);
+              cn.next[j] = node;
+              return;
+            } else {
+              cn = cn.next[j];
+              i += 1;
+              continue char_loop;
+            }
+          }
+        }
+
+        // if we're here we didn't find a match
+        cn.labels += letter;
+        if (i == word.length - 1) {
+          cn.next.push(null);
+          cn.values.push([value]);
+        } else {
+          let node = new Node(word.slice(i + 1), null, [value]);
+          cn.next.push(node);
+          cn.values.push([]);
+        }
+        return;
+      }
+    }
+  }
+}
+

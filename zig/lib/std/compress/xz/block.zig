@@ -59,9 +59,9 @@ pub fn Decoder(comptime ReaderType: type) type {
             while (true) {
                 if (self.to_read.items.len > 0) {
                     const input = self.to_read.items;
-                    const n = std.math.min(input.len, output.len);
-                    std.mem.copy(u8, output[0..n], input[0..n]);
-                    std.mem.copy(u8, input, input[n..]);
+                    const n = @min(input.len, output.len);
+                    @memcpy(output[0..n], input[0..n]);
+                    std.mem.copyForwards(u8, input, input[n..]);
                     self.to_read.shrinkRetainingCapacity(input.len - n);
                     if (self.to_read.items.len == 0 and self.err != null) {
                         if (self.err.? == DecodeError.EndOfStreamWithNoError) {
@@ -108,7 +108,7 @@ pub fn Decoder(comptime ReaderType: type) type {
                     has_unpacked_size: bool,
                 };
 
-                const flags = @bitCast(Flags, try header_reader.readByte());
+                const flags = @as(Flags, @bitCast(try header_reader.readByte()));
                 const filter_count = @as(u3, flags.last_filter_index) + 1;
                 if (filter_count > 1)
                     return error.Unsupported;
@@ -124,12 +124,12 @@ pub fn Decoder(comptime ReaderType: type) type {
                     _,
                 };
 
-                const filter_id = @intToEnum(
+                const filter_id = @as(
                     FilterId,
-                    try std.leb.readULEB128(u64, header_reader),
+                    @enumFromInt(try std.leb.readULEB128(u64, header_reader)),
                 );
 
-                if (@enumToInt(filter_id) >= 0x4000_0000_0000_0000)
+                if (@intFromEnum(filter_id) >= 0x4000_0000_0000_0000)
                     return error.CorruptInput;
 
                 if (filter_id != .lzma2)

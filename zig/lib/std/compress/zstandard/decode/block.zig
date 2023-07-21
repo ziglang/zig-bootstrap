@@ -293,10 +293,10 @@ pub const DecodeState = struct {
 
         try self.decodeLiteralsSlice(dest[write_pos..], sequence.literal_length);
         const copy_start = write_pos + sequence.literal_length - sequence.offset;
-        const copy_end = copy_start + sequence.match_length;
-        // NOTE: we ignore the usage message for std.mem.copy and copy with dest.ptr >= src.ptr
-        //       to allow repeats
-        std.mem.copy(u8, dest[write_pos + sequence.literal_length ..], dest[copy_start..copy_end]);
+        for (
+            dest[write_pos + sequence.literal_length ..][0..sequence.match_length],
+            dest[copy_start..][0..sequence.match_length],
+        ) |*d, s| d.* = s;
         self.written_count += sequence.match_length;
     }
 
@@ -311,7 +311,6 @@ pub const DecodeState = struct {
         try self.decodeLiteralsRingBuffer(dest, sequence.literal_length);
         const copy_start = dest.write_index + dest.data.len - sequence.offset;
         const copy_slice = dest.sliceAt(copy_start, sequence.match_length);
-        // TODO: would std.mem.copy and figuring out dest slice be better/faster?
         for (copy_slice.first) |b| dest.writeAssumeCapacity(b);
         for (copy_slice.second) |b| dest.writeAssumeCapacity(b);
         self.written_count += sequence.match_length;
@@ -444,9 +443,8 @@ pub const DecodeState = struct {
 
         switch (self.literal_header.block_type) {
             .raw => {
-                const literals_end = self.literal_written_count + len;
-                const literal_data = self.literal_streams.one[self.literal_written_count..literals_end];
-                std.mem.copy(u8, dest, literal_data);
+                const literal_data = self.literal_streams.one[self.literal_written_count..][0..len];
+                @memcpy(dest[0..len], literal_data);
                 self.literal_written_count += len;
                 self.written_count += len;
             },
@@ -615,8 +613,7 @@ pub fn decodeBlock(
         .raw => {
             if (src.len < block_size) return error.MalformedBlockSize;
             if (dest[written_count..].len < block_size) return error.DestTooSmall;
-            const data = src[0..block_size];
-            std.mem.copy(u8, dest[written_count..], data);
+            @memcpy(dest[written_count..][0..block_size], src[0..block_size]);
             consumed_count.* += block_size;
             decode_state.written_count += block_size;
             return block_size;
@@ -897,7 +894,7 @@ pub fn decodeBlockReader(
 /// Decode the header of a block.
 pub fn decodeBlockHeader(src: *const [3]u8) frame.Zstandard.Block.Header {
     const last_block = src[0] & 1 == 1;
-    const block_type = @intToEnum(frame.Zstandard.Block.Type, (src[0] & 0b110) >> 1);
+    const block_type = @as(frame.Zstandard.Block.Type, @enumFromInt((src[0] & 0b110) >> 1));
     const block_size = ((src[0] & 0b11111000) >> 3) + (@as(u21, src[1]) << 5) + (@as(u21, src[2]) << 13);
     return .{
         .last_block = last_block,
@@ -1011,7 +1008,7 @@ pub fn decodeLiteralsSection(
                 try huffman.decodeHuffmanTree(counting_reader.reader(), buffer)
             else
                 null;
-            const huffman_tree_size = @intCast(usize, counting_reader.bytes_read);
+            const huffman_tree_size = @as(usize, @intCast(counting_reader.bytes_read));
             const total_streams_size = std.math.sub(usize, header.compressed_size.?, huffman_tree_size) catch
                 return error.MalformedLiteralsSection;
 
@@ -1061,8 +1058,8 @@ fn decodeStreams(size_format: u2, stream_data: []const u8) !LiteralsSection.Stre
 ///   - `error.EndOfStream` if there are not enough bytes in `source`
 pub fn decodeLiteralsHeader(source: anytype) !LiteralsSection.Header {
     const byte0 = try source.readByte();
-    const block_type = @intToEnum(LiteralsSection.BlockType, byte0 & 0b11);
-    const size_format = @intCast(u2, (byte0 & 0b1100) >> 2);
+    const block_type = @as(LiteralsSection.BlockType, @enumFromInt(byte0 & 0b11));
+    const size_format = @as(u2, @intCast((byte0 & 0b1100) >> 2));
     var regenerated_size: u20 = undefined;
     var compressed_size: ?u18 = null;
     switch (block_type) {
@@ -1135,9 +1132,9 @@ pub fn decodeSequencesHeader(
 
     const compression_modes = try source.readByte();
 
-    const matches_mode = @intToEnum(SequencesSection.Header.Mode, (compression_modes & 0b00001100) >> 2);
-    const offsets_mode = @intToEnum(SequencesSection.Header.Mode, (compression_modes & 0b00110000) >> 4);
-    const literal_mode = @intToEnum(SequencesSection.Header.Mode, (compression_modes & 0b11000000) >> 6);
+    const matches_mode = @as(SequencesSection.Header.Mode, @enumFromInt((compression_modes & 0b00001100) >> 2));
+    const offsets_mode = @as(SequencesSection.Header.Mode, @enumFromInt((compression_modes & 0b00110000) >> 4));
+    const literal_mode = @as(SequencesSection.Header.Mode, @enumFromInt((compression_modes & 0b11000000) >> 6));
     if (compression_modes & 0b11 != 0) return error.ReservedBitSet;
 
     return SequencesSection.Header{

@@ -62,7 +62,7 @@ pub const Sha1 = struct {
         // Partial buffer exists from previous update. Copy into buffer then hash.
         if (d.buf_len != 0 and d.buf_len + b.len >= 64) {
             off += 64 - d.buf_len;
-            mem.copy(u8, d.buf[d.buf_len..], b[0..off]);
+            @memcpy(d.buf[d.buf_len..][0..off], b[0..off]);
 
             d.round(d.buf[0..]);
             d.buf_len = 0;
@@ -74,15 +74,20 @@ pub const Sha1 = struct {
         }
 
         // Copy any remainder for next pass.
-        mem.copy(u8, d.buf[d.buf_len..], b[off..]);
-        d.buf_len += @intCast(u8, b[off..].len);
+        @memcpy(d.buf[d.buf_len..][0 .. b.len - off], b[off..]);
+        d.buf_len += @as(u8, @intCast(b[off..].len));
 
         d.total_len += b.len;
     }
 
+    pub fn peek(d: Self) [digest_length]u8 {
+        var copy = d;
+        return copy.finalResult();
+    }
+
     pub fn final(d: *Self, out: *[digest_length]u8) void {
         // The buffer here will never be completely full.
-        mem.set(u8, d.buf[d.buf_len..], 0);
+        @memset(d.buf[d.buf_len..], 0);
 
         // Append padding bits.
         d.buf[d.buf_len] = 0x80;
@@ -91,15 +96,15 @@ pub const Sha1 = struct {
         // > 448 mod 512 so need to add an extra round to wrap around.
         if (64 - d.buf_len < 8) {
             d.round(d.buf[0..]);
-            mem.set(u8, d.buf[0..], 0);
+            @memset(d.buf[0..], 0);
         }
 
         // Append message length.
         var i: usize = 1;
         var len = d.total_len >> 5;
-        d.buf[63] = @intCast(u8, d.total_len & 0x1f) << 3;
+        d.buf[63] = @as(u8, @intCast(d.total_len & 0x1f)) << 3;
         while (i < 8) : (i += 1) {
-            d.buf[63 - i] = @intCast(u8, len & 0xff);
+            d.buf[63 - i] = @as(u8, @intCast(len & 0xff));
             len >>= 8;
         }
 
@@ -108,6 +113,12 @@ pub const Sha1 = struct {
         for (d.s, 0..) |s, j| {
             mem.writeIntBig(u32, out[4 * j ..][0..4], s);
         }
+    }
+
+    pub fn finalResult(d: *Self) [digest_length]u8 {
+        var result: [digest_length]u8 = undefined;
+        d.final(&result);
+        return result;
     }
 
     fn round(d: *Self, b: *const [64]u8) void {
@@ -140,7 +151,7 @@ pub const Sha1 = struct {
             roundParam(0, 1, 2, 3, 4, 15),
         };
         inline for (round0a) |r| {
-            s[r.i] = (@as(u32, b[r.i * 4 + 0]) << 24) | (@as(u32, b[r.i * 4 + 1]) << 16) | (@as(u32, b[r.i * 4 + 2]) << 8) | (@as(u32, b[r.i * 4 + 3]) << 0);
+            s[r.i] = mem.readIntBig(u32, b[r.i * 4 ..][0..4]);
 
             v[r.e] = v[r.e] +% math.rotl(u32, v[r.a], @as(u32, 5)) +% 0x5A827999 +% s[r.i & 0xf] +% ((v[r.b] & v[r.c]) | (~v[r.b] & v[r.d]));
             v[r.b] = math.rotl(u32, v[r.b], @as(u32, 30));
