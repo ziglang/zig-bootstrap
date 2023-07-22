@@ -60,6 +60,7 @@ cmake "$ROOTDIR/zig" \
   -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/host" \
   -DCMAKE_PREFIX_PATH="$ROOTDIR/out/host" \
   -DCMAKE_BUILD_TYPE=Release \
+  -DZIG_NO_LIB=ON \
   -DZIG_VERSION="$ZIG_VERSION"
 cmake --build . --target install
 
@@ -192,6 +193,7 @@ cd "$ROOTDIR/zig"
 $ZIG build \
   --prefix "$ROOTDIR/out/zig-$TARGET-$MCPU" \
   --search-prefix "$ROOTDIR/out/$TARGET-$MCPU" \
+  -Dflat \
   -Dstatic-llvm \
   -Doptimize=ReleaseFast \
   -Dstrip \
