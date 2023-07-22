@@ -60,7 +60,7 @@ cmake "$ROOTDIR/zig" \
   -DCMAKE_INSTALL_PREFIX="$ROOTDIR/out/host" \
   -DCMAKE_PREFIX_PATH="$ROOTDIR/out/host" \
   -DCMAKE_BUILD_TYPE=Release \
-  -DZIG_NO_LIB=ON \
+  -DZIG_NO_LANGREF=ON \
   -DZIG_VERSION="$ZIG_VERSION"
 cmake --build . --target install
 
