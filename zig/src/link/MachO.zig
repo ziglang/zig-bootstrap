@@ -2386,6 +2386,8 @@ pub fn updateDeclExports(
             return llvm_object.updateDeclExports(mod, decl_index, exports);
     }
 
+    if (self.base.options.emit == null) return;
+
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -3227,6 +3229,7 @@ fn writeDyldInfoData(self: *MachO) !void {
 
     var trie: Trie = .{};
     defer trie.deinit(gpa);
+    try trie.init(gpa);
     try self.collectExportData(&trie);
 
     const link_seg = self.getLinkeditSegmentPtr();

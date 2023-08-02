@@ -30,6 +30,8 @@ owner_func_index: InternPool.Index,
 /// an inline or comptime function call.
 /// This could be `none`, a `func_decl`, or a `func_instance`.
 func_index: InternPool.Index,
+/// Whether the type of func_index has a calling convention of `.Naked`.
+func_is_naked: bool,
 /// Used to restore the error return trace when returning a non-error from a function.
 error_return_trace_index_on_fn_entry: Air.Inst.Ref = .none,
 /// When semantic analysis needs to know the return type of the function whose body
@@ -6827,6 +6829,10 @@ fn analyzeCall(
     var is_inline_call = is_comptime_call or modifier == .always_inline or
         func_ty_info.cc == .Inline;
 
+    if (sema.func_is_naked and !is_inline_call and !is_comptime_call) {
+        return sema.fail(block, call_src, "runtime call not allowed in naked function", .{});
+    }
+
     if (!is_inline_call and is_generic_call) {
         if (sema.instantiateGenericCall(
             block,
@@ -7509,6 +7515,9 @@ fn instantiateGenericCall(
         .owner_decl = sema.owner_decl,
         .owner_decl_index = sema.owner_decl_index,
         .func_index = sema.owner_func_index,
+        // This may not be known yet, since the calling convention could be generic, but there
+        // should be no illegal instructions encountered while creating the function anyway.
+        .func_is_naked = false,
         .fn_ret_ty = Type.void,
         .fn_ret_ty_ies = null,
         .owner_func_index = .none,
@@ -10789,6 +10798,13 @@ fn zirSwitchBlock(sema: *Sema, block: *Block, inst: Zir.Inst.Index, operand_is_r
                 special_prong_src,
                 msg,
                 "'_' prong here",
+                .{},
+            );
+            try sema.errNote(
+                block,
+                src,
+                msg,
+                "consider using 'else'",
                 .{},
             );
             break :msg msg;
@@ -17526,7 +17542,7 @@ fn typeInfoNamespaceDecls(
             try sema.typeInfoNamespaceDecls(block, new_ns, declaration_ty, decl_vals, seen_namespaces);
             continue;
         }
-        if (decl.kind != .named) continue;
+        if (decl.kind != .named or !decl.is_pub) continue;
         const name_val = v: {
             var anon_decl = try block.startAnonDecl();
             defer anon_decl.deinit();
@@ -17554,8 +17570,6 @@ fn typeInfoNamespaceDecls(
         const fields = .{
             //name: []const u8,
             name_val,
-            //is_pub: bool,
-            Value.makeBool(decl.is_pub).toIntern(),
         };
         try decl_vals.append(try mod.intern(.{ .aggregate = .{
             .ty = declaration_ty.toIntern(),
@@ -18188,10 +18202,20 @@ fn zirRetImplicit(
     const tracy = trace(@src());
     defer tracy.end();
 
+    if (block.inlining == null and sema.func_is_naked) {
+        assert(!block.is_comptime);
+        if (block.wantSafety()) {
+            // Calling a safety function from a naked function would not be legal.
+            _ = try block.addNoOp(.trap);
+        } else {
+            try block.addUnreachable(false);
+        }
+        return always_noreturn;
+    }
+
     const mod = sema.mod;
     const inst_data = sema.code.instructions.items(.data)[inst].un_tok;
     const operand = try sema.resolveInst(inst_data.operand);
-
     const r_brace_src = inst_data.src();
     const ret_ty_src: LazySrcLoc = .{ .node_offset_fn_type_ret_ty = 0 };
     const base_tag = sema.fn_ret_ty.baseZigTypeTag(mod);
@@ -18217,7 +18241,7 @@ fn zirRetImplicit(
         return sema.failWithOwnedErrorMsg(msg);
     }
 
-    return sema.analyzeRet(block, operand, .unneeded);
+    return sema.analyzeRet(block, operand, r_brace_src);
 }
 
 fn zirRetNode(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Zir.Inst.Index {
@@ -18239,7 +18263,7 @@ fn zirRetLoad(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Zir
     const src = inst_data.src();
     const ret_ptr = try sema.resolveInst(inst_data.operand);
 
-    if (block.is_comptime or block.inlining != null) {
+    if (block.is_comptime or block.inlining != null or sema.func_is_naked) {
         const operand = try sema.analyzeLoad(block, src, ret_ptr, src);
         return sema.analyzeRet(block, operand, src);
     }
@@ -18445,6 +18469,8 @@ fn analyzeRet(
         return always_noreturn;
     } else if (block.is_comptime) {
         return sema.fail(block, src, "function called at runtime cannot return value at comptime", .{});
+    } else if (sema.func_is_naked) {
+        return sema.fail(block, src, "cannot return from naked function", .{});
     }
 
     try sema.resolveTypeLayout(sema.fn_ret_ty);
@@ -20392,6 +20418,12 @@ fn reifyStruct(
     const mod = sema.mod;
     const gpa = sema.gpa;
     const ip = &mod.intern_pool;
+
+    if (is_tuple) switch (layout) {
+        .Extern => return sema.fail(block, src, "extern tuples are not supported", .{}),
+        .Packed => return sema.fail(block, src, "packed tuples are not supported", .{}),
+        .Auto => {},
+    };
 
     // Because these three things each reference each other, `undefined`
     // placeholders are used before being set after the struct type gains an
@@ -24579,7 +24611,7 @@ fn validateExternType(
         .ErrorSet,
         .Frame,
         => return false,
-        .Void => return position == .union_field or position == .ret_ty,
+        .Void => return position == .union_field or position == .ret_ty or position == .struct_field or position == .element,
         .NoReturn => return position == .ret_ty,
         .Opaque,
         .Bool,
@@ -24588,7 +24620,7 @@ fn validateExternType(
         => return true,
         .Pointer => return !(ty.isSlice(mod) or try sema.typeRequiresComptime(ty)),
         .Int => switch (ty.intInfo(mod).bits) {
-            8, 16, 32, 64, 128 => return true,
+            0, 8, 16, 32, 64, 128 => return true,
             else => return false,
         },
         .Fn => {
@@ -24609,11 +24641,11 @@ fn validateExternType(
             .Packed => {
                 const bit_size = try ty.bitSizeAdvanced(mod, sema);
                 switch (bit_size) {
-                    8, 16, 32, 64, 128 => return true,
+                    0, 8, 16, 32, 64, 128 => return true,
                     else => return false,
                 }
             },
-            .Auto => return false,
+            .Auto => return !(try sema.typeHasRuntimeBits(ty)),
         },
         .Array => {
             if (position == .ret_ty or position == .param_ty) return false;
@@ -24662,9 +24694,9 @@ fn explainWhyTypeIsNotExtern(
         .Void => try mod.errNoteNonLazy(src_loc, msg, "'void' is a zero bit type; for C 'void' use 'anyopaque'", .{}),
         .NoReturn => try mod.errNoteNonLazy(src_loc, msg, "'noreturn' is only allowed as a return type", .{}),
         .Int => if (!std.math.isPowerOfTwo(ty.intInfo(mod).bits)) {
-            try mod.errNoteNonLazy(src_loc, msg, "only integers with power of two bits are extern compatible", .{});
+            try mod.errNoteNonLazy(src_loc, msg, "only integers with 0 or power of two bits are extern compatible", .{});
         } else {
-            try mod.errNoteNonLazy(src_loc, msg, "only integers with 8, 16, 32, 64 and 128 bits are extern compatible", .{});
+            try mod.errNoteNonLazy(src_loc, msg, "only integers with 0, 8, 16, 32, 64 and 128 bits are extern compatible", .{});
         },
         .Fn => {
             if (position != .other) {
@@ -30706,6 +30738,33 @@ fn analyzeIsNonErrComptimeOnly(
     const set_ty = ip.errorUnionSet(operand_ty.toIntern());
     switch (set_ty) {
         .anyerror_type => {},
+        .adhoc_inferred_error_set_type => if (sema.fn_ret_ty_ies) |ies| blk: {
+            // If the error set is empty, we must return a comptime true or false.
+            // However we want to avoid unnecessarily resolving an inferred error set
+            // in case it is already non-empty.
+            switch (ies.resolved) {
+                .anyerror_type => break :blk,
+                .none => {},
+                else => |i| if (ip.indexToKey(i).error_set_type.names.len != 0) break :blk,
+            }
+
+            if (maybe_operand_val != null) break :blk;
+
+            // Try to avoid resolving inferred error set if possible.
+            if (ies.errors.count() != 0) return .none;
+            switch (ies.resolved) {
+                .anyerror_type => return .none,
+                .none => {},
+                else => switch (ip.indexToKey(ies.resolved).error_set_type.names.len) {
+                    0 => return .bool_true,
+                    else => return .none,
+                },
+            }
+            // We do not have a comptime answer because this inferred error
+            // set is not resolved, and an instruction later in this function
+            // body may or may not cause an error to be added to this set.
+            return .none;
+        },
         else => switch (ip.indexToKey(set_ty)) {
             .error_set_type => |error_set_type| {
                 if (error_set_type.names.len == 0) return .bool_true;
@@ -30719,41 +30778,30 @@ fn analyzeIsNonErrComptimeOnly(
                     .none => {},
                     else => |i| if (ip.indexToKey(i).error_set_type.names.len != 0) break :blk,
                 }
-                if (maybe_operand_val == null) {
-                    if (sema.fn_ret_ty_ies) |ies| {
-                        if (set_ty == .adhoc_inferred_error_set_type or
-                            ies.func == func_index)
-                        {
-                            // Try to avoid resolving inferred error set if possible.
-                            if (ies.errors.count() != 0) return .none;
-                            switch (ies.resolved) {
-                                .anyerror_type => return .none,
-                                .none => {},
-                                else => switch (ip.indexToKey(ies.resolved).error_set_type.names.len) {
-                                    0 => return .bool_true,
-                                    else => return .none,
-                                },
-                            }
-                            for (ies.inferred_error_sets.keys()) |other_ies_index| {
-                                if (set_ty == other_ies_index) continue;
-                                const other_resolved =
-                                    try sema.resolveInferredErrorSet(block, src, other_ies_index);
-                                if (other_resolved == .anyerror_type) {
-                                    ies.resolved = .anyerror_type;
-                                    return .none;
-                                }
-                                if (ip.indexToKey(other_resolved).error_set_type.names.len != 0)
-                                    return .none;
-                            }
-                            return .bool_true;
+                if (maybe_operand_val != null) break :blk;
+                if (sema.fn_ret_ty_ies) |ies| {
+                    if (ies.func == func_index) {
+                        // Try to avoid resolving inferred error set if possible.
+                        if (ies.errors.count() != 0) return .none;
+                        switch (ies.resolved) {
+                            .anyerror_type => return .none,
+                            .none => {},
+                            else => switch (ip.indexToKey(ies.resolved).error_set_type.names.len) {
+                                0 => return .bool_true,
+                                else => return .none,
+                            },
                         }
+                        // We do not have a comptime answer because this inferred error
+                        // set is not resolved, and an instruction later in this function
+                        // body may or may not cause an error to be added to this set.
+                        return .none;
                     }
-                    const resolved_ty = try sema.resolveInferredErrorSet(block, src, set_ty);
-                    if (resolved_ty == .anyerror_type)
-                        break :blk;
-                    if (ip.indexToKey(resolved_ty).error_set_type.names.len == 0)
-                        return .bool_true;
                 }
+                const resolved_ty = try sema.resolveInferredErrorSet(block, src, set_ty);
+                if (resolved_ty == .anyerror_type)
+                    break :blk;
+                if (ip.indexToKey(resolved_ty).error_set_type.names.len == 0)
+                    return .bool_true;
             },
             else => unreachable,
         },
@@ -33471,7 +33519,9 @@ fn resolveStructLayout(sema: *Sema, ty: Type) CompileError!void {
             return sema.failWithOwnedErrorMsg(msg);
         }
 
-        if (struct_obj.layout == .Auto and mod.backendSupportsFeature(.field_reordering)) {
+        if (struct_obj.layout == .Auto and !struct_obj.is_tuple and
+            mod.backendSupportsFeature(.field_reordering))
+        {
             const optimized_order = try mod.tmp_hack_arena.allocator().alloc(u32, struct_obj.fields.count());
 
             for (struct_obj.fields.values(), 0..) |field, i| {
@@ -33542,6 +33592,7 @@ fn semaBackingIntType(mod: *Module, struct_obj: *Module.Struct) CompileError!voi
             .owner_decl = decl,
             .owner_decl_index = decl_index,
             .func_index = .none,
+            .func_is_naked = false,
             .fn_ret_ty = Type.void,
             .fn_ret_ty_ies = null,
             .owner_func_index = .none,
@@ -33593,6 +33644,7 @@ fn semaBackingIntType(mod: *Module, struct_obj: *Module.Struct) CompileError!voi
                 .owner_decl = decl,
                 .owner_decl_index = decl_index,
                 .func_index = .none,
+                .func_is_naked = false,
                 .fn_ret_ty = Type.void,
                 .fn_ret_ty_ies = null,
                 .owner_func_index = .none,
@@ -34376,6 +34428,7 @@ fn semaStructFields(mod: *Module, struct_obj: *Module.Struct) CompileError!void 
         .owner_decl = decl,
         .owner_decl_index = decl_index,
         .func_index = .none,
+        .func_is_naked = false,
         .fn_ret_ty = Type.void,
         .fn_ret_ty_ies = null,
         .owner_func_index = .none,
@@ -34719,6 +34772,7 @@ fn semaUnionFields(mod: *Module, union_obj: *Module.Union) CompileError!void {
         .owner_decl = decl,
         .owner_decl_index = decl_index,
         .func_index = .none,
+        .func_is_naked = false,
         .fn_ret_ty = Type.void,
         .fn_ret_ty_ies = null,
         .owner_func_index = .none,

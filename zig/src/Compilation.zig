@@ -89,6 +89,7 @@ clang_preprocessor_mode: ClangPreprocessorMode,
 verbose_cc: bool,
 verbose_air: bool,
 verbose_intern_pool: bool,
+verbose_generic_instances: bool,
 verbose_llvm_ir: ?[]const u8,
 verbose_llvm_bc: ?[]const u8,
 verbose_cimport: bool,
@@ -179,7 +180,6 @@ test_name_prefix: ?[]const u8,
 emit_asm: ?EmitLoc,
 emit_llvm_ir: ?EmitLoc,
 emit_llvm_bc: ?EmitLoc,
-emit_analysis: ?EmitLoc,
 
 work_queue_wait_group: WaitGroup = .{},
 astgen_wait_group: WaitGroup = .{},
@@ -482,8 +482,6 @@ pub const InitOptions = struct {
     emit_llvm_ir: ?EmitLoc = null,
     /// `null` means to not emit LLVM module bitcode.
     emit_llvm_bc: ?EmitLoc = null,
-    /// `null` means to not emit semantic analysis JSON.
-    emit_analysis: ?EmitLoc = null,
     /// `null` means to not emit docs.
     emit_docs: ?EmitLoc = null,
     /// `null` means to not emit an import lib.
@@ -599,6 +597,7 @@ pub const InitOptions = struct {
     verbose_link: bool = false,
     verbose_air: bool = false,
     verbose_intern_pool: bool = false,
+    verbose_generic_instances: bool = false,
     verbose_llvm_ir: ?[]const u8 = null,
     verbose_llvm_bc: ?[]const u8 = null,
     verbose_cimport: bool = false,
@@ -1053,6 +1052,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
                     buf.appendSliceAssumeCapacity(",");
                 }
             }
+            if (buf.items.len == 0) break :blk "";
             assert(mem.endsWith(u8, buf.items, ","));
             buf.items[buf.items.len - 1] = 0;
             buf.shrinkAndFree(buf.items.len);
@@ -1589,7 +1589,6 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             .emit_asm = options.emit_asm,
             .emit_llvm_ir = options.emit_llvm_ir,
             .emit_llvm_bc = options.emit_llvm_bc,
-            .emit_analysis = options.emit_analysis,
             .work_queue = std.fifo.LinearFifo(Job, .Dynamic).init(gpa),
             .anon_work_queue = std.fifo.LinearFifo(Job, .Dynamic).init(gpa),
             .c_object_work_queue = std.fifo.LinearFifo(*CObject, .Dynamic).init(gpa),
@@ -1609,6 +1608,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             .verbose_cc = options.verbose_cc,
             .verbose_air = options.verbose_air,
             .verbose_intern_pool = options.verbose_intern_pool,
+            .verbose_generic_instances = options.verbose_generic_instances,
             .verbose_llvm_ir = options.verbose_llvm_ir,
             .verbose_llvm_bc = options.verbose_llvm_bc,
             .verbose_cimport = options.verbose_cimport,
@@ -2074,6 +2074,14 @@ pub fn update(comp: *Compilation, main_progress_node: *std.Progress.Node) !void 
             module.intern_pool.dump();
         }
 
+        if (builtin.mode == .Debug and comp.verbose_generic_instances) {
+            std.debug.print("generic instances for '{s}:0x{x}':\n", .{
+                comp.bin_file.options.root_name,
+                @as(usize, @intFromPtr(module)),
+            });
+            module.intern_pool.dumpGenericInstances(comp.gpa);
+        }
+
         if (comp.bin_file.options.is_test and comp.totalErrorCount() == 0) {
             // The `test_functions` decl has been intentionally postponed until now,
             // at which point we must populate it with the list of test functions that
@@ -2153,16 +2161,9 @@ pub fn update(comp: *Compilation, main_progress_node: *std.Progress.Node) !void 
             try comp.flush(main_progress_node);
             if (comp.totalErrorCount() != 0) return;
 
-            // TODO: do this in a separate job during performAllTheWork(). The
-            // file copies at the end of generate() can also be extracted to
-            // separate jobs
-            if (!build_options.only_c and !build_options.only_core_functionality) {
-                if (comp.bin_file.options.docs_emit) |emit| {
-                    var dir = try emit.directory.handle.makeOpenPath(emit.sub_path, .{});
-                    defer dir.close();
-                    try Autodoc.generate(module, dir);
-                }
-            }
+            // Note the placement of this logic is relying on the call to
+            // `wholeCacheModeSetBinFilePath` above.
+            try maybeGenerateAutodocs(comp, main_progress_node);
         } else {
             try comp.flush(main_progress_node);
             if (comp.totalErrorCount() != 0) return;
@@ -2177,6 +2178,10 @@ pub fn update(comp: *Compilation, main_progress_node: *std.Progress.Node) !void 
         comp.bin_file.lock = man.toOwnedLock();
     } else {
         try comp.flush(main_progress_node);
+
+        if (comp.totalErrorCount() == 0) {
+            try maybeGenerateAutodocs(comp, main_progress_node);
+        }
     }
 
     // Unload all source files to save memory.
@@ -2189,6 +2194,26 @@ pub fn update(comp: *Compilation, main_progress_node: *std.Progress.Node) !void 
                 file.unloadTree(comp.gpa);
                 file.unloadSource(comp.gpa);
             }
+        }
+    }
+}
+
+fn maybeGenerateAutodocs(comp: *Compilation, prog_node: *std.Progress.Node) !void {
+    const mod = comp.bin_file.options.module orelse return;
+    // TODO: do this in a separate job during performAllTheWork(). The
+    // file copies at the end of generate() can also be extracted to
+    // separate jobs
+    if (!build_options.only_c and !build_options.only_core_functionality) {
+        if (comp.bin_file.options.docs_emit) |emit| {
+            var dir = try emit.directory.handle.makeOpenPath(emit.sub_path, .{});
+            defer dir.close();
+
+            var sub_prog_node = prog_node.start("Generating documentation", 0);
+            sub_prog_node.activate();
+            sub_prog_node.context.refresh();
+            defer sub_prog_node.end();
+
+            try Autodoc.generate(mod, dir);
         }
     }
 }
@@ -2311,7 +2336,6 @@ fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifes
     cache_helpers.addOptionalEmitLoc(&man.hash, comp.emit_asm);
     cache_helpers.addOptionalEmitLoc(&man.hash, comp.emit_llvm_ir);
     cache_helpers.addOptionalEmitLoc(&man.hash, comp.emit_llvm_bc);
-    cache_helpers.addOptionalEmitLoc(&man.hash, comp.emit_analysis);
 
     man.hash.addListOfBytes(comp.clang_argv);
 
@@ -5467,6 +5491,7 @@ fn buildOutputFromZig(
         .omit_frame_pointer = comp.bin_file.options.omit_frame_pointer,
         .want_valgrind = false,
         .want_tsan = false,
+        .want_unwind_tables = comp.bin_file.options.eh_frame_hdr,
         .want_pic = comp.bin_file.options.pic,
         .want_pie = comp.bin_file.options.pie,
         .emit_h = null,
@@ -5478,6 +5503,7 @@ fn buildOutputFromZig(
         .verbose_link = comp.bin_file.options.verbose_link,
         .verbose_air = comp.verbose_air,
         .verbose_intern_pool = comp.verbose_intern_pool,
+        .verbose_generic_instances = comp.verbose_intern_pool,
         .verbose_llvm_ir = comp.verbose_llvm_ir,
         .verbose_llvm_bc = comp.verbose_llvm_bc,
         .verbose_cimport = comp.verbose_cimport,
@@ -5557,6 +5583,7 @@ pub fn build_crt_file(
         .verbose_link = comp.bin_file.options.verbose_link,
         .verbose_air = comp.verbose_air,
         .verbose_intern_pool = comp.verbose_intern_pool,
+        .verbose_generic_instances = comp.verbose_generic_instances,
         .verbose_llvm_ir = comp.verbose_llvm_ir,
         .verbose_llvm_bc = comp.verbose_llvm_bc,
         .verbose_cimport = comp.verbose_cimport,
@@ -5613,9 +5640,5 @@ pub fn compilerRtOptMode(comp: Compilation) std.builtin.Mode {
 /// This decides whether to strip debug info for all zig-provided libraries, including
 /// compiler-rt, libcxx, libc, libunwind, etc.
 pub fn compilerRtStrip(comp: Compilation) bool {
-    if (comp.debug_compiler_runtime_libs) {
-        return comp.bin_file.options.strip;
-    } else {
-        return true;
-    }
+    return comp.bin_file.options.strip;
 }

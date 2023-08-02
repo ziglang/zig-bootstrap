@@ -384,8 +384,6 @@ const usage_build_generic =
     \\  -fno-emit-h               (default) Do not generate a C header file (.h)
     \\  -femit-docs[=path]        Create a docs/ dir with html documentation
     \\  -fno-emit-docs            (default) Do not produce docs/ dir with html documentation
-    \\  -femit-analysis[=path]    Write analysis JSON file with type information
-    \\  -fno-emit-analysis        (default) Do not write analysis JSON file with type information
     \\  -femit-implib[=path]      (default) Produce an import .lib when building a Windows DLL
     \\  -fno-emit-implib          Do not produce an import .lib when building a Windows DLL
     \\  --show-builtin            Output the source of @import("builtin") then exit
@@ -437,12 +435,12 @@ const usage_build_generic =
     \\  -fno-dll-export-fns       Force-disable marking exported functions as DLL exports
     \\  -funwind-tables           Always produce unwind table entries for all functions
     \\  -fno-unwind-tables        Never produce unwind table entries
-    \\  -fLLVM                    Force using LLVM as the codegen backend
-    \\  -fno-LLVM                 Prevent using LLVM as the codegen backend
-    \\  -flibLLVM                 Force using the LLVM API in the codegen backend
-    \\  -fno-libLLVM              Prevent using the LLVM API in the codegen backend
-    \\  -fClang                   Force using Clang as the C/C++ compilation backend
-    \\  -fno-Clang                Prevent using Clang as the C/C++ compilation backend
+    \\  -fllvm                    Force using LLVM as the codegen backend
+    \\  -fno-llvm                 Prevent using LLVM as the codegen backend
+    \\  -flibllvm                 Force using the LLVM API in the codegen backend
+    \\  -fno-libllvm              Prevent using the LLVM API in the codegen backend
+    \\  -fclang                   Force using Clang as the C/C++ compilation backend
+    \\  -fno-clang                Prevent using Clang as the C/C++ compilation backend
     \\  -freference-trace[=num]   How many lines of reference trace should be shown per compile error
     \\  -fno-reference-trace      Disable reference trace
     \\  -ferror-tracing           Enable error tracing in ReleaseFast mode
@@ -488,8 +486,8 @@ const usage_build_generic =
     \\  --force_undefined [name]       Specify the symbol must be defined for the link to succeed
     \\  -fsoname[=name]                Override the default SONAME value
     \\  -fno-soname                    Disable emitting a SONAME
-    \\  -fLLD                          Force using LLD as the linker
-    \\  -fno-LLD                       Prevent using LLD as the linker
+    \\  -flld                          Force using LLD as the linker
+    \\  -fno-lld                       Prevent using LLD as the linker
     \\  -fcompiler-rt                  Always include compiler-rt symbols in output
     \\  -fno-compiler-rt               Prevent including compiler-rt symbols in output
     \\  -rdynamic                      Add all symbols to the dynamic symbol table
@@ -573,6 +571,7 @@ const usage_build_generic =
     \\  --verbose-cc                 Display C compiler invocations
     \\  --verbose-air                Enable compiler debug output for Zig AIR
     \\  --verbose-intern-pool        Enable compiler debug output for InternPool
+    \\  --verbose-generic-instances  Enable compiler debug output for generic instance generation
     \\  --verbose-llvm-ir[=path]     Enable compiler debug output for unoptimized LLVM IR
     \\  --verbose-llvm-bc=[path]     Enable compiler debug output for unoptimized LLVM BC
     \\  --verbose-cimport            Enable compiler debug output for C imports
@@ -743,6 +742,7 @@ fn buildOutputType(
     var verbose_cc = (builtin.os.tag != .wasi or builtin.link_libc) and std.process.hasEnvVarConstant("ZIG_VERBOSE_CC");
     var verbose_air = false;
     var verbose_intern_pool = false;
+    var verbose_generic_instances = false;
     var verbose_llvm_ir: ?[]const u8 = null;
     var verbose_llvm_bc: ?[]const u8 = null;
     var verbose_cimport = false;
@@ -755,7 +755,6 @@ fn buildOutputType(
     var emit_llvm_ir: Emit = .no;
     var emit_llvm_bc: Emit = .no;
     var emit_docs: Emit = .no;
-    var emit_analysis: Emit = .no;
     var emit_implib: Emit = .yes_default_path;
     var emit_implib_arg_provided = false;
     var target_arch_os_abi: []const u8 = "native";
@@ -1263,21 +1262,21 @@ fn buildOutputType(
                         want_tsan = true;
                     } else if (mem.eql(u8, arg, "-fno-sanitize-thread")) {
                         want_tsan = false;
-                    } else if (mem.eql(u8, arg, "-fLLVM")) {
+                    } else if (mem.eql(u8, arg, "-fllvm")) {
                         use_llvm = true;
-                    } else if (mem.eql(u8, arg, "-fno-LLVM")) {
+                    } else if (mem.eql(u8, arg, "-fno-llvm")) {
                         use_llvm = false;
-                    } else if (mem.eql(u8, arg, "-flibLLVM")) {
+                    } else if (mem.eql(u8, arg, "-flibllvm")) {
                         use_lib_llvm = true;
-                    } else if (mem.eql(u8, arg, "-fno-libLLVM")) {
+                    } else if (mem.eql(u8, arg, "-fno-libllvm")) {
                         use_lib_llvm = false;
-                    } else if (mem.eql(u8, arg, "-fLLD")) {
+                    } else if (mem.eql(u8, arg, "-flld")) {
                         use_lld = true;
-                    } else if (mem.eql(u8, arg, "-fno-LLD")) {
+                    } else if (mem.eql(u8, arg, "-fno-lld")) {
                         use_lld = false;
-                    } else if (mem.eql(u8, arg, "-fClang")) {
+                    } else if (mem.eql(u8, arg, "-fclang")) {
                         use_clang = true;
-                    } else if (mem.eql(u8, arg, "-fno-Clang")) {
+                    } else if (mem.eql(u8, arg, "-fno-clang")) {
                         use_clang = false;
                     } else if (mem.eql(u8, arg, "-freference-trace")) {
                         reference_trace = 256;
@@ -1336,12 +1335,6 @@ fn buildOutputType(
                         emit_docs = .{ .yes = arg["-femit-docs=".len..] };
                     } else if (mem.eql(u8, arg, "-fno-emit-docs")) {
                         emit_docs = .no;
-                    } else if (mem.eql(u8, arg, "-femit-analysis")) {
-                        emit_analysis = .yes_default_path;
-                    } else if (mem.startsWith(u8, arg, "-femit-analysis=")) {
-                        emit_analysis = .{ .yes = arg["-femit-analysis=".len..] };
-                    } else if (mem.eql(u8, arg, "-fno-emit-analysis")) {
-                        emit_analysis = .no;
                     } else if (mem.eql(u8, arg, "-femit-implib")) {
                         emit_implib = .yes_default_path;
                         emit_implib_arg_provided = true;
@@ -1478,6 +1471,8 @@ fn buildOutputType(
                         verbose_air = true;
                     } else if (mem.eql(u8, arg, "--verbose-intern-pool")) {
                         verbose_intern_pool = true;
+                    } else if (mem.eql(u8, arg, "--verbose-generic-instances")) {
+                        verbose_generic_instances = true;
                     } else if (mem.eql(u8, arg, "--verbose-llvm-ir")) {
                         verbose_llvm_ir = "-";
                     } else if (mem.startsWith(u8, arg, "--verbose-llvm-ir=")) {
@@ -2824,24 +2819,6 @@ fn buildOutputType(
     };
     defer emit_llvm_bc_resolved.deinit();
 
-    const default_analysis_basename = try std.fmt.allocPrint(arena, "{s}-analysis.json", .{root_name});
-    var emit_analysis_resolved = emit_analysis.resolve(default_analysis_basename, output_to_cache) catch |err| {
-        switch (emit_analysis) {
-            .yes => |p| {
-                fatal("unable to open directory from argument '-femit-analysis',  '{s}': {s}", .{
-                    p, @errorName(err),
-                });
-            },
-            .yes_default_path => {
-                fatal("unable to open directory from arguments 'name' or 'soname', '{s}': {s}", .{
-                    default_analysis_basename, @errorName(err),
-                });
-            },
-            .no => unreachable,
-        }
-    };
-    defer emit_analysis_resolved.deinit();
-
     var emit_docs_resolved = emit_docs.resolve("docs", output_to_cache) catch |err| {
         switch (emit_docs) {
             .yes => |p| {
@@ -3096,7 +3073,6 @@ fn buildOutputType(
         .emit_llvm_ir = emit_llvm_ir_resolved.data,
         .emit_llvm_bc = emit_llvm_bc_resolved.data,
         .emit_docs = emit_docs_resolved.data,
-        .emit_analysis = emit_analysis_resolved.data,
         .emit_implib = emit_implib_resolved.data,
         .link_mode = link_mode,
         .dll_export_fns = dll_export_fns,
@@ -3194,6 +3170,7 @@ fn buildOutputType(
         .verbose_link = verbose_link,
         .verbose_air = verbose_air,
         .verbose_intern_pool = verbose_intern_pool,
+        .verbose_generic_instances = verbose_generic_instances,
         .verbose_llvm_ir = verbose_llvm_ir,
         .verbose_llvm_bc = verbose_llvm_bc,
         .verbose_cimport = verbose_cimport,
@@ -4461,6 +4438,10 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
             try wip_errors.init(gpa);
             defer wip_errors.deinit();
 
+            var progress: std.Progress = .{ .dont_print_on_dumb = true };
+            const root_prog_node = progress.start("Fetch Packages", 0);
+            defer root_prog_node.end();
+
             // Here we borrow main package's table and will replace it with a fresh
             // one after this process completes.
             const fetch_result = build_pkg.fetchAndAddDependencies(
@@ -4476,6 +4457,7 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
                 "",
                 &wip_errors,
                 &all_modules,
+                root_prog_node,
             );
             if (wip_errors.root_list.items.len > 0) {
                 var errors = try wip_errors.toOwnedBundle("");
@@ -4780,13 +4762,16 @@ pub fn cmdFmt(gpa: Allocator, arena: Allocator, args: []const []const u8) !void 
     // Mark any excluded files/directories as already seen,
     // so that they are skipped later during actual processing
     for (excluded_files.items) |file_path| {
-        var dir = fs.cwd().openDir(file_path, .{}) catch |err| switch (err) {
+        const stat = fs.cwd().statFile(file_path) catch |err| switch (err) {
             error.FileNotFound => continue,
+            // On Windows, statFile does not work for directories
+            error.IsDir => dir: {
+                var dir = try fs.cwd().openDir(file_path, .{});
+                defer dir.close();
+                break :dir try dir.stat();
+            },
             else => |e| return e,
         };
-        defer dir.close();
-
-        const stat = try dir.stat();
         try fmt.seen.put(stat.inode, {});
     }
 

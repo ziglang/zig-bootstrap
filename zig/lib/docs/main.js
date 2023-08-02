@@ -54,6 +54,7 @@ const NAV_MODES = {
   const domFnNoExamples = document.getElementById("fnNoExamples");
   const domDeclNoRef = document.getElementById("declNoRef");
   const domSearch = document.getElementById("search");
+  const domSearchHelpSummary = document.getElementById("searchHelpSummary");
   const domSectSearchResults = document.getElementById("sectSearchResults");
   const domSectSearchAllResultsLink = document.getElementById("sectSearchAllResultsLink");
   const domDocs = document.getElementById("docs");
@@ -1202,6 +1203,20 @@ Happy writing!
         yield Tok.r_paren;
         return;
       }
+      case "typeOf_peer": {
+        yield { src: "@TypeOf", tag: Tag.builtin };
+        yield { src: "(", tag: Tag.l_paren };
+        for (let i = 0; i < expr.typeOf_peer.length; i+=1) {
+          const elem = zigAnalysis.exprs[expr.typeOf_peer[i]];
+          yield* ex(elem, opts);
+          if (i != expr.typeOf_peer.length - 1) {
+            yield Tok.comma;
+            yield Tok.space;
+          }
+        }
+        yield { src: ")", tag: Tag.r_paren };
+        return;
+      } 
       case "sizeOf": {
         const sizeOf = zigAnalysis.exprs[expr.sizeOf];
         yield { src: "@sizeOf", tag: Tag.builtin };
@@ -3599,8 +3614,22 @@ Happy writing!
     }
   }
 
+  let domDotsToggleTimeout = null;
   function onSearchInput(ev) {
     curSearchIndex = -1;
+  
+    let replaced = domSearch.value.replaceAll(".", " ");
+    if (replaced != domSearch.value) {
+      domSearch.value = replaced;
+      domSearchHelpSummary.classList.remove("normal");
+      if (domDotsToggleTimeout != null) {
+        clearTimeout(domDotsToggleTimeout);
+        domDotsToggleTimeout = null;
+      } 
+      domDotsToggleTimeout = setTimeout(function () { 
+        domSearchHelpSummary.classList.add("normal"); 
+      }, 1000);
+    } 
     startAsyncSearch();
   }
 
@@ -3752,9 +3781,7 @@ Happy writing!
     clearAsyncSearch();
     let oldHash = location.hash;
     let parts = oldHash.split("?");
-    // TODO: make a tooltip that shows the user that we've replaced their dots
-    let box_text = domSearch.value.replaceAll(".", " ");
-    let newPart2 = box_text === "" ? "" : "?" + box_text;
+    let newPart2 = domSearch.value === "" ? "" : "?" + domSearch.value;
     location.replace(parts.length === 1 ? oldHash + newPart2 : parts[0] + newPart2);
   }
   function getSearchTerms() {

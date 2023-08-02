@@ -26,10 +26,13 @@ pub const Context = opaque {
     extern fn LLVMContextDispose(C: *Context) void;
 
     pub const createEnumAttribute = LLVMCreateEnumAttribute;
-    extern fn LLVMCreateEnumAttribute(*Context, KindID: c_uint, Val: u64) *Attribute;
+    extern fn LLVMCreateEnumAttribute(C: *Context, KindID: c_uint, Val: u64) *Attribute;
+
+    pub const createTypeAttribute = LLVMCreateTypeAttribute;
+    extern fn LLVMCreateTypeAttribute(C: *Context, KindID: c_uint, Type: *Type) *Attribute;
 
     pub const createStringAttribute = LLVMCreateStringAttribute;
-    extern fn LLVMCreateStringAttribute(*Context, Key: [*]const u8, Key_Len: c_uint, Value: [*]const u8, Value_Len: c_uint) *Attribute;
+    extern fn LLVMCreateStringAttribute(C: *Context, Key: [*]const u8, Key_Len: c_uint, Value: [*]const u8, Value_Len: c_uint) *Attribute;
 
     pub const pointerType = LLVMPointerTypeInContext;
     extern fn LLVMPointerTypeInContext(C: *Context, AddressSpace: c_uint) *Type;
@@ -309,11 +312,17 @@ pub const Value = opaque {
     pub const setAlignment = LLVMSetAlignment;
     extern fn LLVMSetAlignment(V: *Value, Bytes: c_uint) void;
 
-    pub const getFunctionCallConv = LLVMGetFunctionCallConv;
-    extern fn LLVMGetFunctionCallConv(Fn: *Value) CallConv;
-
     pub const setFunctionCallConv = LLVMSetFunctionCallConv;
     extern fn LLVMSetFunctionCallConv(Fn: *Value, CC: CallConv) void;
+
+    pub const setInstructionCallConv = LLVMSetInstructionCallConv;
+    extern fn LLVMSetInstructionCallConv(Instr: *Value, CC: CallConv) void;
+
+    pub const setTailCallKind = ZigLLVMSetTailCallKind;
+    extern fn ZigLLVMSetTailCallKind(CallInst: *Value, TailCallKind: TailCallKind) void;
+
+    pub const addCallSiteAttribute = LLVMAddCallSiteAttribute;
+    extern fn LLVMAddCallSiteAttribute(C: *Value, Idx: AttributeIndex, A: *Attribute) void;
 
     pub const fnSetSubprogram = ZigLLVMFnSetSubprogram;
     extern fn ZigLLVMFnSetSubprogram(f: *Value, subprogram: *DISubprogram) void;
@@ -425,6 +434,9 @@ pub const Type = opaque {
         Packed: Bool,
     ) void;
 
+    pub const isSized = LLVMTypeIsSized;
+    extern fn LLVMTypeIsSized(Ty: *Type) Bool;
+
     pub const constGEP = LLVMConstGEP2;
     extern fn LLVMConstGEP2(
         Ty: *Type,
@@ -531,7 +543,7 @@ pub const Module = opaque {
     pub const createDIBuilder = ZigLLVMCreateDIBuilder;
     extern fn ZigLLVMCreateDIBuilder(module: *Module, allow_unresolved: bool) *DIBuilder;
 
-    pub const setModuleInlineAsm2 = LLVMSetModuleInlineAsm2;
+    pub const setModuleInlineAsm = LLVMSetModuleInlineAsm2;
     extern fn LLVMSetModuleInlineAsm2(M: *Module, Asm: [*]const u8, Len: usize) void;
 
     pub const printModuleToFile = LLVMPrintModuleToFile;
@@ -642,7 +654,17 @@ pub const Builder = opaque {
         Name: [*:0]const u8,
     ) *Value;
 
-    pub const buildCall = ZigLLVMBuildCall;
+    pub const buildCall = LLVMBuildCall2;
+    extern fn LLVMBuildCall2(
+        *Builder,
+        *Type,
+        Fn: *Value,
+        Args: [*]const *Value,
+        NumArgs: c_uint,
+        Name: [*:0]const u8,
+    ) *Value;
+
+    pub const buildCallOld = ZigLLVMBuildCall;
     extern fn ZigLLVMBuildCall(
         *Builder,
         *Type,
@@ -1315,7 +1337,6 @@ pub extern fn LLVMInitializeSystemZAsmPrinter() void;
 pub extern fn LLVMInitializeWebAssemblyAsmPrinter() void;
 pub extern fn LLVMInitializeX86AsmPrinter() void;
 pub extern fn LLVMInitializeXCoreAsmPrinter() void;
-pub extern fn LLVMInitializeXtensaAsmPrinter() void;
 pub extern fn LLVMInitializeM68kAsmPrinter() void;
 pub extern fn LLVMInitializeVEAsmPrinter() void;
 pub extern fn LLVMInitializeARCAsmPrinter() void;
@@ -1603,6 +1624,13 @@ pub const CallAttr = enum(c_int) {
     NeverInline,
     AlwaysTail,
     AlwaysInline,
+};
+
+pub const TailCallKind = enum(c_uint) {
+    None,
+    Tail,
+    MustTail,
+    NoTail,
 };
 
 pub const DLLStorageClass = enum(c_uint) {

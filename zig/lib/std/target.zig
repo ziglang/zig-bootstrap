@@ -3,9 +3,6 @@ const builtin = @import("builtin");
 const mem = std.mem;
 const Version = std.SemanticVersion;
 
-/// TODO Nearly all the functions in this namespace would be
-/// better off if https://github.com/ziglang/zig/issues/425
-/// was solved.
 pub const Target = struct {
     cpu: Cpu,
     os: Os,
@@ -902,6 +899,10 @@ pub const Target = struct {
                 };
             }
 
+            pub fn isArmOrThumb(arch: Arch) bool {
+                return arch.isARM() or arch.isThumb();
+            }
+
             pub fn isWasm(arch: Arch) bool {
                 return switch (arch) {
                     .wasm32, .wasm64 => true,
@@ -1153,9 +1154,9 @@ pub const Target = struct {
                     .dxil,
                     .loongarch32,
                     .loongarch64,
+                    .arc,
                     => .Little,
 
-                    .arc,
                     .armeb,
                     .aarch64_be,
                     .bpfeb,
@@ -1910,9 +1911,10 @@ pub const Target = struct {
 
     pub fn stackAlignment(target: Target) u16 {
         return switch (target.cpu.arch) {
+            .m68k => 2,
             .amdgcn => 4,
             .x86 => switch (target.os.tag) {
-                .windows => 4,
+                .windows, .uefi => 4,
                 else => 16,
             },
             .arm,
@@ -1931,8 +1933,6 @@ pub const Target = struct {
             .bpfel,
             .mips64,
             .mips64el,
-            .powerpc64,
-            .powerpc64le,
             .riscv32,
             .riscv64,
             .sparc64,
@@ -1941,6 +1941,12 @@ pub const Target = struct {
             .wasm32,
             .wasm64,
             => 16,
+            .powerpc64,
+            .powerpc64le,
+            => switch (target.os.tag) {
+                else => 8,
+                .linux => 16,
+            },
             else => @divExact(target.ptrBitWidth(), 8),
         };
     }
@@ -1959,6 +1965,7 @@ pub const Target = struct {
             .thumbeb,
             => return if (target.os.tag.isDarwin() or target.os.tag == .windows) .signed else .unsigned,
             .powerpc, .powerpc64 => return if (target.os.tag.isDarwin()) .signed else .unsigned,
+            .powerpcle,
             .powerpc64le,
             .s390x,
             .xcore,
