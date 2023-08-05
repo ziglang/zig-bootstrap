@@ -102,8 +102,7 @@ cmake "%ROOTDIR%/zig" ^
   -DZIG_STATIC=ON ^
   -DZIG_STATIC_ZSTD=OFF ^
   -DZIG_TARGET_TRIPLE="%HOST_TARGET%" ^
-  -DZIG_TARGET_MCPU=baseline ^
-  -DZIG_NO_LIB=ON
+  -DZIG_TARGET_MCPU=baseline
 
 if %ERRORLEVEL% neq 0 exit /b %ERRORLEVEL%
 cmake --build . %JOBS_ARG% --target install
@@ -263,6 +262,7 @@ cd "%ROOTDIR%\zig"
 %ZIG% build ^
   --prefix "%ROOTDIR%%OUTDIR%\zig-%TARGET%-%MCPU%" ^
   --search-prefix "%ROOTDIR%%OUTDIR%\%TARGET%-%MCPU%" ^
+  -Dflat ^
   -Dstatic-llvm ^
   -Doptimize=ReleaseFast ^
   -Dstrip ^
