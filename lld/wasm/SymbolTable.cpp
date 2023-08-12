@@ -20,8 +20,7 @@ using namespace llvm;
 using namespace llvm::wasm;
 using namespace llvm::object;
 
-namespace lld {
-namespace wasm {
+namespace lld::wasm {
 SymbolTable *symtab;
 
 void SymbolTable::addFile(InputFile *file) {
@@ -558,6 +557,8 @@ Symbol *SymbolTable::addUndefinedFunction(StringRef name,
                           file);
       if (isCalledDirectly)
         existingUndefined->isCalledDirectly = true;
+      if (s->isWeak())
+        s->flags = flags;
     }
   }
 
@@ -584,6 +585,8 @@ Symbol *SymbolTable::addUndefinedData(StringRef name, uint32_t flags,
       lazy->fetch();
   } else if (s->isDefined()) {
     checkDataType(s, file);
+  } else if (s->isWeak()) {
+    s->flags = flags;
   }
   return s;
 }
@@ -609,6 +612,8 @@ Symbol *SymbolTable::addUndefinedGlobal(StringRef name,
     lazy->fetch();
   else if (s->isDefined())
     checkGlobalType(s, file, type);
+  else if (s->isWeak())
+    s->flags = flags;
   return s;
 }
 
@@ -633,6 +638,8 @@ Symbol *SymbolTable::addUndefinedTable(StringRef name,
     lazy->fetch();
   else if (s->isDefined())
     checkTableType(s, file, type);
+  else if (s->isWeak())
+    s->flags = flags;
   return s;
 }
 
@@ -657,6 +664,8 @@ Symbol *SymbolTable::addUndefinedTag(StringRef name,
     lazy->fetch();
   else if (s->isDefined())
     checkTagType(s, file, sig);
+  else if (s->isWeak())
+    s->flags = flags;
   return s;
 }
 
@@ -963,5 +972,4 @@ void SymbolTable::handleSymbolVariants() {
   }
 }
 
-} // namespace wasm
-} // namespace lld
+} // namespace wasm::lld

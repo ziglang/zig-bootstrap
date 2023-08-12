@@ -17,7 +17,6 @@
 #include "ResourceScriptStmt.h"
 #include "ResourceScriptToken.h"
 
-#include "llvm/ADT/Triple.h"
 #include "llvm/Config/llvm-config.h"
 #include "llvm/Object/WindowsResource.h"
 #include "llvm/Option/Arg.h"
@@ -26,8 +25,8 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/FileSystem.h"
 #include "llvm/Support/FileUtilities.h"
-#include "llvm/Support/Host.h"
 #include "llvm/Support/InitLLVM.h"
+#include "llvm/Support/LLVMDriver.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/PrettyStackTrace.h"
@@ -36,6 +35,8 @@
 #include "llvm/Support/Signals.h"
 #include "llvm/Support/StringSaver.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/Host.h"
+#include "llvm/TargetParser/Triple.h"
 
 #include <algorithm>
 #include <system_error>
@@ -135,7 +136,13 @@ std::string createTempFile(const Twine &Prefix, StringRef Suffix) {
 }
 
 ErrorOr<std::string> findClang(const char *Argv0, StringRef Triple) {
-  StringRef Parent = llvm::sys::path::parent_path(Argv0);
+  // This just needs to be some symbol in the binary.
+  void *P = (void*) (intptr_t) findClang;
+  std::string MainExecPath = llvm::sys::fs::getMainExecutable(Argv0, P);
+  if (MainExecPath.empty())
+    MainExecPath = Argv0;
+
+  StringRef Parent = llvm::sys::path::parent_path(MainExecPath);
   ErrorOr<std::string> Path = std::error_code();
   std::string TargetClang = (Triple + "-clang").str();
   std::string VersionedClang = ("clang-" + Twine(LLVM_VERSION_MAJOR)).str();
@@ -227,7 +234,7 @@ struct RcOptions {
   unsigned LangId = (/*PrimaryLangId*/ 0x09) | (/*SubLangId*/ 0x01 << 10);
 };
 
-bool preprocess(StringRef Src, StringRef Dst, const RcOptions &Opts,
+void preprocess(StringRef Src, StringRef Dst, const RcOptions &Opts,
                 const char *Argv0) {
   std::string Clang;
   if (Opts.PrintCmdAndExit || !Opts.PreprocessCmd.empty()) {
@@ -237,15 +244,12 @@ bool preprocess(StringRef Src, StringRef Dst, const RcOptions &Opts,
     if (ClangOrErr) {
       Clang = *ClangOrErr;
     } else {
-      errs() << "llvm-rc: Unable to find clang, skipping preprocessing."
+      errs() << "llvm-rc: Unable to find clang for preprocessing."
              << "\n";
       StringRef OptionName =
           Opts.IsWindres ? "--no-preprocess" : "-no-preprocess";
-      errs()
-          << "Pass " << OptionName
-          << " to disable preprocessing. This will be an error in the future."
-          << "\n";
-      return false;
+      errs() << "Pass " << OptionName << " to disable preprocessing.\n";
+      fatalError("llvm-rc: Unable to preprocess.");
     }
   }
 
@@ -277,7 +281,6 @@ bool preprocess(StringRef Src, StringRef Dst, const RcOptions &Opts,
   if (Res) {
     fatalError("llvm-rc: Preprocessing failed.");
   }
-  return true;
 }
 
 static std::pair<bool, std::string> isWindres(llvm::StringRef Argv0) {
@@ -324,6 +327,9 @@ std::string unescape(StringRef S) {
         Out.push_back(S[++I]);
       else
         fatalError("Unterminated escape");
+      continue;
+    } else if (S[I] == '"') {
+      // This eats an individual unescaped quote, like a shell would do.
       continue;
     }
     Out.push_back(S[I]);
@@ -521,7 +527,8 @@ RcOptions parseRcOptions(ArrayRef<const char *> ArgsArr,
 
   // The tool prints nothing when invoked with no command-line arguments.
   if (InputArgs.hasArg(OPT_help)) {
-    T.printHelp(outs(), "rc [options] file...", "Resource Converter", false);
+    T.printHelp(outs(), "llvm-rc [options] file...", "LLVM Resource Converter",
+                false);
     exit(0);
   }
 
@@ -611,8 +618,8 @@ void doRc(std::string Src, std::string Dest, RcOptions &Opts,
   if (Opts.Preprocess) {
     std::string OutFile = createTempFile("preproc", "rc");
     TempPreprocFile.setFile(OutFile);
-    if (preprocess(Src, OutFile, Opts, Argv0))
-      PreprocessedFile = OutFile;
+    preprocess(Src, OutFile, Opts, Argv0);
+    PreprocessedFile = OutFile;
   }
 
   // Read and tokenize the input file.
@@ -743,7 +750,7 @@ void doCvtres(std::string Src, std::string Dest, std::string TargetTriple) {
 
 } // anonymous namespace
 
-int llvm_rc_main(int Argc, char **Argv) {
+int llvm_rc_main(int Argc, char **Argv, const llvm::ToolContext &) {
   InitLLVM X(Argc, Argv);
   ExitOnErr.setBanner("llvm-rc: ");
 

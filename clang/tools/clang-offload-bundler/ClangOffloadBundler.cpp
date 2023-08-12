@@ -21,7 +21,6 @@
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/StringMap.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/ADT/Triple.h"
 #include "llvm/Object/Archive.h"
 #include "llvm/Object/ArchiveWriter.h"
 #include "llvm/Object/Binary.h"
@@ -33,7 +32,6 @@
 #include "llvm/Support/Error.h"
 #include "llvm/Support/ErrorOr.h"
 #include "llvm/Support/FileSystem.h"
-#include "llvm/Support/Host.h"
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/Program.h"
@@ -41,6 +39,8 @@
 #include "llvm/Support/StringSaver.h"
 #include "llvm/Support/WithColor.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/TargetParser/Host.h"
+#include "llvm/TargetParser/Triple.h"
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
@@ -313,6 +313,8 @@ int main(int argc, const char **argv) {
   llvm::DenseSet<StringRef> ParsedTargets;
   // Map {offload-kind}-{triple} to target IDs.
   std::map<std::string, std::set<StringRef>> TargetIDs;
+  // Standardize target names to include env field
+  std::vector<std::string> StandardizedTargetNames;
   for (StringRef Target : TargetNames) {
     if (ParsedTargets.contains(Target)) {
       reportError(createStringError(errc::invalid_argument,
@@ -323,6 +325,8 @@ int main(int argc, const char **argv) {
     auto OffloadInfo = OffloadTargetInfo(Target, BundlerConfig);
     bool KindIsValid = OffloadInfo.isOffloadKindValid();
     bool TripleIsValid = OffloadInfo.isTripleValid();
+
+    StandardizedTargetNames.push_back(OffloadInfo.str());
 
     if (!KindIsValid || !TripleIsValid) {
       SmallVector<char, 128u> Buf;
@@ -348,6 +352,9 @@ int main(int argc, const char **argv) {
 
     ++Index;
   }
+
+  BundlerConfig.TargetNames = StandardizedTargetNames;
+
   for (const auto &TargetID : TargetIDs) {
     if (auto ConflictingTID =
             clang::getConflictTargetIDCombination(TargetID.second)) {

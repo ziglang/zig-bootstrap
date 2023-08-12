@@ -27,17 +27,19 @@ add_llvm_target(RISCVCodeGen
   RISCVFrameLowering.cpp
   RISCVGatherScatterLowering.cpp
   RISCVInsertVSETVLI.cpp
+  RISCVInsertReadWriteCSR.cpp
   RISCVInstrInfo.cpp
   RISCVISelDAGToDAG.cpp
   RISCVISelLowering.cpp
   RISCVMachineFunctionInfo.cpp
   RISCVMacroFusion.cpp
-  RISCVMCInstLower.cpp
   RISCVMergeBaseOffset.cpp
+  RISCVOptWInstrs.cpp
   RISCVRedundantCopyElimination.cpp
+  RISCVMoveMerger.cpp
+  RISCVPushPopOptimizer.cpp
   RISCVRegisterInfo.cpp
-  RISCVSExtWRemoval.cpp
-  RISCVStripWSuffix.cpp
+  RISCVRVVInitUndef.cpp
   RISCVSubtarget.cpp
   RISCVTargetMachine.cpp
   RISCVTargetObjectFile.cpp
@@ -50,9 +52,11 @@ add_llvm_target(RISCVCodeGen
   LINK_COMPONENTS
   Analysis
   AsmPrinter
-  Core
-  IPO
   CodeGen
+  CodeGenTypes
+  Core
+  GlobalISel
+  IPO
   MC
   RISCVDesc
   RISCVInfo
@@ -61,7 +65,6 @@ add_llvm_target(RISCVCodeGen
   Target
   TargetParser
   TransformUtils
-  GlobalISel
 
   ADD_TO_COMPONENT
   RISCV
