@@ -35,7 +35,7 @@ project(zig C CXX)
 set(CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake ${CMAKE_MODULE_PATH})
 
 set(ZIG_VERSION_MAJOR 0)
-set(ZIG_VERSION_MINOR 11)
+set(ZIG_VERSION_MINOR 12)
 set(ZIG_VERSION_PATCH 0)
 set(ZIG_VERSION "" CACHE STRING "Override Zig version string. Default is to find out with git.")
 
@@ -124,9 +124,9 @@ endif()
 
 set(ZIG_PIE off CACHE BOOL "produce a position independent zig executable")
 
-find_package(llvm 16)
-find_package(clang 16)
-find_package(lld 16)
+find_package(llvm 17)
+find_package(clang 17)
+find_package(lld 17)
 
 if(ZIG_STATIC_ZLIB)
     if (MSVC)
@@ -714,7 +714,7 @@ endif()
 
 if(MSVC)
   set(ZIG_HOST_TARGET_ABI "-msvc")
-elif(MINGW)
+elseif(MINGW)
   set(ZIG_HOST_TARGET_ABI "-gnu")
 else()
   set(ZIG_HOST_TARGET_ABI "")

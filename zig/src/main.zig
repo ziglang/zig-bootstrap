@@ -765,7 +765,7 @@ fn buildOutputType(
     arg_mode: ArgMode,
 ) !void {
     var color: Color = .auto;
-    var optimize_mode: std.builtin.Mode = .Debug;
+    var optimize_mode: std.builtin.OptimizeMode = .Debug;
     var provided_name: ?[]const u8 = null;
     var link_mode: ?std.builtin.LinkMode = null;
     var dll_export_fns: ?bool = null;
@@ -1111,7 +1111,7 @@ fn buildOutputType(
                     } else if (mem.eql(u8, arg, "-headerpad")) {
                         const next_arg = args_iter.nextOrFatal();
                         headerpad_size = std.fmt.parseUnsigned(u32, eatIntPrefix(next_arg, 16), 16) catch |err| {
-                            fatal("unable to parse headerpat size '{s}': {s}", .{ next_arg, @errorName(err) });
+                            fatal("unable to parse headerpad size '{s}': {s}", .{ next_arg, @errorName(err) });
                         };
                     } else if (mem.eql(u8, arg, "-headerpad_max_install_names")) {
                         headerpad_max_install_names = true;
@@ -1595,7 +1595,7 @@ fn buildOutputType(
                 }
             }
             if (optimize_mode_string) |s| {
-                optimize_mode = std.meta.stringToEnum(std.builtin.Mode, s) orelse
+                optimize_mode = std.meta.stringToEnum(std.builtin.OptimizeMode, s) orelse
                     fatal("unrecognized optimization mode: '{s}'", .{s});
             }
         },
