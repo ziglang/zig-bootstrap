@@ -1873,12 +1873,13 @@ pub const AddrSpace = enum(u24) {
 
     // See llvm/lib/Target/AVR/AVR.h
     pub const avr = struct {
-        pub const flash: AddrSpace = @enumFromInt(1);
-        pub const flash1: AddrSpace = @enumFromInt(2);
-        pub const flash2: AddrSpace = @enumFromInt(3);
-        pub const flash3: AddrSpace = @enumFromInt(4);
-        pub const flash4: AddrSpace = @enumFromInt(5);
-        pub const flash5: AddrSpace = @enumFromInt(6);
+        pub const data: AddrSpace = @enumFromInt(0);
+        pub const program: AddrSpace = @enumFromInt(1);
+        pub const program1: AddrSpace = @enumFromInt(2);
+        pub const program2: AddrSpace = @enumFromInt(3);
+        pub const program3: AddrSpace = @enumFromInt(4);
+        pub const program4: AddrSpace = @enumFromInt(5);
+        pub const program5: AddrSpace = @enumFromInt(6);
     };
 
     // See llvm/lib/Target/NVPTX/NVPTX.h
@@ -1901,6 +1902,7 @@ pub const AddrSpace = enum(u24) {
         pub const private: AddrSpace = @enumFromInt(5);
         pub const constant_32bit: AddrSpace = @enumFromInt(6);
         pub const buffer_fat_pointer: AddrSpace = @enumFromInt(7);
+        pub const buffer_resource: AddrSpace = @enumFromInt(8);
         pub const param_d: AddrSpace = @enumFromInt(6);
         pub const param_i: AddrSpace = @enumFromInt(7);
         pub const constant_buffer_0: AddrSpace = @enumFromInt(8);
@@ -1921,7 +1923,7 @@ pub const AddrSpace = enum(u24) {
         pub const constant_buffer_15: AddrSpace = @enumFromInt(23);
     };
 
-    // See llvm/lib/Target/WebAssembly/Utils/WebAssemblyTypeUtilities.h
+    // See llvm/include/llvm/CodeGen/WasmAddressSpaces.h
     pub const wasm = struct {
         pub const variable: AddrSpace = @enumFromInt(1);
         pub const externref: AddrSpace = @enumFromInt(10);
@@ -10061,8 +10063,8 @@ fn vectorTypeAssumeCapacity(
             .data = self.addTypeExtraAssumeCapacity(data),
         });
         if (self.useLibLlvm()) self.llvm.types.appendAssumeCapacity(switch (kind) {
-            .normal => llvm.Type.vectorType,
-            .scalable => llvm.Type.scalableVectorType,
+            .normal => &llvm.Type.vectorType,
+            .scalable => &llvm.Type.scalableVectorType,
         }(child.toLlvm(self), @intCast(len)));
     }
     return @enumFromInt(gop.index);
@@ -10677,10 +10679,10 @@ fn ppc_fp128ConstAssumeCapacity(self: *Builder, val: [2]f64) Constant {
             }),
         });
         if (self.useLibLlvm()) {
-            const llvm_limbs: *const [2]u64 = @ptrCast(&val);
+            const llvm_limbs: [2]u64 = @bitCast(val);
             self.llvm.constants.appendAssumeCapacity(
                 Type.i128.toLlvm(self)
-                    .constIntOfArbitraryPrecision(@intCast(llvm_limbs.len), llvm_limbs)
+                    .constIntOfArbitraryPrecision(@intCast(llvm_limbs.len), &llvm_limbs)
                     .constBitCast(Type.ppc_fp128.toLlvm(self)),
             );
         }
@@ -11243,8 +11245,8 @@ fn gepConstAssumeCapacity(
             for (llvm_indices, indices) |*llvm_index, index| llvm_index.* = index.toLlvm(self);
 
             self.llvm.constants.appendAssumeCapacity(switch (kind) {
-                .normal => llvm.Type.constGEP,
-                .inbounds => llvm.Type.constInBoundsGEP,
+                .normal => &llvm.Type.constGEP,
+                .inbounds => &llvm.Type.constInBoundsGEP,
             }(ty.toLlvm(self), base.toLlvm(self), llvm_indices.ptr, @intCast(llvm_indices.len)));
         }
     }

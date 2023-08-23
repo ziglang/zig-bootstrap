@@ -276,7 +276,6 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/math/log.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/math/log10.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/math/log2.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/math/nan.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/math/signbit.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/math/sqrt.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/mem.zig"
@@ -516,6 +515,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/zig/tokenizer.zig"
     "${CMAKE_SOURCE_DIR}/src/Air.zig"
     "${CMAKE_SOURCE_DIR}/src/AstGen.zig"
+    "${CMAKE_SOURCE_DIR}/src/AstRlAnnotate.zig"
     "${CMAKE_SOURCE_DIR}/src/Compilation.zig"
     "${CMAKE_SOURCE_DIR}/src/Liveness.zig"
     "${CMAKE_SOURCE_DIR}/src/Module.zig"
@@ -690,7 +690,9 @@ target_link_libraries(zigcpp LINK_PUBLIC
 )
 
 string(TOLOWER "${CMAKE_HOST_SYSTEM_PROCESSOR}" ZIG_HOST_TARGET_ARCH)
-if(ZIG_HOST_TARGET_ARCH STREQUAL "amd64")
+if(ZIG_HOST_TARGET_ARCH MATCHES "^i[3-9]86$")
+  set(ZIG_HOST_TARGET_ARCH "x86")
+elseif(ZIG_HOST_TARGET_ARCH STREQUAL "amd64")
   set(ZIG_HOST_TARGET_ARCH "x86_64")
 elseif(ZIG_HOST_TARGET_ARCH STREQUAL "arm64")
   set(ZIG_HOST_TARGET_ARCH "aarch64")
@@ -699,14 +701,16 @@ elseif(ZIG_HOST_TARGET_ARCH STREQUAL "armv7l")
 elseif(ZIG_HOST_TARGET_ARCH STREQUAL "armv7b")
   set(ZIG_HOST_TARGET_ARCH "armeb")
 endif()
-
-if(ZIG_HOST_TARGET_ARCH MATCHES "^arm(eb)?$")
+string(REGEX REPLACE "^((arm|thumb)(hf?)?)el$" "\\1" ZIG_HOST_TARGET_ARCH "${ZIG_HOST_TARGET_ARCH}")
+if(ZIG_HOST_TARGET_ARCH MATCHES "^arm(hf?)?(eb)?$")
   include(CheckSymbolExists)
   check_symbol_exists(__thumb__ "" ZIG_HOST_TARGET_DEFAULTS_TO_THUMB)
   if(ZIG_HOST_TARGET_DEFAULTS_TO_THUMB)
     string(REGEX REPLACE "^arm" "thumb" ZIG_HOST_TARGET_ARCH "${ZIG_HOST_TARGET_ARCH}")
   endif()
 endif()
+string(REGEX REPLACE "^ppc((64)?(le)?)$" "powerpc\\1" ZIG_HOST_TARGET_ARCH "${ZIG_HOST_TARGET_ARCH}")
+
 string(TOLOWER "${CMAKE_HOST_SYSTEM_NAME}" ZIG_HOST_TARGET_OS)
 if(ZIG_HOST_TARGET_OS STREQUAL "darwin")
   set(ZIG_HOST_TARGET_OS "macos")
@@ -716,6 +720,9 @@ if(MSVC)
   set(ZIG_HOST_TARGET_ABI "-msvc")
 elseif(MINGW)
   set(ZIG_HOST_TARGET_ABI "-gnu")
+elseif(ZIG_HOST_TARGET_ARCH MATCHES "^(arm|thumb)hf?(eb)?$")
+  string(REGEX REPLACE "^(arm|thumb)hf?((eb)?)$" "\\1\\2" ZIG_HOST_TARGET_ARCH "${ZIG_HOST_TARGET_ARCH}")
+  set(ZIG_HOST_TARGET_ABI "-eabihf")
 else()
   set(ZIG_HOST_TARGET_ABI "")
 endif()
