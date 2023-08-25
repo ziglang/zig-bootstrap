@@ -37,6 +37,15 @@ For other versions, check the git tags of this repository.
 
 ## Build Instructions
 
+TL;DR:
+
+```
+CMAKE_GENERATOR=Ninja ./build native-linux-gnu baseline
+./out/zig-x86_64-linux-gnu-baseline/zig version
+```
+
+### UNIX Build Instructions
+
 ```
 ./build <arch>-<os>-<abi> <mcpu>
 ```
@@ -61,7 +70,7 @@ significantly affect how long it takes to build:
 
 When it succeeds, output can be found in `out/zig-<triple>-<cpu>/`.
 
-## Windows Build Instructions
+### Windows Build Instructions
 
 Bootstrapping on Windows with MSVC is also possible via `build.bat`, which
 takes the same arguments as `build` above.
