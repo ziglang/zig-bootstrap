@@ -25,9 +25,6 @@ const fs = std.fs;
 const dl = @import("dynamic_library.zig");
 const MAX_PATH_BYTES = std.fs.MAX_PATH_BYTES;
 const is_windows = builtin.os.tag == .windows;
-const Allocator = std.mem.Allocator;
-const Preopen = std.fs.wasi.Preopen;
-const PreopenList = std.fs.wasi.PreopenList;
 
 pub const darwin = std.c;
 pub const dragonfly = std.c;
@@ -1467,7 +1464,7 @@ pub const OpenError = error{
 /// See also `openZ`.
 pub fn open(file_path: []const u8, flags: u32, perm: mode_t) OpenError!fd_t {
     if (builtin.os.tag == .windows) {
-        const file_path_w = try windows.sliceToPrefixedFileW(file_path);
+        const file_path_w = try windows.sliceToPrefixedFileW(null, file_path);
         return openW(file_path_w.span(), flags, perm);
     } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
         return openat(wasi.AT.FDCWD, file_path, flags, perm);
@@ -1480,7 +1477,7 @@ pub fn open(file_path: []const u8, flags: u32, perm: mode_t) OpenError!fd_t {
 /// See also `open`.
 pub fn openZ(file_path: [*:0]const u8, flags: u32, perm: mode_t) OpenError!fd_t {
     if (builtin.os.tag == .windows) {
-        const file_path_w = try windows.cStrToPrefixedFileW(file_path);
+        const file_path_w = try windows.cStrToPrefixedFileW(null, file_path);
         return openW(file_path_w.span(), flags, perm);
     } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
         return open(mem.sliceTo(file_path, 0), flags, perm);
@@ -1571,7 +1568,7 @@ pub fn openW(file_path_w: []const u16, flags: u32, perm: mode_t) OpenError!fd_t 
 /// See also `openatZ`.
 pub fn openat(dir_fd: fd_t, file_path: []const u8, flags: u32, mode: mode_t) OpenError!fd_t {
     if (builtin.os.tag == .windows) {
-        const file_path_w = try windows.sliceToPrefixedFileW(file_path);
+        const file_path_w = try windows.sliceToPrefixedFileW(dir_fd, file_path);
         return openatW(dir_fd, file_path_w.span(), flags, mode);
     } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
         // `mode` is ignored on WASI, which does not support unix-style file permissions
@@ -1693,7 +1690,7 @@ pub fn openatWasi(
 /// See also `openat`.
 pub fn openatZ(dir_fd: fd_t, file_path: [*:0]const u8, flags: u32, mode: mode_t) OpenError!fd_t {
     if (builtin.os.tag == .windows) {
-        const file_path_w = try windows.cStrToPrefixedFileW(file_path);
+        const file_path_w = try windows.cStrToPrefixedFileW(dir_fd, file_path);
         return openatW(dir_fd, file_path_w.span(), flags, mode);
     } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
         return openat(dir_fd, mem.sliceTo(file_path, 0), flags, mode);
@@ -2308,7 +2305,7 @@ pub fn unlink(file_path: []const u8) UnlinkError!void {
             else => |e| return e,
         };
     } else if (builtin.os.tag == .windows) {
-        const file_path_w = try windows.sliceToPrefixedFileW(file_path);
+        const file_path_w = try windows.sliceToPrefixedFileW(null, file_path);
         return unlinkW(file_path_w.span());
     } else {
         const file_path_c = try toPosixPath(file_path);
@@ -2319,7 +2316,7 @@ pub fn unlink(file_path: []const u8) UnlinkError!void {
 /// Same as `unlink` except the parameter is a null terminated UTF8-encoded string.
 pub fn unlinkZ(file_path: [*:0]const u8) UnlinkError!void {
     if (builtin.os.tag == .windows) {
-        const file_path_w = try windows.cStrToPrefixedFileW(file_path);
+        const file_path_w = try windows.cStrToPrefixedFileW(null, file_path);
         return unlinkW(file_path_w.span());
     } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
         return unlink(mem.sliceTo(file_path, 0));
@@ -2357,7 +2354,7 @@ pub const UnlinkatError = UnlinkError || error{
 /// Asserts that the path parameter has no null bytes.
 pub fn unlinkat(dirfd: fd_t, file_path: []const u8, flags: u32) UnlinkatError!void {
     if (builtin.os.tag == .windows) {
-        const file_path_w = try windows.sliceToPrefixedFileW(file_path);
+        const file_path_w = try windows.sliceToPrefixedFileW(dirfd, file_path);
         return unlinkatW(dirfd, file_path_w.span(), flags);
     } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
         return unlinkatWasi(dirfd, file_path, flags);
@@ -2402,7 +2399,7 @@ pub fn unlinkatWasi(dirfd: fd_t, file_path: []const u8, flags: u32) UnlinkatErro
 /// Same as `unlinkat` but `file_path` is a null-terminated string.
 pub fn unlinkatZ(dirfd: fd_t, file_path_c: [*:0]const u8, flags: u32) UnlinkatError!void {
     if (builtin.os.tag == .windows) {
-        const file_path_w = try windows.cStrToPrefixedFileW(file_path_c);
+        const file_path_w = try windows.cStrToPrefixedFileW(dirfd, file_path_c);
         return unlinkatW(dirfd, file_path_w.span(), flags);
     } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
         return unlinkat(dirfd, mem.sliceTo(file_path_c, 0), flags);
@@ -2471,8 +2468,8 @@ pub fn rename(old_path: []const u8, new_path: []const u8) RenameError!void {
     if (builtin.os.tag == .wasi and !builtin.link_libc) {
         return renameat(wasi.AT.FDCWD, old_path, wasi.AT.FDCWD, new_path);
     } else if (builtin.os.tag == .windows) {
-        const old_path_w = try windows.sliceToPrefixedFileW(old_path);
-        const new_path_w = try windows.sliceToPrefixedFileW(new_path);
+        const old_path_w = try windows.sliceToPrefixedFileW(null, old_path);
+        const new_path_w = try windows.sliceToPrefixedFileW(null, new_path);
         return renameW(old_path_w.span().ptr, new_path_w.span().ptr);
     } else {
         const old_path_c = try toPosixPath(old_path);
@@ -2484,8 +2481,8 @@ pub fn rename(old_path: []const u8, new_path: []const u8) RenameError!void {
 /// Same as `rename` except the parameters are null-terminated byte arrays.
 pub fn renameZ(old_path: [*:0]const u8, new_path: [*:0]const u8) RenameError!void {
     if (builtin.os.tag == .windows) {
-        const old_path_w = try windows.cStrToPrefixedFileW(old_path);
-        const new_path_w = try windows.cStrToPrefixedFileW(new_path);
+        const old_path_w = try windows.cStrToPrefixedFileW(null, old_path);
+        const new_path_w = try windows.cStrToPrefixedFileW(null, new_path);
         return renameW(old_path_w.span().ptr, new_path_w.span().ptr);
     } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
         return rename(mem.sliceTo(old_path, 0), mem.sliceTo(new_path, 0));
@@ -2529,8 +2526,8 @@ pub fn renameat(
     new_path: []const u8,
 ) RenameError!void {
     if (builtin.os.tag == .windows) {
-        const old_path_w = try windows.sliceToPrefixedFileW(old_path);
-        const new_path_w = try windows.sliceToPrefixedFileW(new_path);
+        const old_path_w = try windows.sliceToPrefixedFileW(old_dir_fd, old_path);
+        const new_path_w = try windows.sliceToPrefixedFileW(new_dir_fd, new_path);
         return renameatW(old_dir_fd, old_path_w.span(), new_dir_fd, new_path_w.span(), windows.TRUE);
     } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
         const old: RelativePathWasi = .{ .dir_fd = old_dir_fd, .relative_path = old_path };
@@ -2579,8 +2576,8 @@ pub fn renameatZ(
     new_path: [*:0]const u8,
 ) RenameError!void {
     if (builtin.os.tag == .windows) {
-        const old_path_w = try windows.cStrToPrefixedFileW(old_path);
-        const new_path_w = try windows.cStrToPrefixedFileW(new_path);
+        const old_path_w = try windows.cStrToPrefixedFileW(old_dir_fd, old_path);
+        const new_path_w = try windows.cStrToPrefixedFileW(new_dir_fd, new_path);
         return renameatW(old_dir_fd, old_path_w.span(), new_dir_fd, new_path_w.span(), windows.TRUE);
     } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
         return renameat(old_dir_fd, mem.sliceTo(old_path, 0), new_dir_fd, mem.sliceTo(new_path, 0));
@@ -2632,33 +2629,74 @@ pub fn renameatW(
     };
     defer windows.CloseHandle(src_fd);
 
-    const struct_buf_len = @sizeOf(windows.FILE_RENAME_INFORMATION) + (MAX_PATH_BYTES - 1);
-    var rename_info_buf: [struct_buf_len]u8 align(@alignOf(windows.FILE_RENAME_INFORMATION)) = undefined;
-    const struct_len = @sizeOf(windows.FILE_RENAME_INFORMATION) - 1 + new_path_w.len * 2;
-    if (struct_len > struct_buf_len) return error.NameTooLong;
+    var need_fallback = true;
+    var rc: windows.NTSTATUS = undefined;
+    if (comptime builtin.target.os.version_range.windows.min.isAtLeast(.win10_rs1)) {
+        const struct_buf_len = @sizeOf(windows.FILE_RENAME_INFORMATION_EX) + (MAX_PATH_BYTES - 1);
+        var rename_info_buf: [struct_buf_len]u8 align(@alignOf(windows.FILE_RENAME_INFORMATION_EX)) = undefined;
+        const struct_len = @sizeOf(windows.FILE_RENAME_INFORMATION_EX) - 1 + new_path_w.len * 2;
+        if (struct_len > struct_buf_len) return error.NameTooLong;
 
-    const rename_info = @as(*windows.FILE_RENAME_INFORMATION, @ptrCast(&rename_info_buf));
+        const rename_info = @as(*windows.FILE_RENAME_INFORMATION_EX, @ptrCast(&rename_info_buf));
+        var io_status_block: windows.IO_STATUS_BLOCK = undefined;
 
-    rename_info.* = .{
-        .ReplaceIfExists = ReplaceIfExists,
-        .RootDirectory = if (std.fs.path.isAbsoluteWindowsWTF16(new_path_w)) null else new_dir_fd,
-        .FileNameLength = @as(u32, @intCast(new_path_w.len * 2)), // already checked error.NameTooLong
-        .FileName = undefined,
-    };
-    @memcpy(@as([*]u16, &rename_info.FileName)[0..new_path_w.len], new_path_w);
+        var flags: windows.ULONG = windows.FILE_RENAME_POSIX_SEMANTICS | windows.FILE_RENAME_IGNORE_READONLY_ATTRIBUTE;
+        if (ReplaceIfExists == windows.TRUE) flags |= windows.FILE_RENAME_REPLACE_IF_EXISTS;
+        rename_info.* = .{
+            .Flags = flags,
+            .RootDirectory = if (std.fs.path.isAbsoluteWindowsWTF16(new_path_w)) null else new_dir_fd,
+            .FileNameLength = @intCast(new_path_w.len * 2), // already checked error.NameTooLong
+            .FileName = undefined,
+        };
+        @memcpy(@as([*]u16, &rename_info.FileName)[0..new_path_w.len], new_path_w);
+        rc = windows.ntdll.NtSetInformationFile(
+            src_fd,
+            &io_status_block,
+            rename_info,
+            @intCast(struct_len), // already checked for error.NameTooLong
+            .FileRenameInformationEx,
+        );
+        switch (rc) {
+            .SUCCESS => return,
+            // INVALID_PARAMETER here means that the filesystem does not support FileRenameInformationEx
+            .INVALID_PARAMETER => {},
+            .DIRECTORY_NOT_EMPTY => return error.PathAlreadyExists,
+            .FILE_IS_A_DIRECTORY => return error.IsDir,
+            .NOT_A_DIRECTORY => return error.NotDir,
+            // For all other statuses, fall down to the switch below to handle them.
+            else => need_fallback = false,
+        }
+    }
 
-    var io_status_block: windows.IO_STATUS_BLOCK = undefined;
+    if (need_fallback) {
+        const struct_buf_len = @sizeOf(windows.FILE_RENAME_INFORMATION) + (MAX_PATH_BYTES - 1);
+        var rename_info_buf: [struct_buf_len]u8 align(@alignOf(windows.FILE_RENAME_INFORMATION)) = undefined;
+        const struct_len = @sizeOf(windows.FILE_RENAME_INFORMATION) - 1 + new_path_w.len * 2;
+        if (struct_len > struct_buf_len) return error.NameTooLong;
 
-    const rc = windows.ntdll.NtSetInformationFile(
-        src_fd,
-        &io_status_block,
-        rename_info,
-        @as(u32, @intCast(struct_len)), // already checked for error.NameTooLong
-        .FileRenameInformation,
-    );
+        const rename_info = @as(*windows.FILE_RENAME_INFORMATION, @ptrCast(&rename_info_buf));
+        var io_status_block: windows.IO_STATUS_BLOCK = undefined;
+
+        rename_info.* = .{
+            .Flags = ReplaceIfExists,
+            .RootDirectory = if (std.fs.path.isAbsoluteWindowsWTF16(new_path_w)) null else new_dir_fd,
+            .FileNameLength = @intCast(new_path_w.len * 2), // already checked error.NameTooLong
+            .FileName = undefined,
+        };
+        @memcpy(@as([*]u16, &rename_info.FileName)[0..new_path_w.len], new_path_w);
+
+        rc =
+            windows.ntdll.NtSetInformationFile(
+            src_fd,
+            &io_status_block,
+            rename_info,
+            @intCast(struct_len), // already checked for error.NameTooLong
+            .FileRenameInformation,
+        );
+    }
 
     switch (rc) {
-        .SUCCESS => return,
+        .SUCCESS => {},
         .INVALID_HANDLE => unreachable,
         .INVALID_PARAMETER => unreachable,
         .OBJECT_PATH_SYNTAX_BAD => unreachable,
@@ -2673,7 +2711,7 @@ pub fn renameatW(
 
 pub fn mkdirat(dir_fd: fd_t, sub_dir_path: []const u8, mode: u32) MakeDirError!void {
     if (builtin.os.tag == .windows) {
-        const sub_dir_path_w = try windows.sliceToPrefixedFileW(sub_dir_path);
+        const sub_dir_path_w = try windows.sliceToPrefixedFileW(dir_fd, sub_dir_path);
         return mkdiratW(dir_fd, sub_dir_path_w.span(), mode);
     } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
         return mkdiratWasi(dir_fd, sub_dir_path, mode);
@@ -2708,7 +2746,7 @@ pub fn mkdiratWasi(dir_fd: fd_t, sub_dir_path: []const u8, mode: u32) MakeDirErr
 
 pub fn mkdiratZ(dir_fd: fd_t, sub_dir_path: [*:0]const u8, mode: u32) MakeDirError!void {
     if (builtin.os.tag == .windows) {
-        const sub_dir_path_w = try windows.cStrToPrefixedFileW(sub_dir_path);
+        const sub_dir_path_w = try windows.cStrToPrefixedFileW(dir_fd, sub_dir_path);
         return mkdiratW(dir_fd, sub_dir_path_w.span().ptr, mode);
     } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
         return mkdirat(dir_fd, mem.sliceTo(sub_dir_path, 0), mode);
@@ -2779,7 +2817,7 @@ pub fn mkdir(dir_path: []const u8, mode: u32) MakeDirError!void {
     if (builtin.os.tag == .wasi and !builtin.link_libc) {
         return mkdirat(wasi.AT.FDCWD, dir_path, mode);
     } else if (builtin.os.tag == .windows) {
-        const dir_path_w = try windows.sliceToPrefixedFileW(dir_path);
+        const dir_path_w = try windows.sliceToPrefixedFileW(null, dir_path);
         return mkdirW(dir_path_w.span(), mode);
     } else {
         const dir_path_c = try toPosixPath(dir_path);
@@ -2790,7 +2828,7 @@ pub fn mkdir(dir_path: []const u8, mode: u32) MakeDirError!void {
 /// Same as `mkdir` but the parameter is a null-terminated UTF8-encoded string.
 pub fn mkdirZ(dir_path: [*:0]const u8, mode: u32) MakeDirError!void {
     if (builtin.os.tag == .windows) {
-        const dir_path_w = try windows.cStrToPrefixedFileW(dir_path);
+        const dir_path_w = try windows.cStrToPrefixedFileW(null, dir_path);
         return mkdirW(dir_path_w.span(), mode);
     } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
         return mkdir(mem.sliceTo(dir_path, 0), mode);
@@ -2857,7 +2895,7 @@ pub fn rmdir(dir_path: []const u8) DeleteDirError!void {
             else => |e| return e,
         };
     } else if (builtin.os.tag == .windows) {
-        const dir_path_w = try windows.sliceToPrefixedFileW(dir_path);
+        const dir_path_w = try windows.sliceToPrefixedFileW(null, dir_path);
         return rmdirW(dir_path_w.span());
     } else {
         const dir_path_c = try toPosixPath(dir_path);
@@ -2868,7 +2906,7 @@ pub fn rmdir(dir_path: []const u8) DeleteDirError!void {
 /// Same as `rmdir` except the parameter is null-terminated.
 pub fn rmdirZ(dir_path: [*:0]const u8) DeleteDirError!void {
     if (builtin.os.tag == .windows) {
-        const dir_path_w = try windows.cStrToPrefixedFileW(dir_path);
+        const dir_path_w = try windows.cStrToPrefixedFileW(null, dir_path);
         return rmdirW(dir_path_w.span());
     } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
         return rmdir(mem.sliceTo(dir_path, 0));
@@ -2998,6 +3036,8 @@ pub const ReadLinkError = error{
     /// Windows-only. This error may occur if the opened reparse point is
     /// of unsupported type.
     UnsupportedReparsePointType,
+    /// On Windows, `\\server` or `\\server\share` was not found.
+    NetworkNotFound,
 } || UnexpectedError;
 
 /// Read value of a symbolic link.
@@ -3006,7 +3046,7 @@ pub fn readlink(file_path: []const u8, out_buffer: []u8) ReadLinkError![]u8 {
     if (builtin.os.tag == .wasi and !builtin.link_libc) {
         return readlinkat(wasi.AT.FDCWD, file_path, out_buffer);
     } else if (builtin.os.tag == .windows) {
-        const file_path_w = try windows.sliceToPrefixedFileW(file_path);
+        const file_path_w = try windows.sliceToPrefixedFileW(null, file_path);
         return readlinkW(file_path_w.span(), out_buffer);
     } else {
         const file_path_c = try toPosixPath(file_path);
@@ -3052,7 +3092,7 @@ pub fn readlinkat(dirfd: fd_t, file_path: []const u8, out_buffer: []u8) ReadLink
         return readlinkatWasi(dirfd, file_path, out_buffer);
     }
     if (builtin.os.tag == .windows) {
-        const file_path_w = try windows.sliceToPrefixedFileW(file_path);
+        const file_path_w = try windows.sliceToPrefixedFileW(dirfd, file_path);
         return readlinkatW(dirfd, file_path_w.span(), out_buffer);
     }
     const file_path_c = try toPosixPath(file_path);
@@ -3089,7 +3129,7 @@ pub fn readlinkatW(dirfd: fd_t, file_path: []const u16, out_buffer: []u8) ReadLi
 /// See also `readlinkat`.
 pub fn readlinkatZ(dirfd: fd_t, file_path: [*:0]const u8, out_buffer: []u8) ReadLinkError![]u8 {
     if (builtin.os.tag == .windows) {
-        const file_path_w = try windows.cStrToPrefixedFileW(file_path);
+        const file_path_w = try windows.cStrToPrefixedFileW(dirfd, file_path);
         return readlinkatW(dirfd, file_path_w.span(), out_buffer);
     } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
         return readlinkat(dirfd, mem.sliceTo(file_path, 0), out_buffer);
@@ -4446,7 +4486,10 @@ pub const AccessError = error{
 /// TODO currently this assumes `mode` is `F.OK` on Windows.
 pub fn access(path: []const u8, mode: u32) AccessError!void {
     if (builtin.os.tag == .windows) {
-        const path_w = try windows.sliceToPrefixedFileW(path);
+        const path_w = windows.sliceToPrefixedFileW(null, path) catch |err| switch (err) {
+            error.AccessDenied => return error.PermissionDenied,
+            else => |e| return e,
+        };
         _ = try windows.GetFileAttributesW(path_w.span().ptr);
         return;
     } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
@@ -4459,7 +4502,10 @@ pub fn access(path: []const u8, mode: u32) AccessError!void {
 /// Same as `access` except `path` is null-terminated.
 pub fn accessZ(path: [*:0]const u8, mode: u32) AccessError!void {
     if (builtin.os.tag == .windows) {
-        const path_w = try windows.cStrToPrefixedFileW(path);
+        const path_w = windows.cStrToPrefixedFileW(null, path) catch |err| switch (err) {
+            error.AccessDenied => return error.PermissionDenied,
+            else => |e| return e,
+        };
         _ = try windows.GetFileAttributesW(path_w.span().ptr);
         return;
     } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
@@ -4503,7 +4549,7 @@ pub fn accessW(path: [*:0]const u16, mode: u32) windows.GetFileAttributesError!v
 /// TODO currently this ignores `mode` and `flags` on Windows.
 pub fn faccessat(dirfd: fd_t, path: []const u8, mode: u32, flags: u32) AccessError!void {
     if (builtin.os.tag == .windows) {
-        const path_w = try windows.sliceToPrefixedFileW(path);
+        const path_w = try windows.sliceToPrefixedFileW(dirfd, path);
         return faccessatW(dirfd, path_w.span().ptr, mode, flags);
     } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
         var resolved = RelativePathWasi{ .dir_fd = dirfd, .relative_path = path };
@@ -4546,7 +4592,7 @@ pub fn faccessat(dirfd: fd_t, path: []const u8, mode: u32, flags: u32) AccessErr
 /// Same as `faccessat` except the path parameter is null-terminated.
 pub fn faccessatZ(dirfd: fd_t, path: [*:0]const u8, mode: u32, flags: u32) AccessError!void {
     if (builtin.os.tag == .windows) {
-        const path_w = try windows.cStrToPrefixedFileW(path);
+        const path_w = try windows.cStrToPrefixedFileW(dirfd, path);
         return faccessatW(dirfd, path_w.span().ptr, mode, flags);
     } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
         return faccessat(dirfd, mem.sliceTo(path, 0), mode, flags);
@@ -5082,7 +5128,7 @@ pub const RealPathError = error{
 /// See also `realpathZ` and `realpathW`.
 pub fn realpath(pathname: []const u8, out_buffer: *[MAX_PATH_BYTES]u8) RealPathError![]u8 {
     if (builtin.os.tag == .windows) {
-        const pathname_w = try windows.sliceToPrefixedFileW(pathname);
+        const pathname_w = try windows.sliceToPrefixedFileW(null, pathname);
         return realpathW(pathname_w.span(), out_buffer);
     } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
         @compileError("WASI does not support os.realpath");
@@ -5094,7 +5140,7 @@ pub fn realpath(pathname: []const u8, out_buffer: *[MAX_PATH_BYTES]u8) RealPathE
 /// Same as `realpath` except `pathname` is null-terminated.
 pub fn realpathZ(pathname: [*:0]const u8, out_buffer: *[MAX_PATH_BYTES]u8) RealPathError![]u8 {
     if (builtin.os.tag == .windows) {
-        const pathname_w = try windows.cStrToPrefixedFileW(pathname);
+        const pathname_w = try windows.cStrToPrefixedFileW(null, pathname);
         return realpathW(pathname_w.span(), out_buffer);
     } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
         return realpath(mem.sliceTo(pathname, 0), out_buffer);
@@ -5144,18 +5190,8 @@ pub fn realpathW(pathname: []const u16, out_buffer: *[MAX_PATH_BYTES]u8) RealPat
             .share_access = share_access,
             .creation = creation,
             .io_mode = .blocking,
+            .filter = .any,
         }) catch |err| switch (err) {
-            error.IsDir => break :blk w.OpenFile(pathname, .{
-                .dir = dir,
-                .access_mask = access_mask,
-                .share_access = share_access,
-                .creation = creation,
-                .io_mode = .blocking,
-                .filter = .dir_only,
-            }) catch |er| switch (er) {
-                error.WouldBlock => unreachable,
-                else => |e2| return e2,
-            },
             error.WouldBlock => unreachable,
             else => |e| return e,
         };
@@ -5166,11 +5202,30 @@ pub fn realpathW(pathname: []const u16, out_buffer: *[MAX_PATH_BYTES]u8) RealPat
     return getFdPath(h_file, out_buffer);
 }
 
+pub fn isGetFdPathSupportedOnTarget(os: std.Target.Os) bool {
+    return switch (os.tag) {
+        // zig fmt: off
+        .windows,
+        .macos, .ios, .watchos, .tvos,
+        .linux,
+        .solaris,
+        .freebsd,
+        => true,
+        // zig fmt: on
+        .dragonfly => os.version_range.semver.max.order(.{ .major = 6, .minor = 0, .patch = 0 }) != .lt,
+        .netbsd => os.version_range.semver.max.order(.{ .major = 10, .minor = 0, .patch = 0 }) != .lt,
+        else => false,
+    };
+}
+
 /// Return canonical path of handle `fd`.
 /// This function is very host-specific and is not universally supported by all hosts.
 /// For example, while it generally works on Linux, macOS, FreeBSD or Windows, it is
 /// unsupported on WASI.
 pub fn getFdPath(fd: fd_t, out_buffer: *[MAX_PATH_BYTES]u8) RealPathError![]u8 {
+    if (!comptime isGetFdPathSupportedOnTarget(builtin.os)) {
+        @compileError("querying for canonical path of a handle is unsupported on this host");
+    }
     switch (builtin.os.tag) {
         .windows => {
             var wide_buf: [windows.PATH_MAX_WIDE]u16 = undefined;
@@ -5273,9 +5328,6 @@ pub fn getFdPath(fd: fd_t, out_buffer: *[MAX_PATH_BYTES]u8) RealPathError![]u8 {
             }
         },
         .dragonfly => {
-            if (comptime builtin.os.version_range.semver.max.order(.{ .major = 6, .minor = 0, .patch = 0 }) == .lt) {
-                @compileError("querying for canonical path of a handle is unsupported on this host");
-            }
             @memset(out_buffer[0..MAX_PATH_BYTES], 0);
             switch (errno(system.fcntl(fd, F.GETPATH, out_buffer))) {
                 .SUCCESS => {},
@@ -5287,9 +5339,6 @@ pub fn getFdPath(fd: fd_t, out_buffer: *[MAX_PATH_BYTES]u8) RealPathError![]u8 {
             return out_buffer[0..len];
         },
         .netbsd => {
-            if (comptime builtin.os.version_range.semver.max.order(.{ .major = 10, .minor = 0, .patch = 0 }) == .lt) {
-                @compileError("querying for canonical path of a handle is unsupported on this host");
-            }
             @memset(out_buffer[0..MAX_PATH_BYTES], 0);
             switch (errno(system.fcntl(fd, F.GETPATH, out_buffer))) {
                 .SUCCESS => {},
@@ -5303,7 +5352,7 @@ pub fn getFdPath(fd: fd_t, out_buffer: *[MAX_PATH_BYTES]u8) RealPathError![]u8 {
             const len = mem.indexOfScalar(u8, out_buffer[0..], @as(u8, 0)) orelse MAX_PATH_BYTES;
             return out_buffer[0..len];
         },
-        else => @compileError("querying for canonical path of a handle is unsupported on this host"),
+        else => unreachable, // made unreachable by isGetFdPathSupportedOnTarget above
     }
 }
 

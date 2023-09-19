@@ -12,8 +12,6 @@ const mem = std.mem;
 const math = std.math;
 const debug = std.debug;
 const EnvMap = process.EnvMap;
-const Os = std.builtin.Os;
-const TailQueue = std.TailQueue;
 const maxInt = std.math.maxInt;
 const assert = std.debug.assert;
 
@@ -963,7 +961,7 @@ fn windowsCreateProcessPathExt(
         try dir_buf.append(allocator, 0);
         defer dir_buf.shrinkRetainingCapacity(dir_path_len);
         const dir_path_z = dir_buf.items[0 .. dir_buf.items.len - 1 :0];
-        const prefixed_path = try windows.wToPrefixedFileW(dir_path_z);
+        const prefixed_path = try windows.wToPrefixedFileW(null, dir_path_z);
         break :dir fs.cwd().openDirW(prefixed_path.span().ptr, .{}, true) catch return error.FileNotFound;
     };
     defer dir.close();

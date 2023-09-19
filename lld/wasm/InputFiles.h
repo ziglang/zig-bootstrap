@@ -13,11 +13,11 @@
 #include "lld/Common/LLVM.h"
 #include "llvm/ADT/DenseMap.h"
 #include "llvm/ADT/DenseSet.h"
-#include "llvm/ADT/Triple.h"
 #include "llvm/LTO/LTO.h"
 #include "llvm/Object/Archive.h"
 #include "llvm/Object/Wasm.h"
 #include "llvm/Support/MemoryBuffer.h"
+#include "llvm/TargetParser/Triple.h"
 #include <optional>
 #include <vector>
 
@@ -184,7 +184,7 @@ public:
   static bool doneLTO;
 };
 
-// Stub libray (See docs/WebAssembly.rst)
+// Stub library (See docs/WebAssembly.rst)
 class StubFile : public InputFile {
 public:
   explicit StubFile(MemoryBufferRef m) : InputFile(StubKind, m) {}

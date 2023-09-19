@@ -498,7 +498,7 @@ pub const InitOptions = struct {
     /// this flag would be set to disable this machinery to avoid false positives.
     disable_lld_caching: bool = false,
     cache_mode: CacheMode = .incremental,
-    optimize_mode: std.builtin.Mode = .Debug,
+    optimize_mode: std.builtin.OptimizeMode = .Debug,
     keep_source_files_loaded: bool = false,
     clang_argv: []const []const u8 = &[0][]const u8{},
     lib_dirs: []const []const u8 = &[0][]const u8{},
@@ -507,7 +507,7 @@ pub const InitOptions = struct {
     c_source_files: []const CSourceFile = &[0]CSourceFile{},
     link_objects: []LinkObject = &[0]LinkObject{},
     framework_dirs: []const []const u8 = &[0][]const u8{},
-    frameworks: std.StringArrayHashMapUnmanaged(Framework) = .{},
+    frameworks: []const Framework = &.{},
     system_lib_names: []const []const u8 = &.{},
     system_lib_infos: []const SystemLib = &.{},
     /// These correspond to the WASI libc emulated subcomponents including:
@@ -830,7 +830,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             // Our linker can't handle objects or most advanced options yet.
             if (options.link_objects.len != 0 or
                 options.c_source_files.len != 0 or
-                options.frameworks.count() != 0 or
+                options.frameworks.len != 0 or
                 options.system_lib_names.len != 0 or
                 options.link_libc or options.link_libcpp or
                 link_eh_frame_hdr or
@@ -1027,7 +1027,7 @@ pub fn create(gpa: Allocator, options: InitOptions) !*Compilation {
             return error.TargetRequiresSingleThreaded;
         }
 
-        const llvm_cpu_features: ?[*:0]const u8 = if (build_options.have_llvm and use_llvm) blk: {
+        const llvm_cpu_features: ?[*:0]const u8 = if (use_llvm) blk: {
             var buf = std.ArrayList(u8).init(arena);
             for (options.target.cpu.arch.allFeaturesList(), 0..) |feature, index_usize| {
                 const index = @as(Target.Cpu.Feature.Set.Index, @intCast(index_usize));
@@ -2267,7 +2267,7 @@ fn prepareWholeEmitSubPath(arena: Allocator, opt_emit: ?EmitLoc) error{OutOfMemo
 /// to remind the programmer to update multiple related pieces of code that
 /// are in different locations. Bump this number when adding or deleting
 /// anything from the link cache manifest.
-pub const link_hash_implementation_version = 9;
+pub const link_hash_implementation_version = 10;
 
 fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifest) !void {
     const gpa = comp.gpa;
@@ -2277,7 +2277,7 @@ fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifes
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
-    comptime assert(link_hash_implementation_version == 9);
+    comptime assert(link_hash_implementation_version == 10);
 
     if (comp.bin_file.options.module) |mod| {
         const main_zig_file = try mod.main_pkg.root_src_directory.join(arena, &[_][]const u8{
@@ -2386,7 +2386,7 @@ fn addNonIncrementalStuffToCacheManifest(comp: *Compilation, man: *Cache.Manifes
 
     // Mach-O specific stuff
     man.hash.addListOfBytes(comp.bin_file.options.framework_dirs);
-    link.hashAddFrameworks(&man.hash, comp.bin_file.options.frameworks);
+    try link.hashAddFrameworks(man, comp.bin_file.options.frameworks);
     try man.addOptionalFile(comp.bin_file.options.entitlements);
     man.hash.addOptional(comp.bin_file.options.pagezero_size);
     man.hash.addOptional(comp.bin_file.options.headerpad_size);
@@ -4289,6 +4289,9 @@ pub fn addCCArgs(
             try argv.append("-D_LIBCPP_HAS_NO_THREADS");
         }
 
+        // See the comment in libcxx.zig for more details about this.
+        try argv.append("-D_LIBCPP_PSTL_CPU_BACKEND_SERIAL");
+
         try argv.append(try std.fmt.allocPrint(arena, "-D_LIBCPP_ABI_VERSION={d}", .{
             @intFromEnum(comp.libcxx_abi_version),
         }));
@@ -4425,9 +4428,18 @@ pub fn addCCArgs(
             if (comp.sanitize_c and !comp.bin_file.options.tsan) {
                 try argv.append("-fsanitize=undefined");
                 try argv.append("-fsanitize-trap=undefined");
+                // It is very common, and well-defined, for a pointer on one side of a C ABI
+                // to have a different but compatible element type. Examples include:
+                // `char*` vs `uint8_t*` on a system with 8-bit bytes
+                // `const char*` vs `char*`
+                // `char*` vs `unsigned char*`
+                // Without this flag, Clang would invoke UBSAN when such an extern
+                // function was called.
+                try argv.append("-fno-sanitize=function");
             } else if (comp.sanitize_c and comp.bin_file.options.tsan) {
                 try argv.append("-fsanitize=undefined,thread");
                 try argv.append("-fsanitize-trap=undefined");
+                try argv.append("-fno-sanitize=function");
             } else if (!comp.sanitize_c and comp.bin_file.options.tsan) {
                 try argv.append("-fsanitize=thread");
             }
@@ -5175,14 +5187,17 @@ pub fn lockAndParseLldStderr(comp: *Compilation, comptime prefix: []const u8, st
 }
 
 pub fn dump_argv(argv: []const []const u8) void {
+    std.debug.getStderrMutex().lock();
+    defer std.debug.getStderrMutex().unlock();
+    const stderr = std.io.getStdErr().writer();
     for (argv[0 .. argv.len - 1]) |arg| {
-        std.debug.print("{s} ", .{arg});
+        nosuspend stderr.print("{s} ", .{arg}) catch return;
     }
-    std.debug.print("{s}\n", .{argv[argv.len - 1]});
+    nosuspend stderr.print("{s}\n", .{argv[argv.len - 1]}) catch {};
 }
 
 pub fn getZigBackend(comp: Compilation) std.builtin.CompilerBackend {
-    if (build_options.have_llvm and comp.bin_file.options.use_llvm) return .stage2_llvm;
+    if (comp.bin_file.options.use_llvm) return .stage2_llvm;
     const target = comp.bin_file.options.target;
     if (target.ofmt == .c) return .stage2_c;
     return switch (target.cpu.arch) {
@@ -5348,7 +5363,7 @@ pub fn generateBuiltinZigSource(comp: *Compilation, allocator: Allocator) Alloca
         \\    .ofmt = object_format,
         \\}};
         \\pub const object_format = std.Target.ObjectFormat.{};
-        \\pub const mode = std.builtin.Mode.{};
+        \\pub const mode = std.builtin.OptimizeMode.{};
         \\pub const link_libc = {};
         \\pub const link_libcpp = {};
         \\pub const have_error_return_tracing = {};
@@ -5631,7 +5646,7 @@ pub fn addLinkLib(comp: *Compilation, lib_name: []const u8) !void {
 
 /// This decides the optimization mode for all zig-provided libraries, including
 /// compiler-rt, libcxx, libc, libunwind, etc.
-pub fn compilerRtOptMode(comp: Compilation) std.builtin.Mode {
+pub fn compilerRtOptMode(comp: Compilation) std.builtin.OptimizeMode {
     if (comp.debug_compiler_runtime_libs) {
         return comp.bin_file.options.optimize_mode;
     }

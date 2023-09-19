@@ -9,7 +9,7 @@ const fs = std.fs;
 const InstallDirectoryOptions = std.Build.InstallDirectoryOptions;
 const assert = std.debug.assert;
 
-const zig_version = std.SemanticVersion{ .major = 0, .minor = 11, .patch = 0 };
+const zig_version = std.SemanticVersion{ .major = 0, .minor = 12, .patch = 0 };
 const stack_size = 32 * 1024 * 1024;
 
 pub fn build(b: *std.Build) !void {
@@ -128,7 +128,8 @@ pub fn build(b: *std.Build) !void {
         "llvm-has-xtensa",
         "Whether LLVM has the experimental target xtensa enabled",
     ) orelse false;
-    const enable_macos_sdk = b.option(bool, "enable-macos-sdk", "Run tests requiring presence of macOS SDK and frameworks") orelse false;
+    const enable_ios_sdk = b.option(bool, "enable-ios-sdk", "Run tests requiring presence of iOS SDK and frameworks") orelse false;
+    const enable_macos_sdk = b.option(bool, "enable-macos-sdk", "Run tests requiring presence of macOS SDK and frameworks") orelse enable_ios_sdk;
     const enable_symlinks_windows = b.option(bool, "enable-symlinks-windows", "Run tests requiring presence of symlinks on Windows") orelse false;
     const config_h_path_option = b.option([]const u8, "config_h", "Path to the generated config.h");
 
@@ -400,22 +401,22 @@ pub fn build(b: *std.Build) !void {
     test_cases_options.addOption(std.SemanticVersion, "semver", semver);
     test_cases_options.addOption(?[]const u8, "test_filter", test_filter);
 
-    var chosen_opt_modes_buf: [4]builtin.Mode = undefined;
+    var chosen_opt_modes_buf: [4]builtin.OptimizeMode = undefined;
     var chosen_mode_index: usize = 0;
     if (!skip_debug) {
-        chosen_opt_modes_buf[chosen_mode_index] = builtin.Mode.Debug;
+        chosen_opt_modes_buf[chosen_mode_index] = builtin.OptimizeMode.Debug;
         chosen_mode_index += 1;
     }
     if (!skip_release_safe) {
-        chosen_opt_modes_buf[chosen_mode_index] = builtin.Mode.ReleaseSafe;
+        chosen_opt_modes_buf[chosen_mode_index] = builtin.OptimizeMode.ReleaseSafe;
         chosen_mode_index += 1;
     }
     if (!skip_release_fast) {
-        chosen_opt_modes_buf[chosen_mode_index] = builtin.Mode.ReleaseFast;
+        chosen_opt_modes_buf[chosen_mode_index] = builtin.OptimizeMode.ReleaseFast;
         chosen_mode_index += 1;
     }
     if (!skip_release_small) {
-        chosen_opt_modes_buf[chosen_mode_index] = builtin.Mode.ReleaseSmall;
+        chosen_opt_modes_buf[chosen_mode_index] = builtin.OptimizeMode.ReleaseSmall;
         chosen_mode_index += 1;
     }
     const optimization_modes = chosen_opt_modes_buf[0..chosen_mode_index];
@@ -485,11 +486,12 @@ pub fn build(b: *std.Build) !void {
         b,
         optimization_modes,
         enable_macos_sdk,
+        enable_ios_sdk,
         false,
         enable_symlinks_windows,
     ));
     test_step.dependOn(tests.addCAbiTests(b, skip_non_native, skip_release));
-    test_step.dependOn(tests.addLinkTests(b, enable_macos_sdk, false, enable_symlinks_windows));
+    test_step.dependOn(tests.addLinkTests(b, enable_macos_sdk, enable_ios_sdk, false, enable_symlinks_windows));
     test_step.dependOn(tests.addStackTraceTests(b, test_filter, optimization_modes));
     test_step.dependOn(tests.addCliTests(b));
     test_step.dependOn(tests.addAssembleAndLinkTests(b, test_filter, optimization_modes));
@@ -630,14 +632,16 @@ fn addCmakeCfgOptionsToExe(
         const lib_suffix = if (static) exe.target.staticLibSuffix()[1..] else exe.target.dynamicLibSuffix()[1..];
         switch (exe.target.getOsTag()) {
             .linux => {
-                // First we try to link against gcc libstdc++. If that doesn't work, we fall
-                // back to -lc++ and cross our fingers.
-                addCxxKnownPath(b, cfg, exe, b.fmt("libstdc++.{s}", .{lib_suffix}), "", need_cpp_includes) catch |err| switch (err) {
-                    error.RequiredLibraryNotFound => {
-                        exe.linkLibCpp();
-                    },
-                    else => |e| return e,
-                };
+                // First we try to link against system libstdc++ or libc++.
+                // If that doesn't work, we fall to -lc++ and cross our fingers.
+                const found = for ([_][]const u8{ "stdc++", "c++" }) |name| {
+                    addCxxKnownPath(b, cfg, exe, b.fmt("lib{s}.{s}", .{ name, lib_suffix }), "", need_cpp_includes) catch |err| switch (err) {
+                        error.RequiredLibraryNotFound => continue,
+                        else => |e| return e,
+                    };
+                    break true;
+                } else false;
+                if (!found) exe.linkLibCpp();
                 exe.linkSystemLibrary("unwind");
             },
             .ios, .macos, .watchos, .tvos => {
@@ -988,8 +992,8 @@ const llvm_libs = [_][]const u8{
     "LLVMWebAssemblyDisassembler",
     "LLVMWebAssemblyAsmParser",
     "LLVMWebAssemblyCodeGen",
-    "LLVMWebAssemblyDesc",
     "LLVMWebAssemblyUtils",
+    "LLVMWebAssemblyDesc",
     "LLVMWebAssemblyInfo",
     "LLVMVEDisassembler",
     "LLVMVEAsmParser",
@@ -1110,12 +1114,13 @@ const llvm_libs = [_][]const u8{
     "LLVMAsmPrinter",
     "LLVMSelectionDAG",
     "LLVMCodeGen",
+    "LLVMTarget",
     "LLVMObjCARCOpts",
+    "LLVMCodeGenTypes",
     "LLVMIRPrinter",
     "LLVMInterfaceStub",
     "LLVMFileCheck",
     "LLVMFuzzMutate",
-    "LLVMTarget",
     "LLVMScalarOpts",
     "LLVMInstCombine",
     "LLVMAggressiveInstCombine",
@@ -1124,6 +1129,7 @@ const llvm_libs = [_][]const u8{
     "LLVMAnalysis",
     "LLVMProfileData",
     "LLVMSymbolize",
+    "LLVMDebugInfoBTF",
     "LLVMDebugInfoPDB",
     "LLVMDebugInfoMSF",
     "LLVMDebugInfoDWARF",

@@ -1266,8 +1266,13 @@ fn walkInstruction(
             try self.exprs.append(self.arena, start.expr);
             self.exprs.items[slice_index] = .{ .slice = .{ .lhs = lhs_index, .start = start_index } };
 
+            const typeRef = switch (lhs.expr) {
+                .declRef => |ref| self.decls.items[ref.Analyzed].value.typeRef,
+                else => null,
+            };
+
             return DocData.WalkResult{
-                .typeRef = self.decls.items[lhs.expr.declRef.Analyzed].value.typeRef,
+                .typeRef = typeRef,
                 .expr = .{ .sliceIndex = slice_index },
             };
         },
@@ -1311,8 +1316,13 @@ fn walkInstruction(
             try self.exprs.append(self.arena, end.expr);
             self.exprs.items[slice_index] = .{ .slice = .{ .lhs = lhs_index, .start = start_index, .end = end_index } };
 
+            const typeRef = switch (lhs.expr) {
+                .declRef => |ref| self.decls.items[ref.Analyzed].value.typeRef,
+                else => null,
+            };
+
             return DocData.WalkResult{
-                .typeRef = self.decls.items[lhs.expr.declRef.Analyzed].value.typeRef,
+                .typeRef = typeRef,
                 .expr = .{ .sliceIndex = slice_index },
             };
         },
@@ -1364,10 +1374,20 @@ fn walkInstruction(
             try self.exprs.append(self.arena, end.expr);
             const sentinel_index = self.exprs.items.len;
             try self.exprs.append(self.arena, sentinel.expr);
-            self.exprs.items[slice_index] = .{ .slice = .{ .lhs = lhs_index, .start = start_index, .end = end_index, .sentinel = sentinel_index } };
+            self.exprs.items[slice_index] = .{ .slice = .{
+                .lhs = lhs_index,
+                .start = start_index,
+                .end = end_index,
+                .sentinel = sentinel_index,
+            } };
+
+            const typeRef = switch (lhs.expr) {
+                .declRef => |ref| self.decls.items[ref.Analyzed].value.typeRef,
+                else => null,
+            };
 
             return DocData.WalkResult{
-                .typeRef = self.decls.items[lhs.expr.declRef.Analyzed].value.typeRef,
+                .typeRef = typeRef,
                 .expr = .{ .sliceIndex = slice_index },
             };
         },
@@ -1432,8 +1452,13 @@ fn walkInstruction(
                 .sentinel = sentinel_index,
             } };
 
+            const typeRef = switch (lhs.expr) {
+                .declRef => |ref| self.decls.items[ref.Analyzed].value.typeRef,
+                else => null,
+            };
+
             return DocData.WalkResult{
-                .typeRef = self.decls.items[lhs.expr.declRef.Analyzed].value.typeRef,
+                .typeRef = typeRef,
                 .expr = .{ .sliceIndex = slice_index },
             };
         },
@@ -5512,9 +5537,8 @@ fn findGuidePaths(self: *Autodoc, file: *File, str: []const u8) ![]const u8 {
 fn addGuide(self: *Autodoc, file: *File, guide_path: []const u8, section: *Section) !void {
     if (guide_path.len == 0) return error.MissingAutodocGuideName;
 
-    const cur_mod_dir_path = file.pkg.root_src_directory.path orelse ".";
     const resolved_path = try std.fs.path.resolve(self.arena, &[_][]const u8{
-        cur_mod_dir_path, file.sub_file_path, "..", guide_path,
+        file.sub_file_path, "..", guide_path,
     });
 
     var guide_file = try file.pkg.root_src_directory.handle.openFile(resolved_path, .{});

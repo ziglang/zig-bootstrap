@@ -422,7 +422,6 @@ pub fn openPath(allocator: Allocator, options: link.Options) !*MachO {
 pub fn createEmpty(gpa: Allocator, options: link.Options) !*MachO {
     const cpu_arch = options.target.cpu.arch;
     const page_size: u16 = if (cpu_arch == .aarch64) 0x4000 else 0x1000;
-    const use_llvm = build_options.have_llvm and options.use_llvm;
 
     const self = try gpa.create(MachO);
     errdefer gpa.destroy(self);
@@ -435,13 +434,13 @@ pub fn createEmpty(gpa: Allocator, options: link.Options) !*MachO {
             .file = null,
         },
         .page_size = page_size,
-        .mode = if (use_llvm or options.module == null or options.cache_mode == .whole)
+        .mode = if (options.use_llvm or options.module == null or options.cache_mode == .whole)
             .zld
         else
             .incremental,
     };
 
-    if (use_llvm) {
+    if (options.use_llvm) {
         self.llvm_object = try LlvmObject.create(gpa, options);
     }
 
@@ -452,10 +451,8 @@ pub fn createEmpty(gpa: Allocator, options: link.Options) !*MachO {
 
 pub fn flush(self: *MachO, comp: *Compilation, prog_node: *std.Progress.Node) link.File.FlushError!void {
     if (self.base.options.emit == null) {
-        if (build_options.have_llvm) {
-            if (self.llvm_object) |llvm_object| {
-                try llvm_object.flushModule(comp, prog_node);
-            }
+        if (self.llvm_object) |llvm_object| {
+            try llvm_object.flushModule(comp, prog_node);
         }
         return;
     }
@@ -479,10 +476,8 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
     const tracy = trace(@src());
     defer tracy.end();
 
-    if (build_options.have_llvm) {
-        if (self.llvm_object) |llvm_object| {
-            return try llvm_object.flushModule(comp, prog_node);
-        }
+    if (self.llvm_object) |llvm_object| {
+        return try llvm_object.flushModule(comp, prog_node);
     }
 
     var arena_allocator = std.heap.ArenaAllocator.init(self.base.allocator);
@@ -875,49 +870,7 @@ fn resolveLibSystemInDirs(arena: Allocator, dirs: []const []const u8, out_libs: 
     return false;
 }
 
-pub fn resolveSearchDir(
-    arena: Allocator,
-    dir: []const u8,
-    syslibroot: ?[]const u8,
-) !?[]const u8 {
-    var candidates = std.ArrayList([]const u8).init(arena);
-
-    if (fs.path.isAbsolute(dir)) {
-        if (syslibroot) |root| {
-            const common_dir = if (builtin.os.tag == .windows) blk: {
-                // We need to check for disk designator and strip it out from dir path so
-                // that we can concat dir with syslibroot.
-                // TODO we should backport this mechanism to 'MachO.Dylib.parseDependentLibs()'
-                const disk_designator = fs.path.diskDesignatorWindows(dir);
-
-                if (mem.indexOf(u8, dir, disk_designator)) |where| {
-                    break :blk dir[where + disk_designator.len ..];
-                }
-
-                break :blk dir;
-            } else dir;
-            const full_path = try fs.path.join(arena, &[_][]const u8{ root, common_dir });
-            try candidates.append(full_path);
-        }
-    }
-
-    try candidates.append(dir);
-
-    for (candidates.items) |candidate| {
-        // Verify that search path actually exists
-        var tmp = fs.cwd().openDir(candidate, .{}) catch |err| switch (err) {
-            error.FileNotFound => continue,
-            else => |e| return e,
-        };
-        defer tmp.close();
-
-        return candidate;
-    }
-
-    return null;
-}
-
-pub fn resolveLib(
+fn resolveLib(
     arena: Allocator,
     search_dir: []const u8,
     name: []const u8,
@@ -925,26 +878,6 @@ pub fn resolveLib(
 ) !?[]const u8 {
     const search_name = try std.fmt.allocPrint(arena, "lib{s}{s}", .{ name, ext });
     const full_path = try fs.path.join(arena, &[_][]const u8{ search_dir, search_name });
-
-    // Check if the file exists.
-    const tmp = fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
-        error.FileNotFound => return null,
-        else => |e| return e,
-    };
-    defer tmp.close();
-
-    return full_path;
-}
-
-pub fn resolveFramework(
-    arena: Allocator,
-    search_dir: []const u8,
-    name: []const u8,
-    ext: []const u8,
-) !?[]const u8 {
-    const search_name = try std.fmt.allocPrint(arena, "{s}{s}", .{ name, ext });
-    const prefix_path = try std.fmt.allocPrint(arena, "{s}.framework", .{name});
-    const full_path = try fs.path.join(arena, &[_][]const u8{ search_dir, prefix_path, search_name });
 
     // Check if the file exists.
     const tmp = fs.cwd().openFile(full_path, .{}) catch |err| switch (err) {
@@ -1622,9 +1555,7 @@ fn resolveSymbolsInDylibs(self: *MachO, actions: *std.ArrayList(ResolveAction)) 
 pub fn deinit(self: *MachO) void {
     const gpa = self.base.allocator;
 
-    if (build_options.have_llvm) {
-        if (self.llvm_object) |llvm_object| llvm_object.destroy(gpa);
-    }
+    if (self.llvm_object) |llvm_object| llvm_object.destroy(gpa);
 
     if (self.d_sym) |*d_sym| {
         d_sym.deinit();
@@ -1855,9 +1786,7 @@ pub fn updateFunc(self: *MachO, mod: *Module, func_index: InternPool.Index, air:
     if (build_options.skip_non_native and builtin.object_format != .macho) {
         @panic("Attempted to compile for object format that was disabled by build configuration");
     }
-    if (build_options.have_llvm) {
-        if (self.llvm_object) |llvm_object| return llvm_object.updateFunc(mod, func_index, air, liveness);
-    }
+    if (self.llvm_object) |llvm_object| return llvm_object.updateFunc(mod, func_index, air, liveness);
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -1979,9 +1908,7 @@ pub fn updateDecl(self: *MachO, mod: *Module, decl_index: Module.Decl.Index) !vo
     if (build_options.skip_non_native and builtin.object_format != .macho) {
         @panic("Attempted to compile for object format that was disabled by build configuration");
     }
-    if (build_options.have_llvm) {
-        if (self.llvm_object) |llvm_object| return llvm_object.updateDecl(mod, decl_index);
-    }
+    if (self.llvm_object) |llvm_object| return llvm_object.updateDecl(mod, decl_index);
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -2387,10 +2314,8 @@ pub fn updateDeclExports(
     if (build_options.skip_non_native and builtin.object_format != .macho) {
         @panic("Attempted to compile for object format that was disabled by build configuration");
     }
-    if (build_options.have_llvm) {
-        if (self.llvm_object) |llvm_object|
-            return llvm_object.updateDeclExports(mod, decl_index, exports);
-    }
+    if (self.llvm_object) |llvm_object|
+        return llvm_object.updateDeclExports(mod, decl_index, exports);
 
     if (self.base.options.emit == null) return;
 
@@ -2542,9 +2467,7 @@ fn freeUnnamedConsts(self: *MachO, decl_index: Module.Decl.Index) void {
 }
 
 pub fn freeDecl(self: *MachO, decl_index: Module.Decl.Index) void {
-    if (build_options.have_llvm) {
-        if (self.llvm_object) |llvm_object| return llvm_object.freeDecl(decl_index);
-    }
+    if (self.llvm_object) |llvm_object| return llvm_object.freeDecl(decl_index);
     const mod = self.base.options.module.?;
     const decl = mod.declPtr(decl_index);
 

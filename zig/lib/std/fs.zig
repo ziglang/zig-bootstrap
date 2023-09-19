@@ -1118,7 +1118,7 @@ pub const Dir = struct {
     /// Asserts that the path parameter has no null bytes.
     pub fn openFile(self: Dir, sub_path: []const u8, flags: File.OpenFlags) File.OpenError!File {
         if (builtin.os.tag == .windows) {
-            const path_w = try os.windows.sliceToPrefixedFileW(sub_path);
+            const path_w = try os.windows.sliceToPrefixedFileW(self.fd, sub_path);
             return self.openFileW(path_w.span(), flags);
         }
         if (builtin.os.tag == .wasi and !builtin.link_libc) {
@@ -1156,7 +1156,7 @@ pub const Dir = struct {
     /// Same as `openFile` but the path parameter is null-terminated.
     pub fn openFileZ(self: Dir, sub_path: [*:0]const u8, flags: File.OpenFlags) File.OpenError!File {
         if (builtin.os.tag == .windows) {
-            const path_w = try os.windows.cStrToPrefixedFileW(sub_path);
+            const path_w = try os.windows.cStrToPrefixedFileW(self.fd, sub_path);
             return self.openFileW(path_w.span(), flags);
         }
 
@@ -1282,7 +1282,7 @@ pub const Dir = struct {
     /// Asserts that the path parameter has no null bytes.
     pub fn createFile(self: Dir, sub_path: []const u8, flags: File.CreateFlags) File.OpenError!File {
         if (builtin.os.tag == .windows) {
-            const path_w = try os.windows.sliceToPrefixedFileW(sub_path);
+            const path_w = try os.windows.sliceToPrefixedFileW(self.fd, sub_path);
             return self.createFileW(path_w.span(), flags);
         }
         if (builtin.os.tag == .wasi and !builtin.link_libc) {
@@ -1323,7 +1323,7 @@ pub const Dir = struct {
     /// Same as `createFile` but the path parameter is null-terminated.
     pub fn createFileZ(self: Dir, sub_path_c: [*:0]const u8, flags: File.CreateFlags) File.OpenError!File {
         if (builtin.os.tag == .windows) {
-            const path_w = try os.windows.cStrToPrefixedFileW(sub_path_c);
+            const path_w = try os.windows.cStrToPrefixedFileW(self.fd, sub_path_c);
             return self.createFileW(path_w.span(), flags);
         }
 
@@ -1513,7 +1513,7 @@ pub const Dir = struct {
             @compileError("realpath is not available on WASI");
         }
         if (builtin.os.tag == .windows) {
-            const pathname_w = try os.windows.sliceToPrefixedFileW(pathname);
+            const pathname_w = try os.windows.sliceToPrefixedFileW(self.fd, pathname);
             return self.realpathW(pathname_w.span(), out_buffer);
         }
         const pathname_c = try os.toPosixPath(pathname);
@@ -1524,7 +1524,7 @@ pub const Dir = struct {
     /// See also `Dir.realpath`, `realpathZ`.
     pub fn realpathZ(self: Dir, pathname: [*:0]const u8, out_buffer: []u8) ![]u8 {
         if (builtin.os.tag == .windows) {
-            const pathname_w = try os.windows.cStrToPrefixedFileW(pathname);
+            const pathname_w = try os.windows.cStrToPrefixedFileW(self.fd, pathname);
             return self.realpathW(pathname_w.span(), out_buffer);
         }
 
@@ -1568,18 +1568,8 @@ pub const Dir = struct {
                 .share_access = share_access,
                 .creation = creation,
                 .io_mode = .blocking,
+                .filter = .any,
             }) catch |err| switch (err) {
-                error.IsDir => break :blk w.OpenFile(pathname, .{
-                    .dir = self.fd,
-                    .access_mask = access_mask,
-                    .share_access = share_access,
-                    .creation = creation,
-                    .io_mode = .blocking,
-                    .filter = .dir_only,
-                }) catch |er| switch (er) {
-                    error.WouldBlock => unreachable,
-                    else => |e2| return e2,
-                },
                 error.WouldBlock => unreachable,
                 else => |e| return e,
             };
@@ -1656,7 +1646,7 @@ pub const Dir = struct {
     /// Asserts that the path parameter has no null bytes.
     pub fn openDir(self: Dir, sub_path: []const u8, args: OpenDirOptions) OpenError!Dir {
         if (builtin.os.tag == .windows) {
-            const sub_path_w = try os.windows.sliceToPrefixedFileW(sub_path);
+            const sub_path_w = try os.windows.sliceToPrefixedFileW(self.fd, sub_path);
             return self.openDirW(sub_path_w.span().ptr, args, false);
         } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
             return self.openDirWasi(sub_path, args);
@@ -1672,7 +1662,7 @@ pub const Dir = struct {
     /// Asserts that the path parameter has no null bytes.
     pub fn openIterableDir(self: Dir, sub_path: []const u8, args: OpenDirOptions) OpenError!IterableDir {
         if (builtin.os.tag == .windows) {
-            const sub_path_w = try os.windows.sliceToPrefixedFileW(sub_path);
+            const sub_path_w = try os.windows.sliceToPrefixedFileW(self.fd, sub_path);
             return IterableDir{ .dir = try self.openDirW(sub_path_w.span().ptr, args, true) };
         } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
             return IterableDir{ .dir = try self.openDirWasi(sub_path, args) };
@@ -1732,7 +1722,7 @@ pub const Dir = struct {
     /// Same as `openDir` except the parameter is null-terminated.
     pub fn openDirZ(self: Dir, sub_path_c: [*:0]const u8, args: OpenDirOptions, iterable: bool) OpenError!Dir {
         if (builtin.os.tag == .windows) {
-            const sub_path_w = try os.windows.cStrToPrefixedFileW(sub_path_c);
+            const sub_path_w = try os.windows.cStrToPrefixedFileW(self.fd, sub_path_c);
             return self.openDirW(sub_path_w.span().ptr, args, iterable);
         }
         const symlink_flags: u32 = if (args.no_follow) os.O.NOFOLLOW else 0x0;
@@ -1831,7 +1821,7 @@ pub const Dir = struct {
     /// Asserts that the path parameter has no null bytes.
     pub fn deleteFile(self: Dir, sub_path: []const u8) DeleteFileError!void {
         if (builtin.os.tag == .windows) {
-            const sub_path_w = try os.windows.sliceToPrefixedFileW(sub_path);
+            const sub_path_w = try os.windows.sliceToPrefixedFileW(self.fd, sub_path);
             return self.deleteFileW(sub_path_w.span());
         } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
             os.unlinkat(self.fd, sub_path, 0) catch |err| switch (err) {
@@ -1894,7 +1884,7 @@ pub const Dir = struct {
     /// Asserts that the path parameter has no null bytes.
     pub fn deleteDir(self: Dir, sub_path: []const u8) DeleteDirError!void {
         if (builtin.os.tag == .windows) {
-            const sub_path_w = try os.windows.sliceToPrefixedFileW(sub_path);
+            const sub_path_w = try os.windows.sliceToPrefixedFileW(self.fd, sub_path);
             return self.deleteDirW(sub_path_w.span());
         } else if (builtin.os.tag == .wasi and !builtin.link_libc) {
             os.unlinkat(self.fd, sub_path, os.AT.REMOVEDIR) catch |err| switch (err) {
@@ -1959,8 +1949,14 @@ pub const Dir = struct {
             return self.symLinkWasi(target_path, sym_link_path, flags);
         }
         if (builtin.os.tag == .windows) {
-            const target_path_w = try os.windows.sliceToPrefixedFileW(target_path);
-            const sym_link_path_w = try os.windows.sliceToPrefixedFileW(sym_link_path);
+            // Target path does not use sliceToPrefixedFileW because certain paths
+            // are handled differently when creating a symlink than they would be
+            // when converting to an NT namespaced path. CreateSymbolicLink in
+            // symLinkW will handle the necessary conversion.
+            var target_path_w: os.windows.PathSpace = undefined;
+            target_path_w.len = try std.unicode.utf8ToUtf16Le(&target_path_w.data, target_path);
+            target_path_w.data[target_path_w.len] = 0;
+            const sym_link_path_w = try os.windows.sliceToPrefixedFileW(self.fd, sym_link_path);
             return self.symLinkW(target_path_w.span(), sym_link_path_w.span(), flags);
         }
         const target_path_c = try os.toPosixPath(target_path);
@@ -1986,8 +1982,8 @@ pub const Dir = struct {
         flags: SymLinkFlags,
     ) !void {
         if (builtin.os.tag == .windows) {
-            const target_path_w = try os.windows.cStrToPrefixedFileW(target_path_c);
-            const sym_link_path_w = try os.windows.cStrToPrefixedFileW(sym_link_path_c);
+            const target_path_w = try os.windows.cStrToPrefixedFileW(self.fd, target_path_c);
+            const sym_link_path_w = try os.windows.cStrToPrefixedFileW(self.fd, sym_link_path_c);
             return self.symLinkW(target_path_w.span(), sym_link_path_w.span(), flags);
         }
         return os.symlinkatZ(target_path_c, self.fd, sym_link_path_c);
@@ -1997,7 +1993,10 @@ pub const Dir = struct {
     /// are null-terminated, WTF16 encoded.
     pub fn symLinkW(
         self: Dir,
-        target_path_w: []const u16,
+        /// WTF-16, does not need to be NT-prefixed. The NT-prefixing
+        /// of this path is handled by CreateSymbolicLink.
+        target_path_w: [:0]const u16,
+        /// WTF-16, must be NT-prefixed or relative
         sym_link_path_w: []const u16,
         flags: SymLinkFlags,
     ) !void {
@@ -2012,7 +2011,7 @@ pub const Dir = struct {
             return self.readLinkWasi(sub_path, buffer);
         }
         if (builtin.os.tag == .windows) {
-            const sub_path_w = try os.windows.sliceToPrefixedFileW(sub_path);
+            const sub_path_w = try os.windows.sliceToPrefixedFileW(self.fd, sub_path);
             return self.readLinkW(sub_path_w.span(), buffer);
         }
         const sub_path_c = try os.toPosixPath(sub_path);
@@ -2027,7 +2026,7 @@ pub const Dir = struct {
     /// Same as `readLink`, except the `pathname` parameter is null-terminated.
     pub fn readLinkZ(self: Dir, sub_path_c: [*:0]const u8, buffer: []u8) ![]u8 {
         if (builtin.os.tag == .windows) {
-            const sub_path_w = try os.windows.cStrToPrefixedFileW(sub_path_c);
+            const sub_path_w = try os.windows.cStrToPrefixedFileW(self.fd, sub_path_c);
             return self.readLinkW(sub_path_w.span(), buffer);
         }
         return os.readlinkatZ(self.fd, sub_path_c, buffer);
@@ -2501,7 +2500,10 @@ pub const Dir = struct {
     /// open it and handle the error for file not found.
     pub fn access(self: Dir, sub_path: []const u8, flags: File.OpenFlags) AccessError!void {
         if (builtin.os.tag == .windows) {
-            const sub_path_w = try os.windows.sliceToPrefixedFileW(sub_path);
+            const sub_path_w = os.windows.sliceToPrefixedFileW(self.fd, sub_path) catch |err| switch (err) {
+                error.AccessDenied => return error.PermissionDenied,
+                else => |e| return e,
+            };
             return self.accessW(sub_path_w.span().ptr, flags);
         }
         const path_c = try os.toPosixPath(sub_path);
@@ -2511,7 +2513,10 @@ pub const Dir = struct {
     /// Same as `access` except the path parameter is null-terminated.
     pub fn accessZ(self: Dir, sub_path: [*:0]const u8, flags: File.OpenFlags) AccessError!void {
         if (builtin.os.tag == .windows) {
-            const sub_path_w = try os.windows.cStrToPrefixedFileW(sub_path);
+            const sub_path_w = os.windows.cStrToPrefixedFileW(self.fd, sub_path) catch |err| switch (err) {
+                error.AccessDenied => return error.PermissionDenied,
+                else => |e| return e,
+            };
             return self.accessW(sub_path_w.span().ptr, flags);
         }
         const os_mode = switch (flags.mode) {
@@ -2894,8 +2899,8 @@ pub fn symLinkAbsolute(target_path: []const u8, sym_link_path: []const u8, flags
     assert(path.isAbsolute(target_path));
     assert(path.isAbsolute(sym_link_path));
     if (builtin.os.tag == .windows) {
-        const target_path_w = try os.windows.sliceToPrefixedFileW(target_path);
-        const sym_link_path_w = try os.windows.sliceToPrefixedFileW(sym_link_path);
+        const target_path_w = try os.windows.sliceToPrefixedFileW(null, target_path);
+        const sym_link_path_w = try os.windows.sliceToPrefixedFileW(null, sym_link_path);
         return os.windows.CreateSymbolicLink(null, sym_link_path_w.span(), target_path_w.span(), flags.is_directory);
     }
     return os.symlink(target_path, sym_link_path);
@@ -2944,8 +2949,12 @@ pub fn openSelfExe(flags: File.OpenFlags) OpenSelfExeError!File {
         return openFileAbsoluteZ("/proc/self/exe", flags);
     }
     if (builtin.os.tag == .windows) {
-        const wide_slice = selfExePathW();
-        const prefixed_path_w = try os.windows.wToPrefixedFileW(wide_slice);
+        // If ImagePathName is a symlink, then it will contain the path of the symlink,
+        // not the path that the symlink points to. However, because we are opening
+        // the file, we can let the openFileW call follow the symlink for us.
+        const image_path_unicode_string = &os.windows.peb().ProcessParameters.ImagePathName;
+        const image_path_name = image_path_unicode_string.Buffer[0 .. image_path_unicode_string.Length / 2 :0];
+        const prefixed_path_w = try os.windows.wToPrefixedFileW(null, image_path_name);
         return cwd().openFileW(prefixed_path_w.span(), flags);
     }
     // Use of MAX_PATH_BYTES here is valid as the resulting path is immediately
@@ -2972,7 +2981,7 @@ pub fn selfExePathAlloc(allocator: Allocator) ![]u8 {
     return allocator.dupe(u8, try selfExePath(&buf));
 }
 
-/// Get the path to the current executable.
+/// Get the path to the current executable. Follows symlinks.
 /// If you only need the directory, use selfExeDirPath.
 /// If you only want an open file handle, use openSelfExe.
 /// This function may return an error if the current executable
@@ -3055,21 +3064,21 @@ pub fn selfExePath(out_buffer: []u8) SelfExePathError![]u8 {
             return error.FileNotFound;
         },
         .windows => {
-            const utf16le_slice = selfExePathW();
-            // Trust that Windows gives us valid UTF-16LE.
-            const end_index = std.unicode.utf16leToUtf8(out_buffer, utf16le_slice) catch unreachable;
-            return out_buffer[0..end_index];
+            const image_path_unicode_string = &os.windows.peb().ProcessParameters.ImagePathName;
+            const image_path_name = image_path_unicode_string.Buffer[0 .. image_path_unicode_string.Length / 2 :0];
+
+            // If ImagePathName is a symlink, then it will contain the path of the
+            // symlink, not the path that the symlink points to. We want the path
+            // that the symlink points to, though, so we need to get the realpath.
+            const pathname_w = try os.windows.wToPrefixedFileW(null, image_path_name);
+            return std.fs.cwd().realpathW(pathname_w.span(), out_buffer);
         },
         .wasi => @compileError("std.fs.selfExePath not supported for WASI. Use std.fs.selfExePathAlloc instead."),
         else => @compileError("std.fs.selfExePath not supported for this target"),
     }
 }
 
-/// The result is UTF16LE-encoded.
-pub fn selfExePathW() [:0]const u16 {
-    const image_path_name = &os.windows.peb().ProcessParameters.ImagePathName;
-    return image_path_name.Buffer[0 .. image_path_name.Length / 2 :0];
-}
+pub const selfExePathW = @compileError("deprecated; use selfExePath instead");
 
 /// `selfExeDirPath` except allocates the result on the heap.
 /// Caller owns returned memory.

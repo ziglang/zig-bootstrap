@@ -275,22 +275,24 @@ const test_targets = blk: {
         //    .link_libc = true,
         //},
 
-        .{
-            .target = .{
-                .cpu_arch = .mips,
-                .os_tag = .linux,
-                .abi = .none,
-            },
-        },
+        // https://github.com/ziglang/zig/issues/16846
+        //.{
+        //    .target = .{
+        //        .cpu_arch = .mips,
+        //        .os_tag = .linux,
+        //        .abi = .none,
+        //    },
+        //},
 
-        .{
-            .target = .{
-                .cpu_arch = .mips,
-                .os_tag = .linux,
-                .abi = .musl,
-            },
-            .link_libc = true,
-        },
+        // https://github.com/ziglang/zig/issues/16846
+        //.{
+        //    .target = .{
+        //        .cpu_arch = .mips,
+        //        .os_tag = .linux,
+        //        .abi = .musl,
+        //    },
+        //    .link_libc = true,
+        //},
 
         // https://github.com/ziglang/zig/issues/4927
         //.{
@@ -302,22 +304,24 @@ const test_targets = blk: {
         //    .link_libc = true,
         //},
 
-        .{
-            .target = .{
-                .cpu_arch = .mipsel,
-                .os_tag = .linux,
-                .abi = .none,
-            },
-        },
+        // https://github.com/ziglang/zig/issues/16846
+        //.{
+        //    .target = .{
+        //        .cpu_arch = .mipsel,
+        //        .os_tag = .linux,
+        //        .abi = .none,
+        //    },
+        //},
 
-        .{
-            .target = .{
-                .cpu_arch = .mipsel,
-                .os_tag = .linux,
-                .abi = .musl,
-            },
-            .link_libc = true,
-        },
+        // https://github.com/ziglang/zig/issues/16846
+        //.{
+        //    .target = .{
+        //        .cpu_arch = .mipsel,
+        //        .os_tag = .linux,
+        //        .abi = .musl,
+        //    },
+        //    .link_libc = true,
+        //},
 
         // https://github.com/ziglang/zig/issues/4927
         //.{
@@ -566,6 +570,7 @@ pub fn addStandaloneTests(
     b: *std.Build,
     optimize_modes: []const OptimizeMode,
     enable_macos_sdk: bool,
+    enable_ios_sdk: bool,
     omit_stage2: bool,
     enable_symlinks_windows: bool,
 ) *Step {
@@ -615,10 +620,13 @@ pub fn addStandaloneTests(
             case.import.requires_symlinks;
         const requires_macos_sdk = @hasDecl(case.import, "requires_macos_sdk") and
             case.import.requires_macos_sdk;
+        const requires_ios_sdk = @hasDecl(case.import, "requires_ios_sdk") and
+            case.import.requires_ios_sdk;
         const bad =
             (requires_stage2 and omit_stage2) or
             (requires_symlinks and omit_symlinks) or
-            (requires_macos_sdk and !enable_macos_sdk);
+            (requires_macos_sdk and !enable_macos_sdk) or
+            (requires_ios_sdk and !enable_ios_sdk);
         if (!bad) {
             const dep = b.anonymousDependency(case.build_root, case.import, .{});
             const dep_step = dep.builder.default_step;
@@ -635,6 +643,7 @@ pub fn addStandaloneTests(
 pub fn addLinkTests(
     b: *std.Build,
     enable_macos_sdk: bool,
+    enable_ios_sdk: bool,
     omit_stage2: bool,
     enable_symlinks_windows: bool,
 ) *Step {
@@ -648,10 +657,13 @@ pub fn addLinkTests(
             case.import.requires_symlinks;
         const requires_macos_sdk = @hasDecl(case.import, "requires_macos_sdk") and
             case.import.requires_macos_sdk;
+        const requires_ios_sdk = @hasDecl(case.import, "requires_ios_sdk") and
+            case.import.requires_ios_sdk;
         const bad =
             (requires_stage2 and omit_stage2) or
             (requires_symlinks and omit_symlinks) or
-            (requires_macos_sdk and !enable_macos_sdk);
+            (requires_macos_sdk and !enable_macos_sdk) or
+            (requires_ios_sdk and !enable_ios_sdk);
         if (!bad) {
             const dep = b.anonymousDependency(case.build_root, case.import, .{});
             const dep_step = dep.builder.default_step;
