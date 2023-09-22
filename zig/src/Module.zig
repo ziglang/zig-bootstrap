@@ -92,6 +92,17 @@ embed_table: std.StringHashMapUnmanaged(*EmbedFile) = .{},
 /// is not yet implemented.
 intern_pool: InternPool = .{},
 
+/// The index type for this array is `CaptureScope.Index` and the elements here are
+/// the indexes of the parent capture scopes.
+/// Memory is owned by gpa; garbage collected.
+capture_scope_parents: std.ArrayListUnmanaged(CaptureScope.Index) = .{},
+/// Value is index of type
+/// Memory is owned by gpa; garbage collected.
+runtime_capture_scopes: std.AutoArrayHashMapUnmanaged(CaptureScope.Key, InternPool.Index) = .{},
+/// Value is index of value
+/// Memory is owned by gpa; garbage collected.
+comptime_capture_scopes: std.AutoArrayHashMapUnmanaged(CaptureScope.Key, InternPool.Index) = .{},
+
 /// To be eliminated in a future commit by moving more data into InternPool.
 /// Current uses that must be eliminated:
 /// * Struct comptime_args
@@ -272,83 +283,26 @@ pub const Export = struct {
 };
 
 pub const CaptureScope = struct {
-    refs: u32,
-    parent: ?*CaptureScope,
-
-    /// Values from this decl's evaluation that will be closed over in
-    /// child decls. This map is backed by the gpa, and deinited when
-    /// the refcount reaches 0.
-    captures: std.AutoHashMapUnmanaged(Zir.Inst.Index, Capture) = .{},
-
-    pub const Capture = union(enum) {
-        comptime_val: InternPool.Index, // index of value
-        runtime_val: InternPool.Index, // index of type
+    pub const Key = extern struct {
+        zir_index: Zir.Inst.Index,
+        index: Index,
     };
 
-    pub fn failed(noalias self: *const CaptureScope) bool {
-        return self.captures.available == 0 and self.captures.size == std.math.maxInt(u32);
-    }
+    /// Index into `capture_scope_parents` which uniquely identifies a capture scope.
+    pub const Index = enum(u32) {
+        none = std.math.maxInt(u32),
+        _,
 
-    pub fn fail(noalias self: *CaptureScope, gpa: Allocator) void {
-        self.captures.deinit(gpa);
-        self.captures.available = 0;
-        self.captures.size = std.math.maxInt(u32);
-    }
-
-    pub fn incRef(self: *CaptureScope) void {
-        // TODO: wtf is reference counting doing in my beautiful codebase? 😠
-        // seriously though, let's change this to rely on InternPool garbage
-        // collection instead.
-        self.refs += 1;
-    }
-
-    pub fn decRef(self: *CaptureScope, gpa: Allocator) void {
-        self.refs -= 1;
-        if (self.refs > 0) return;
-        if (self.parent) |p| p.decRef(gpa);
-        if (!self.failed()) {
-            self.captures.deinit(gpa);
+        pub fn parent(i: Index, mod: *Module) Index {
+            return mod.capture_scope_parents.items[@intFromEnum(i)];
         }
-        gpa.destroy(self);
-    }
+    };
 };
 
-pub const WipCaptureScope = struct {
-    scope: *CaptureScope,
-    finalized: bool,
-    gpa: Allocator,
-
-    pub fn init(gpa: Allocator, parent: ?*CaptureScope) !WipCaptureScope {
-        const scope = try gpa.create(CaptureScope);
-        if (parent) |p| p.incRef();
-        scope.* = .{ .refs = 1, .parent = parent };
-        return .{
-            .scope = scope,
-            .finalized = false,
-            .gpa = gpa,
-        };
-    }
-
-    pub fn finalize(noalias self: *WipCaptureScope) !void {
-        self.finalized = true;
-    }
-
-    pub fn reset(noalias self: *WipCaptureScope, parent: ?*CaptureScope) !void {
-        self.scope.decRef(self.gpa);
-        self.scope = try self.gpa.create(CaptureScope);
-        if (parent) |p| p.incRef();
-        self.scope.* = .{ .refs = 1, .parent = parent };
-    }
-
-    pub fn deinit(noalias self: *WipCaptureScope) void {
-        if (self.finalized) {
-            self.scope.decRef(self.gpa);
-        } else {
-            self.scope.fail(self.gpa);
-        }
-        self.* = undefined;
-    }
-};
+pub fn createCaptureScope(mod: *Module, parent: CaptureScope.Index) error{OutOfMemory}!CaptureScope.Index {
+    try mod.capture_scope_parents.append(mod.gpa, parent);
+    return @enumFromInt(mod.capture_scope_parents.items.len - 1);
+}
 
 const ValueArena = struct {
     state: std.heap.ArenaAllocator.State,
@@ -413,7 +367,7 @@ pub const Decl = struct {
     /// The scope which lexically contains this decl.  A decl must depend
     /// on its lexical parent, in order to ensure that this pointer is valid.
     /// This scope is allocated out of the arena of the parent decl.
-    src_scope: ?*CaptureScope,
+    src_scope: CaptureScope.Index,
 
     /// An integer that can be checked against the corresponding incrementing
     /// generation field of Module. This is used to determine whether `complete` status
@@ -1519,11 +1473,11 @@ pub const ErrorMsg = struct {
     msg: []const u8,
     notes: []ErrorMsg = &.{},
     reference_trace: []Trace = &.{},
+    hidden_references: u32 = 0,
 
     pub const Trace = struct {
-        decl: InternPool.OptionalNullTerminatedString,
+        decl: InternPool.NullTerminatedString,
         src_loc: SrcLoc,
-        hidden: u32 = 0,
     };
 
     pub fn create(
@@ -1565,12 +1519,6 @@ pub const ErrorMsg = struct {
         gpa.free(err_msg.msg);
         gpa.free(err_msg.reference_trace);
         err_msg.* = undefined;
-    }
-
-    pub fn clearTrace(err_msg: *ErrorMsg, gpa: Allocator) void {
-        if (err_msg.reference_trace.len == 0) return;
-        gpa.free(err_msg.reference_trace);
-        err_msg.reference_trace = &.{};
     }
 };
 
@@ -2899,6 +2847,10 @@ pub fn deinit(mod: *Module) void {
     mod.memoized_decls.deinit(gpa);
     mod.intern_pool.deinit(gpa);
     mod.tmp_hack_arena.deinit();
+
+    mod.capture_scope_parents.deinit(gpa);
+    mod.runtime_capture_scopes.deinit(gpa);
+    mod.comptime_capture_scopes.deinit(gpa);
 }
 
 pub fn destroyDecl(mod: *Module, decl_index: Decl.Index) void {
@@ -2920,7 +2872,6 @@ pub fn destroyDecl(mod: *Module, decl_index: Decl.Index) void {
                 mod.destroyNamespace(i);
             }
         }
-        if (decl.src_scope) |scope| scope.decRef(gpa);
         decl.dependants.deinit(gpa);
         decl.dependencies.deinit(gpa);
     }
@@ -3915,7 +3866,7 @@ pub fn semaFile(mod: *Module, file: *File) SemaError!void {
     const new_namespace = mod.namespacePtr(new_namespace_index);
     errdefer mod.destroyNamespace(new_namespace_index);
 
-    const new_decl_index = try mod.allocateNewDecl(new_namespace_index, 0, null);
+    const new_decl_index = try mod.allocateNewDecl(new_namespace_index, 0, .none);
     const new_decl = mod.declPtr(new_decl_index);
     errdefer @panic("TODO error handling");
 
@@ -3990,11 +3941,7 @@ pub fn semaFile(mod: *Module, file: *File) SemaError!void {
         };
         defer sema.deinit();
 
-        var wip_captures = try WipCaptureScope.init(gpa, null);
-        defer wip_captures.deinit();
-
         if (sema.analyzeStructDecl(new_decl, main_struct_inst, struct_index)) |_| {
-            try wip_captures.finalize();
             for (comptime_mutable_decls.items) |decl_index| {
                 const decl = mod.declPtr(decl_index);
                 _ = try decl.internValue(mod);
@@ -4121,15 +4068,12 @@ fn semaDecl(mod: *Module, decl_index: Decl.Index) !bool {
         return false;
     }
 
-    var wip_captures = try WipCaptureScope.init(gpa, decl.src_scope);
-    defer wip_captures.deinit();
-
     var block_scope: Sema.Block = .{
         .parent = null,
         .sema = &sema,
         .src_decl = decl_index,
         .namespace = decl.src_namespace,
-        .wip_capture_scope = wip_captures.scope,
+        .wip_capture_scope = try mod.createCaptureScope(decl.src_scope),
         .instructions = .{},
         .inlining = null,
         .is_comptime = true,
@@ -4143,7 +4087,6 @@ fn semaDecl(mod: *Module, decl_index: Decl.Index) !bool {
     const result_ref = (try sema.analyzeBodyBreak(&block_scope, body)).?.operand;
     // We'll do some other bits with the Sema. Clear the type target index just in case they analyze any type.
     sema.builtin_type_target_index = .none;
-    try wip_captures.finalize();
     for (comptime_mutable_decls.items) |ct_decl_index| {
         const ct_decl = mod.declPtr(ct_decl_index);
         _ = try ct_decl.internValue(mod);
@@ -4153,7 +4096,9 @@ fn semaDecl(mod: *Module, decl_index: Decl.Index) !bool {
     const address_space_src: LazySrcLoc = .{ .node_offset_var_decl_addrspace = 0 };
     const ty_src: LazySrcLoc = .{ .node_offset_var_decl_ty = 0 };
     const init_src: LazySrcLoc = .{ .node_offset_var_decl_init = 0 };
-    const decl_tv = try sema.resolveInstValue(&block_scope, init_src, result_ref, "global variable initializer must be comptime-known");
+    const decl_tv = try sema.resolveInstValue(&block_scope, init_src, result_ref, .{
+        .needed_comptime_reason = "global variable initializer must be comptime-known",
+    });
 
     // Note this resolves the type of the Decl, not the value; if this Decl
     // is a struct, for example, this resolves `type` (which needs no resolution),
@@ -4263,7 +4208,9 @@ fn semaDecl(mod: *Module, decl_index: Decl.Index) !bool {
     decl.@"linksection" = blk: {
         const linksection_ref = decl.zirLinksectionRef(mod);
         if (linksection_ref == .none) break :blk .none;
-        const bytes = try sema.resolveConstString(&block_scope, section_src, linksection_ref, "linksection must be comptime-known");
+        const bytes = try sema.resolveConstString(&block_scope, section_src, linksection_ref, .{
+            .needed_comptime_reason = "linksection must be comptime-known",
+        });
         if (mem.indexOfScalar(u8, bytes, 0) != null) {
             return sema.fail(&block_scope, section_src, "linksection cannot contain null bytes", .{});
         } else if (bytes.len == 0) {
@@ -5071,15 +5018,12 @@ pub fn analyzeFnBody(mod: *Module, func_index: InternPool.Index, arena: Allocato
     try sema.air_extra.ensureTotalCapacity(gpa, reserved_count);
     sema.air_extra.items.len += reserved_count;
 
-    var wip_captures = try WipCaptureScope.init(gpa, decl.src_scope);
-    defer wip_captures.deinit();
-
     var inner_block: Sema.Block = .{
         .parent = null,
         .sema = &sema,
         .src_decl = decl_index,
         .namespace = decl.src_namespace,
-        .wip_capture_scope = wip_captures.scope,
+        .wip_capture_scope = try mod.createCaptureScope(decl.src_scope),
         .instructions = .{},
         .inlining = null,
         .is_comptime = false,
@@ -5191,7 +5135,6 @@ pub fn analyzeFnBody(mod: *Module, func_index: InternPool.Index, arena: Allocato
         };
     }
 
-    try wip_captures.finalize();
     for (comptime_mutable_decls.items) |ct_decl_index| {
         const ct_decl = mod.declPtr(ct_decl_index);
         _ = try ct_decl.internValue(mod);
@@ -5310,7 +5253,7 @@ pub fn allocateNewDecl(
     mod: *Module,
     namespace: Namespace.Index,
     src_node: Ast.Node.Index,
-    src_scope: ?*CaptureScope,
+    src_scope: CaptureScope.Index,
 ) !Decl.Index {
     const ip = &mod.intern_pool;
     const gpa = mod.gpa;
@@ -5346,8 +5289,6 @@ pub fn allocateNewDecl(
         }
     }
 
-    if (src_scope) |scope| scope.incRef();
-
     return decl_index;
 }
 
@@ -5376,7 +5317,7 @@ pub fn createAnonymousDeclFromDecl(
     mod: *Module,
     src_decl: *Decl,
     namespace: Namespace.Index,
-    src_scope: ?*CaptureScope,
+    src_scope: CaptureScope.Index,
     tv: TypedValue,
 ) !Decl.Index {
     const new_decl_index = try mod.allocateNewDecl(namespace, src_decl.src_node, src_scope);
@@ -5970,7 +5911,7 @@ pub fn populateTestFunctions(
                     .len = test_decl_name.len,
                     .child = .u8_type,
                 });
-                const test_name_decl_index = try mod.createAnonymousDeclFromDecl(decl, decl.src_namespace, null, .{
+                const test_name_decl_index = try mod.createAnonymousDeclFromDecl(decl, decl.src_namespace, .none, .{
                     .ty = test_name_decl_ty,
                     .val = (try mod.intern(.{ .aggregate = .{
                         .ty = test_name_decl_ty.toIntern(),
@@ -6017,7 +5958,7 @@ pub fn populateTestFunctions(
             .child = test_fn_ty.toIntern(),
             .sentinel = .none,
         });
-        const array_decl_index = try mod.createAnonymousDeclFromDecl(decl, decl.src_namespace, null, .{
+        const array_decl_index = try mod.createAnonymousDeclFromDecl(decl, decl.src_namespace, .none, .{
             .ty = array_decl_ty,
             .val = (try mod.intern(.{ .aggregate = .{
                 .ty = array_decl_ty.toIntern(),
@@ -6362,7 +6303,7 @@ pub fn errorSetFromUnsortedNames(
 
 /// Supports only pointers, not pointer-like optionals.
 pub fn ptrIntValue(mod: *Module, ty: Type, x: u64) Allocator.Error!Value {
-    assert(ty.zigTypeTag(mod) == .Pointer);
+    assert(ty.zigTypeTag(mod) == .Pointer and !ty.isSlice(mod));
     const i = try intern(mod, .{ .ptr = .{
         .ty = ty.toIntern(),
         .addr = .{ .int = (try mod.intValue_u64(Type.usize, x)).toIntern() },

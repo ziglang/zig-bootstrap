@@ -1893,6 +1893,9 @@ pub fn execvpeZ(
 /// Get an environment variable.
 /// See also `getenvZ`.
 pub fn getenv(key: []const u8) ?[:0]const u8 {
+    if (builtin.os.tag == .windows) {
+        @compileError("std.os.getenv is unavailable for Windows because environment strings are in WTF-16 format. See std.process.getEnvVarOwned for a cross-platform API or std.os.getenvW for a Windows-specific API.");
+    }
     if (builtin.link_libc) {
         var ptr = std.c.environ;
         while (ptr[0]) |line| : (ptr += 1) {
@@ -1906,8 +1909,8 @@ pub fn getenv(key: []const u8) ?[:0]const u8 {
         }
         return null;
     }
-    if (builtin.os.tag == .windows) {
-        @compileError("std.os.getenv is unavailable for Windows because environment string is in WTF-16 format. See std.process.getEnvVarOwned for cross-platform API or std.os.getenvW for Windows-specific API.");
+    if (builtin.os.tag == .wasi) {
+        @compileError("std.os.getenv is unavailable for WASI. See std.process.getEnvMap or std.process.getEnvVarOwned for a cross-platform API.");
     }
     // The simplified start logic doesn't populate environ.
     if (std.start.simplified_logic) return null;
@@ -2631,7 +2634,13 @@ pub fn renameatW(
 
     var need_fallback = true;
     var rc: windows.NTSTATUS = undefined;
-    if (comptime builtin.target.os.version_range.windows.min.isAtLeast(.win10_rs1)) {
+    // FILE_RENAME_INFORMATION_EX and FILE_RENAME_POSIX_SEMANTICS require >= win10_rs1,
+    // but FILE_RENAME_IGNORE_READONLY_ATTRIBUTE requires >= win10_rs5. We check >= rs5 here
+    // so that we only use POSIX_SEMANTICS when we know IGNORE_READONLY_ATTRIBUTE will also be
+    // supported in order to avoid either (1) using a redundant call that we can know in advance will return
+    // STATUS_NOT_SUPPORTED or (2) only setting IGNORE_READONLY_ATTRIBUTE when >= rs5
+    // and therefore having different behavior when the Windows version is >= rs1 but < rs5.
+    if (comptime builtin.target.os.version_range.windows.min.isAtLeast(.win10_rs5)) {
         const struct_buf_len = @sizeOf(windows.FILE_RENAME_INFORMATION_EX) + (MAX_PATH_BYTES - 1);
         var rename_info_buf: [struct_buf_len]u8 align(@alignOf(windows.FILE_RENAME_INFORMATION_EX)) = undefined;
         const struct_len = @sizeOf(windows.FILE_RENAME_INFORMATION_EX) - 1 + new_path_w.len * 2;
@@ -3973,7 +3982,7 @@ pub fn connect(sock: socket_t, sock_addr: *const sockaddr, len: socklen_t) Conne
             .WSAEINVAL => unreachable,
             .WSAEISCONN => unreachable,
             .WSAENOTSOCK => unreachable,
-            .WSAEWOULDBLOCK => unreachable,
+            .WSAEWOULDBLOCK => return error.WouldBlock,
             .WSAEACCES => unreachable,
             .WSAENOBUFS => return error.SystemResources,
             .WSAEAFNOSUPPORT => return error.AddressFamilyNotSupported,

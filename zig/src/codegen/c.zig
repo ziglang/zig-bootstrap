@@ -1275,7 +1275,11 @@ pub const DeclGen = struct {
 
                     try writer.writeByte('{');
                     var empty = true;
-                    for (tuple.types, tuple.values, 0..) |field_ty, comptime_ty, field_i| {
+                    for (
+                        tuple.types.get(ip),
+                        tuple.values.get(ip),
+                        0..,
+                    ) |field_ty, comptime_ty, field_i| {
                         if (comptime_ty != .none) continue;
                         if (!field_ty.toType().hasRuntimeBitsIgnoreComptime(mod)) continue;
 
@@ -6951,8 +6955,10 @@ fn airUnionInit(f: *Function, inst: Air.Inst.Index) !CValue {
 }
 
 fn airPrefetch(f: *Function, inst: Air.Inst.Index) !CValue {
+    const mod = f.object.dg.module;
     const prefetch = f.air.instructions.items(.data)[inst].prefetch;
 
+    const ptr_ty = f.typeOf(prefetch.ptr);
     const ptr = try f.resolveInst(prefetch.ptr);
     try reap(f, inst, &.{prefetch.ptr});
 
@@ -6960,7 +6966,10 @@ fn airPrefetch(f: *Function, inst: Air.Inst.Index) !CValue {
     switch (prefetch.cache) {
         .data => {
             try writer.writeAll("zig_prefetch(");
-            try f.writeCValue(writer, ptr, .FunctionArgument);
+            if (ptr_ty.isSlice(mod))
+                try f.writeCValueMember(writer, ptr, .{ .identifier = "ptr" })
+            else
+                try f.writeCValue(writer, ptr, .FunctionArgument);
             try writer.print(", {d}, {d});\n", .{ @intFromEnum(prefetch.rw), prefetch.locality });
         },
         // The available prefetch intrinsics do not accept a cache argument; only
@@ -7740,16 +7749,18 @@ fn lowerFnRetTy(ret_ty: Type, mod: *Module) !Type {
     if (ret_ty.ip_index == .noreturn_type) return Type.noreturn;
 
     if (lowersToArray(ret_ty, mod)) {
+        const gpa = mod.gpa;
+        const ip = &mod.intern_pool;
         const names = [1]InternPool.NullTerminatedString{
-            try mod.intern_pool.getOrPutString(mod.gpa, "array"),
+            try ip.getOrPutString(gpa, "array"),
         };
         const types = [1]InternPool.Index{ret_ty.ip_index};
         const values = [1]InternPool.Index{.none};
-        const interned = try mod.intern(.{ .anon_struct_type = .{
+        const interned = try ip.getAnonStructType(gpa, .{
             .names = &names,
             .types = &types,
             .values = &values,
-        } });
+        });
         return interned.toType();
     }
 

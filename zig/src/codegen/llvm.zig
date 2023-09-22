@@ -831,6 +831,18 @@ pub const Object = struct {
     /// Memoizes a null `?usize` value.
     null_opt_usize: Builder.Constant,
 
+    /// When an LLVM struct type is created, an entry is inserted into this
+    /// table for every zig source field of the struct that has a corresponding
+    /// LLVM struct field. comptime fields and 0 bit fields are not included.
+    /// The value is the LLVM struct field index.
+    /// This is denormalized data.
+    struct_field_map: std.AutoHashMapUnmanaged(ZigStructField, c_uint),
+
+    const ZigStructField = struct {
+        struct_ty: InternPool.Index,
+        field_index: u32,
+    };
+
     pub const TypeMap = std.AutoHashMapUnmanaged(InternPool.Index, Builder.Type);
 
     /// This is an ArrayHashMap as opposed to a HashMap because in `flushModule` we
@@ -985,6 +997,7 @@ pub const Object = struct {
             .error_name_table = .none,
             .extern_collisions = .{},
             .null_opt_usize = .no_init,
+            .struct_field_map = .{},
         };
     }
 
@@ -1000,6 +1013,7 @@ pub const Object = struct {
         self.type_map.deinit(gpa);
         self.extern_collisions.deinit(gpa);
         self.builder.deinit();
+        self.struct_field_map.deinit(gpa);
         self.* = undefined;
     }
 
@@ -2398,7 +2412,7 @@ pub const Object = struct {
                         comptime assert(struct_layout_version == 2);
                         var offset: u64 = 0;
 
-                        for (tuple.types, tuple.values, 0..) |field_ty, field_val, i| {
+                        for (tuple.types.get(ip), tuple.values.get(ip), 0..) |field_ty, field_val, i| {
                             if (field_val != .none or !field_ty.toType().hasRuntimeBits(mod)) continue;
 
                             const field_size = field_ty.toType().abiSize(mod);
@@ -2407,7 +2421,7 @@ pub const Object = struct {
                             offset = field_offset + field_size;
 
                             const field_name = if (tuple.names.len != 0)
-                                ip.stringToSlice(tuple.names[i])
+                                ip.stringToSlice(tuple.names.get(ip)[i])
                             else
                                 try std.fmt.allocPrintZ(gpa, "{d}", .{i});
                             defer if (tuple.names.len == 0) gpa.free(field_name);
@@ -3280,7 +3294,10 @@ pub const Object = struct {
 
                     var llvm_field_types = std.ArrayListUnmanaged(Builder.Type){};
                     defer llvm_field_types.deinit(o.gpa);
+                    // Although we can estimate how much capacity to add, these cannot be
+                    // relied upon because of the recursive calls to lowerType below.
                     try llvm_field_types.ensureUnusedCapacity(o.gpa, struct_obj.fields.count());
+                    try o.struct_field_map.ensureUnusedCapacity(o.gpa, @intCast(struct_obj.fields.count()));
 
                     comptime assert(struct_layout_version == 2);
                     var offset: u64 = 0;
@@ -3302,6 +3319,10 @@ pub const Object = struct {
                             o.gpa,
                             try o.builder.arrayType(padding_len, .i8),
                         );
+                        try o.struct_field_map.put(o.gpa, .{
+                            .struct_ty = t.toIntern(),
+                            .field_index = field_and_index.index,
+                        }, @intCast(llvm_field_types.items.len));
                         try llvm_field_types.append(o.gpa, try o.lowerType(field.ty));
 
                         offset += field.ty.abiSize(mod);
@@ -3325,13 +3346,20 @@ pub const Object = struct {
                 .anon_struct_type => |anon_struct_type| {
                     var llvm_field_types: std.ArrayListUnmanaged(Builder.Type) = .{};
                     defer llvm_field_types.deinit(o.gpa);
+                    // Although we can estimate how much capacity to add, these cannot be
+                    // relied upon because of the recursive calls to lowerType below.
                     try llvm_field_types.ensureUnusedCapacity(o.gpa, anon_struct_type.types.len);
+                    try o.struct_field_map.ensureUnusedCapacity(o.gpa, anon_struct_type.types.len);
 
                     comptime assert(struct_layout_version == 2);
                     var offset: u64 = 0;
                     var big_align: u32 = 0;
 
-                    for (anon_struct_type.types, anon_struct_type.values) |field_ty, field_val| {
+                    for (
+                        anon_struct_type.types.get(ip),
+                        anon_struct_type.values.get(ip),
+                        0..,
+                    ) |field_ty, field_val, field_index| {
                         if (field_val != .none or !field_ty.toType().hasRuntimeBits(mod)) continue;
 
                         const field_align = field_ty.toType().abiAlignment(mod);
@@ -3344,6 +3372,10 @@ pub const Object = struct {
                             o.gpa,
                             try o.builder.arrayType(padding_len, .i8),
                         );
+                        try o.struct_field_map.put(o.gpa, .{
+                            .struct_ty = t.toIntern(),
+                            .field_index = @intCast(field_index),
+                        }, @intCast(llvm_field_types.items.len));
                         try llvm_field_types.append(o.gpa, try o.lowerType(field_ty.toType()));
 
                         offset += field_ty.toType().abiSize(mod);
@@ -3880,7 +3912,11 @@ pub const Object = struct {
                     var offset: u64 = 0;
                     var big_align: u32 = 0;
                     var need_unnamed = false;
-                    for (tuple.types, tuple.values, 0..) |field_ty, field_val, field_index| {
+                    for (
+                        tuple.types.get(ip),
+                        tuple.values.get(ip),
+                        0..,
+                    ) |field_ty, field_val, field_index| {
                         if (field_val != .none) continue;
                         if (!field_ty.toType().hasRuntimeBitsIgnoreComptime(mod)) continue;
 
@@ -4236,9 +4272,9 @@ pub const Object = struct {
                             try o.lowerType(parent_ty),
                             parent_ptr,
                             null,
-                            if (llvmField(parent_ty, field_index, mod)) |llvm_field| &.{
+                            if (o.llvmFieldIndex(parent_ty, field_index)) |llvm_field_index| &.{
                                 try o.builder.intConst(.i32, 0),
-                                try o.builder.intConst(.i32, llvm_field.index),
+                                try o.builder.intConst(.i32, llvm_field_index),
                             } else &.{
                                 try o.builder.intConst(.i32, @intFromBool(
                                     parent_ty.hasRuntimeBitsIgnoreComptime(mod),
@@ -4394,6 +4430,13 @@ pub const Object = struct {
         try attributes.addParamAttr(llvm_arg_i, .readonly, &o.builder);
         try attributes.addParamAttr(llvm_arg_i, .{ .@"align" = alignment }, &o.builder);
         if (byval) try attributes.addParamAttr(llvm_arg_i, .{ .byval = param_llvm_ty }, &o.builder);
+    }
+
+    fn llvmFieldIndex(o: *Object, struct_ty: Type, field_index: usize) ?c_uint {
+        return o.struct_field_map.get(.{
+            .struct_ty = struct_ty.toIntern(),
+            .field_index = @intCast(field_index),
+        });
     }
 };
 
@@ -6141,7 +6184,7 @@ pub const FuncGen = struct {
                         return self.wip.cast(.trunc, shifted_value, elem_llvm_ty, "");
                     },
                     else => {
-                        const llvm_field_index = llvmField(struct_ty, field_index, mod).?.index;
+                        const llvm_field_index = o.llvmFieldIndex(struct_ty, field_index).?;
                         return self.wip.extractValue(struct_llvm_val, &.{llvm_field_index}, "");
                     },
                 },
@@ -6168,23 +6211,25 @@ pub const FuncGen = struct {
 
         switch (struct_ty.zigTypeTag(mod)) {
             .Struct => {
-                assert(struct_ty.containerLayout(mod) != .Packed);
-                const llvm_field = llvmField(struct_ty, field_index, mod).?;
+                const layout = struct_ty.containerLayout(mod);
+                assert(layout != .Packed);
                 const struct_llvm_ty = try o.lowerType(struct_ty);
+                const llvm_field_index = o.llvmFieldIndex(struct_ty, field_index).?;
                 const field_ptr =
-                    try self.wip.gepStruct(struct_llvm_ty, struct_llvm_val, llvm_field.index, "");
+                    try self.wip.gepStruct(struct_llvm_ty, struct_llvm_val, llvm_field_index, "");
+                const alignment = struct_ty.structFieldAlign(field_index, mod);
                 const field_ptr_ty = try mod.ptrType(.{
-                    .child = llvm_field.ty.toIntern(),
+                    .child = field_ty.toIntern(),
                     .flags = .{
-                        .alignment = InternPool.Alignment.fromNonzeroByteUnits(llvm_field.alignment),
+                        .alignment = InternPool.Alignment.fromNonzeroByteUnits(alignment),
                     },
                 });
                 if (isByRef(field_ty, mod)) {
                     if (canElideLoad(self, body_tail))
                         return field_ptr;
 
-                    assert(llvm_field.alignment != 0);
-                    const field_alignment = Builder.Alignment.fromByteUnits(llvm_field.alignment);
+                    assert(alignment != 0);
+                    const field_alignment = Builder.Alignment.fromByteUnits(alignment);
                     return self.loadByRef(field_ptr, field_ty, field_alignment, .normal);
                 } else {
                     return self.load(field_ptr, field_ptr_ty);
@@ -7079,15 +7124,17 @@ pub const FuncGen = struct {
         const field_index = ty_pl.payload;
 
         const mod = o.module;
-        const llvm_field = llvmField(struct_ty, field_index, mod).?;
         const struct_llvm_ty = try o.lowerType(struct_ty);
+        const llvm_field_index = o.llvmFieldIndex(struct_ty, field_index).?;
         assert(self.err_ret_trace != .none);
         const field_ptr =
-            try self.wip.gepStruct(struct_llvm_ty, self.err_ret_trace, llvm_field.index, "");
+            try self.wip.gepStruct(struct_llvm_ty, self.err_ret_trace, llvm_field_index, "");
+        const field_alignment = struct_ty.structFieldAlign(field_index, mod);
+        const field_ty = struct_ty.structFieldType(field_index, mod);
         const field_ptr_ty = try mod.ptrType(.{
-            .child = llvm_field.ty.toIntern(),
+            .child = field_ty.toIntern(),
             .flags = .{
-                .alignment = InternPool.Alignment.fromNonzeroByteUnits(llvm_field.alignment),
+                .alignment = InternPool.Alignment.fromNonzeroByteUnits(field_alignment),
             },
         });
         return self.load(field_ptr, field_ptr_ty);
@@ -7639,8 +7686,8 @@ pub const FuncGen = struct {
         const result_val = try self.wip.extractValue(results, &.{0}, "");
         const overflow_bit = try self.wip.extractValue(results, &.{1}, "");
 
-        const result_index = llvmField(inst_ty, 0, mod).?.index;
-        const overflow_index = llvmField(inst_ty, 1, mod).?.index;
+        const result_index = o.llvmFieldIndex(inst_ty, 0).?;
+        const overflow_index = o.llvmFieldIndex(inst_ty, 1).?;
 
         if (isByRef(inst_ty, mod)) {
             const result_alignment = Builder.Alignment.fromByteUnits(inst_ty.abiAlignment(mod));
@@ -7997,8 +8044,8 @@ pub const FuncGen = struct {
 
         const overflow_bit = try self.wip.icmp(.ne, lhs, reconstructed, "");
 
-        const result_index = llvmField(dest_ty, 0, mod).?.index;
-        const overflow_index = llvmField(dest_ty, 1, mod).?.index;
+        const result_index = o.llvmFieldIndex(dest_ty, 0).?;
+        const overflow_index = o.llvmFieldIndex(dest_ty, 1).?;
 
         if (isByRef(dest_ty, mod)) {
             const result_alignment = Builder.Alignment.fromByteUnits(dest_ty.abiAlignment(mod));
@@ -9615,7 +9662,7 @@ pub const FuncGen = struct {
                         if ((try result_ty.structFieldValueComptime(mod, i)) != null) continue;
 
                         const llvm_elem = try self.resolveInst(elem);
-                        const llvm_i = llvmField(result_ty, i, mod).?.index;
+                        const llvm_i = o.llvmFieldIndex(result_ty, i).?;
                         const field_ptr =
                             try self.wip.gepStruct(llvm_result_ty, alloca_inst, llvm_i, "");
                         const field_ptr_ty = try mod.ptrType(.{
@@ -9636,7 +9683,7 @@ pub const FuncGen = struct {
                         if ((try result_ty.structFieldValueComptime(mod, i)) != null) continue;
 
                         const llvm_elem = try self.resolveInst(elem);
-                        const llvm_i = llvmField(result_ty, i, mod).?.index;
+                        const llvm_i = o.llvmFieldIndex(result_ty, i).?;
                         result = try self.wip.insertValue(result, llvm_elem, &.{llvm_i}, "");
                     }
                     return result;
@@ -9843,7 +9890,7 @@ pub const FuncGen = struct {
         }
 
         _ = try self.wip.callIntrinsic(.normal, .none, .prefetch, &.{.ptr}, &.{
-            try self.resolveInst(prefetch.ptr),
+            try self.sliceOrArrayPtr(try self.resolveInst(prefetch.ptr), self.typeOf(prefetch.ptr)),
             try o.builder.intValue(.i32, prefetch.rw),
             try o.builder.intValue(.i32, prefetch.locality),
             try o.builder.intValue(.i32, prefetch.cache),
@@ -10058,8 +10105,8 @@ pub const FuncGen = struct {
                 else => {
                     const struct_llvm_ty = try o.lowerPtrElemTy(struct_ty);
 
-                    if (llvmField(struct_ty, field_index, mod)) |llvm_field| {
-                        return self.wip.gepStruct(struct_llvm_ty, struct_ptr, llvm_field.index, "");
+                    if (o.llvmFieldIndex(struct_ty, field_index)) |llvm_field_index| {
+                        return self.wip.gepStruct(struct_llvm_ty, struct_ptr, llvm_field_index, "");
                     } else {
                         // If we found no index then this means this is a zero sized field at the
                         // end of the struct. Treat our struct pointer as an array of two and get
@@ -10525,89 +10572,6 @@ fn toLlvmGlobalAddressSpace(wanted_address_space: std.builtin.AddressSpace, targ
         .generic => llvmDefaultGlobalAddressSpace(target),
         else => |as| toLlvmAddressSpace(as, target),
     };
-}
-
-const LlvmField = struct {
-    index: c_uint,
-    ty: Type,
-    alignment: u32,
-};
-
-/// Take into account 0 bit fields and padding. Returns null if an llvm
-/// field could not be found.
-/// This only happens if you want the field index of a zero sized field at
-/// the end of the struct.
-fn llvmField(ty: Type, field_index: usize, mod: *Module) ?LlvmField {
-    // Detects where we inserted extra padding fields so that we can skip
-    // over them in this function.
-    comptime assert(struct_layout_version == 2);
-    var offset: u64 = 0;
-    var big_align: u32 = 0;
-
-    const struct_type = switch (mod.intern_pool.indexToKey(ty.toIntern())) {
-        .anon_struct_type => |tuple| {
-            var llvm_field_index: c_uint = 0;
-            for (tuple.types, tuple.values, 0..) |field_ty, field_val, i| {
-                if (field_val != .none or !field_ty.toType().hasRuntimeBits(mod)) continue;
-
-                const field_align = field_ty.toType().abiAlignment(mod);
-                big_align = @max(big_align, field_align);
-                const prev_offset = offset;
-                offset = std.mem.alignForward(u64, offset, field_align);
-
-                const padding_len = offset - prev_offset;
-                if (padding_len > 0) {
-                    llvm_field_index += 1;
-                }
-
-                if (field_index <= i) {
-                    return .{
-                        .index = llvm_field_index,
-                        .ty = field_ty.toType(),
-                        .alignment = field_align,
-                    };
-                }
-
-                llvm_field_index += 1;
-                offset += field_ty.toType().abiSize(mod);
-            }
-            return null;
-        },
-        .struct_type => |s| s,
-        else => unreachable,
-    };
-    const struct_obj = mod.structPtrUnwrap(struct_type.index).?;
-    const layout = struct_obj.layout;
-    assert(layout != .Packed);
-
-    var llvm_field_index: c_uint = 0;
-    var it = struct_obj.runtimeFieldIterator(mod);
-    while (it.next()) |field_and_index| {
-        const field = field_and_index.field;
-        const field_align = field.alignment(mod, layout);
-        big_align = @max(big_align, field_align);
-        const prev_offset = offset;
-        offset = std.mem.alignForward(u64, offset, field_align);
-
-        const padding_len = offset - prev_offset;
-        if (padding_len > 0) {
-            llvm_field_index += 1;
-        }
-
-        if (field_index == field_and_index.index) {
-            return .{
-                .index = llvm_field_index,
-                .ty = field.ty,
-                .alignment = field_align,
-            };
-        }
-
-        llvm_field_index += 1;
-        offset += field.ty.abiSize(mod);
-    } else {
-        // We did not find an llvm field that corresponds to this zig field.
-        return null;
-    }
 }
 
 fn firstParamSRet(fn_info: InternPool.Key.FuncType, mod: *Module) bool {
@@ -11146,6 +11110,7 @@ fn isByRef(ty: Type, mod: *Module) bool {
     // For tuples and structs, if there are more than this many non-void
     // fields, then we make it byref, otherwise byval.
     const max_fields_byval = 0;
+    const ip = &mod.intern_pool;
 
     switch (ty.zigTypeTag(mod)) {
         .Type,
@@ -11174,10 +11139,10 @@ fn isByRef(ty: Type, mod: *Module) bool {
         .Struct => {
             // Packed structs are represented to LLVM as integers.
             if (ty.containerLayout(mod) == .Packed) return false;
-            const struct_type = switch (mod.intern_pool.indexToKey(ty.toIntern())) {
+            const struct_type = switch (ip.indexToKey(ty.toIntern())) {
                 .anon_struct_type => |tuple| {
                     var count: usize = 0;
-                    for (tuple.types, tuple.values) |field_ty, field_val| {
+                    for (tuple.types.get(ip), tuple.values.get(ip)) |field_ty, field_val| {
                         if (field_val != .none or !field_ty.toType().hasRuntimeBits(mod)) continue;
 
                         count += 1;

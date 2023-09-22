@@ -125,7 +125,9 @@ const Owner = union(enum) {
             .func_index => |func_index| {
                 const mod = ctx.bin_file.options.module.?;
                 const decl_index = mod.funcOwnerDeclIndex(func_index);
-                if (ctx.bin_file.cast(link.File.MachO)) |macho_file| {
+                if (ctx.bin_file.cast(link.File.Elf)) |elf_file| {
+                    return elf_file.getOrCreateMetadataForDecl(decl_index);
+                } else if (ctx.bin_file.cast(link.File.MachO)) |macho_file| {
                     const atom = try macho_file.getOrCreateAtomForDecl(decl_index);
                     return macho_file.getAtom(atom).getSymbolIndex().?;
                 } else if (ctx.bin_file.cast(link.File.Coff)) |coff_file| {
@@ -136,7 +138,10 @@ const Owner = union(enum) {
                 } else unreachable;
             },
             .lazy_sym => |lazy_sym| {
-                if (ctx.bin_file.cast(link.File.MachO)) |macho_file| {
+                if (ctx.bin_file.cast(link.File.Elf)) |elf_file| {
+                    return elf_file.getOrCreateMetadataForLazySymbol(lazy_sym) catch |err|
+                        ctx.fail("{s} creating lazy symbol", .{@errorName(err)});
+                } else if (ctx.bin_file.cast(link.File.MachO)) |macho_file| {
                     const atom = macho_file.getOrCreateAtomForLazySymbol(lazy_sym) catch |err|
                         return ctx.fail("{s} creating lazy symbol", .{@errorName(err)});
                     return macho_file.getAtom(atom).getSymbolIndex().?;
@@ -1929,7 +1934,7 @@ fn genBody(self: *Self, body: []const Air.Inst.Index) InnerError!void {
             .ptr_elem_ptr        => try self.airPtrElemPtr(inst),
 
             .inferred_alloc, .inferred_alloc_comptime => unreachable,
-            .unreach  => if (self.wantSafety()) try self.airTrap() else self.finishAirBookkeeping(),
+            .unreach  => self.finishAirBookkeeping(),
 
             .optional_payload           => try self.airOptionalPayload(inst),
             .optional_payload_ptr       => try self.airOptionalPayloadPtr(inst),
@@ -8149,10 +8154,11 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
             else => null,
         }) |owner_decl| {
             if (self.bin_file.cast(link.File.Elf)) |elf_file| {
-                const atom_index = try elf_file.getOrCreateAtomForDecl(owner_decl);
-                const atom = elf_file.getAtom(atom_index);
-                _ = try atom.getOrCreateOffsetTableEntry(elf_file);
-                const got_addr = atom.getOffsetTableAddress(elf_file);
+                const sym_index = try elf_file.getOrCreateMetadataForDecl(owner_decl);
+                const sym = elf_file.symbol(sym_index);
+                sym.flags.needs_got = true;
+                _ = try sym.getOrCreateGotEntry(sym_index, elf_file);
+                const got_addr = sym.gotAddress(elf_file);
                 try self.asmMemory(.{ ._, .call }, Memory.sib(.qword, .{
                     .base = .{ .reg = .ds },
                     .disp = @intCast(got_addr),
@@ -8178,7 +8184,18 @@ fn airCall(self: *Self, inst: Air.Inst.Index, modifier: std.builtin.CallModifier
         } else if (func_value.getExternFunc(mod)) |extern_func| {
             const decl_name = mod.intern_pool.stringToSlice(mod.declPtr(extern_func.decl).name);
             const lib_name = mod.intern_pool.stringToSliceUnwrap(extern_func.lib_name);
-            if (self.bin_file.cast(link.File.Coff)) |coff_file| {
+            if (self.bin_file.cast(link.File.Elf)) |elf_file| {
+                const atom_index = try self.owner.getSymbolIndex(self);
+                const sym_index = try elf_file.getGlobalSymbol(decl_name, lib_name);
+                _ = try self.addInst(.{
+                    .tag = .call,
+                    .ops = .extern_fn_reloc,
+                    .data = .{ .reloc = .{
+                        .atom_index = atom_index,
+                        .sym_index = sym_index,
+                    } },
+                });
+            } else if (self.bin_file.cast(link.File.Coff)) |coff_file| {
                 const atom_index = try self.owner.getSymbolIndex(self);
                 const sym_index = try coff_file.getGlobalSymbol(decl_name, lib_name);
                 _ = try self.addInst(.{
@@ -9796,8 +9813,7 @@ fn genSetReg(self: *Self, dst_reg: Register, ty: Type, src_mcv: MCValue) InnerEr
         .register_overflow,
         .reserved_frame,
         => unreachable,
-        .undef => if (self.wantSafety())
-            try self.genSetReg(dst_reg.to64(), Type.usize, .{ .immediate = 0xaaaaaaaaaaaaaaaa }),
+        .undef => {},
         .eflags => |cc| try self.asmSetccRegister(dst_reg.to8(), cc),
         .immediate => |imm| {
             if (imm == 0) {
@@ -10081,8 +10097,7 @@ fn genSetMem(self: *Self, base: Memory.Base, disp: i32, ty: Type, src_mcv: MCVal
     };
     switch (src_mcv) {
         .none, .unreach, .dead, .reserved_frame => unreachable,
-        .undef => if (self.wantSafety())
-            try self.genInlineMemset(dst_ptr_mcv, .{ .immediate = 0xaa }, .{ .immediate = abi_size }),
+        .undef => {},
         .immediate => |imm| switch (abi_size) {
             1, 2, 4 => {
                 const immediate = if (ty.isSignedInt(mod))
@@ -10215,11 +10230,12 @@ fn genLazySymbolRef(
     lazy_sym: link.File.LazySymbol,
 ) InnerError!void {
     if (self.bin_file.cast(link.File.Elf)) |elf_file| {
-        const atom_index = elf_file.getOrCreateAtomForLazySymbol(lazy_sym) catch |err|
+        const sym_index = elf_file.getOrCreateMetadataForLazySymbol(lazy_sym) catch |err|
             return self.fail("{s} creating lazy symbol", .{@errorName(err)});
-        const atom = elf_file.getAtom(atom_index);
-        _ = try atom.getOrCreateOffsetTableEntry(elf_file);
-        const got_addr = atom.getOffsetTableAddress(elf_file);
+        const sym = elf_file.symbol(sym_index);
+        sym.flags.needs_got = true;
+        _ = try sym.getOrCreateGotEntry(sym_index, elf_file);
+        const got_addr = sym.gotAddress(elf_file);
         const got_mem =
             Memory.sib(.qword, .{ .base = .{ .reg = .ds }, .disp = @intCast(got_addr) });
         switch (tag) {
@@ -11996,16 +12012,6 @@ fn resolveCallingConventionValues(
 
     result.stack_byte_count = mem.alignForward(u31, result.stack_byte_count, result.stack_align);
     return result;
-}
-
-/// TODO support scope overrides. Also note this logic is duplicated with `Module.wantSafety`.
-fn wantSafety(self: *Self) bool {
-    return switch (self.bin_file.options.optimize_mode) {
-        .Debug => true,
-        .ReleaseSafe => true,
-        .ReleaseFast => false,
-        .ReleaseSmall => false,
-    };
 }
 
 fn fail(self: *Self, comptime format: []const u8, args: anytype) InnerError {

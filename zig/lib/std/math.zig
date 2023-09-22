@@ -241,6 +241,7 @@ pub const log = @import("math/log.zig").log;
 pub const log2 = @import("math/log2.zig").log2;
 pub const log10 = @import("math/log10.zig").log10;
 pub const log10_int = @import("math/log10.zig").log10_int;
+pub const log_int = @import("math/log_int.zig").log_int;
 pub const log1p = @import("math/log1p.zig").log1p;
 pub const asinh = @import("math/asinh.zig").asinh;
 pub const acosh = @import("math/acosh.zig").acosh;
@@ -362,6 +363,7 @@ test {
     _ = log2;
     _ = log10;
     _ = log10_int;
+    _ = log_int;
     _ = log1p;
     _ = asinh;
     _ = acosh;
@@ -741,6 +743,7 @@ fn testOverflow() !void {
 /// Returns the absolute value of x, where x is a value of a signed integer type.
 /// Does not convert and returns a value of a signed integer type.
 /// Use `absCast` if you want to convert the result and get an unsigned type.
+/// Use `@fabs` if you need the absolute value of a floating point value.
 pub fn absInt(x: anytype) !@TypeOf(x) {
     const T = @TypeOf(x);
     return switch (@typeInfo(T)) {
