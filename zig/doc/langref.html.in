@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Documentation - The Zig Programming Language</title>
     <link rel="icon" href="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAABAAAAAQCAYAAAAf8/9hAAAAgklEQVR4AWMYWuD7EllJIM4G4g4g5oIJ/odhOJ8wToOxSTXgNxDHoeiBMfA4+wGShjyYOCkG/IGqWQziEzYAoUAeiF9D5U+DxEg14DRU7jWIT5IBIOdCxf+A+CQZAAoopEB7QJwBCBwHiip8UYmRdrAlDpIMgApwQZNnNii5Dq0MBgCxxycBnwEd+wAAAABJRU5ErkJggg==">
+    <link rel="icon" href="data:image/svg+xml;base64,PHN2ZyB4bWxucz0iaHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmciIHZpZXdCb3g9IjAgMCAxNTMgMTQwIj48ZyBmaWxsPSIjRjdBNDFEIj48Zz48cG9seWdvbiBwb2ludHM9IjQ2LDIyIDI4LDQ0IDE5LDMwIi8+PHBvbHlnb24gcG9pbnRzPSI0NiwyMiAzMywzMyAyOCw0NCAyMiw0NCAyMiw5NSAzMSw5NSAyMCwxMDAgMTIsMTE3IDAsMTE3IDAsMjIiIHNoYXBlLXJlbmRlcmluZz0iY3Jpc3BFZGdlcyIvPjxwb2x5Z29uIHBvaW50cz0iMzEsOTUgMTIsMTE3IDQsMTA2Ii8+PC9nPjxnPjxwb2x5Z29uIHBvaW50cz0iNTYsMjIgNjIsMzYgMzcsNDQiLz48cG9seWdvbiBwb2ludHM9IjU2LDIyIDExMSwyMiAxMTEsNDQgMzcsNDQgNTYsMzIiIHNoYXBlLXJlbmRlcmluZz0iY3Jpc3BFZGdlcyIvPjxwb2x5Z29uIHBvaW50cz0iMTE2LDk1IDk3LDExNyA5MCwxMDQiLz48cG9seWdvbiBwb2ludHM9IjExNiw5NSAxMDAsMTA0IDk3LDExNyA0MiwxMTcgNDIsOTUiIHNoYXBlLXJlbmRlcmluZz0iY3Jpc3BFZGdlcyIvPjxwb2x5Z29uIHBvaW50cz0iMTUwLDAgNTIsMTE3IDMsMTQwIDEwMSwyMiIvPjwvZz48Zz48cG9seWdvbiBwb2ludHM9IjE0MSwyMiAxNDAsNDAgMTIyLDQ1Ii8+PHBvbHlnb24gcG9pbnRzPSIxNTMsMjIgMTUzLDExNyAxMDYsMTE3IDEyMCwxMDUgMTI1LDk1IDEzMSw5NSAxMzEsNDUgMTIyLDQ1IDEzMiwzNiAxNDEsMjIiIHNoYXBlLXJlbmRlcmluZz0iY3Jpc3BFZGdlcyIvPjxwb2x5Z29uIHBvaW50cz0iMTI1LDk1IDEzMCwxMTAgMTA2LDExNyIvPjwvZz48L2c+PC9zdmc+">
     <style>
       :root{
          --nav-width: 24em;
@@ -6656,7 +6657,7 @@ test "coercion from homogenous tuple to array" {
           <li>{#link|@alignCast#} - make a pointer have more alignment</li>
           <li>{#link|@enumFromInt#} - obtain an enum value based on its integer tag value</li>
           <li>{#link|@errorFromInt#} - obtain an error code based on its integer value</li>
-          <li>{#link|@errSetCast#} - convert to a smaller error set</li>
+          <li>{#link|@errorCast#} - convert to a smaller error set</li>
           <li>{#link|@floatCast#} - convert a larger float to a smaller float</li>
           <li>{#link|@floatFromInt#} - convert an integer to a float value</li>
           <li>{#link|@intCast#} - convert between integer types</li>
@@ -8409,10 +8410,10 @@ test "main" {
       </p>
       {#header_close#}
 
-      {#header_open|@errSetCast#}
-      <pre>{#syntax#}@errSetCast(value: anytype) anytype{#endsyntax#}</pre>
+      {#header_open|@errorCast#}
+      <pre>{#syntax#}@errorCast(value: anytype) anytype{#endsyntax#}</pre>
       <p>
-      Converts an error value from one error set to another error set. The return type is the
+      Converts an error set or error union value from one error set to another error set. The return type is the
 			inferred result type. Attempting to convert an error which is not in the destination error
 			set results in safety-protected {#link|Undefined Behavior#}.
       </p>
@@ -9420,14 +9421,17 @@ fn doTheTest() !void {
       Supports {#link|Floats#} and {#link|Vectors#} of floats.
       </p>
       {#header_close#}
-      {#header_open|@fabs#}
-      <pre>{#syntax#}@fabs(value: anytype) @TypeOf(value){#endsyntax#}</pre>
+      {#header_open|@abs#}
+      <pre>{#syntax#}@abs(value: anytype) anytype{#endsyntax#}</pre>
       <p>
-      Returns the absolute value of a floating point number. Uses a dedicated hardware instruction
+      Returns the absolute value of an integer or a floating point number. Uses a dedicated hardware instruction
       when available.
+
+      The return type is always an unsigned integer of the same bit width as the operand if the operand is an integer.
+      Unsigned integer operands are supported. The builtin cannot overflow for signed integer operands.
       </p>
       <p>
-      Supports {#link|Floats#} and {#link|Vectors#} of floats.
+      Supports {#link|Floats#}, {#link|Integers#} and {#link|Vectors#} of floats or integers.
       </p>
       {#header_close#}
       {#header_open|@floor#}
@@ -10253,7 +10257,7 @@ const Set2 = error{
     C,
 };
 comptime {
-    _ = @as(Set2, @errSetCast(Set1.B));
+    _ = @as(Set2, @errorCast(Set1.B));
 }
       {#code_end#}
       <p>At runtime:</p>
@@ -10272,7 +10276,7 @@ pub fn main() void {
     foo(Set1.B);
 }
 fn foo(set1: Set1) void {
-    const x: Set2 = @errSetCast(set1);
+    const x: Set2 = @errorCast(set1);
     std.debug.print("value: {}\n", .{x});
 }
       {#code_end#}
@@ -12367,20 +12371,16 @@ fn readU32Be() u32 {}
 Root <- skip container_doc_comment? ContainerMembers eof
 
 # *** Top level ***
-ContainerMembers <- ContainerDeclarations (ContainerField COMMA)* (ContainerField / ContainerDeclarations)
+ContainerMembers <- ContainerDeclaration* (ContainerField COMMA)* (ContainerField / ContainerDeclaration*)
 
-ContainerDeclarations
-    <- TestDecl ContainerDeclarations
-     / ComptimeDecl ContainerDeclarations
-     / doc_comment? KEYWORD_pub? Decl ContainerDeclarations
-     /
+ContainerDeclaration <- TestDecl / ComptimeDecl / doc_comment? KEYWORD_pub? Decl
 
 TestDecl <- KEYWORD_test (STRINGLITERALSINGLE / IDENTIFIER)? Block
 
 ComptimeDecl <- KEYWORD_comptime Block
 
 Decl
-    <- (KEYWORD_export / KEYWORD_extern STRINGLITERALSINGLE? / (KEYWORD_inline / KEYWORD_noinline))? FnProto (SEMICOLON / Block)
+    <- (KEYWORD_export / KEYWORD_extern STRINGLITERALSINGLE? / KEYWORD_inline / KEYWORD_noinline)? FnProto (SEMICOLON / Block)
      / (KEYWORD_export / KEYWORD_extern STRINGLITERALSINGLE?)? KEYWORD_threadlocal? GlobalVarDecl
      / KEYWORD_usingnamespace Expr SEMICOLON
 

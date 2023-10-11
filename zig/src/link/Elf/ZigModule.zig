@@ -49,23 +49,23 @@ pub fn addGlobalEsym(self: *ZigModule, allocator: Allocator) !Symbol.Index {
     return index | 0x10000000;
 }
 
-pub fn addAtom(self: *ZigModule, output_section_index: u16, elf_file: *Elf) !Symbol.Index {
+pub fn addAtom(self: *ZigModule, elf_file: *Elf) !Symbol.Index {
     const gpa = elf_file.base.allocator;
 
     const atom_index = try elf_file.addAtom();
+    const symbol_index = try elf_file.addSymbol();
+    const esym_index = try self.addLocalEsym(gpa);
+
     try self.atoms.putNoClobber(gpa, atom_index, {});
+    try self.local_symbols.append(gpa, symbol_index);
+
     const atom_ptr = elf_file.atom(atom_index).?;
     atom_ptr.file_index = self.index;
-    atom_ptr.output_section_index = output_section_index;
 
-    const symbol_index = try elf_file.addSymbol();
-    try self.local_symbols.append(gpa, symbol_index);
     const symbol_ptr = elf_file.symbol(symbol_index);
     symbol_ptr.file_index = self.index;
     symbol_ptr.atom_index = atom_index;
-    symbol_ptr.output_section_index = output_section_index;
 
-    const esym_index = try self.addLocalEsym(gpa);
     const esym = &self.local_esyms.items[esym_index];
     esym.st_shndx = atom_index;
     symbol_ptr.esym_index = esym_index;
@@ -88,7 +88,7 @@ pub fn resolveSymbols(self: *ZigModule, elf_file: *Elf) void {
         if (esym.st_shndx != elf.SHN_ABS and esym.st_shndx != elf.SHN_COMMON) {
             const atom_index = esym.st_shndx;
             const atom = elf_file.atom(atom_index) orelse continue;
-            if (!atom.alive) continue;
+            if (!atom.flags.alive) continue;
         }
 
         const global = elf_file.symbol(index);
@@ -98,9 +98,9 @@ pub fn resolveSymbols(self: *ZigModule, elf_file: *Elf) void {
                 else => esym.st_shndx,
             };
             const output_section_index = if (elf_file.atom(atom_index)) |atom|
-                atom.output_section_index
+                atom.outputShndx().?
             else
-                0;
+                elf.SHN_UNDEF;
             global.value = esym.st_value;
             global.atom_index = atom_index;
             global.esym_index = esym_index;
@@ -143,8 +143,15 @@ pub fn claimUnresolved(self: *ZigModule, elf_file: *Elf) void {
 pub fn scanRelocs(self: *ZigModule, elf_file: *Elf, undefs: anytype) !void {
     for (self.atoms.keys()) |atom_index| {
         const atom = elf_file.atom(atom_index) orelse continue;
-        if (!atom.alive) continue;
-        try atom.scanRelocs(elf_file, undefs);
+        if (!atom.flags.alive) continue;
+        if (try atom.scanRelocsRequiresCode(elf_file)) {
+            // TODO ideally we don't have to fetch the code here.
+            // Perhaps it would make sense to save the code until flushModule where we
+            // would free all of generated code?
+            const code = try self.codeAlloc(elf_file, atom_index);
+            defer elf_file.base.allocator.free(code);
+            try atom.scanRelocs(elf_file, code, undefs);
+        } else try atom.scanRelocs(elf_file, null, undefs);
     }
 }
 
@@ -154,6 +161,22 @@ pub fn resetGlobals(self: *ZigModule, elf_file: *Elf) void {
         const off = global.name_offset;
         global.* = .{};
         global.name_offset = off;
+    }
+}
+
+pub fn markLive(self: *ZigModule, elf_file: *Elf) void {
+    for (self.globals(), 0..) |index, i| {
+        const esym = self.global_esyms.items[i];
+        if (esym.st_bind() == elf.STB_WEAK) continue;
+
+        const global = elf_file.symbol(index);
+        const file = global.file(elf_file) orelse continue;
+        const should_keep = esym.st_shndx == elf.SHN_UNDEF or
+            (esym.st_shndx == elf.SHN_COMMON and global.elfSym(elf_file).st_shndx != elf.SHN_COMMON);
+        if (should_keep and !file.isAlive()) {
+            file.setAlive();
+            file.markLive(elf_file);
+        }
     }
 }
 
@@ -235,6 +258,22 @@ pub fn globals(self: *ZigModule) []const Symbol.Index {
 
 pub fn asFile(self: *ZigModule) File {
     return .{ .zig_module = self };
+}
+
+/// Returns atom's code.
+/// Caller owns the memory.
+pub fn codeAlloc(self: ZigModule, elf_file: *Elf, atom_index: Atom.Index) ![]u8 {
+    const gpa = elf_file.base.allocator;
+    const atom = elf_file.atom(atom_index).?;
+    assert(atom.file_index == self.index);
+    const shdr = &elf_file.shdrs.items[atom.outputShndx().?];
+    const file_offset = shdr.sh_offset + atom.value - shdr.sh_addr;
+    const size = std.math.cast(usize, atom.size) orelse return error.Overflow;
+    const code = try gpa.alloc(u8, size);
+    errdefer gpa.free(code);
+    const amt = try elf_file.base.file.?.preadAll(code, file_offset);
+    if (amt != code.len) return error.InputOutput;
+    return code;
 }
 
 pub fn fmtSymtab(self: *ZigModule, elf_file: *Elf) std.fmt.Formatter(formatSymtab) {

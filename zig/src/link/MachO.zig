@@ -109,6 +109,7 @@ atom_by_index_table: std.AutoHashMapUnmanaged(u32, Atom.Index) = .{},
 /// value assigned to label `foo` is an unnamed constant belonging/associated
 /// with `Decl` `main`, and lives as long as that `Decl`.
 unnamed_const_atoms: UnnamedConstTable = .{},
+anon_decls: AnonDeclTable = .{},
 
 /// A table of relocations indexed by the owning them `Atom`.
 /// Note that once we refactor `Atom`'s lifetime and ownership rules,
@@ -558,10 +559,7 @@ pub fn flushModule(self: *MachO, comp: *Compilation, prog_node: *std.Progress.No
     });
     {
         const platform = Platform.fromTarget(self.base.options.target);
-        const sdk_version: ?std.SemanticVersion = if (self.base.options.sysroot) |path|
-            load_commands.inferSdkVersionFromSdkPath(path)
-        else
-            null;
+        const sdk_version: ?std.SemanticVersion = load_commands.inferSdkVersion(arena, comp);
         if (platform.isBuildVersionCompatible()) {
             try load_commands.writeBuildVersionLC(platform, sdk_version, lc_writer);
         } else if (platform.isVersionMinCompatible()) {
@@ -647,11 +645,6 @@ pub fn resolveLibSystem(
     var checked_paths = std.ArrayList([]const u8).init(tmp_arena);
 
     success: {
-        if (self.base.options.sysroot) |root| {
-            const dir = try fs.path.join(tmp_arena, &[_][]const u8{ root, "usr", "lib" });
-            if (try accessLibPath(tmp_arena, &test_path, &checked_paths, dir, "libSystem")) break :success;
-        }
-
         for (search_dirs) |dir| if (try accessLibPath(
             tmp_arena,
             &test_path,
@@ -660,11 +653,16 @@ pub fn resolveLibSystem(
             "libSystem",
         )) break :success;
 
-        const dir = try comp.zig_lib_directory.join(tmp_arena, &[_][]const u8{ "libc", "darwin" });
-        const lib_name = try std.fmt.allocPrint(tmp_arena, "libSystem.{d}", .{
-            self.base.options.target.os.version_range.semver.min.major,
-        });
-        if (try accessLibPath(tmp_arena, &test_path, &checked_paths, dir, lib_name)) break :success;
+        if (self.base.options.darwin_sdk_layout) |sdk_layout| switch (sdk_layout) {
+            .sdk => {
+                const dir = try fs.path.join(tmp_arena, &[_][]const u8{ self.base.options.sysroot.?, "usr", "lib" });
+                if (try accessLibPath(tmp_arena, &test_path, &checked_paths, dir, "libSystem")) break :success;
+            },
+            .vendored => {
+                const dir = try comp.zig_lib_directory.join(tmp_arena, &[_][]const u8{ "libc", "darwin" });
+                if (try accessLibPath(tmp_arena, &test_path, &checked_paths, dir, "libSystem")) break :success;
+            },
+        };
 
         try self.reportMissingLibraryError(checked_paths.items, "unable to find libSystem system library", .{});
         return;
@@ -676,27 +674,6 @@ pub fn resolveLibSystem(
         .weak = false,
         .path = libsystem_path,
     });
-
-    const ext = fs.path.extension(libsystem_path);
-    if (mem.eql(u8, ext, ".dylib")) {
-        // We found 'libSystem.dylib', so now we also need to look for 'libc.dylib'.
-        success: {
-            if (self.base.options.sysroot) |root| {
-                const dir = try fs.path.join(tmp_arena, &[_][]const u8{ root, "usr", "lib" });
-                if (try accessLibPath(tmp_arena, &test_path, &checked_paths, dir, "libc")) break :success;
-            }
-
-            for (search_dirs) |dir| if (try accessLibPath(
-                tmp_arena,
-                &test_path,
-                &checked_paths,
-                dir,
-                "libc",
-            )) break :success;
-
-            try self.reportMissingLibraryError(checked_paths.items, "unable to find libc system library", .{});
-        }
-    }
 }
 
 fn accessLibPath(
@@ -1425,7 +1402,7 @@ pub fn allocateSpecialSymbols(self: *MachO) !void {
 
 const CreateAtomOpts = struct {
     size: u64 = 0,
-    alignment: u32 = 0,
+    alignment: Alignment = .@"1",
 };
 
 pub fn createAtom(self: *MachO, sym_index: u32, opts: CreateAtomOpts) !Atom.Index {
@@ -1473,7 +1450,7 @@ pub fn createTentativeDefAtoms(self: *MachO) !void {
 
         const atom_index = try self.createAtom(global.sym_index, .{
             .size = size,
-            .alignment = alignment,
+            .alignment = @enumFromInt(alignment),
         });
         const atom = self.getAtomPtr(atom_index);
         atom.file = global.file;
@@ -1493,7 +1470,7 @@ pub fn createDyldPrivateAtom(self: *MachO) !void {
     const sym_index = try self.allocateSymbol();
     const atom_index = try self.createAtom(sym_index, .{
         .size = @sizeOf(u64),
-        .alignment = 3,
+        .alignment = .@"8",
     });
     try self.atom_by_index_table.putNoClobber(self.base.allocator, sym_index, atom_index);
 
@@ -1510,7 +1487,7 @@ pub fn createDyldPrivateAtom(self: *MachO) !void {
     switch (self.mode) {
         .zld => self.addAtomToSection(atom_index),
         .incremental => {
-            sym.n_value = try self.allocateAtom(atom_index, atom.size, @alignOf(u64));
+            sym.n_value = try self.allocateAtom(atom_index, atom.size, .@"8");
             log.debug("allocated dyld_private atom at 0x{x}", .{sym.n_value});
             var buffer: [@sizeOf(u64)]u8 = [_]u8{0} ** @sizeOf(u64);
             try self.writeAtom(atom_index, &buffer);
@@ -1521,7 +1498,7 @@ pub fn createDyldPrivateAtom(self: *MachO) !void {
 fn createThreadLocalDescriptorAtom(self: *MachO, sym_name: []const u8, target: SymbolWithLoc) !Atom.Index {
     const gpa = self.base.allocator;
     const size = 3 * @sizeOf(u64);
-    const required_alignment: u32 = 1;
+    const required_alignment: Alignment = .@"1";
     const sym_index = try self.allocateSymbol();
     const atom_index = try self.createAtom(sym_index, .{});
     try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
@@ -1923,6 +1900,7 @@ pub fn deinit(self: *MachO) void {
         atoms.deinit(gpa);
     }
     self.unnamed_const_atoms.deinit(gpa);
+    self.anon_decls.deinit(gpa);
 
     self.atom_by_index_table.deinit(gpa);
 
@@ -2030,10 +2008,10 @@ fn shrinkAtom(self: *MachO, atom_index: Atom.Index, new_block_size: u64) void {
     // capacity, insert a free list node for it.
 }
 
-fn growAtom(self: *MachO, atom_index: Atom.Index, new_atom_size: u64, alignment: u64) !u64 {
+fn growAtom(self: *MachO, atom_index: Atom.Index, new_atom_size: u64, alignment: Alignment) !u64 {
     const atom = self.getAtom(atom_index);
     const sym = atom.getSymbol(self);
-    const align_ok = mem.alignBackward(u64, sym.n_value, alignment) == sym.n_value;
+    const align_ok = alignment.check(sym.n_value);
     const need_realloc = !align_ok or new_atom_size > atom.capacity(self);
     if (!need_realloc) return sym.n_value;
     return self.allocateAtom(atom_index, new_atom_size, alignment);
@@ -2196,39 +2174,19 @@ pub fn updateFunc(self: *MachO, mod: *Module, func_index: InternPool.Index, air:
 
 pub fn lowerUnnamedConst(self: *MachO, typed_value: TypedValue, decl_index: Module.Decl.Index) !u32 {
     const gpa = self.base.allocator;
-
-    var code_buffer = std.ArrayList(u8).init(gpa);
-    defer code_buffer.deinit();
-
     const mod = self.base.options.module.?;
     const gop = try self.unnamed_const_atoms.getOrPut(gpa, decl_index);
     if (!gop.found_existing) {
         gop.value_ptr.* = .{};
     }
     const unnamed_consts = gop.value_ptr;
-
     const decl = mod.declPtr(decl_index);
     const decl_name = mod.intern_pool.stringToSlice(try decl.getFullyQualifiedName(mod));
-
-    const name_str_index = blk: {
-        const index = unnamed_consts.items.len;
-        const name = try std.fmt.allocPrint(gpa, "___unnamed_{s}_{d}", .{ decl_name, index });
-        defer gpa.free(name);
-        break :blk try self.strtab.insert(gpa, name);
-    };
-    const name = self.strtab.get(name_str_index).?;
-
-    log.debug("allocating symbol indexes for {s}", .{name});
-
-    const sym_index = try self.allocateSymbol();
-    const atom_index = try self.createAtom(sym_index, .{});
-    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
-
-    const res = try codegen.generateSymbol(&self.base, decl.srcLoc(mod), typed_value, &code_buffer, .none, .{
-        .parent_atom_index = self.getAtom(atom_index).getSymbolIndex().?,
-    });
-    var code = switch (res) {
-        .ok => code_buffer.items,
+    const index = unnamed_consts.items.len;
+    const name = try std.fmt.allocPrint(gpa, "___unnamed_{s}_{d}", .{ decl_name, index });
+    defer gpa.free(name);
+    const atom_index = switch (try self.lowerConst(name, typed_value, self.data_const_section_index.?, decl.srcLoc(mod))) {
+        .ok => |atom_index| atom_index,
         .fail => |em| {
             decl.analysis = .codegen_failure;
             try mod.failed_decls.put(mod.gpa, decl_index, em);
@@ -2236,28 +2194,63 @@ pub fn lowerUnnamedConst(self: *MachO, typed_value: TypedValue, decl_index: Modu
             return error.CodegenFail;
         },
     };
+    try unnamed_consts.append(gpa, atom_index);
+    const atom = self.getAtomPtr(atom_index);
+    return atom.getSymbolIndex().?;
+}
 
-    const required_alignment = typed_value.ty.abiAlignment(mod);
+const LowerConstResult = union(enum) {
+    ok: Atom.Index,
+    fail: *Module.ErrorMsg,
+};
+
+fn lowerConst(
+    self: *MachO,
+    name: []const u8,
+    tv: TypedValue,
+    sect_id: u8,
+    src_loc: Module.SrcLoc,
+) !LowerConstResult {
+    const gpa = self.base.allocator;
+
+    var code_buffer = std.ArrayList(u8).init(gpa);
+    defer code_buffer.deinit();
+
+    const mod = self.base.options.module.?;
+
+    log.debug("allocating symbol indexes for {s}", .{name});
+
+    const sym_index = try self.allocateSymbol();
+    const atom_index = try self.createAtom(sym_index, .{});
+    try self.atom_by_index_table.putNoClobber(gpa, sym_index, atom_index);
+
+    const res = try codegen.generateSymbol(&self.base, src_loc, tv, &code_buffer, .none, .{
+        .parent_atom_index = self.getAtom(atom_index).getSymbolIndex().?,
+    });
+    var code = switch (res) {
+        .ok => code_buffer.items,
+        .fail => |em| return .{ .fail = em },
+    };
+
+    const required_alignment = tv.ty.abiAlignment(mod);
     const atom = self.getAtomPtr(atom_index);
     atom.size = code.len;
     // TODO: work out logic for disambiguating functions from function pointers
     // const sect_id = self.getDeclOutputSection(decl_index);
-    const sect_id = self.data_const_section_index.?;
     const symbol = atom.getSymbolPtr(self);
+    const name_str_index = try self.strtab.insert(gpa, name);
     symbol.n_strx = name_str_index;
     symbol.n_type = macho.N_SECT;
     symbol.n_sect = sect_id + 1;
     symbol.n_value = try self.allocateAtom(atom_index, code.len, required_alignment);
     errdefer self.freeAtom(atom_index);
 
-    try unnamed_consts.append(gpa, atom_index);
-
     log.debug("allocated atom for {s} at 0x{x}", .{ name, symbol.n_value });
     log.debug("  (required alignment 0x{x})", .{required_alignment});
 
     try self.writeAtom(atom_index, code);
 
-    return atom.getSymbolIndex().?;
+    return .{ .ok = atom_index };
 }
 
 pub fn updateDecl(self: *MachO, mod: *Module, decl_index: Module.Decl.Index) !void {
@@ -2350,7 +2343,7 @@ fn updateLazySymbolAtom(
     const gpa = self.base.allocator;
     const mod = self.base.options.module.?;
 
-    var required_alignment: u32 = undefined;
+    var required_alignment: Alignment = .none;
     var code_buffer = std.ArrayList(u8).init(gpa);
     defer code_buffer.deinit();
 
@@ -2617,7 +2610,7 @@ fn updateDeclCode(self: *MachO, decl_index: Module.Decl.Index, code: []u8) !u64 
         sym.n_desc = 0;
 
         const capacity = atom.capacity(self);
-        const need_realloc = code_len > capacity or !mem.isAlignedGeneric(u64, sym.n_value, required_alignment);
+        const need_realloc = code_len > capacity or !required_alignment.check(sym.n_value);
 
         if (need_realloc) {
             const vaddr = try self.growAtom(atom_index, code_len, required_alignment);
@@ -2849,6 +2842,62 @@ pub fn getDeclVAddr(self: *MachO, decl_index: Module.Decl.Index, reloc_info: Fil
     assert(self.llvm_object == null);
 
     const this_atom_index = try self.getOrCreateAtomForDecl(decl_index);
+    const sym_index = self.getAtom(this_atom_index).getSymbolIndex().?;
+    const atom_index = self.getAtomIndexForSymbol(.{ .sym_index = reloc_info.parent_atom_index }).?;
+    try Atom.addRelocation(self, atom_index, .{
+        .type = .unsigned,
+        .target = .{ .sym_index = sym_index },
+        .offset = @as(u32, @intCast(reloc_info.offset)),
+        .addend = reloc_info.addend,
+        .pcrel = false,
+        .length = 3,
+    });
+    try Atom.addRebase(self, atom_index, @as(u32, @intCast(reloc_info.offset)));
+
+    return 0;
+}
+
+pub fn lowerAnonDecl(self: *MachO, decl_val: InternPool.Index, src_loc: Module.SrcLoc) !codegen.Result {
+    // This is basically the same as lowerUnnamedConst.
+    // example:
+    // const ty = mod.intern_pool.typeOf(decl_val).toType();
+    // const val = decl_val.toValue();
+    // The symbol name can be something like `__anon_{d}` with `@intFromEnum(decl_val)`.
+    // It doesn't have an owner decl because it's just an unnamed constant that might
+    // be used by more than one function, however, its address is being used so we need
+    // to put it in some location.
+    // ...
+    const gpa = self.base.allocator;
+    const gop = try self.anon_decls.getOrPut(gpa, decl_val);
+    if (!gop.found_existing) {
+        const mod = self.base.options.module.?;
+        const ty = mod.intern_pool.typeOf(decl_val).toType();
+        const val = decl_val.toValue();
+        const tv = TypedValue{ .ty = ty, .val = val };
+        const name = try std.fmt.allocPrint(gpa, "__anon_{d}", .{@intFromEnum(decl_val)});
+        defer gpa.free(name);
+        const res = self.lowerConst(name, tv, self.data_const_section_index.?, src_loc) catch |err| switch (err) {
+            else => {
+                // TODO improve error message
+                const em = try Module.ErrorMsg.create(gpa, src_loc, "lowerAnonDecl failed with error: {s}", .{
+                    @errorName(err),
+                });
+                return .{ .fail = em };
+            },
+        };
+        const atom_index = switch (res) {
+            .ok => |atom_index| atom_index,
+            .fail => |em| return .{ .fail = em },
+        };
+        gop.value_ptr.* = atom_index;
+    }
+    return .ok;
+}
+
+pub fn getAnonDeclVAddr(self: *MachO, decl_val: InternPool.Index, reloc_info: link.File.RelocInfo) !u64 {
+    assert(self.llvm_object == null);
+
+    const this_atom_index = self.anon_decls.get(decl_val).?;
     const sym_index = self.getAtom(this_atom_index).getSymbolIndex().?;
     const atom_index = self.getAtomIndexForSymbol(.{ .sym_index = reloc_info.parent_atom_index }).?;
     try Atom.addRelocation(self, atom_index, .{
@@ -3204,7 +3253,7 @@ pub fn addAtomToSection(self: *MachO, atom_index: Atom.Index) void {
     self.sections.set(sym.n_sect - 1, section);
 }
 
-fn allocateAtom(self: *MachO, atom_index: Atom.Index, new_atom_size: u64, alignment: u64) !u64 {
+fn allocateAtom(self: *MachO, atom_index: Atom.Index, new_atom_size: u64, alignment: Alignment) !u64 {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -3247,7 +3296,7 @@ fn allocateAtom(self: *MachO, atom_index: Atom.Index, new_atom_size: u64, alignm
             const ideal_capacity_end_vaddr = math.add(u64, sym.n_value, ideal_capacity) catch ideal_capacity;
             const capacity_end_vaddr = sym.n_value + capacity;
             const new_start_vaddr_unaligned = capacity_end_vaddr - new_atom_ideal_capacity;
-            const new_start_vaddr = mem.alignBackward(u64, new_start_vaddr_unaligned, alignment);
+            const new_start_vaddr = alignment.backward(new_start_vaddr_unaligned);
             if (new_start_vaddr < ideal_capacity_end_vaddr) {
                 // Additional bookkeeping here to notice if this free list node
                 // should be deleted because the atom that it points to has grown to take up
@@ -3276,11 +3325,11 @@ fn allocateAtom(self: *MachO, atom_index: Atom.Index, new_atom_size: u64, alignm
             const last_symbol = last.getSymbol(self);
             const ideal_capacity = if (requires_padding) padToIdeal(last.size) else last.size;
             const ideal_capacity_end_vaddr = last_symbol.n_value + ideal_capacity;
-            const new_start_vaddr = mem.alignForward(u64, ideal_capacity_end_vaddr, alignment);
+            const new_start_vaddr = alignment.forward(ideal_capacity_end_vaddr);
             atom_placement = last_index;
             break :blk new_start_vaddr;
         } else {
-            break :blk mem.alignForward(u64, segment.vmaddr, alignment);
+            break :blk alignment.forward(segment.vmaddr);
         }
     };
 
@@ -3295,10 +3344,8 @@ fn allocateAtom(self: *MachO, atom_index: Atom.Index, new_atom_size: u64, alignm
         self.segment_table_dirty = true;
     }
 
-    const align_pow = @as(u32, @intCast(math.log2(alignment)));
-    if (header.@"align" < align_pow) {
-        header.@"align" = align_pow;
-    }
+    assert(alignment != .none);
+    header.@"align" = @min(header.@"align", @intFromEnum(alignment));
     self.getAtomPtr(atom_index).size = new_atom_size;
 
     if (atom.prev_index) |prev_index| {
@@ -3338,7 +3385,7 @@ pub fn getGlobalSymbol(self: *MachO, name: []const u8, lib_name: ?[]const u8) !u
 
 pub fn writeSegmentHeaders(self: *MachO, writer: anytype) !void {
     for (self.segments.items, 0..) |seg, i| {
-        const indexes = self.getSectionIndexes(@as(u8, @intCast(i)));
+        const indexes = self.getSectionIndexes(@intCast(i));
         var out_seg = seg;
         out_seg.cmdsize = @sizeOf(macho.segment_command_64);
         out_seg.nsects = 0;
@@ -5415,6 +5462,7 @@ const DeclMetadata = struct {
     }
 };
 
+const AnonDeclTable = std.AutoHashMapUnmanaged(InternPool.Index, Atom.Index);
 const BindingTable = std.AutoArrayHashMapUnmanaged(Atom.Index, std.ArrayListUnmanaged(Atom.Binding));
 const UnnamedConstTable = std.AutoArrayHashMapUnmanaged(Module.Decl.Index, std.ArrayListUnmanaged(Atom.Index));
 const RebaseTable = std.AutoArrayHashMapUnmanaged(Atom.Index, std.ArrayListUnmanaged(u32));
@@ -5526,6 +5574,7 @@ const Trie = @import("MachO/Trie.zig");
 const Type = @import("../type.zig").Type;
 const TypedValue = @import("../TypedValue.zig");
 const Value = @import("../value.zig").Value;
+const Alignment = Atom.Alignment;
 
 pub const DebugSymbols = @import("MachO/DebugSymbols.zig");
 pub const Bind = @import("MachO/dyld_info/bind.zig").Bind(*const MachO, SymbolWithLoc);

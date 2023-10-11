@@ -39,7 +39,7 @@ name_only_filename: ?[]const u8,
 strip: ?bool,
 unwind_tables: ?bool,
 // keep in sync with src/link.zig:CompressDebugSections
-compress_debug_sections: enum { none, zlib } = .none,
+compress_debug_sections: enum { none, zlib, zstd } = .none,
 lib_paths: ArrayList(LazyPath),
 rpaths: ArrayList(LazyPath),
 frameworks: StringHashMap(FrameworkLinkInfo),
@@ -68,7 +68,7 @@ c_std: std.Build.CStd,
 /// Set via options; intended to be read-only after that.
 zig_lib_dir: ?LazyPath,
 /// Set via options; intended to be read-only after that.
-main_pkg_path: ?LazyPath,
+main_mod_path: ?LazyPath,
 exec_cmd_args: ?[]const ?[]const u8,
 filter: ?[]const u8,
 test_evented_io: bool = false,
@@ -89,6 +89,14 @@ installed_headers: ArrayList(*Step),
 is_linking_libc: bool,
 is_linking_libcpp: bool,
 vcpkg_bin_path: ?[]const u8 = null,
+
+// keep in sync with src/Compilation.zig:RcIncludes
+/// Behavior of automatic detection of include directories when compiling .rc files.
+///  any: Use MSVC if available, fall back to MinGW.
+///  msvc: Use MSVC include paths (must be present on the system).
+///  gnu: Use MinGW include paths (distributed with Zig).
+///  none: Do not use any autodetected include paths.
+rc_includes: enum { any, msvc, gnu, none } = .any,
 
 installed_path: ?[]const u8,
 
@@ -114,6 +122,10 @@ link_emit_relocs: bool = false,
 /// Place every function in its own section so that unused ones may be
 /// safely garbage-collected during the linking phase.
 link_function_sections: bool = false,
+
+/// Place every data in its own section so that unused ones may be
+/// safely garbage-collected during the linking phase.
+link_data_sections: bool = false,
 
 /// Remove functions and data that are unreachable by the entry point or
 /// exported symbols.
@@ -204,7 +216,9 @@ generated_llvm_ir: ?*GeneratedFile,
 generated_h: ?*GeneratedFile,
 
 pub const CSourceFiles = struct {
-    /// Relative to the build root.
+    dependency: ?*std.Build.Dependency,
+    /// If `dependency` is not null relative to it,
+    /// else relative to the build root.
     files: []const []const u8,
     flags: []const []const u8,
 };
@@ -221,6 +235,26 @@ pub const CSourceFile = struct {
     }
 };
 
+pub const RcSourceFile = struct {
+    file: LazyPath,
+    /// Any option that rc.exe accepts will work here, with the exception of:
+    /// - `/fo`: The output filename is set by the build system
+    /// - Any MUI-related option
+    /// https://learn.microsoft.com/en-us/windows/win32/menurc/using-rc-the-rc-command-line-
+    ///
+    /// Implicitly defined options:
+    ///  /x (ignore the INCLUDE environment variable)
+    ///  /D_DEBUG or /DNDEBUG depending on the optimization mode
+    flags: []const []const u8 = &.{},
+
+    pub fn dupe(self: RcSourceFile, b: *std.Build) RcSourceFile {
+        return .{
+            .file = self.file.dupe(b),
+            .flags = b.dupeStrings(self.flags),
+        };
+    }
+};
+
 pub const LinkObject = union(enum) {
     static_path: LazyPath,
     other_step: *Compile,
@@ -228,6 +262,7 @@ pub const LinkObject = union(enum) {
     assembly_file: LazyPath,
     c_source_file: *CSourceFile,
     c_source_files: *CSourceFiles,
+    win32_resource_file: *RcSourceFile,
 };
 
 pub const SystemLib = struct {
@@ -260,6 +295,7 @@ const FrameworkLinkInfo = struct {
 pub const IncludeDir = union(enum) {
     path: LazyPath,
     path_system: LazyPath,
+    path_after: LazyPath,
     framework_path: LazyPath,
     framework_path_system: LazyPath,
     other_step: *Compile,
@@ -282,6 +318,9 @@ pub const Options = struct {
     use_llvm: ?bool = null,
     use_lld: ?bool = null,
     zig_lib_dir: ?LazyPath = null,
+    main_mod_path: ?LazyPath = null,
+
+    /// deprecated; use `main_mod_path`.
     main_pkg_path: ?LazyPath = null,
 };
 
@@ -446,7 +485,7 @@ pub fn create(owner: *std.Build, options: Options) *Compile {
         .installed_headers = ArrayList(*Step).init(owner.allocator),
         .c_std = std.Build.CStd.C99,
         .zig_lib_dir = null,
-        .main_pkg_path = null,
+        .main_mod_path = null,
         .exec_cmd_args = null,
         .filter = options.filter,
         .test_runner = options.test_runner,
@@ -481,8 +520,8 @@ pub fn create(owner: *std.Build, options: Options) *Compile {
         lp.addStepDependencies(&self.step);
     }
 
-    if (options.main_pkg_path) |lp| {
-        self.main_pkg_path = lp.dupe(self.step.owner);
+    if (options.main_mod_path orelse options.main_pkg_path) |lp| {
+        self.main_mod_path = lp.dupe(self.step.owner);
         lp.addStepDependencies(&self.step);
     }
 
@@ -887,15 +926,23 @@ pub fn linkSystemLibrary2(
     }) catch @panic("OOM");
 }
 
+pub const AddCSourceFilesOptions = struct {
+    /// When provided, `files` are relative to `dependency` rather than the package that owns the `Compile` step.
+    dependency: ?*std.Build.Dependency = null,
+    files: []const []const u8,
+    flags: []const []const u8 = &.{},
+};
+
 /// Handy when you have many C/C++ source files and want them all to have the same flags.
-pub fn addCSourceFiles(self: *Compile, files: []const []const u8, flags: []const []const u8) void {
+pub fn addCSourceFiles(self: *Compile, options: AddCSourceFilesOptions) void {
     const b = self.step.owner;
     const c_source_files = b.allocator.create(CSourceFiles) catch @panic("OOM");
 
-    const files_copy = b.dupeStrings(files);
-    const flags_copy = b.dupeStrings(flags);
+    const files_copy = b.dupeStrings(options.files);
+    const flags_copy = b.dupeStrings(options.flags);
 
     c_source_files.* = .{
+        .dependency = options.dependency,
         .files = files_copy,
         .flags = flags_copy,
     };
@@ -907,6 +954,18 @@ pub fn addCSourceFile(self: *Compile, source: CSourceFile) void {
     const c_source_file = b.allocator.create(CSourceFile) catch @panic("OOM");
     c_source_file.* = source.dupe(b);
     self.link_objects.append(.{ .c_source_file = c_source_file }) catch @panic("OOM");
+    source.file.addStepDependencies(&self.step);
+}
+
+pub fn addWin32ResourceFile(self: *Compile, source: RcSourceFile) void {
+    // Only the PE/COFF format has a Resource Table, so for any other target
+    // the resource file is just ignored.
+    if (self.target.getObjectFormat() != .coff) return;
+
+    const b = self.step.owner;
+    const rc_source_file = b.allocator.create(RcSourceFile) catch @panic("OOM");
+    rc_source_file.* = source.dupe(b);
+    self.link_objects.append(.{ .win32_resource_file = rc_source_file }) catch @panic("OOM");
     source.file.addStepDependencies(&self.step);
 }
 
@@ -1019,6 +1078,12 @@ pub fn addObjectFile(self: *Compile, source: LazyPath) void {
 pub fn addObject(self: *Compile, obj: *Compile) void {
     assert(obj.kind == .obj);
     self.linkLibraryOrObject(obj);
+}
+
+pub fn addAfterIncludePath(self: *Compile, path: LazyPath) void {
+    const b = self.step.owner;
+    self.include_dirs.append(IncludeDir{ .path_after = path.dupe(b) }) catch @panic("OOM");
+    path.addStepDependencies(&self.step);
 }
 
 pub fn addSystemIncludePath(self: *Compile, path: LazyPath) void {
@@ -1358,6 +1423,7 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
     try transitive_deps.add(self.link_objects.items);
 
     var prev_has_cflags = false;
+    var prev_has_rcflags = false;
     var prev_search_strategy: SystemLib.SearchStrategy = .paths_first;
     var prev_preferred_link_mode: std.builtin.LinkMode = .Dynamic;
 
@@ -1496,9 +1562,33 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
                     try zig_args.append("--");
                     prev_has_cflags = true;
                 }
-                for (c_source_files.files) |file| {
-                    try zig_args.append(b.pathFromRoot(file));
+                if (c_source_files.dependency) |dep| {
+                    for (c_source_files.files) |file| {
+                        try zig_args.append(dep.builder.pathFromRoot(file));
+                    }
+                } else {
+                    for (c_source_files.files) |file| {
+                        try zig_args.append(b.pathFromRoot(file));
+                    }
                 }
+            },
+
+            .win32_resource_file => |rc_source_file| {
+                if (rc_source_file.flags.len == 0) {
+                    if (prev_has_rcflags) {
+                        try zig_args.append("-rcflags");
+                        try zig_args.append("--");
+                        prev_has_rcflags = false;
+                    }
+                } else {
+                    try zig_args.append("-rcflags");
+                    for (rc_source_file.flags) |arg| {
+                        try zig_args.append(arg);
+                    }
+                    try zig_args.append("--");
+                    prev_has_rcflags = true;
+                }
+                try zig_args.append(rc_source_file.file.getPath(b));
             },
         }
     }
@@ -1568,6 +1658,7 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
     switch (self.compress_debug_sections) {
         .none => {},
         .zlib => try zig_args.append("--compress-debug-sections=zlib"),
+        .zstd => try zig_args.append("--compress-debug-sections=zstd"),
     }
 
     if (self.link_eh_frame_hdr) {
@@ -1578,6 +1669,9 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
     }
     if (self.link_function_sections) {
         try zig_args.append("-ffunction-sections");
+    }
+    if (self.link_data_sections) {
+        try zig_args.append("-fdata-sections");
     }
     if (self.link_gc_sections) |x| {
         try zig_args.append(if (x) "--gc-sections" else "--no-gc-sections");
@@ -1781,6 +1875,10 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
                 try zig_args.append("-isystem");
                 try zig_args.append(include_path.getPath(b));
             },
+            .path_after => |include_path| {
+                try zig_args.append("-idirafter");
+                try zig_args.append(include_path.getPath(b));
+            },
             .framework_path => |include_path| {
                 try zig_args.append("-F");
                 try zig_args.append(include_path.getPath2(b, step));
@@ -1836,7 +1934,7 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
                     continue;
                 }
             },
-            .generated => {},
+            .generated, .dependency => {},
         };
 
         zig_args.appendAssumeCapacity(rpath.getPath2(b, step));
@@ -1897,6 +1995,11 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
         }
     }
 
+    if (self.rc_includes != .any) {
+        try zig_args.append("-rcincludes");
+        try zig_args.append(@tagName(self.rc_includes));
+    }
+
     try addFlag(&zig_args, "valgrind", self.valgrind_support);
     try addFlag(&zig_args, "each-lib-rpath", self.each_lib_rpath);
 
@@ -1914,8 +2017,8 @@ fn make(step: *Step, prog_node: *std.Progress.Node) !void {
         try zig_args.append(dir.getPath(b));
     }
 
-    if (self.main_pkg_path) |dir| {
-        try zig_args.append("--main-pkg-path");
+    if (self.main_mod_path) |dir| {
+        try zig_args.append("--main-mod-path");
         try zig_args.append(dir.getPath(b));
     }
 

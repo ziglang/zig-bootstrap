@@ -150,7 +150,7 @@ pub fn buildLibCXX(comp: *Compilation, prog_node: *std.Progress.Node) !void {
 
         if (std.mem.startsWith(u8, cxx_src, "src/support/win32/") and target.os.tag != .windows)
             continue;
-        if (std.mem.startsWith(u8, cxx_src, "src/support/solaris/") and target.os.tag != .solaris)
+        if (std.mem.startsWith(u8, cxx_src, "src/support/solaris/") and !target.os.tag.isSolarish())
             continue;
         if (std.mem.startsWith(u8, cxx_src, "src/support/ibm/") and target.os.tag != .zos)
             continue;
@@ -233,7 +233,7 @@ pub fn buildLibCXX(comp: *Compilation, prog_node: *std.Progress.Node) !void {
         .cache_mode = .whole,
         .target = target,
         .root_name = root_name,
-        .main_pkg = null,
+        .main_mod = null,
         .output_mode = output_mode,
         .thread_pool = comp.thread_pool,
         .libc_installation = comp.bin_file.options.libc_installation,
@@ -396,7 +396,7 @@ pub fn buildLibCXXABI(comp: *Compilation, prog_node: *std.Progress.Node) !void {
         .cache_mode = .whole,
         .target = target,
         .root_name = root_name,
-        .main_pkg = null,
+        .main_mod = null,
         .output_mode = output_mode,
         .thread_pool = comp.thread_pool,
         .libc_installation = comp.bin_file.options.libc_installation,

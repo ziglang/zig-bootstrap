@@ -6,7 +6,7 @@ const Autodoc = @This();
 const Compilation = @import("Compilation.zig");
 const CompilationModule = @import("Module.zig");
 const File = CompilationModule.File;
-const Module = @import("Package.zig");
+const Module = @import("Package.zig").Module;
 const Tokenizer = std.zig.Tokenizer;
 const InternPool = @import("InternPool.zig");
 const Zir = @import("Zir.zig");
@@ -44,6 +44,14 @@ ref_paths_pending_on_types: std.AutoHashMapUnmanaged(
     usize,
     std.ArrayListUnmanaged(RefPathResumeInfo),
 ) = .{},
+
+/// A set of ZIR instruction refs which have a meaning other than the
+/// instruction they refer to. For instance, during analysis of the arguments to
+/// a `call`, the index of the `call` itself is repurposed to refer to the
+/// parameter type.
+/// TODO: there should be some kind of proper handling for these instructions;
+/// currently we just ignore them!
+repurposed_insts: std.AutoHashMapUnmanaged(Zir.Inst.Index, void) = .{},
 
 const RefPathResumeInfo = struct {
     file: *File,
@@ -90,9 +98,8 @@ pub fn generate(cm: *CompilationModule, output_dir: std.fs.Dir) !void {
 }
 
 fn generateZirData(self: *Autodoc, output_dir: std.fs.Dir) !void {
-    const root_src_dir = self.comp_module.main_pkg.root_src_directory;
-    const root_src_path = self.comp_module.main_pkg.root_src_path;
-    const joined_src_path = try root_src_dir.join(self.arena, &.{root_src_path});
+    const root_src_path = self.comp_module.main_mod.root_src_path;
+    const joined_src_path = try self.comp_module.main_mod.root.joinString(self.arena, root_src_path);
     defer self.arena.free(joined_src_path);
 
     const abs_root_src_path = try std.fs.path.resolve(self.arena, &.{ ".", joined_src_path });
@@ -287,20 +294,20 @@ fn generateZirData(self: *Autodoc, output_dir: std.fs.Dir) !void {
     }
 
     const rootName = blk: {
-        const rootName = std.fs.path.basename(self.comp_module.main_pkg.root_src_path);
+        const rootName = std.fs.path.basename(self.comp_module.main_mod.root_src_path);
         break :blk rootName[0 .. rootName.len - 4];
     };
 
     const main_type_index = self.types.items.len;
     {
-        try self.modules.put(self.arena, self.comp_module.main_pkg, .{
+        try self.modules.put(self.arena, self.comp_module.main_mod, .{
             .name = rootName,
             .main = main_type_index,
             .table = .{},
         });
         try self.modules.entries.items(.value)[0].table.put(
             self.arena,
-            self.comp_module.main_pkg,
+            self.comp_module.main_mod,
             .{
                 .name = rootName,
                 .value = 0,
@@ -404,7 +411,7 @@ fn generateZirData(self: *Autodoc, output_dir: std.fs.Dir) !void {
 
         while (files_iterator.next()) |entry| {
             const sub_file_path = entry.key_ptr.*.sub_file_path;
-            const file_module = entry.key_ptr.*.pkg;
+            const file_module = entry.key_ptr.*.mod;
             const module_name = (self.modules.get(file_module) orelse continue).name;
 
             const file_path = std.fs.path.dirname(sub_file_path) orelse "";
@@ -954,6 +961,11 @@ fn walkInstruction(
     const tags = file.zir.instructions.items(.tag);
     const data = file.zir.instructions.items(.data);
 
+    if (self.repurposed_insts.contains(@intCast(inst_index))) {
+        // TODO: better handling here
+        return .{ .expr = .{ .comptimeExpr = 0 } };
+    }
+
     // We assume that the topmost ast_node entry corresponds to our decl
     const self_ast_node_index = self.ast_nodes.items.len - 1;
 
@@ -973,12 +985,12 @@ fn walkInstruction(
 
             // importFile cannot error out since all files
             // are already loaded at this point
-            if (file.pkg.table.get(path)) |other_module| {
+            if (file.mod.deps.get(path)) |other_module| {
                 const result = try self.modules.getOrPut(self.arena, other_module);
 
                 // Immediately add this module to the import table of our
                 // current module, regardless of wether it's new or not.
-                if (self.modules.getPtr(file.pkg)) |current_module| {
+                if (self.modules.getPtr(file.mod)) |current_module| {
                     // TODO: apparently, in the stdlib a file gets analyzed before
                     //       its module gets added. I guess we're importing a file
                     //       that belongs to another module through its file path?
@@ -1012,12 +1024,12 @@ fn walkInstruction(
                 // TODO: Add this module as a dependency to the current module
                 // TODO: this seems something that could be done in bulk
                 //       at the beginning or the end, or something.
-                const root_src_dir = other_module.root_src_directory;
-                const root_src_path = other_module.root_src_path;
-                const joined_src_path = try root_src_dir.join(self.arena, &.{root_src_path});
-                defer self.arena.free(joined_src_path);
-
-                const abs_root_src_path = try std.fs.path.resolve(self.arena, &.{ ".", joined_src_path });
+                const abs_root_src_path = try std.fs.path.resolve(self.arena, &.{
+                    ".",
+                    other_module.root.root_dir.path orelse ".",
+                    other_module.root.sub_path,
+                    other_module.root_src_path,
+                });
                 defer self.arena.free(abs_root_src_path);
 
                 const new_file = self.comp_module.import_table.get(abs_root_src_path).?;
@@ -1534,7 +1546,6 @@ fn walkInstruction(
             };
         },
 
-        // @check array_cat and array_mul
         .add,
         .addwrap,
         .add_sat,
@@ -1551,9 +1562,8 @@ fn walkInstruction(
         .bit_or,
         .bit_and,
         .xor,
-        // @check still not working when applied in std
-        // .array_cat,
-        // .array_mul,
+        .array_cat,
+        .array_mul,
         => {
             const pl_node = data[inst_index].pl_node;
             const extra = file.zir.extraData(Zir.Inst.Bin, pl_node.payload_index);
@@ -1656,7 +1666,7 @@ fn walkInstruction(
         .log,
         .log2,
         .log10,
-        .fabs,
+        .abs,
         .floor,
         .ceil,
         .trunc,
@@ -2378,34 +2388,6 @@ fn walkInstruction(
                 .expr = .{ .@"&" = expr_index },
             };
         },
-        .array_init_anon_ref => {
-            const pl_node = data[inst_index].pl_node;
-            const extra = file.zir.extraData(Zir.Inst.MultiOp, pl_node.payload_index);
-            const operands = file.zir.refSlice(extra.end, extra.data.operands_len);
-            const array_data = try self.arena.alloc(usize, operands.len);
-
-            for (operands, 0..) |op, idx| {
-                const wr = try self.walkRef(
-                    file,
-                    parent_scope,
-                    parent_src,
-                    op,
-                    false,
-                    call_ctx,
-                );
-                const expr_index = self.exprs.items.len;
-                try self.exprs.append(self.arena, wr.expr);
-                array_data[idx] = expr_index;
-            }
-
-            const expr_index = self.exprs.items.len;
-            try self.exprs.append(self.arena, .{ .array = array_data });
-
-            return DocData.WalkResult{
-                .typeRef = null,
-                .expr = .{ .@"&" = expr_index },
-            };
-        },
         .float => {
             const float = data[inst_index].float;
             return DocData.WalkResult{
@@ -2696,9 +2678,7 @@ fn walkInstruction(
                 .expr = .{ .declRef = decl_status },
             };
         },
-        .field_val, .field_ptr, .field_type => {
-            // TODO: field type uses Zir.Inst.FieldType, it just happens to have the
-            // same layout as Zir.Inst.Field :^)
+        .field_val, .field_ptr => {
             const pl_node = data[inst_index].pl_node;
             const extra = file.zir.extraData(Zir.Inst.Field, pl_node.payload_index);
 
@@ -2717,8 +2697,7 @@ fn walkInstruction(
                     };
 
                     if (tags[lhs] != .field_val and
-                        tags[lhs] != .field_ptr and
-                        tags[lhs] != .field_type) break :blk lhs_extra.data.lhs;
+                        tags[lhs] != .field_ptr) break :blk lhs_extra.data.lhs;
 
                     lhs_extra = file.zir.extraData(
                         Zir.Inst.Field,
@@ -2857,7 +2836,7 @@ fn walkInstruction(
 
                 const field_name = blk: {
                     const field_inst_index = init_extra.data.field_type;
-                    if (tags[field_inst_index] != .field_type) unreachable;
+                    if (tags[field_inst_index] != .struct_init_field_type) unreachable;
                     const field_pl_node = data[field_inst_index].pl_node;
                     const field_extra = file.zir.extraData(
                         Zir.Inst.FieldType,
@@ -2899,7 +2878,9 @@ fn walkInstruction(
                 .expr = .{ .@"struct" = field_vals },
             };
         },
-        .struct_init_empty => {
+        .struct_init_empty,
+        .struct_init_empty_result,
+        => {
             const un_node = data[inst_index].un_node;
 
             var operand: DocData.WalkResult = try self.walkRef(
@@ -3021,6 +3002,9 @@ fn walkInstruction(
             const args_len = extra.data.flags.args_len;
             var args = try self.arena.alloc(DocData.Expr, args_len);
             const body = file.zir.extra[extra.end..];
+
+            try self.repurposed_insts.put(self.arena, @intCast(inst_index), {});
+            defer _ = self.repurposed_insts.remove(@intCast(inst_index));
 
             var i: usize = 0;
             while (i < args_len) : (i += 1) {
@@ -5698,7 +5682,7 @@ fn writeFileTableToJson(
     while (it.next()) |entry| {
         try jsw.beginArray();
         try jsw.write(entry.key_ptr.*.sub_file_path);
-        try jsw.write(mods.getIndex(entry.key_ptr.*.pkg) orelse 0);
+        try jsw.write(mods.getIndex(entry.key_ptr.*.mod) orelse 0);
         try jsw.endArray();
     }
     try jsw.endArray();
@@ -5855,7 +5839,7 @@ fn addGuide(self: *Autodoc, file: *File, guide_path: []const u8, section: *Secti
         file.sub_file_path, "..", guide_path,
     });
 
-    var guide_file = try file.pkg.root_src_directory.handle.openFile(resolved_path, .{});
+    var guide_file = try file.mod.root.openFile(resolved_path, .{});
     defer guide_file.close();
 
     const guide = guide_file.reader().readAllAlloc(self.arena, 1 * 1024 * 1024) catch |err| switch (err) {

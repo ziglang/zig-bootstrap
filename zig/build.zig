@@ -88,7 +88,7 @@ pub fn build(b: *std.Build) !void {
         .name = "check-case",
         .root_source_file = .{ .path = "test/src/Cases.zig" },
         .optimize = optimize,
-        .main_pkg_path = .{ .path = "." },
+        .main_mod_path = .{ .path = "." },
     });
     check_case_exe.stack_size = stack_size;
     check_case_exe.single_threaded = single_threaded;
@@ -580,6 +580,9 @@ fn addCompilerStep(
         .optimize = optimize,
     });
     exe.stack_size = stack_size;
+    exe.addAnonymousModule("aro", .{
+        .source_file = .{ .path = "deps/aro/lib.zig" },
+    });
     return exe;
 }
 
@@ -670,6 +673,10 @@ fn addCmakeCfgOptionsToExe(
                     try addCxxKnownPath(b, cfg, exe, b.fmt("libstdc++.{s}", .{lib_suffix}), null, need_cpp_includes);
                 }
             },
+            .solaris, .illumos => {
+                try addCxxKnownPath(b, cfg, exe, b.fmt("libstdc++.{s}", .{lib_suffix}), null, need_cpp_includes);
+                try addCxxKnownPath(b, cfg, exe, b.fmt("libgcc_eh.{s}", .{lib_suffix}), null, need_cpp_includes);
+            },
             else => {},
         }
     }
@@ -686,7 +693,10 @@ fn addStaticLlvmOptionsToExe(exe: *std.Build.Step.Compile) !void {
     // in a dependency on llvm::cfg::Update<llvm::BasicBlock*>::dump() which is
     // unavailable when LLVM is compiled in Release mode.
     const zig_cpp_cflags = exe_cflags ++ [_][]const u8{"-DNDEBUG=1"};
-    exe.addCSourceFiles(&zig_cpp_sources, &zig_cpp_cflags);
+    exe.addCSourceFiles(.{
+        .files = &zig_cpp_sources,
+        .flags = &zig_cpp_cflags,
+    });
 
     for (clang_libs) |lib_name| {
         exe.linkSystemLibrary(lib_name);

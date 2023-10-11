@@ -11,7 +11,7 @@ to find and inspect the patch diffs.
  * LLVM, LLD, Clang release/17.x 37b79e779f447f1c714af7f907e7a2ec846d1da0
  * zlib 1.3
  * zstd 1.5.2
- * zig 0.12.0-dev.467+0345d7866
+ * zig 0.12.0-dev.888+130227491
 
 For other versions, check the git tags of this repository.
 

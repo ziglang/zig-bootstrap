@@ -136,7 +136,7 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
                 try self.comdat_groups.append(elf_file.base.allocator, comdat_group_index);
             },
 
-            elf.SHT_SYMTAB_SHNDX => @panic("TODO"),
+            elf.SHT_SYMTAB_SHNDX => @panic("TODO SHT_SYMTAB_SHNDX"),
 
             elf.SHT_NULL,
             elf.SHT_REL,
@@ -166,29 +166,35 @@ fn initAtoms(self: *Object, elf_file: *Elf) !void {
     };
 }
 
-fn addAtom(self: *Object, shdr: elf.Elf64_Shdr, shndx: u16, name: [:0]const u8, elf_file: *Elf) !void {
+fn addAtom(
+    self: *Object,
+    shdr: elf.Elf64_Shdr,
+    shndx: u16,
+    name: [:0]const u8,
+    elf_file: *Elf,
+) error{ OutOfMemory, Overflow }!void {
     const atom_index = try elf_file.addAtom();
     const atom = elf_file.atom(atom_index).?;
     atom.atom_index = atom_index;
     atom.name_offset = try elf_file.strtab.insert(elf_file.base.allocator, name);
     atom.file_index = self.index;
     atom.input_section_index = shndx;
-    atom.output_section_index = self.getOutputSectionIndex(elf_file, shdr);
-    atom.alive = true;
+    atom.output_section_index = try self.getOutputSectionIndex(elf_file, shdr);
+    atom.flags.alive = true;
     self.atoms.items[shndx] = atom_index;
 
     if (shdr.sh_flags & elf.SHF_COMPRESSED != 0) {
         const data = try self.shdrContents(shndx);
         const chdr = @as(*align(1) const elf.Elf64_Chdr, @ptrCast(data.ptr)).*;
         atom.size = chdr.ch_size;
-        atom.alignment = math.log2_int(u64, chdr.ch_addralign);
+        atom.alignment = Alignment.fromNonzeroByteUnits(chdr.ch_addralign);
     } else {
         atom.size = shdr.sh_size;
-        atom.alignment = math.log2_int(u64, shdr.sh_addralign);
+        atom.alignment = Alignment.fromNonzeroByteUnits(shdr.sh_addralign);
     }
 }
 
-fn getOutputSectionIndex(self: *Object, elf_file: *Elf, shdr: elf.Elf64_Shdr) u16 {
+fn getOutputSectionIndex(self: *Object, elf_file: *Elf, shdr: elf.Elf64_Shdr) error{OutOfMemory}!u16 {
     const name = blk: {
         const name = self.strings.getAssumeExists(shdr.sh_name);
         // if (shdr.sh_flags & elf.SHF_MERGE != 0) break :blk name;
@@ -202,6 +208,8 @@ fn getOutputSectionIndex(self: *Object, elf_file: *Elf, shdr: elf.Elf64_Shdr) u1
                 break :blk prefix;
             }
         }
+        if (std.mem.eql(u8, name, ".tcommon")) break :blk ".tbss";
+        if (std.mem.eql(u8, name, ".common")) break :blk ".bss";
         break :blk name;
     };
     const @"type" = switch (shdr.sh_type) {
@@ -223,10 +231,31 @@ fn getOutputSectionIndex(self: *Object, elf_file: *Elf, shdr: elf.Elf64_Shdr) u1
             else => flags,
         };
     };
-    _ = flags;
-    const out_shndx = elf_file.sectionByName(name) orelse {
-        log.err("{}: output section {s} not found", .{ self.fmtPath(), name });
-        @panic("TODO: missing output section!");
+    const out_shndx = elf_file.sectionByName(name) orelse blk: {
+        const is_alloc = flags & elf.SHF_ALLOC != 0;
+        const is_write = flags & elf.SHF_WRITE != 0;
+        const is_exec = flags & elf.SHF_EXECINSTR != 0;
+        if (!is_alloc) {
+            log.err("{}: output section {s} not found", .{ self.fmtPath(), name });
+            @panic("TODO: missing output section!");
+        }
+        var phdr_flags: u32 = elf.PF_R;
+        if (is_write) phdr_flags |= elf.PF_W;
+        if (is_exec) phdr_flags |= elf.PF_X;
+        const phdr_index = try elf_file.allocateSegment(.{
+            .size = Elf.padToIdeal(shdr.sh_size),
+            .alignment = elf_file.page_size,
+            .flags = phdr_flags,
+        });
+        const shndx = try elf_file.allocateAllocSection(.{
+            .name = name,
+            .phdr_index = phdr_index,
+            .alignment = shdr.sh_addralign,
+            .flags = flags,
+            .type = @"type",
+        });
+        try elf_file.last_atom_and_free_list_table.putNoClobber(elf_file.base.allocator, shndx, .{});
+        break :blk shndx;
     };
     return out_shndx;
 }
@@ -272,9 +301,9 @@ fn initSymtab(self: *Object, elf_file: *Elf) !void {
         sym_ptr.atom_index = if (sym.st_shndx == elf.SHN_ABS) 0 else self.atoms.items[sym.st_shndx];
         sym_ptr.file_index = self.index;
         sym_ptr.output_section_index = if (sym_ptr.atom(elf_file)) |atom_ptr|
-            atom_ptr.output_section_index
+            atom_ptr.outputShndx().?
         else
-            0;
+            elf.SHN_UNDEF;
     }
 
     for (self.symtab[first_global..]) |sym| {
@@ -396,11 +425,17 @@ fn filterRelocs(
 pub fn scanRelocs(self: *Object, elf_file: *Elf, undefs: anytype) !void {
     for (self.atoms.items) |atom_index| {
         const atom = elf_file.atom(atom_index) orelse continue;
-        if (!atom.alive) continue;
+        if (!atom.flags.alive) continue;
         const shdr = atom.inputShdr(elf_file);
         if (shdr.sh_flags & elf.SHF_ALLOC == 0) continue;
         if (shdr.sh_type == elf.SHT_NOBITS) continue;
-        try atom.scanRelocs(elf_file, undefs);
+        if (try atom.scanRelocsRequiresCode(elf_file)) {
+            // TODO ideally, we don't have to decompress at this stage (should already be done)
+            // and we just fetch the code slice.
+            const code = try self.codeDecompressAlloc(elf_file, atom_index);
+            defer elf_file.base.allocator.free(code);
+            try atom.scanRelocs(elf_file, code, undefs);
+        } else try atom.scanRelocs(elf_file, null, undefs);
     }
 
     for (self.cies.items) |cie| {
@@ -430,7 +465,7 @@ pub fn resolveSymbols(self: *Object, elf_file: *Elf) void {
         if (esym.st_shndx != elf.SHN_ABS and esym.st_shndx != elf.SHN_COMMON) {
             const atom_index = self.atoms.items[esym.st_shndx];
             const atom = elf_file.atom(atom_index) orelse continue;
-            if (!atom.alive) continue;
+            if (!atom.flags.alive) continue;
         }
 
         const global = elf_file.symbol(index);
@@ -440,9 +475,9 @@ pub fn resolveSymbols(self: *Object, elf_file: *Elf) void {
                 else => self.atoms.items[esym.st_shndx],
             };
             const output_section_index = if (elf_file.atom(atom_index)) |atom|
-                atom.output_section_index
+                atom.outputShndx().?
             else
-                0;
+                elf.SHN_UNDEF;
             global.value = esym.st_value;
             global.atom_index = atom_index;
             global.esym_index = esym_index;
@@ -525,7 +560,7 @@ pub fn checkDuplicates(self: *Object, elf_file: *Elf) void {
         if (this_sym.st_shndx != elf.SHN_ABS) {
             const atom_index = self.atoms.items[this_sym.st_shndx];
             const atom = elf_file.atom(atom_index) orelse continue;
-            if (!atom.alive) continue;
+            if (!atom.flags.alive) continue;
         }
 
         elf_file.base.fatal("multiple definition: {}: {}: {s}", .{
@@ -563,7 +598,7 @@ pub fn convertCommonSymbols(self: *Object, elf_file: *Elf) !void {
         try self.atoms.append(gpa, atom_index);
 
         const is_tls = global.getType(elf_file) == elf.STT_TLS;
-        const name = if (is_tls) ".tls_common" else ".common";
+        const name = if (is_tls) ".tbss" else ".bss";
 
         const atom = elf_file.atom(atom_index).?;
         atom.atom_index = atom_index;
@@ -571,7 +606,7 @@ pub fn convertCommonSymbols(self: *Object, elf_file: *Elf) !void {
         atom.file = self.index;
         atom.size = this_sym.st_size;
         const alignment = this_sym.st_value;
-        atom.alignment = math.log2_int(u64, alignment);
+        atom.alignment = Alignment.fromNonzeroByteUnits(alignment);
 
         var sh_flags: u32 = elf.SHF_ALLOC | elf.SHF_WRITE;
         if (is_tls) sh_flags |= elf.SHF_TLS;
@@ -600,7 +635,7 @@ pub fn convertCommonSymbols(self: *Object, elf_file: *Elf) !void {
 pub fn updateSymtabSize(self: *Object, elf_file: *Elf) void {
     for (self.locals()) |local_index| {
         const local = elf_file.symbol(local_index);
-        if (local.atom(elf_file)) |atom| if (!atom.alive) continue;
+        if (local.atom(elf_file)) |atom| if (!atom.flags.alive) continue;
         const esym = local.elfSym(elf_file);
         switch (esym.st_type()) {
             elf.STT_SECTION, elf.STT_NOTYPE => continue,
@@ -613,7 +648,7 @@ pub fn updateSymtabSize(self: *Object, elf_file: *Elf) void {
     for (self.globals()) |global_index| {
         const global = elf_file.symbol(global_index);
         if (global.file(elf_file)) |file| if (file.index() != self.index) continue;
-        if (global.atom(elf_file)) |atom| if (!atom.alive) continue;
+        if (global.atom(elf_file)) |atom| if (!atom.flags.alive) continue;
         global.flags.output_symtab = true;
         if (global.isLocal()) {
             self.output_symtab_size.nlocals += 1;
@@ -657,12 +692,41 @@ pub fn globals(self: *Object) []const Symbol.Index {
     return self.symbols.items[start..];
 }
 
-pub fn shdrContents(self: *Object, index: u32) error{Overflow}![]const u8 {
+fn shdrContents(self: Object, index: u32) error{Overflow}![]const u8 {
     assert(index < self.shdrs.items.len);
     const shdr = self.shdrs.items[index];
     const offset = math.cast(usize, shdr.sh_offset) orelse return error.Overflow;
     const size = math.cast(usize, shdr.sh_size) orelse return error.Overflow;
     return self.data[offset..][0..size];
+}
+
+/// Returns atom's code and optionally uncompresses data if required (for compressed sections).
+/// Caller owns the memory.
+pub fn codeDecompressAlloc(self: Object, elf_file: *Elf, atom_index: Atom.Index) ![]u8 {
+    const gpa = elf_file.base.allocator;
+    const atom_ptr = elf_file.atom(atom_index).?;
+    assert(atom_ptr.file_index == self.index);
+    const data = try self.shdrContents(atom_ptr.input_section_index);
+    const shdr = atom_ptr.inputShdr(elf_file);
+    if (shdr.sh_flags & elf.SHF_COMPRESSED != 0) {
+        const chdr = @as(*align(1) const elf.Elf64_Chdr, @ptrCast(data.ptr)).*;
+        switch (chdr.ch_type) {
+            .ZLIB => {
+                var stream = std.io.fixedBufferStream(data[@sizeOf(elf.Elf64_Chdr)..]);
+                var zlib_stream = std.compress.zlib.decompressStream(gpa, stream.reader()) catch
+                    return error.InputOutput;
+                defer zlib_stream.deinit();
+                const size = std.math.cast(usize, chdr.ch_size) orelse return error.Overflow;
+                const decomp = try gpa.alloc(u8, size);
+                const nread = zlib_stream.reader().readAll(decomp) catch return error.InputOutput;
+                if (nread != decomp.len) {
+                    return error.InputOutput;
+                }
+                return decomp;
+            },
+            else => @panic("TODO unhandled compression scheme"),
+        }
+    } else return gpa.dupe(u8, data);
 }
 
 fn getString(self: *Object, off: u32) [:0]const u8 {
@@ -870,3 +934,4 @@ const Fde = eh_frame.Fde;
 const File = @import("file.zig").File;
 const StringTable = @import("../strtab.zig").StringTable;
 const Symbol = @import("Symbol.zig");
+const Alignment = Atom.Alignment;

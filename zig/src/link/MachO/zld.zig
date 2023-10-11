@@ -186,9 +186,8 @@ pub fn linkWithZld(
             try positionals.append(.{ .path = p });
         }
 
-        if (comp.compiler_rt_lib) |lib| {
-            try positionals.append(.{ .path = lib.full_object_path });
-        }
+        if (comp.compiler_rt_lib) |lib| try positionals.append(.{ .path = lib.full_object_path });
+        if (comp.compiler_rt_obj) |obj| try positionals.append(.{ .path = obj.full_object_path });
 
         // libc++ dep
         if (options.link_libcpp) {
@@ -232,6 +231,20 @@ pub fn linkWithZld(
                 if (options.install_name) |install_name| {
                     try argv.append("-install_name");
                     try argv.append(install_name);
+                }
+            }
+
+            {
+                const platform = Platform.fromTarget(options.target);
+                try argv.append("-platform_version");
+                try argv.append(@tagName(platform.os_tag));
+                try argv.append(try std.fmt.allocPrint(arena, "{}", .{platform.version}));
+
+                const sdk_version: ?std.SemanticVersion = load_commands.inferSdkVersion(arena, comp);
+                if (sdk_version) |ver| {
+                    try argv.append(try std.fmt.allocPrint(arena, "{d}.{d}", .{ ver.major, ver.minor }));
+                } else {
+                    try argv.append(try std.fmt.allocPrint(arena, "{}", .{platform.version}));
                 }
             }
 
@@ -287,9 +300,8 @@ pub fn linkWithZld(
                 try argv.append(p);
             }
 
-            if (comp.compiler_rt_lib) |lib| {
-                try argv.append(lib.full_object_path);
-            }
+            if (comp.compiler_rt_lib) |lib| try argv.append(lib.full_object_path);
+            if (comp.compiler_rt_obj) |obj| try argv.append(obj.full_object_path);
 
             if (options.link_libcpp) {
                 try argv.append(comp.libcxxabi_static_lib.?.full_object_path);
@@ -300,7 +312,6 @@ pub fn linkWithZld(
             try argv.append(full_out_path);
 
             try argv.append("-lSystem");
-            try argv.append("-lc");
 
             for (options.system_libs.keys()) |l_name| {
                 const info = options.system_libs.get(l_name).?;
@@ -561,10 +572,7 @@ pub fn linkWithZld(
         });
         {
             const platform = Platform.fromTarget(macho_file.base.options.target);
-            const sdk_version: ?std.SemanticVersion = if (macho_file.base.options.sysroot) |path|
-                load_commands.inferSdkVersionFromSdkPath(path)
-            else
-                null;
+            const sdk_version: ?std.SemanticVersion = load_commands.inferSdkVersion(arena, comp);
             if (platform.isBuildVersionCompatible()) {
                 try load_commands.writeBuildVersionLC(platform, sdk_version, lc_writer);
             } else {
@@ -985,19 +993,16 @@ fn calcSectionSizes(macho_file: *MachO) !void {
 
         while (true) {
             const atom = macho_file.getAtom(atom_index);
-            const atom_alignment = try math.powi(u32, 2, atom.alignment);
-            const atom_offset = mem.alignForward(u64, header.size, atom_alignment);
+            const atom_offset = atom.alignment.forward(header.size);
             const padding = atom_offset - header.size;
 
             const sym = macho_file.getSymbolPtr(atom.getSymbolWithLoc());
             sym.n_value = atom_offset;
 
             header.size += padding + atom.size;
-            header.@"align" = @max(header.@"align", atom.alignment);
+            header.@"align" = @max(header.@"align", atom.alignment.toLog2Units());
 
-            if (atom.next_index) |next_index| {
-                atom_index = next_index;
-            } else break;
+            atom_index = atom.next_index orelse break;
         }
     }
 
