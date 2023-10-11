@@ -9,7 +9,7 @@ This repository copies sources from upstream. Patches listed below. Use git
 to find and inspect the patch diffs.
 
  * LLVM, LLD, Clang 17.0.1
- * zlib 1.2.13
+ * zlib 1.3
  * zstd 1.5.2
  * zig 0.12.0-dev.467+0345d7866
 
