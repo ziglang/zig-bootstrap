@@ -766,7 +766,9 @@ pub fn CreateSymbolicLink(
                 //       it will still resolve the path relative to the root of
                 //       the C:\ drive.
                 .rooted => break :target_path target_path,
-                else => {},
+                // Keep relative paths relative, but anything else needs to get NT-prefixed.
+                else => if (!std.fs.path.isAbsoluteWindowsWTF16(target_path))
+                    break :target_path target_path,
             },
             // Already an NT path, no need to do anything to it
             .nt => break :target_path target_path,
@@ -834,14 +836,14 @@ pub fn ReadLink(dir: ?HANDLE, sub_path_w: []const u16, out_buffer: []u8) ReadLin
 
     const rc = ntdll.NtCreateFile(
         &result_handle,
-        FILE_READ_ATTRIBUTES,
+        FILE_READ_ATTRIBUTES | SYNCHRONIZE,
         &attr,
         &io,
         null,
         FILE_ATTRIBUTE_NORMAL,
         FILE_SHARE_READ,
         FILE_OPEN,
-        FILE_OPEN_REPARSE_POINT,
+        FILE_OPEN_REPARSE_POINT | FILE_SYNCHRONOUS_IO_NONALERT,
         null,
         0,
     );
@@ -1591,11 +1593,12 @@ pub fn GetModuleFileNameW(hModule: ?HMODULE, buf_ptr: [*]u16, buf_len: DWORD) Ge
     return buf_ptr[0..rc :0];
 }
 
-pub const TerminateProcessError = error{Unexpected};
+pub const TerminateProcessError = error{ PermissionDenied, Unexpected };
 
 pub fn TerminateProcess(hProcess: HANDLE, uExitCode: UINT) TerminateProcessError!void {
     if (kernel32.TerminateProcess(hProcess, uExitCode) == 0) {
         switch (kernel32.GetLastError()) {
+            Win32Error.ACCESS_DENIED => return error.PermissionDenied,
             else => |err| return unexpectedError(err),
         }
     }

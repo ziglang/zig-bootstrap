@@ -18,6 +18,7 @@ const link = @import("link.zig");
 const Package = @import("Package.zig");
 const build_options = @import("build_options");
 const introspect = @import("introspect.zig");
+const EnvVar = introspect.EnvVar;
 const LibCInstallation = @import("libc_installation.zig").LibCInstallation;
 const wasi_libc = @import("wasi_libc.zig");
 const BuildId = std.Build.CompileStep.BuildId;
@@ -104,6 +105,7 @@ const normal_usage =
     \\  lib              Use Zig as a drop-in lib.exe
     \\  ranlib           Use Zig as a drop-in ranlib
     \\  objcopy          Use Zig as a drop-in objcopy
+    \\  rc               Use Zig as a drop-in rc.exe
     \\
     \\  env              Print lib path, std path, cache directory, and version
     \\  help             Print this help and exit
@@ -230,14 +232,14 @@ pub fn mainArgs(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
         fatal("expected command argument", .{});
     }
 
-    if (std.process.can_execv and std.os.getenvZ("ZIG_IS_DETECTING_LIBC_PATHS") != null) {
+    if (process.can_execv and std.os.getenvZ("ZIG_IS_DETECTING_LIBC_PATHS") != null) {
         // In this case we have accidentally invoked ourselves as "the system C compiler"
         // to figure out where libc is installed. This is essentially infinite recursion
         // via child process execution due to the CC environment variable pointing to Zig.
         // Here we ignore the CC environment variable and exec `cc` as a child process.
         // However it's possible Zig is installed as *that* C compiler as well, which is
         // why we have this additional environment variable here to check.
-        var env_map = try std.process.getEnvMap(arena);
+        var env_map = try process.getEnvMap(arena);
 
         const inf_loop_env_key = "ZIG_IS_TRYING_TO_NOT_CALL_ITSELF";
         if (env_map.get(inf_loop_env_key) != null) {
@@ -253,11 +255,11 @@ pub fn mainArgs(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
         // CC environment variable. We detect and support this scenario here because of
         // the ZIG_IS_DETECTING_LIBC_PATHS environment variable.
         if (mem.eql(u8, args[1], "cc")) {
-            return std.process.execve(arena, args[1..], &env_map);
+            return process.execve(arena, args[1..], &env_map);
         } else {
             const modified_args = try arena.dupe([]const u8, args);
             modified_args[0] = "cc";
-            return std.process.execve(arena, modified_args, &env_map);
+            return process.execve(arena, modified_args, &env_map);
         }
     }
 
@@ -300,6 +302,8 @@ pub fn mainArgs(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
         return buildOutputType(gpa, arena, args, .cpp);
     } else if (mem.eql(u8, cmd, "translate-c")) {
         return buildOutputType(gpa, arena, args, .translate_c);
+    } else if (mem.eql(u8, cmd, "rc")) {
+        return cmdRc(gpa, arena, args[1..]);
     } else if (mem.eql(u8, cmd, "fmt")) {
         return cmdFmt(gpa, arena, cmd_args);
     } else if (mem.eql(u8, cmd, "objcopy")) {
@@ -417,6 +421,7 @@ const usage_build_generic =
     \\  --deps [dep],[dep],...    Set dependency names for the root package
     \\      dep:  [[import=]name]
     \\  --main-mod-path           Set the directory of the root module
+    \\  --error-limit [num]       Set the maximum amount of distinct error values
     \\  -fPIC                     Force-enable Position Independent Code
     \\  -fno-PIC                  Force-disable Position Independent Code
     \\  -fPIE                     Force-enable Position Independent Executable
@@ -682,19 +687,6 @@ const Emit = union(enum) {
     }
 };
 
-fn optionalStringEnvVar(arena: Allocator, name: []const u8) !?[]const u8 {
-    // Env vars aren't used in the bootstrap stage.
-    if (build_options.only_c) {
-        return null;
-    }
-    if (std.process.getEnvVarOwned(arena, name)) |value| {
-        return value;
-    } else |err| switch (err) {
-        error.EnvironmentVariableNotFound => return null,
-        else => |e| return e,
-    }
-}
-
 const ArgMode = union(enum) {
     build: std.builtin.OutputMode,
     cc,
@@ -793,8 +785,10 @@ fn buildOutputType(
     var no_builtin = false;
     var listen: Listen = .none;
     var debug_compile_errors = false;
-    var verbose_link = (builtin.os.tag != .wasi or builtin.link_libc) and std.process.hasEnvVarConstant("ZIG_VERBOSE_LINK");
-    var verbose_cc = (builtin.os.tag != .wasi or builtin.link_libc) and std.process.hasEnvVarConstant("ZIG_VERBOSE_CC");
+    var verbose_link = (builtin.os.tag != .wasi or builtin.link_libc) and
+        EnvVar.ZIG_VERBOSE_LINK.isSet();
+    var verbose_cc = (builtin.os.tag != .wasi or builtin.link_libc) and
+        EnvVar.ZIG_VERBOSE_CC.isSet();
     var verbose_air = false;
     var verbose_intern_pool = false;
     var verbose_generic_instances = false;
@@ -888,15 +882,15 @@ fn buildOutputType(
     var each_lib_rpath: ?bool = null;
     var build_id: ?BuildId = null;
     var sysroot: ?[]const u8 = null;
-    var libc_paths_file: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_LIBC");
+    var libc_paths_file: ?[]const u8 = try EnvVar.ZIG_LIBC.get(arena);
     var machine_code_model: std.builtin.CodeModel = .default;
     var runtime_args_start: ?usize = null;
     var test_filter: ?[]const u8 = null;
     var test_name_prefix: ?[]const u8 = null;
     var test_runner_path: ?[]const u8 = null;
-    var override_local_cache_dir: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_LOCAL_CACHE_DIR");
-    var override_global_cache_dir: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_GLOBAL_CACHE_DIR");
-    var override_lib_dir: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_LIB_DIR");
+    var override_local_cache_dir: ?[]const u8 = try EnvVar.ZIG_LOCAL_CACHE_DIR.get(arena);
+    var override_global_cache_dir: ?[]const u8 = try EnvVar.ZIG_GLOBAL_CACHE_DIR.get(arena);
+    var override_lib_dir: ?[]const u8 = try EnvVar.ZIG_LIB_DIR.get(arena);
     var main_mod_path: ?[]const u8 = null;
     var clang_preprocessor_mode: Compilation.ClangPreprocessorMode = .no;
     var subsystem: ?std.Target.SubSystem = null;
@@ -918,6 +912,8 @@ fn buildOutputType(
     var error_tracing: ?bool = null;
     var pdb_out_path: ?[]const u8 = null;
     var dwarf_format: ?std.dwarf.Format = null;
+    var error_limit: ?Module.ErrorInt = null;
+
     // e.g. -m3dnow or -mno-outline-atomics. They correspond to std.Target llvm cpu feature names.
     // This array is populated by zig cc frontend and then has to be converted to zig-style
     // CPU features.
@@ -935,6 +931,7 @@ fn buildOutputType(
     var rc_source_files = std.ArrayList(Compilation.RcSourceFile).init(arena);
     var rc_includes: Compilation.RcIncludes = .any;
     var res_files = std.ArrayList(Compilation.LinkObject).init(arena);
+    var manifest_file: ?[]const u8 = null;
     var link_objects = std.ArrayList(Compilation.LinkObject).init(arena);
     var framework_dirs = std.ArrayList([]const u8).init(arena);
     var frameworks: std.StringArrayHashMapUnmanaged(Framework) = .{};
@@ -953,7 +950,7 @@ fn buildOutputType(
     // if it exists, default the color setting to .off
     // explicit --color arguments will still override this setting.
     // Disable color on WASI per https://github.com/WebAssembly/WASI/issues/162
-    color = if (builtin.os.tag == .wasi or std.process.hasEnvVarConstant("NO_COLOR")) .off else .auto;
+    color = if (builtin.os.tag == .wasi or EnvVar.NO_COLOR.isSet()) .off else .auto;
 
     switch (arg_mode) {
         .build, .translate_c, .zig_test, .run => {
@@ -1046,6 +1043,11 @@ fn buildOutputType(
                         root_deps_str = args_iter.nextOrFatal();
                     } else if (mem.eql(u8, arg, "--main-mod-path")) {
                         main_mod_path = args_iter.nextOrFatal();
+                    } else if (mem.eql(u8, arg, "--error-limit")) {
+                        const next_arg = args_iter.nextOrFatal();
+                        error_limit = std.fmt.parseUnsigned(Module.ErrorInt, next_arg, 0) catch |err| {
+                            fatal("unable to parse error limit '{s}': {s}", .{ next_arg, @errorName(err) });
+                        };
                     } else if (mem.eql(u8, arg, "-cflags")) {
                         extra_cflags.shrinkRetainingCapacity(0);
                         while (true) {
@@ -1624,6 +1626,11 @@ fn buildOutputType(
                     Compilation.classifyFileExt(arg)) {
                     .object, .static_library, .shared_library => try link_objects.append(.{ .path = arg }),
                     .res => try res_files.append(.{ .path = arg }),
+                    .manifest => {
+                        if (manifest_file) |other| {
+                            fatal("only one manifest file can be specified, found '{s}' after '{s}'", .{ arg, other });
+                        } else manifest_file = arg;
+                    },
                     .assembly, .assembly_with_cpp, .c, .cpp, .h, .ll, .bc, .m, .mm, .cu => {
                         try c_source_files.append(.{
                             .src_path = arg,
@@ -1644,6 +1651,9 @@ fn buildOutputType(
                         } else root_src_file = arg;
                     },
                     .def, .unknown => {
+                        if (std.ascii.eqlIgnoreCase(".xml", std.fs.path.extension(arg))) {
+                            std.log.warn("embedded manifest files must have the extension '.manifest'", .{});
+                        }
                         fatal("unrecognized file extension of parameter '{s}'", .{arg});
                     },
                 }
@@ -1731,6 +1741,11 @@ fn buildOutputType(
                             .path = it.only_arg,
                             .must_link = must_link,
                         }),
+                        .manifest => {
+                            if (manifest_file) |other| {
+                                fatal("only one manifest file can be specified, found '{s}' after previously specified manifest '{s}'", .{ it.only_arg, other });
+                            } else manifest_file = it.only_arg;
+                        },
                         .def => {
                             linker_module_definition_file = it.only_arg;
                         },
@@ -2598,6 +2613,9 @@ fn buildOutputType(
             try link_objects.append(res_file);
         }
     } else {
+        if (manifest_file != null) {
+            fatal("manifest file is not allowed unless the target object format is coff (Windows/UEFI)", .{});
+        }
         if (rc_source_files.items.len != 0) {
             fatal("rc files are not allowed unless the target object format is coff (Windows/UEFI)", .{});
         }
@@ -3415,6 +3433,7 @@ fn buildOutputType(
         .symbol_wrap_set = symbol_wrap_set,
         .c_source_files = c_source_files.items,
         .rc_source_files = rc_source_files.items,
+        .manifest_file = manifest_file,
         .rc_includes = rc_includes,
         .link_objects = link_objects.items,
         .framework_dirs = framework_dirs.items,
@@ -3535,6 +3554,7 @@ fn buildOutputType(
         .reference_trace = reference_trace,
         .error_tracing = error_tracing,
         .pdb_out_path = pdb_out_path,
+        .error_limit = error_limit,
     }) catch |err| switch (err) {
         error.LibCUnavailable => {
             const target = target_info.target;
@@ -4029,18 +4049,18 @@ fn runOrTest(
     if (runtime_args_start) |i| {
         try argv.appendSlice(all_args[i..]);
     }
-    var env_map = try std.process.getEnvMap(arena);
+    var env_map = try process.getEnvMap(arena);
     try env_map.put("ZIG_EXE", self_exe_path);
 
     // We do not execve for tests because if the test fails we want to print
     // the error message and invocation below.
-    if (std.process.can_execv and arg_mode == .run) {
+    if (process.can_execv and arg_mode == .run) {
         // execv releases the locks; no need to destroy the Compilation here.
-        const err = std.process.execve(gpa, argv.items, &env_map);
+        const err = process.execve(gpa, argv.items, &env_map);
         try warnAboutForeignBinaries(arena, arg_mode, target_info, link_libc);
         const cmd = try std.mem.join(arena, " ", argv.items);
         fatal("the following command failed to execve with '{s}':\n{s}", .{ @errorName(err), cmd });
-    } else if (std.process.can_spawn) {
+    } else if (process.can_spawn) {
         var child = std.ChildProcess.init(argv.items, gpa);
         child.env_map = &env_map;
         child.stdin_behavior = .Inherit;
@@ -4235,6 +4255,7 @@ fn cmdTranslateC(comp: *Compilation, arena: Allocator, fancy_output: ?*Compilati
     defer man.deinit();
 
     man.hash.add(@as(u16, 0xb945)); // Random number to distinguish translate-c from compiling C objects
+    man.hash.add(comp.c_frontend);
     Compilation.cache_helpers.hashCSource(&man, c_source_file) catch |err| {
         fatal("unable to process '{s}': {s}", .{ c_source_file.src_path, @errorName(err) });
     };
@@ -4369,6 +4390,270 @@ fn cmdTranslateC(comp: *Compilation, arena: Allocator, fancy_output: ?*Compilati
         defer zig_file.close();
         try io.getStdOut().writeFileAll(zig_file, .{});
         return cleanExit();
+    }
+}
+
+fn cmdRc(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
+    const resinator = @import("resinator.zig");
+
+    const stderr = std.io.getStdErr();
+    const stderr_config = std.io.tty.detectConfig(stderr);
+
+    var options = options: {
+        var cli_diagnostics = resinator.cli.Diagnostics.init(gpa);
+        defer cli_diagnostics.deinit();
+        var options = resinator.cli.parse(gpa, args, &cli_diagnostics) catch |err| switch (err) {
+            error.ParseError => {
+                cli_diagnostics.renderToStdErr(args, stderr_config);
+                process.exit(1);
+            },
+            else => |e| return e,
+        };
+        try options.maybeAppendRC(std.fs.cwd());
+
+        // print any warnings/notes
+        cli_diagnostics.renderToStdErr(args, stderr_config);
+        // If there was something printed, then add an extra newline separator
+        // so that there is a clear separation between the cli diagnostics and whatever
+        // gets printed after
+        if (cli_diagnostics.errors.items.len > 0) {
+            std.debug.print("\n", .{});
+        }
+        break :options options;
+    };
+    defer options.deinit();
+
+    if (options.print_help_and_exit) {
+        try resinator.cli.writeUsage(stderr.writer(), "zig rc");
+        return;
+    }
+
+    const stdout_writer = std.io.getStdOut().writer();
+    if (options.verbose) {
+        try options.dumpVerbose(stdout_writer);
+        try stdout_writer.writeByte('\n');
+    }
+
+    var full_input = full_input: {
+        if (options.preprocess != .no) {
+            if (!build_options.have_llvm) {
+                fatal("clang not available: compiler built without LLVM extensions", .{});
+            }
+
+            var argv = std.ArrayList([]const u8).init(gpa);
+            defer argv.deinit();
+
+            const self_exe_path = try introspect.findZigExePath(arena);
+            var zig_lib_directory = introspect.findZigLibDirFromSelfExe(arena, self_exe_path) catch |err| {
+                try resinator.utils.renderErrorMessage(stderr.writer(), stderr_config, .err, "unable to find zig installation directory: {s}", .{@errorName(err)});
+                process.exit(1);
+            };
+            defer zig_lib_directory.handle.close();
+
+            const include_args = detectRcIncludeDirs(arena, zig_lib_directory.path.?, options.auto_includes) catch |err| {
+                try resinator.utils.renderErrorMessage(stderr.writer(), stderr_config, .err, "unable to detect system include directories: {s}", .{@errorName(err)});
+                process.exit(1);
+            };
+
+            try argv.appendSlice(&[_][]const u8{ self_exe_path, "clang" });
+
+            const clang_target = clang_target: {
+                if (include_args.target_abi) |abi| {
+                    break :clang_target try std.fmt.allocPrint(arena, "x86_64-unknown-windows-{s}", .{abi});
+                }
+                break :clang_target "x86_64-unknown-windows";
+            };
+            try resinator.preprocess.appendClangArgs(arena, &argv, options, .{
+                .clang_target = clang_target,
+                .system_include_paths = include_args.include_paths,
+                .needs_gnu_workaround = if (include_args.target_abi) |abi| std.mem.eql(u8, abi, "gnu") else false,
+                .nostdinc = true,
+            });
+
+            try argv.append(options.input_filename);
+
+            if (options.verbose) {
+                try stdout_writer.writeAll("Preprocessor: zig clang\n");
+                for (argv.items[0 .. argv.items.len - 1]) |arg| {
+                    try stdout_writer.print("{s} ", .{arg});
+                }
+                try stdout_writer.print("{s}\n\n", .{argv.items[argv.items.len - 1]});
+            }
+
+            if (process.can_spawn) {
+                var result = std.ChildProcess.exec(.{
+                    .allocator = gpa,
+                    .argv = argv.items,
+                    .max_output_bytes = std.math.maxInt(u32),
+                }) catch |err| {
+                    try resinator.utils.renderErrorMessage(stderr.writer(), stderr_config, .err, "unable to spawn preprocessor child process: {s}", .{@errorName(err)});
+                    process.exit(1);
+                };
+                errdefer gpa.free(result.stdout);
+                defer gpa.free(result.stderr);
+
+                switch (result.term) {
+                    .Exited => |code| {
+                        if (code != 0) {
+                            try resinator.utils.renderErrorMessage(stderr.writer(), stderr_config, .err, "the preprocessor failed with exit code {}:", .{code});
+                            try stderr.writeAll(result.stderr);
+                            try stderr.writeAll("\n");
+                            process.exit(1);
+                        }
+                    },
+                    .Signal, .Stopped, .Unknown => {
+                        try resinator.utils.renderErrorMessage(stderr.writer(), stderr_config, .err, "the preprocessor terminated unexpectedly ({s}):", .{@tagName(result.term)});
+                        try stderr.writeAll(result.stderr);
+                        try stderr.writeAll("\n");
+                        process.exit(1);
+                    },
+                }
+
+                break :full_input result.stdout;
+            } else {
+                // need to use an intermediate file
+                const rand_int = std.crypto.random.int(u64);
+                const preprocessed_path = try std.fmt.allocPrint(gpa, "resinator{x}.rcpp", .{rand_int});
+                defer gpa.free(preprocessed_path);
+                defer std.fs.cwd().deleteFile(preprocessed_path) catch {};
+
+                try argv.appendSlice(&.{ "-o", preprocessed_path });
+                const exit_code = try clangMain(arena, argv.items);
+                if (exit_code != 0) {
+                    try resinator.utils.renderErrorMessage(stderr.writer(), stderr_config, .err, "the preprocessor failed with exit code {}:", .{exit_code});
+                    process.exit(1);
+                }
+                break :full_input std.fs.cwd().readFileAlloc(gpa, preprocessed_path, std.math.maxInt(usize)) catch |err| {
+                    try resinator.utils.renderErrorMessage(stderr.writer(), stderr_config, .err, "unable to read preprocessed file path '{s}': {s}", .{ preprocessed_path, @errorName(err) });
+                    process.exit(1);
+                };
+            }
+        } else {
+            break :full_input std.fs.cwd().readFileAlloc(gpa, options.input_filename, std.math.maxInt(usize)) catch |err| {
+                try resinator.utils.renderErrorMessage(stderr.writer(), stderr_config, .err, "unable to read input file path '{s}': {s}", .{ options.input_filename, @errorName(err) });
+                process.exit(1);
+            };
+        }
+    };
+    defer gpa.free(full_input);
+
+    if (options.preprocess == .only) {
+        std.fs.cwd().writeFile(options.output_filename, full_input) catch |err| {
+            try resinator.utils.renderErrorMessage(stderr.writer(), stderr_config, .err, "unable to write output file '{s}': {s}", .{ options.output_filename, @errorName(err) });
+            process.exit(1);
+        };
+        return cleanExit();
+    }
+
+    var mapping_results = try resinator.source_mapping.parseAndRemoveLineCommands(gpa, full_input, full_input, .{ .initial_filename = options.input_filename });
+    defer mapping_results.mappings.deinit(gpa);
+
+    var final_input = resinator.comments.removeComments(mapping_results.result, mapping_results.result, &mapping_results.mappings);
+
+    var output_file = std.fs.cwd().createFile(options.output_filename, .{}) catch |err| {
+        try resinator.utils.renderErrorMessage(stderr.writer(), stderr_config, .err, "unable to create output file '{s}': {s}", .{ options.output_filename, @errorName(err) });
+        process.exit(1);
+    };
+    var output_file_closed = false;
+    defer if (!output_file_closed) output_file.close();
+
+    var diagnostics = resinator.errors.Diagnostics.init(gpa);
+    defer diagnostics.deinit();
+
+    var output_buffered_stream = std.io.bufferedWriter(output_file.writer());
+
+    resinator.compile.compile(gpa, final_input, output_buffered_stream.writer(), .{
+        .cwd = std.fs.cwd(),
+        .diagnostics = &diagnostics,
+        .source_mappings = &mapping_results.mappings,
+        .dependencies_list = null,
+        .ignore_include_env_var = options.ignore_include_env_var,
+        .extra_include_paths = options.extra_include_paths.items,
+        .default_language_id = options.default_language_id,
+        .default_code_page = options.default_code_page orelse .windows1252,
+        .verbose = options.verbose,
+        .null_terminate_string_table_strings = options.null_terminate_string_table_strings,
+        .max_string_literal_codepoints = options.max_string_literal_codepoints,
+        .silent_duplicate_control_ids = options.silent_duplicate_control_ids,
+        .warn_instead_of_error_on_invalid_code_page = options.warn_instead_of_error_on_invalid_code_page,
+    }) catch |err| switch (err) {
+        error.ParseError, error.CompileError => {
+            diagnostics.renderToStdErr(std.fs.cwd(), final_input, stderr_config, mapping_results.mappings);
+            // Delete the output file on error
+            output_file.close();
+            output_file_closed = true;
+            // Failing to delete is not really a big deal, so swallow any errors
+            std.fs.cwd().deleteFile(options.output_filename) catch {};
+            process.exit(1);
+        },
+        else => |e| return e,
+    };
+
+    try output_buffered_stream.flush();
+
+    // print any warnings/notes
+    diagnostics.renderToStdErr(std.fs.cwd(), final_input, stderr_config, mapping_results.mappings);
+
+    return cleanExit();
+}
+
+const RcIncludeArgs = struct {
+    include_paths: []const []const u8 = &.{},
+    target_abi: ?[]const u8 = null,
+};
+
+fn detectRcIncludeDirs(arena: Allocator, zig_lib_dir: []const u8, auto_includes: @import("resinator.zig").cli.Options.AutoIncludes) !RcIncludeArgs {
+    if (auto_includes == .none) return .{};
+    var cur_includes = auto_includes;
+    if (builtin.target.os.tag != .windows) {
+        switch (cur_includes) {
+            // MSVC can't be found when the host isn't Windows, so short-circuit.
+            .msvc => return error.WindowsSdkNotFound,
+            // Skip straight to gnu since we won't be able to detect MSVC on non-Windows hosts.
+            .any => cur_includes = .gnu,
+            .gnu => {},
+            .none => unreachable,
+        }
+    }
+    while (true) {
+        switch (cur_includes) {
+            .any, .msvc => {
+                const cross_target = std.zig.CrossTarget.parse(.{ .arch_os_abi = "native-windows-msvc" }) catch unreachable;
+                const target = cross_target.toTarget();
+                const is_native_abi = cross_target.isNativeAbi();
+                const detected_libc = Compilation.detectLibCIncludeDirs(arena, zig_lib_dir, target, is_native_abi, true, null) catch |err| {
+                    if (cur_includes == .any) {
+                        // fall back to mingw
+                        cur_includes = .gnu;
+                        continue;
+                    }
+                    return err;
+                };
+                if (detected_libc.libc_include_dir_list.len == 0) {
+                    if (cur_includes == .any) {
+                        // fall back to mingw
+                        cur_includes = .gnu;
+                        continue;
+                    }
+                    return error.WindowsSdkNotFound;
+                }
+                return .{
+                    .include_paths = detected_libc.libc_include_dir_list,
+                    .target_abi = "msvc",
+                };
+            },
+            .gnu => {
+                const cross_target = std.zig.CrossTarget.parse(.{ .arch_os_abi = "native-windows-gnu" }) catch unreachable;
+                const target = cross_target.toTarget();
+                const is_native_abi = cross_target.isNativeAbi();
+                const detected_libc = try Compilation.detectLibCIncludeDirs(arena, zig_lib_dir, target, is_native_abi, true, null);
+                return .{
+                    .include_paths = detected_libc.libc_include_dir_list,
+                    .target_abi = "gnu",
+                };
+            },
+            .none => unreachable,
+        }
     }
 }
 
@@ -4628,7 +4913,7 @@ pub const usage_build =
 
 pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
     const work_around_btrfs_bug = builtin.os.tag == .linux and
-        std.process.hasEnvVarConstant("ZIG_BTRFS_WORKAROUND");
+        EnvVar.ZIG_BTRFS_WORKAROUND.isSet();
     var color: Color = .auto;
 
     // We want to release all the locks before executing the child process, so we make a nice
@@ -4637,10 +4922,10 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
         const self_exe_path = try introspect.findZigExePath(arena);
 
         var build_file: ?[]const u8 = null;
-        var override_lib_dir: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_LIB_DIR");
-        var override_global_cache_dir: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_GLOBAL_CACHE_DIR");
-        var override_local_cache_dir: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_LOCAL_CACHE_DIR");
-        var override_build_runner: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_BUILD_RUNNER");
+        var override_lib_dir: ?[]const u8 = try EnvVar.ZIG_LIB_DIR.get(arena);
+        var override_global_cache_dir: ?[]const u8 = try EnvVar.ZIG_GLOBAL_CACHE_DIR.get(arena);
+        var override_local_cache_dir: ?[]const u8 = try EnvVar.ZIG_LOCAL_CACHE_DIR.get(arena);
+        var override_build_runner: ?[]const u8 = try EnvVar.ZIG_BUILD_RUNNER.get(arena);
         var child_argv = std.ArrayList([]const u8).init(arena);
         var reference_trace: ?u32 = null;
         var debug_compile_errors = false;
@@ -4849,6 +5134,7 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
                 .thread_pool = &thread_pool,
                 .global_cache = global_cache_directory,
                 .recursive = true,
+                .debug_hash = false,
                 .work_around_btrfs_bug = work_around_btrfs_bug,
             };
             defer job_queue.deinit();
@@ -4997,7 +5283,7 @@ pub fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !voi
         break :argv child_argv.items;
     };
 
-    if (std.process.can_spawn) {
+    if (process.can_spawn) {
         var child = std.ChildProcess.init(child_argv, gpa);
         child.stdin_behavior = .Inherit;
         child.stdout_behavior = .Inherit;
@@ -6662,9 +6948,9 @@ fn accessFrameworkPath(
 ) !bool {
     const sep = fs.path.sep_str;
 
-    for (&[_][]const u8{ "tbd", "dylib" }) |ext| {
+    for (&[_][]const u8{ ".tbd", ".dylib", "" }) |ext| {
         test_path.clearRetainingCapacity();
-        try test_path.writer().print("{s}" ++ sep ++ "{s}.framework" ++ sep ++ "{s}.{s}", .{
+        try test_path.writer().print("{s}" ++ sep ++ "{s}.framework" ++ sep ++ "{s}{s}", .{
             framework_dir_path,
             framework_name,
             framework_name,
@@ -6697,6 +6983,7 @@ pub const usage_fetch =
     \\Options:
     \\  -h, --help                    Print this help and exit
     \\  --global-cache-dir [path]     Override path to global Zig cache directory
+    \\  --debug-hash                  Print verbose hash information to stdout
     \\
 ;
 
@@ -6707,9 +6994,10 @@ fn cmdFetch(
 ) !void {
     const color: Color = .auto;
     const work_around_btrfs_bug = builtin.os.tag == .linux and
-        std.process.hasEnvVarConstant("ZIG_BTRFS_WORKAROUND");
+        EnvVar.ZIG_BTRFS_WORKAROUND.isSet();
     var opt_path_or_url: ?[]const u8 = null;
-    var override_global_cache_dir: ?[]const u8 = try optionalStringEnvVar(arena, "ZIG_GLOBAL_CACHE_DIR");
+    var override_global_cache_dir: ?[]const u8 = try EnvVar.ZIG_GLOBAL_CACHE_DIR.get(arena);
+    var debug_hash: bool = false;
 
     {
         var i: usize = 0;
@@ -6724,6 +7012,9 @@ fn cmdFetch(
                     if (i + 1 >= args.len) fatal("expected argument after '{s}'", .{arg});
                     i += 1;
                     override_global_cache_dir = args[i];
+                    continue;
+                } else if (mem.eql(u8, arg, "--debug-hash")) {
+                    debug_hash = true;
                     continue;
                 } else {
                     fatal("unrecognized parameter: '{s}'", .{arg});
@@ -6763,6 +7054,7 @@ fn cmdFetch(
         .thread_pool = &thread_pool,
         .global_cache = global_cache_directory,
         .recursive = false,
+        .debug_hash = debug_hash,
         .work_around_btrfs_bug = work_around_btrfs_bug,
     };
     defer job_queue.deinit();

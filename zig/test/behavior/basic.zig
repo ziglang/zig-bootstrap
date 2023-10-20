@@ -38,7 +38,6 @@ test "truncate to non-power-of-two integers" {
 }
 
 test "truncate to non-power-of-two integers from 128-bit" {
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
@@ -358,8 +357,6 @@ fn f2(x: bool) []const u8 {
 }
 
 test "variable is allowed to be a pointer to an opaque type" {
-    if (builtin.zig_backend == .stage2_spirv64) return error.SkipZigTest;
-
     var x: i32 = 1234;
     _ = hereIsAnOpaqueType(@as(*OpaqueA, @ptrCast(&x)));
 }
@@ -381,8 +378,6 @@ fn testTakeAddressOfParameter(f: f32) !void {
 }
 
 test "pointer to void return type" {
-    if (builtin.zig_backend == .stage2_spirv64) return error.SkipZigTest;
-
     try testPointerToVoidReturnType();
 }
 fn testPointerToVoidReturnType() anyerror!void {
@@ -398,8 +393,6 @@ test "array 2D const double ptr" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_spirv64) return error.SkipZigTest;
 
     const rect_2d_vertexes = [_][1]f32{
         [_]f32{1.0},
@@ -412,7 +405,6 @@ test "array 2D const double ptr with offset" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_spirv64) return error.SkipZigTest;
 
     const rect_2d_vertexes = [_][2]f32{
         [_]f32{ 3.0, 4.239 },
@@ -425,7 +417,6 @@ test "array 3D const double ptr with offset" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
-    if (builtin.zig_backend == .stage2_spirv64) return error.SkipZigTest;
 
     const rect_3d_vertexes = [_][2][2]f32{
         [_][2]f32{
@@ -480,7 +471,6 @@ fn testStructInFn() !void {
 
 test "fn call returning scalar optional in equality expression" {
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_spirv64) return error.SkipZigTest;
     try expect(getNull() == null);
 }
 
@@ -491,7 +481,6 @@ fn getNull() ?*i32 {
 test "global variable assignment with optional unwrapping with var initialized to undefined" {
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_spirv64) return error.SkipZigTest;
 
     const S = struct {
         var data: i32 = 1234;
@@ -580,8 +569,6 @@ test "comptime cast fn to ptr" {
 }
 
 test "equality compare fn ptrs" {
-    if (builtin.zig_backend == .stage2_spirv64) return error.SkipZigTest;
-
     var a = &emptyFn;
     try expect(a == a);
 }
@@ -651,7 +638,6 @@ test "string escapes" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_spirv64) return error.SkipZigTest;
 
     try expectEqualStrings("\"", "\x22");
     try expectEqualStrings("\'", "\x27");
@@ -729,7 +715,6 @@ test "result location is optional inside error union" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_arm) return error.SkipZigTest; // TODO
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_spirv64) return error.SkipZigTest;
 
     const x = maybe(true) catch unreachable;
     try expect(x.? == 42);
@@ -848,7 +833,6 @@ test "labeled block implicitly ends in a break" {
 test "catch in block has correct result location" {
     if (builtin.zig_backend == .stage2_aarch64) return error.SkipZigTest;
     if (builtin.zig_backend == .stage2_sparc64) return error.SkipZigTest; // TODO
-    if (builtin.zig_backend == .stage2_spirv64) return error.SkipZigTest;
 
     const S = struct {
         fn open() error{A}!@This() {
@@ -1171,4 +1155,52 @@ test "pointer to struct literal with runtime field is constant" {
     var runtime_zero: usize = 0;
     const ptr = &S{ .data = runtime_zero };
     try expect(@typeInfo(@TypeOf(ptr)).Pointer.is_const);
+}
+
+test "integer compare" {
+    const S = struct {
+        fn doTheTestSigned(comptime T: type) !void {
+            var z: T = 0;
+            var p: T = 123;
+            var n: T = -123;
+            try expect(z == z and z != p and z != n);
+            try expect(p == p and p != n and n == n);
+            try expect(z > n and z < p and z >= n and z <= p);
+            try expect(!(z < n or z > p or z <= n or z >= p or z > z or z < z));
+            try expect(p > n and n < p and p >= n and n <= p and p >= p and p <= p and n >= n and n <= n);
+            try expect(!(p < n or n > p or p <= n or n >= p or p > p or p < p or n > n or n < n));
+            try expect(z == 0 and z != 123 and z != -123 and 0 == z and 0 != p and 0 != n);
+            try expect(z > -123 and p > -123 and !(n > 123));
+            try expect(z < 123 and !(p < 123) and n < 123);
+            try expect(-123 <= z and -123 <= p and -123 <= n);
+            try expect(123 >= z and 123 >= p and 123 >= n);
+            try expect(!(0 != z or 123 != p or -123 != n));
+            try expect(!(z > 0 or -123 > p or 123 < n));
+        }
+        fn doTheTestUnsigned(comptime T: type) !void {
+            var z: T = 0;
+            var p: T = 123;
+            try expect(z == z and z != p);
+            try expect(p == p);
+            try expect(z < p and z <= p);
+            try expect(!(z > p or z >= p or z > z or z < z));
+            try expect(p >= p and p <= p);
+            try expect(!(p > p or p < p));
+            try expect(z == 0 and z != 123 and z != -123 and 0 == z and 0 != p);
+            try expect(z > -123 and p > -123);
+            try expect(z < 123 and !(p < 123));
+            try expect(-123 <= z and -123 <= p);
+            try expect(123 >= z and 123 >= p);
+            try expect(!(0 != z or 123 != p));
+            try expect(!(z > 0 or -123 > p));
+        }
+    };
+    inline for (.{ u8, u16, u32, u64, usize, u10, u20, u30, u60 }) |T| {
+        try S.doTheTestUnsigned(T);
+        try comptime S.doTheTestUnsigned(T);
+    }
+    inline for (.{ i8, i16, i32, i64, isize, i10, i20, i30, i60 }) |T| {
+        try S.doTheTestSigned(T);
+        try comptime S.doTheTestSigned(T);
+    }
 }

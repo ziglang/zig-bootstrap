@@ -3,6 +3,13 @@ const builtin = @import("builtin");
 const tests = @import("tests.zig");
 const CrossTarget = std.zig.CrossTarget;
 
+// ********************************************************
+// *                                                      *
+// *               DO NOT ADD NEW CASES HERE              *
+// *     instead add a file to test/cases/translate_c     *
+// *                                                      *
+// ********************************************************
+
 pub fn addCases(cases: *tests.TranslateCContext) void {
     const default_enum_type = if (builtin.abi == .msvc) "c_int" else "c_uint";
 
@@ -3315,23 +3322,6 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\pub const FOO_CHAR = '\x3f';
     });
 
-    cases.add("enums",
-        \\enum Foo {
-        \\    FooA = 2,
-        \\    FooB = 5,
-        \\    Foo1,
-        \\};
-    , &[_][]const u8{
-        \\pub const FooA: c_int = 2;
-        \\pub const FooB: c_int = 5;
-        \\pub const Foo1: c_int = 6;
-        \\pub const enum_Foo =
-        ++ " " ++ default_enum_type ++
-            \\;
-        ,
-        \\pub const Foo = enum_Foo;
-    });
-
     cases.add("macro cast",
         \\#include <stdint.h>
         \\int baz(void *arg) { return 0; }
@@ -4149,5 +4139,19 @@ pub fn addCases(cases: *tests.TranslateCContext) void {
         \\pub const foo = struct_foo_1;
         ,
         \\pub export var struct_foo: [*c]const u8 = "hello world";
+    });
+
+    cases.add("unsupport declare statement at the last of a compound statement which belongs to a statement expr",
+        \\void somefunc(void) {
+        \\  int y;
+        \\  (void)({y=1; _Static_assert(1);});
+        \\}
+    , &[_][]const u8{
+        \\pub export fn somefunc() void {
+        \\    var y: c_int = undefined;
+        \\    _ = blk: {
+        \\        y = 1;
+        \\    };
+        \\}
     });
 }

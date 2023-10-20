@@ -81,6 +81,10 @@ pub const JobQueue = struct {
     wait_group: WaitGroup = .{},
     global_cache: Cache.Directory,
     recursive: bool,
+    /// Dumps hash information to stdout which can be used to troubleshoot why
+    /// two hashes of the same package do not match.
+    /// If this is true, `recursive` must be false.
+    debug_hash: bool,
     work_around_btrfs_bug: bool,
 
     pub const Table = std.AutoArrayHashMapUnmanaged(Manifest.MultiHashHexDigest, *Fetch);
@@ -354,53 +358,55 @@ fn runResource(
     const rand_int = std.crypto.random.int(u64);
     const tmp_dir_sub_path = "tmp" ++ s ++ Manifest.hex64(rand_int);
 
-    const tmp_directory_path = try cache_root.join(arena, &.{tmp_dir_sub_path});
-    var tmp_directory: Cache.Directory = .{
-        .path = tmp_directory_path,
-        .handle = handle: {
-            const dir = cache_root.handle.makeOpenPathIterable(tmp_dir_sub_path, .{}) catch |err| {
-                try eb.addRootErrorMessage(.{
-                    .msg = try eb.printString("unable to create temporary directory '{s}': {s}", .{
-                        tmp_directory_path, @errorName(err),
-                    }),
-                });
-                return error.FetchFailed;
-            };
-            break :handle dir.dir;
-        },
-    };
-    defer tmp_directory.handle.close();
+    {
+        const tmp_directory_path = try cache_root.join(arena, &.{tmp_dir_sub_path});
+        var tmp_directory: Cache.Directory = .{
+            .path = tmp_directory_path,
+            .handle = handle: {
+                const dir = cache_root.handle.makeOpenPathIterable(tmp_dir_sub_path, .{}) catch |err| {
+                    try eb.addRootErrorMessage(.{
+                        .msg = try eb.printString("unable to create temporary directory '{s}': {s}", .{
+                            tmp_directory_path, @errorName(err),
+                        }),
+                    });
+                    return error.FetchFailed;
+                };
+                break :handle dir.dir;
+            },
+        };
+        defer tmp_directory.handle.close();
 
-    try unpackResource(f, resource, uri_path, tmp_directory);
+        try unpackResource(f, resource, uri_path, tmp_directory);
 
-    // Load, parse, and validate the unpacked build.zig.zon file. It is allowed
-    // for the file to be missing, in which case this fetched package is
-    // considered to be a "naked" package.
-    try loadManifest(f, .{ .root_dir = tmp_directory });
+        // Load, parse, and validate the unpacked build.zig.zon file. It is allowed
+        // for the file to be missing, in which case this fetched package is
+        // considered to be a "naked" package.
+        try loadManifest(f, .{ .root_dir = tmp_directory });
 
-    // Apply the manifest's inclusion rules to the temporary directory by
-    // deleting excluded files. If any error occurred for files that were
-    // ultimately excluded, those errors should be ignored, such as failure to
-    // create symlinks that weren't supposed to be included anyway.
+        // Apply the manifest's inclusion rules to the temporary directory by
+        // deleting excluded files. If any error occurred for files that were
+        // ultimately excluded, those errors should be ignored, such as failure to
+        // create symlinks that weren't supposed to be included anyway.
 
-    // Empty directories have already been omitted by `unpackResource`.
+        // Empty directories have already been omitted by `unpackResource`.
 
-    const filter: Filter = .{
-        .include_paths = if (f.manifest) |m| m.paths else .{},
-    };
+        const filter: Filter = .{
+            .include_paths = if (f.manifest) |m| m.paths else .{},
+        };
 
-    // Compute the package hash based on the remaining files in the temporary
-    // directory.
+        // Compute the package hash based on the remaining files in the temporary
+        // directory.
 
-    if (builtin.os.tag == .linux and f.job_queue.work_around_btrfs_bug) {
-        // https://github.com/ziglang/zig/issues/17095
-        tmp_directory.handle.close();
-        const iterable_dir = cache_root.handle.makeOpenPathIterable(tmp_dir_sub_path, .{}) catch
-            @panic("btrfs workaround failed");
-        tmp_directory.handle = iterable_dir.dir;
+        if (builtin.os.tag == .linux and f.job_queue.work_around_btrfs_bug) {
+            // https://github.com/ziglang/zig/issues/17095
+            tmp_directory.handle.close();
+            const iterable_dir = cache_root.handle.makeOpenPathIterable(tmp_dir_sub_path, .{}) catch
+                @panic("btrfs workaround failed");
+            tmp_directory.handle = iterable_dir.dir;
+        }
+
+        f.actual_hash = try computeHash(f, tmp_directory, filter);
     }
-
-    f.actual_hash = try computeHash(f, tmp_directory, filter);
 
     // Rename the temporary directory into the global zig package cache
     // directory. If the hash already exists, delete the temporary directory
@@ -750,12 +756,14 @@ const FileType = enum {
     tar,
     @"tar.gz",
     @"tar.xz",
+    @"tar.zst",
     git_pack,
 
     fn fromPath(file_path: []const u8) ?FileType {
         if (ascii.endsWithIgnoreCase(file_path, ".tar")) return .tar;
         if (ascii.endsWithIgnoreCase(file_path, ".tar.gz")) return .@"tar.gz";
         if (ascii.endsWithIgnoreCase(file_path, ".tar.xz")) return .@"tar.xz";
+        if (ascii.endsWithIgnoreCase(file_path, ".tar.zst")) return .@"tar.zst";
         return null;
     }
 
@@ -973,6 +981,9 @@ fn unpackResource(
             if (ascii.eqlIgnoreCase(content_type, "application/x-xz"))
                 break :ft .@"tar.xz";
 
+            if (ascii.eqlIgnoreCase(content_type, "application/zstd"))
+                break :ft .@"tar.zst";
+
             if (!ascii.eqlIgnoreCase(content_type, "application/octet-stream")) {
                 return f.fail(f.location_tok, try eb.printString(
                     "unrecognized 'Content-Type' header: '{s}'",
@@ -1013,6 +1024,7 @@ fn unpackResource(
         .tar => try unpackTarball(f, tmp_directory.handle, resource.reader()),
         .@"tar.gz" => try unpackTarballCompressed(f, tmp_directory.handle, resource, std.compress.gzip),
         .@"tar.xz" => try unpackTarballCompressed(f, tmp_directory.handle, resource, std.compress.xz),
+        .@"tar.zst" => try unpackTarballCompressed(f, tmp_directory.handle, resource, ZstdWrapper),
         .git_pack => unpackGitPack(f, tmp_directory.handle, resource) catch |err| switch (err) {
             error.FetchFailed => return error.FetchFailed,
             error.OutOfMemory => return error.OutOfMemory,
@@ -1023,6 +1035,18 @@ fn unpackResource(
         },
     }
 }
+
+// due to slight differences in the API of std.compress.(gzip|xz) and std.compress.zstd, zstd is
+// wrapped for generic use in unpackTarballCompressed: see github.com/ziglang/zig/issues/14739
+const ZstdWrapper = struct {
+    fn DecompressType(comptime T: type) type {
+        return error{}!std.compress.zstd.DecompressStream(T, .{});
+    }
+
+    fn decompress(allocator: Allocator, reader: anytype) DecompressType(@TypeOf(reader)) {
+        return std.compress.zstd.decompressStream(allocator, reader);
+    }
+};
 
 fn unpackTarballCompressed(
     f: *Fetch,
@@ -1313,7 +1337,7 @@ fn computeHash(
             const kind: HashedFile.Kind = switch (entry.kind) {
                 .directory => unreachable,
                 .file => .file,
-                .sym_link => .sym_link,
+                .sym_link => .link,
                 else => return f.fail(f.location_tok, try eb.printString(
                     "package contains '{s}' which has illegal file type '{s}'",
                     .{ entry.path, @tagName(entry.kind) },
@@ -1327,7 +1351,7 @@ fn computeHash(
             const hashed_file = try arena.create(HashedFile);
             hashed_file.* = .{
                 .fs_path = fs_path,
-                .normalized_path = try normalizePath(arena, fs_path),
+                .normalized_path = try normalizePathAlloc(arena, fs_path),
                 .kind = kind,
                 .hash = undefined, // to be populated by the worker
                 .failure = undefined, // to be populated by the worker
@@ -1397,7 +1421,34 @@ fn computeHash(
     }
 
     if (any_failures) return error.FetchFailed;
+
+    if (f.job_queue.debug_hash) {
+        assert(!f.job_queue.recursive);
+        // Print something to stdout that can be text diffed to figure out why
+        // the package hash is different.
+        dumpHashInfo(all_files.items) catch |err| {
+            std.debug.print("unable to write to stdout: {s}\n", .{@errorName(err)});
+            std.process.exit(1);
+        };
+    }
+
     return hasher.finalResult();
+}
+
+fn dumpHashInfo(all_files: []const *const HashedFile) !void {
+    const stdout = std.io.getStdOut();
+    var bw = std.io.bufferedWriter(stdout.writer());
+    const w = bw.writer();
+
+    for (all_files) |hashed_file| {
+        try w.print("{s}: {s}: {s}\n", .{
+            @tagName(hashed_file.kind),
+            std.fmt.fmtSliceHexLower(&hashed_file.hash),
+            hashed_file.normalized_path,
+        });
+    }
+
+    try bw.flush();
 }
 
 fn workerHashFile(dir: fs.Dir, hashed_file: *HashedFile, wg: *WaitGroup) void {
@@ -1425,8 +1476,14 @@ fn hashFileFallible(dir: fs.Dir, hashed_file: *HashedFile) HashedFile.Error!void
                 hasher.update(buf[0..bytes_read]);
             }
         },
-        .sym_link => {
+        .link => {
             const link_name = try dir.readLink(hashed_file.fs_path, &buf);
+            if (fs.path.sep != canonical_sep) {
+                // Package hashes are intended to be consistent across
+                // platforms which means we must normalize path separators
+                // inside symlinks.
+                normalizePath(link_name);
+            }
             hasher.update(link_name);
         },
     }
@@ -1472,7 +1529,7 @@ const HashedFile = struct {
         fs.File.StatError ||
         fs.Dir.ReadLinkError;
 
-    const Kind = enum { file, sym_link };
+    const Kind = enum { file, link };
 
     fn lessThan(context: void, lhs: *const HashedFile, rhs: *const HashedFile) bool {
         _ = context;
@@ -1482,20 +1539,18 @@ const HashedFile = struct {
 
 /// Make a file system path identical independently of operating system path inconsistencies.
 /// This converts backslashes into forward slashes.
-fn normalizePath(arena: Allocator, fs_path: []const u8) ![]const u8 {
-    const canonical_sep = '/';
-
-    if (fs.path.sep == canonical_sep)
-        return fs_path;
-
+fn normalizePathAlloc(arena: Allocator, fs_path: []const u8) ![]const u8 {
+    if (fs.path.sep == canonical_sep) return fs_path;
     const normalized = try arena.dupe(u8, fs_path);
-    for (normalized) |*byte| {
-        switch (byte.*) {
-            fs.path.sep => byte.* = canonical_sep,
-            else => continue,
-        }
-    }
+    normalizePath(normalized);
     return normalized;
+}
+
+const canonical_sep = fs.path.sep_posix;
+
+fn normalizePath(bytes: []u8) void {
+    assert(fs.path.sep != canonical_sep);
+    std.mem.replaceScalar(u8, bytes, fs.path.sep, canonical_sep);
 }
 
 const Filter = struct {
@@ -1505,6 +1560,7 @@ const Filter = struct {
     pub fn includePath(self: Filter, sub_path: []const u8) bool {
         if (self.include_paths.count() == 0) return true;
         if (self.include_paths.contains("")) return true;
+        if (self.include_paths.contains(".")) return true;
         if (self.include_paths.contains(sub_path)) return true;
 
         // Check if any included paths are parent directories of sub_path.
@@ -1569,4 +1625,5 @@ const ErrorBundle = std.zig.ErrorBundle;
 
 test {
     _ = Filter;
+    _ = FileType;
 }

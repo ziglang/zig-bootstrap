@@ -974,7 +974,7 @@ pub fn indexOfSentinel(comptime T: type, comptime sentinel: T, p: [*:sentinel]co
             // The below branch assumes that reading past the end of the buffer is valid, as long
             // as we don't read into a new page. This should be the case for most architectures
             // which use paged memory, however should be confirmed before adding a new arch below.
-            .aarch64, .x86, .x86_64 => if (comptime std.simd.suggestVectorSize(T)) |block_len| {
+            .aarch64, .x86, .x86_64 => if (std.simd.suggestVectorSize(T)) |block_len| {
                 comptime std.debug.assert(std.mem.page_size % block_len == 0);
                 const Block = @Vector(block_len, T);
                 const mask: Block = @splat(sentinel);
@@ -1027,7 +1027,7 @@ test "indexOfSentinel vector paths" {
     const allocator = std.testing.allocator;
 
     inline for (Types) |T| {
-        const block_len = comptime std.simd.suggestVectorSize(T) orelse continue;
+        const block_len = std.simd.suggestVectorSize(T) orelse continue;
 
         // Allocate three pages so we guarantee a page-crossing address with a full page after
         const memory = try allocator.alloc(T, 3 * std.mem.page_size / @sizeOf(T));
@@ -1118,11 +1118,11 @@ pub fn indexOfScalarPos(comptime T: type, slice: []const T, start_index: usize, 
         !@inComptime() and
         (@typeInfo(T) == .Int or @typeInfo(T) == .Float) and std.math.isPowerOfTwo(@bitSizeOf(T)))
     {
-        if (comptime std.simd.suggestVectorSize(T)) |block_len| {
+        if (std.simd.suggestVectorSize(T)) |block_len| {
             // For Intel Nehalem (2009) and AMD Bulldozer (2012) or later, unaligned loads on aligned data result
             // in the same execution as aligned loads. We ignore older arch's here and don't bother pre-aligning.
             //
-            // Use `comptime std.simd.suggestVectorSize(T)` to get the same alignment as used in this function
+            // Use `std.simd.suggestVectorSize(T)` to get the same alignment as used in this function
             // however this usually isn't necessary unless your arch has a performance penalty due to this.
             //
             // This may differ for other arch's. Arm for example costs a cycle when loading across a cache
@@ -1911,7 +1911,7 @@ pub fn writePackedInt(comptime T: type, bytes: []u8, bit_offset: usize, value: T
 /// Any extra bytes in buffer after writing the integer are set to zero. To
 /// avoid the branch to check for extra buffer bytes, use writeIntLittle
 /// instead.
-pub fn writeIntSliceLittle(comptime T: type, buffer: []u8, value: T) void {
+fn writeIntSliceLittleNative(comptime T: type, buffer: []u8, value: T) void {
     assert(buffer.len >= @divExact(@typeInfo(T).Int.bits, 8));
 
     if (@typeInfo(T).Int.bits == 0) {
@@ -1921,21 +1921,27 @@ pub fn writeIntSliceLittle(comptime T: type, buffer: []u8, value: T) void {
         buffer[0] = @as(u8, @bitCast(value));
         return;
     }
-    // TODO I want to call writeIntLittle here but comptime eval facilities aren't good enough
-    const uint = std.meta.Int(.unsigned, @typeInfo(T).Int.bits);
-    var bits = @as(uint, @bitCast(value));
-    for (buffer) |*b| {
-        b.* = @as(u8, @truncate(bits));
-        bits >>= 8;
-    }
+
+    const write_end = @divExact(@typeInfo(T).Int.bits, 8);
+    @as(*align(1) T, @ptrCast(buffer)).* = value;
+    @memset(buffer[write_end..], 0);
 }
+
+fn writeIntSliceLittleForeign(comptime T: type, buffer: []u8, value: T) void {
+    return writeIntSliceLittleNative(T, buffer, @byteSwap(value));
+}
+
+pub const writeIntSliceLittle = switch (native_endian) {
+    .Little => writeIntSliceLittleNative,
+    .Big => writeIntSliceLittleForeign,
+};
 
 /// Writes a twos-complement big-endian integer to memory.
 /// Asserts that buffer.len >= @typeInfo(T).Int.bits / 8.
 /// The bit count of T must be divisible by 8.
 /// Any extra bytes in buffer before writing the integer are set to zero. To
 /// avoid the branch to check for extra buffer bytes, use writeIntBig instead.
-pub fn writeIntSliceBig(comptime T: type, buffer: []u8, value: T) void {
+fn writeIntSliceBigNative(comptime T: type, buffer: []u8, value: T) void {
     assert(buffer.len >= @divExact(@typeInfo(T).Int.bits, 8));
 
     if (@typeInfo(T).Int.bits == 0) {
@@ -1946,25 +1952,28 @@ pub fn writeIntSliceBig(comptime T: type, buffer: []u8, value: T) void {
         return;
     }
 
-    // TODO I want to call writeIntBig here but comptime eval facilities aren't good enough
-    const uint = std.meta.Int(.unsigned, @typeInfo(T).Int.bits);
-    var bits = @as(uint, @bitCast(value));
-    var index: usize = buffer.len;
-    while (index != 0) {
-        index -= 1;
-        buffer[index] = @as(u8, @truncate(bits));
-        bits >>= 8;
-    }
+    const write_start = buffer.len - @divExact(@typeInfo(T).Int.bits, 8);
+    @memset(buffer[0..write_start], 0);
+    @as(*align(1) T, @ptrCast(buffer[write_start..])).* = value;
 }
 
+fn writeIntSliceBigForeign(comptime T: type, buffer: []u8, value: T) void {
+    return writeIntSliceBigNative(T, buffer, @byteSwap(value));
+}
+
+pub const writeIntSliceBig = switch (native_endian) {
+    .Little => writeIntSliceBigForeign,
+    .Big => writeIntSliceBigNative,
+};
+
 pub const writeIntSliceNative = switch (native_endian) {
-    .Little => writeIntSliceLittle,
-    .Big => writeIntSliceBig,
+    .Little => writeIntSliceLittleNative,
+    .Big => writeIntSliceBigNative,
 };
 
 pub const writeIntSliceForeign = switch (native_endian) {
-    .Little => writeIntSliceBig,
-    .Big => writeIntSliceLittle,
+    .Little => writeIntSliceBigForeign,
+    .Big => writeIntSliceLittleForeign,
 };
 
 /// Writes a twos-complement integer to memory, with the specified endianness.
@@ -3801,12 +3810,11 @@ test "replace" {
     try testing.expectEqualStrings(expected, output[0..expected.len]);
 }
 
-/// Replace all occurrences of `needle` with `replacement`.
-pub fn replaceScalar(comptime T: type, slice: []T, needle: T, replacement: T) void {
-    for (slice, 0..) |e, i| {
-        if (e == needle) {
-            slice[i] = replacement;
-        }
+/// Replace all occurrences of `match` with `replacement`.
+pub fn replaceScalar(comptime T: type, slice: []T, match: T, replacement: T) void {
+    for (slice) |*e| {
+        if (e.* == match)
+            e.* = replacement;
     }
 }
 

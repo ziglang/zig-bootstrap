@@ -30,7 +30,17 @@ pub fn renderTree(buffer: *std.ArrayList(u8), tree: Ast) Error!void {
         try renderContainerDocComments(ais, tree, 0);
     }
 
-    try renderMembers(buffer.allocator, ais, tree, tree.rootDecls());
+    if (tree.mode == .zon) {
+        try renderExpression(
+            buffer.allocator,
+            ais,
+            tree,
+            tree.nodes.items(.data)[0].lhs,
+            .newline,
+        );
+    } else {
+        try renderMembers(buffer.allocator, ais, tree, tree.rootDecls());
+    }
 
     if (ais.disabled_offset) |disabled_offset| {
         try writeFixingWhitespace(ais.underlying_writer, tree.source[disabled_offset..]);
@@ -1261,17 +1271,6 @@ fn renderFor(gpa: Allocator, ais: *Ais, tree: Ast, for_node: Ast.full.For, space
 
     const lparen = for_node.ast.for_token + 1;
     try renderParamList(gpa, ais, tree, lparen, for_node.ast.inputs, .space);
-
-    // TODO remove this after zig 0.11.0
-    if (for_node.isOldSyntax(token_tags)) {
-        // old: for (a) |b, c| {}
-        // new: for (a, 0..) |b, c| {}
-        const array_list = ais.underlying_writer.context; // abstractions? who needs 'em!
-        if (mem.endsWith(u8, array_list.items, ") ")) {
-            array_list.items.len -= 2;
-            try array_list.appendSlice(", 0..) ");
-        }
-    }
 
     var cur = for_node.payload_token;
     const pipe = std.mem.indexOfScalarPos(std.zig.Token.Tag, token_tags, cur, .pipe).?;
