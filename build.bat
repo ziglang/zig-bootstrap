@@ -1,3 +1,5 @@
+rem This file is licensed under the public domain.
+
 @echo off
 
 SETLOCAL EnableDelayedExpansion
