@@ -240,6 +240,9 @@ pub fn handleLineCommand(allocator: Allocator, line_command: []const u8, current
     };
     defer allocator.free(filename);
 
+    // \x00 bytes in the filename is incompatible with how StringTable works
+    if (std.mem.indexOfScalar(u8, filename, '\x00') != null) return;
+
     current_mapping.line_num = linenum;
     current_mapping.filename.clearRetainingCapacity();
     try current_mapping.filename.appendSlice(allocator, filename);
@@ -248,7 +251,7 @@ pub fn handleLineCommand(allocator: Allocator, line_command: []const u8, current
 }
 
 pub fn parseAndRemoveLineCommandsAlloc(allocator: Allocator, source: []const u8, options: ParseAndRemoveLineCommandsOptions) !ParseLineCommandsResult {
-    var buf = try allocator.alloc(u8, source.len);
+    const buf = try allocator.alloc(u8, source.len);
     errdefer allocator.free(buf);
     var result = try parseAndRemoveLineCommands(allocator, source, buf, options);
     result.result = try allocator.realloc(buf, result.result.len);
@@ -437,11 +440,11 @@ pub const SourceMappings = struct {
     }
 
     pub fn set(self: *SourceMappings, allocator: Allocator, line_num: usize, span: SourceSpan) !void {
-        var ptr = try self.expandAndGet(allocator, line_num);
+        const ptr = try self.expandAndGet(allocator, line_num);
         ptr.* = span;
     }
 
-    pub fn has(self: *SourceMappings, line_num: usize) bool {
+    pub fn has(self: SourceMappings, line_num: usize) bool {
         return self.mapping.items.len >= line_num;
     }
 
@@ -473,7 +476,7 @@ pub const SourceMappings = struct {
 
         const after_collapsed_start = line_num + num_following_lines_to_collapse;
         const new_num_lines = self.mapping.items.len - num_following_lines_to_collapse;
-        std.mem.copy(SourceSpan, self.mapping.items[line_num..new_num_lines], self.mapping.items[after_collapsed_start..]);
+        std.mem.copyForwards(SourceSpan, self.mapping.items[line_num..new_num_lines], self.mapping.items[after_collapsed_start..]);
 
         self.mapping.items.len = new_num_lines;
     }

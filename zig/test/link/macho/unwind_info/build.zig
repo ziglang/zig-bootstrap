@@ -14,7 +14,7 @@ pub fn build(b: *std.Build) void {
 }
 
 fn add(b: *std.Build, test_step: *std.Build.Step, optimize: std.builtin.OptimizeMode) void {
-    const target: std.zig.CrossTarget = .{ .os_tag = .macos };
+    const target = b.resolveTargetQuery(.{ .os_tag = .macos });
 
     testUnwindInfo(b, test_step, optimize, target, false, "no-dead-strip");
     testUnwindInfo(b, test_step, optimize, target, true, "yes-dead-strip");
@@ -24,7 +24,7 @@ fn testUnwindInfo(
     b: *std.Build,
     test_step: *std.Build.Step,
     optimize: std.builtin.OptimizeMode,
-    target: std.zig.CrossTarget,
+    target: std.Build.ResolvedTarget,
     dead_strip: bool,
     name: []const u8,
 ) void {
@@ -32,7 +32,7 @@ fn testUnwindInfo(
     exe.link_gc_sections = dead_strip;
 
     const check = exe.checkObject();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("segname __TEXT");
     check.checkExact("sectname __gcc_except_tab");
     check.checkExact("sectname __unwind_info");
@@ -46,7 +46,7 @@ fn testUnwindInfo(
     }
 
     check.checkInSymtab();
-    check.checkContains("(__TEXT,__text) external ___gxx_personality_v0");
+    check.checkContains("(__TEXT,__text) private external ___gxx_personality_v0");
     test_step.dependOn(&check.step);
 
     const run = b.addRunArtifact(exe);
@@ -66,7 +66,7 @@ fn testUnwindInfo(
 fn createScenario(
     b: *std.Build,
     optimize: std.builtin.OptimizeMode,
-    target: std.zig.CrossTarget,
+    target: std.Build.ResolvedTarget,
     name: []const u8,
 ) *std.Build.Step.Compile {
     const exe = b.addExecutable(.{

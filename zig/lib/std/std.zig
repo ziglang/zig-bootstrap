@@ -47,7 +47,7 @@ pub const StringArrayHashMap = array_hash_map.StringArrayHashMap;
 pub const StringArrayHashMapUnmanaged = array_hash_map.StringArrayHashMapUnmanaged;
 /// deprecated: use `DoublyLinkedList`.
 pub const TailQueue = DoublyLinkedList;
-pub const Target = @import("target.zig").Target;
+pub const Target = @import("Target.zig");
 pub const Thread = @import("Thread.zig");
 pub const Treap = @import("treap.zig").Treap;
 pub const Tz = tz.Tz;
@@ -194,9 +194,6 @@ pub const zig = @import("zig.zig");
 
 pub const start = @import("start.zig");
 
-/// deprecated: use `Build`.
-pub const build = Build;
-
 const root = @import("root");
 const options_override = if (@hasDecl(root, "std_options")) root.std_options else struct {};
 
@@ -283,10 +280,15 @@ pub const options = struct {
     else
         false;
 
-    pub const http_connection_pool_size = if (@hasDecl(options_override, "http_connection_pool_size"))
-        options_override.http_connection_pool_size
+    /// By default, std.http.Client will support HTTPS connections.  Set this option to `true` to
+    /// disable TLS support.
+    ///
+    /// This will likely reduce the size of the binary, but it will also make it impossible to
+    /// make a HTTPS connection.
+    pub const http_disable_tls = if (@hasDecl(options_override, "http_disable_tls"))
+        options_override.http_disable_tls
     else
-        http.Client.default_connection_pool_size;
+        false;
 
     pub const side_channels_mitigations: crypto.SideChannelsMitigations = if (@hasDecl(options_override, "side_channels_mitigations"))
         options_override.side_channels_mitigations

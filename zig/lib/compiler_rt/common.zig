@@ -51,10 +51,9 @@ pub const gnu_f16_abi = switch (builtin.cpu.arch) {
     .wasm64,
     .riscv64,
     .riscv32,
-    .x86_64,
     => false,
 
-    .x86 => true,
+    .x86, .x86_64 => true,
 
     .arm, .armeb, .thumb, .thumbeb => switch (builtin.abi) {
         .eabi, .eabihf => false,
@@ -249,7 +248,7 @@ pub fn HalveInt(comptime T: type, comptime signed_half: bool) type {
         pub const HalfT = if (signed_half) HalfTS else HalfTU;
 
         all: T,
-        s: if (native_endian == .Little)
+        s: if (native_endian == .little)
             extern struct { low: HalfT, high: HalfT }
         else
             extern struct { high: HalfT, low: HalfT },

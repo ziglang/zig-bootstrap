@@ -24,7 +24,7 @@ pub fn main() !void {
     };
     const arena = thread_safe_arena.allocator();
 
-    var args = try process.argsAlloc(arena);
+    const args = try process.argsAlloc(arena);
 
     // skip my own exe name
     var arg_idx: usize = 1;
@@ -46,7 +46,10 @@ pub fn main() !void {
         return error.InvalidArgs;
     };
 
-    const host = try std.zig.system.NativeTargetInfo.detect(.{});
+    const host: std.Build.ResolvedTarget = .{
+        .query = .{},
+        .result = try std.zig.system.resolveTargetQuery(.{}),
+    };
 
     const build_root_directory: std.Build.Cache.Directory = .{
         .path = build_root,
@@ -95,6 +98,8 @@ pub fn main() !void {
     var max_rss: usize = 0;
     var skip_oom_steps: bool = false;
     var color: Color = .auto;
+    var seed: u32 = 0;
+    var prominent_compile_errors: bool = false;
 
     const stderr_stream = io.getStdErr().writer();
     const stdout_stream = io.getStdOut().writer();
@@ -196,6 +201,17 @@ pub fn main() !void {
                     std.debug.print("Expected argument after {s}\n\n", .{arg});
                     usageAndErr(builder, false, stderr_stream);
                 } };
+            } else if (mem.eql(u8, arg, "--seed")) {
+                const next_arg = nextArg(args, &arg_idx) orelse {
+                    std.debug.print("Expected u32 after {s}\n\n", .{arg});
+                    usageAndErr(builder, false, stderr_stream);
+                };
+                seed = std.fmt.parseUnsigned(u32, next_arg, 0) catch |err| {
+                    std.debug.print("unable to parse seed '{s}' as 32-bit integer: {s}\n", .{
+                        next_arg, @errorName(err),
+                    });
+                    process.exit(1);
+                };
             } else if (mem.eql(u8, arg, "--debug-log")) {
                 const next_arg = nextArg(args, &arg_idx) orelse {
                     std.debug.print("Expected argument after {s}\n\n", .{arg});
@@ -227,6 +243,8 @@ pub fn main() !void {
                 builder.verbose_cc = true;
             } else if (mem.eql(u8, arg, "--verbose-llvm-cpu-features")) {
                 builder.verbose_llvm_cpu_features = true;
+            } else if (mem.eql(u8, arg, "--prominent-compile-errors")) {
+                prominent_compile_errors = true;
             } else if (mem.eql(u8, arg, "-fwine")) {
                 builder.enable_wine = true;
             } else if (mem.eql(u8, arg, "-fno-wine")) {
@@ -310,6 +328,7 @@ pub fn main() !void {
         .max_rss_mutex = .{},
         .skip_oom_steps = skip_oom_steps,
         .memory_blocked_steps = std.ArrayList(*Step).init(arena),
+        .prominent_compile_errors = prominent_compile_errors,
 
         .claimed_rss = 0,
         .summary = summary,
@@ -329,6 +348,7 @@ pub fn main() !void {
         main_progress_node,
         thread_pool_options,
         &run,
+        seed,
     ) catch |err| switch (err) {
         error.UncleanExit => process.exit(1),
         else => return err,
@@ -341,11 +361,12 @@ const Run = struct {
     max_rss_mutex: std.Thread.Mutex,
     skip_oom_steps: bool,
     memory_blocked_steps: std.ArrayList(*Step),
+    prominent_compile_errors: bool,
 
     claimed_rss: usize,
     summary: ?Summary,
     ttyconf: std.io.tty.Config,
-    stderr: std.fs.File,
+    stderr: File,
 };
 
 fn runStepNames(
@@ -355,6 +376,7 @@ fn runStepNames(
     parent_prog_node: *std.Progress.Node,
     thread_pool_options: std.Thread.Pool.Options,
     run: *Run,
+    seed: u32,
 ) !void {
     const gpa = b.allocator;
     var step_stack: std.AutoArrayHashMapUnmanaged(*Step, void) = .{};
@@ -375,8 +397,13 @@ fn runStepNames(
     }
 
     const starting_steps = try arena.dupe(*Step, step_stack.keys());
+
+    var rng = std.rand.DefaultPrng.init(seed);
+    const rand = rng.random();
+    rand.shuffle(*Step, starting_steps);
+
     for (starting_steps) |s| {
-        checkForDependencyLoop(b, s, &step_stack) catch |err| switch (err) {
+        constructGraphAndCheckForDependencyLoop(b, s, &step_stack, rand) catch |err| switch (err) {
             error.DependencyLoopDetected => return error.UncleanExit,
             else => |e| return e,
         };
@@ -539,7 +566,7 @@ fn runStepNames(
     // Finally, render compile errors at the bottom of the terminal.
     // We use a separate compile_error_steps array list because step_stack is destructively
     // mutated in printTreeStep above.
-    if (total_compile_errors > 0) {
+    if (run.prominent_compile_errors and total_compile_errors > 0) {
         for (compile_error_steps.items) |s| {
             if (s.result_error_bundle.errorMessageCount() > 0) {
                 s.result_error_bundle.renderToStdErr(renderOptions(ttyconf));
@@ -560,7 +587,7 @@ const PrintNode = struct {
     last: bool = false,
 };
 
-fn printPrefix(node: *PrintNode, stderr: std.fs.File, ttyconf: std.io.tty.Config) !void {
+fn printPrefix(node: *PrintNode, stderr: File, ttyconf: std.io.tty.Config) !void {
     const parent = node.parent orelse return;
     if (parent.parent == null) return;
     try printPrefix(parent, stderr, ttyconf);
@@ -574,11 +601,145 @@ fn printPrefix(node: *PrintNode, stderr: std.fs.File, ttyconf: std.io.tty.Config
     }
 }
 
+fn printChildNodePrefix(stderr: File, ttyconf: std.io.tty.Config) !void {
+    try stderr.writeAll(switch (ttyconf) {
+        .no_color, .windows_api => "+- ",
+        .escape_codes => "\x1B\x28\x30\x6d\x71\x1B\x28\x42 ", // └─
+    });
+}
+
+fn printStepStatus(
+    s: *Step,
+    stderr: File,
+    ttyconf: std.io.tty.Config,
+    run: *const Run,
+) !void {
+    switch (s.state) {
+        .precheck_unstarted => unreachable,
+        .precheck_started => unreachable,
+        .precheck_done => unreachable,
+        .running => unreachable,
+
+        .dependency_failure => {
+            try ttyconf.setColor(stderr, .dim);
+            try stderr.writeAll(" transitive failure\n");
+            try ttyconf.setColor(stderr, .reset);
+        },
+
+        .success => {
+            try ttyconf.setColor(stderr, .green);
+            if (s.result_cached) {
+                try stderr.writeAll(" cached");
+            } else if (s.test_results.test_count > 0) {
+                const pass_count = s.test_results.passCount();
+                try stderr.writer().print(" {d} passed", .{pass_count});
+                if (s.test_results.skip_count > 0) {
+                    try ttyconf.setColor(stderr, .yellow);
+                    try stderr.writer().print(" {d} skipped", .{s.test_results.skip_count});
+                }
+            } else {
+                try stderr.writeAll(" success");
+            }
+            try ttyconf.setColor(stderr, .reset);
+            if (s.result_duration_ns) |ns| {
+                try ttyconf.setColor(stderr, .dim);
+                if (ns >= std.time.ns_per_min) {
+                    try stderr.writer().print(" {d}m", .{ns / std.time.ns_per_min});
+                } else if (ns >= std.time.ns_per_s) {
+                    try stderr.writer().print(" {d}s", .{ns / std.time.ns_per_s});
+                } else if (ns >= std.time.ns_per_ms) {
+                    try stderr.writer().print(" {d}ms", .{ns / std.time.ns_per_ms});
+                } else if (ns >= std.time.ns_per_us) {
+                    try stderr.writer().print(" {d}us", .{ns / std.time.ns_per_us});
+                } else {
+                    try stderr.writer().print(" {d}ns", .{ns});
+                }
+                try ttyconf.setColor(stderr, .reset);
+            }
+            if (s.result_peak_rss != 0) {
+                const rss = s.result_peak_rss;
+                try ttyconf.setColor(stderr, .dim);
+                if (rss >= 1000_000_000) {
+                    try stderr.writer().print(" MaxRSS:{d}G", .{rss / 1000_000_000});
+                } else if (rss >= 1000_000) {
+                    try stderr.writer().print(" MaxRSS:{d}M", .{rss / 1000_000});
+                } else if (rss >= 1000) {
+                    try stderr.writer().print(" MaxRSS:{d}K", .{rss / 1000});
+                } else {
+                    try stderr.writer().print(" MaxRSS:{d}B", .{rss});
+                }
+                try ttyconf.setColor(stderr, .reset);
+            }
+            try stderr.writeAll("\n");
+        },
+        .skipped, .skipped_oom => |skip| {
+            try ttyconf.setColor(stderr, .yellow);
+            try stderr.writeAll(" skipped");
+            if (skip == .skipped_oom) {
+                try stderr.writeAll(" (not enough memory)");
+                try ttyconf.setColor(stderr, .dim);
+                try stderr.writer().print(" upper bound of {d} exceeded runner limit ({d})", .{ s.max_rss, run.max_rss });
+                try ttyconf.setColor(stderr, .yellow);
+            }
+            try stderr.writeAll("\n");
+            try ttyconf.setColor(stderr, .reset);
+        },
+        .failure => try printStepFailure(s, stderr, ttyconf),
+    }
+}
+
+fn printStepFailure(
+    s: *Step,
+    stderr: File,
+    ttyconf: std.io.tty.Config,
+) !void {
+    if (s.result_error_bundle.errorMessageCount() > 0) {
+        try ttyconf.setColor(stderr, .red);
+        try stderr.writer().print(" {d} errors\n", .{
+            s.result_error_bundle.errorMessageCount(),
+        });
+        try ttyconf.setColor(stderr, .reset);
+    } else if (!s.test_results.isSuccess()) {
+        try stderr.writer().print(" {d}/{d} passed", .{
+            s.test_results.passCount(), s.test_results.test_count,
+        });
+        if (s.test_results.fail_count > 0) {
+            try stderr.writeAll(", ");
+            try ttyconf.setColor(stderr, .red);
+            try stderr.writer().print("{d} failed", .{
+                s.test_results.fail_count,
+            });
+            try ttyconf.setColor(stderr, .reset);
+        }
+        if (s.test_results.skip_count > 0) {
+            try stderr.writeAll(", ");
+            try ttyconf.setColor(stderr, .yellow);
+            try stderr.writer().print("{d} skipped", .{
+                s.test_results.skip_count,
+            });
+            try ttyconf.setColor(stderr, .reset);
+        }
+        if (s.test_results.leak_count > 0) {
+            try stderr.writeAll(", ");
+            try ttyconf.setColor(stderr, .red);
+            try stderr.writer().print("{d} leaked", .{
+                s.test_results.leak_count,
+            });
+            try ttyconf.setColor(stderr, .reset);
+        }
+        try stderr.writeAll("\n");
+    } else {
+        try ttyconf.setColor(stderr, .red);
+        try stderr.writeAll(" failure\n");
+        try ttyconf.setColor(stderr, .reset);
+    }
+}
+
 fn printTreeStep(
     b: *std.Build,
     s: *Step,
     run: *const Run,
-    stderr: std.fs.File,
+    stderr: File,
     ttyconf: std.io.tty.Config,
     parent_node: *PrintNode,
     step_stack: *std.AutoArrayHashMapUnmanaged(*Step, void),
@@ -591,10 +752,7 @@ fn printTreeStep(
     if (!first) try ttyconf.setColor(stderr, .dim);
     if (parent_node.parent != null) {
         if (parent_node.last) {
-            try stderr.writeAll(switch (ttyconf) {
-                .no_color, .windows_api => "+- ",
-                .escape_codes => "\x1B\x28\x30\x6d\x71\x1B\x28\x42 ", // └─
-            });
+            try printChildNodePrefix(stderr, ttyconf);
         } else {
             try stderr.writeAll(switch (ttyconf) {
                 .no_color, .windows_api => "+- ",
@@ -607,119 +765,7 @@ fn printTreeStep(
     try stderr.writeAll(s.name);
 
     if (first) {
-        switch (s.state) {
-            .precheck_unstarted => unreachable,
-            .precheck_started => unreachable,
-            .precheck_done => unreachable,
-            .running => unreachable,
-
-            .dependency_failure => {
-                try ttyconf.setColor(stderr, .dim);
-                try stderr.writeAll(" transitive failure\n");
-                try ttyconf.setColor(stderr, .reset);
-            },
-
-            .success => {
-                try ttyconf.setColor(stderr, .green);
-                if (s.result_cached) {
-                    try stderr.writeAll(" cached");
-                } else if (s.test_results.test_count > 0) {
-                    const pass_count = s.test_results.passCount();
-                    try stderr.writer().print(" {d} passed", .{pass_count});
-                    if (s.test_results.skip_count > 0) {
-                        try ttyconf.setColor(stderr, .yellow);
-                        try stderr.writer().print(" {d} skipped", .{s.test_results.skip_count});
-                    }
-                } else {
-                    try stderr.writeAll(" success");
-                }
-                try ttyconf.setColor(stderr, .reset);
-                if (s.result_duration_ns) |ns| {
-                    try ttyconf.setColor(stderr, .dim);
-                    if (ns >= std.time.ns_per_min) {
-                        try stderr.writer().print(" {d}m", .{ns / std.time.ns_per_min});
-                    } else if (ns >= std.time.ns_per_s) {
-                        try stderr.writer().print(" {d}s", .{ns / std.time.ns_per_s});
-                    } else if (ns >= std.time.ns_per_ms) {
-                        try stderr.writer().print(" {d}ms", .{ns / std.time.ns_per_ms});
-                    } else if (ns >= std.time.ns_per_us) {
-                        try stderr.writer().print(" {d}us", .{ns / std.time.ns_per_us});
-                    } else {
-                        try stderr.writer().print(" {d}ns", .{ns});
-                    }
-                    try ttyconf.setColor(stderr, .reset);
-                }
-                if (s.result_peak_rss != 0) {
-                    const rss = s.result_peak_rss;
-                    try ttyconf.setColor(stderr, .dim);
-                    if (rss >= 1000_000_000) {
-                        try stderr.writer().print(" MaxRSS:{d}G", .{rss / 1000_000_000});
-                    } else if (rss >= 1000_000) {
-                        try stderr.writer().print(" MaxRSS:{d}M", .{rss / 1000_000});
-                    } else if (rss >= 1000) {
-                        try stderr.writer().print(" MaxRSS:{d}K", .{rss / 1000});
-                    } else {
-                        try stderr.writer().print(" MaxRSS:{d}B", .{rss});
-                    }
-                    try ttyconf.setColor(stderr, .reset);
-                }
-                try stderr.writeAll("\n");
-            },
-            .skipped, .skipped_oom => |skip| {
-                try ttyconf.setColor(stderr, .yellow);
-                try stderr.writeAll(" skipped");
-                if (skip == .skipped_oom) {
-                    try stderr.writeAll(" (not enough memory)");
-                    try ttyconf.setColor(stderr, .dim);
-                    try stderr.writer().print(" upper bound of {d} exceeded runner limit ({d})", .{ s.max_rss, run.max_rss });
-                    try ttyconf.setColor(stderr, .yellow);
-                }
-                try stderr.writeAll("\n");
-                try ttyconf.setColor(stderr, .reset);
-            },
-            .failure => {
-                if (s.result_error_bundle.errorMessageCount() > 0) {
-                    try ttyconf.setColor(stderr, .red);
-                    try stderr.writer().print(" {d} errors\n", .{
-                        s.result_error_bundle.errorMessageCount(),
-                    });
-                    try ttyconf.setColor(stderr, .reset);
-                } else if (!s.test_results.isSuccess()) {
-                    try stderr.writer().print(" {d}/{d} passed", .{
-                        s.test_results.passCount(), s.test_results.test_count,
-                    });
-                    if (s.test_results.fail_count > 0) {
-                        try stderr.writeAll(", ");
-                        try ttyconf.setColor(stderr, .red);
-                        try stderr.writer().print("{d} failed", .{
-                            s.test_results.fail_count,
-                        });
-                        try ttyconf.setColor(stderr, .reset);
-                    }
-                    if (s.test_results.skip_count > 0) {
-                        try stderr.writeAll(", ");
-                        try ttyconf.setColor(stderr, .yellow);
-                        try stderr.writer().print("{d} skipped", .{
-                            s.test_results.skip_count,
-                        });
-                        try ttyconf.setColor(stderr, .reset);
-                    }
-                    if (s.test_results.leak_count > 0) {
-                        try stderr.writeAll(", ");
-                        try ttyconf.setColor(stderr, .red);
-                        try stderr.writer().print("{d} leaked", .{
-                            s.test_results.leak_count,
-                        });
-                        try ttyconf.setColor(stderr, .reset);
-                    }
-                    try stderr.writeAll("\n");
-                } else {
-                    try ttyconf.setColor(stderr, .red);
-                    try stderr.writeAll(" failure\n");
-                    try ttyconf.setColor(stderr, .reset);
-                }
-            },
-        }
+        try printStepStatus(s, stderr, ttyconf, run);
 
         const last_index = if (!failures_only) s.dependencies.items.len -| 1 else blk: {
             var i: usize = s.dependencies.items.len;
@@ -748,10 +794,22 @@ fn printTreeStep(
     }
 }
 
-fn checkForDependencyLoop(
+/// Traverse the dependency graph depth-first and make it undirected by having
+/// steps know their dependants (they only know dependencies at start).
+/// Along the way, check that there is no dependency loop, and record the steps
+/// in traversal order in `step_stack`.
+/// Each step has its dependencies traversed in random order, this accomplishes
+/// two things:
+/// - `step_stack` will be in randomized-depth-first order, so the build runner
+///   spawns steps in a random (but optimized) order
+/// - each step's `dependants` list is also filled in a random order, so that
+///   when it finishes executing in `workerMakeOneStep`, it spawns next steps
+///   to run in random order
+fn constructGraphAndCheckForDependencyLoop(
     b: *std.Build,
     s: *Step,
     step_stack: *std.AutoArrayHashMapUnmanaged(*Step, void),
+    rand: std.rand.Random,
 ) !void {
     switch (s.state) {
         .precheck_started => {
@@ -762,10 +820,16 @@ fn checkForDependencyLoop(
             s.state = .precheck_started;
 
             try step_stack.ensureUnusedCapacity(b.allocator, s.dependencies.items.len);
-            for (s.dependencies.items) |dep| {
+
+            // We dupe to avoid shuffling the steps in the summary, it depends
+            // on s.dependencies' order.
+            const deps = b.allocator.dupe(*Step, s.dependencies.items) catch @panic("OOM");
+            rand.shuffle(*Step, deps);
+
+            for (deps) |dep| {
                 try step_stack.put(b.allocator, dep, {});
                 try dep.dependants.append(b.allocator, s);
-                checkForDependencyLoop(b, dep, step_stack) catch |err| {
+                constructGraphAndCheckForDependencyLoop(b, dep, step_stack, rand) catch |err| {
                     if (err == error.DependencyLoopDetected) {
                         std.debug.print("  {s}\n", .{s.name});
                     }
@@ -851,26 +915,15 @@ fn workerMakeOneStep(
     const make_result = s.make(&sub_prog_node);
 
     // No matter the result, we want to display error/warning messages.
-    if (s.result_error_msgs.items.len > 0) {
+    const show_compile_errors = !run.prominent_compile_errors and
+        s.result_error_bundle.errorMessageCount() > 0;
+    const show_error_msgs = s.result_error_msgs.items.len > 0;
+
+    if (show_error_msgs or show_compile_errors) {
         sub_prog_node.context.lock_stderr();
         defer sub_prog_node.context.unlock_stderr();
 
-        const stderr = run.stderr;
-        const ttyconf = run.ttyconf;
-
-        for (s.result_error_msgs.items) |msg| {
-            // Sometimes it feels like you just can't catch a break. Finally,
-            // with Zig, you can.
-            ttyconf.setColor(stderr, .bold) catch break;
-            stderr.writeAll(s.owner.dep_prefix) catch break;
-            stderr.writeAll(s.name) catch break;
-            stderr.writeAll(": ") catch break;
-            ttyconf.setColor(stderr, .red) catch break;
-            stderr.writeAll("error: ") catch break;
-            ttyconf.setColor(stderr, .reset) catch break;
-            stderr.writeAll(msg) catch break;
-            stderr.writeAll("\n") catch break;
-        }
+        printErrorMessages(b, s, run) catch {};
     }
 
     handle_result: {
@@ -922,6 +975,54 @@ fn workerMakeOneStep(
             }
         }
         run.memory_blocked_steps.shrinkRetainingCapacity(i);
+    }
+}
+
+fn printErrorMessages(b: *std.Build, failing_step: *Step, run: *const Run) !void {
+    const gpa = b.allocator;
+    const stderr = run.stderr;
+    const ttyconf = run.ttyconf;
+
+    // Provide context for where these error messages are coming from by
+    // printing the corresponding Step subtree.
+
+    var step_stack: std.ArrayListUnmanaged(*Step) = .{};
+    defer step_stack.deinit(gpa);
+    try step_stack.append(gpa, failing_step);
+    while (step_stack.items[step_stack.items.len - 1].dependants.items.len != 0) {
+        try step_stack.append(gpa, step_stack.items[step_stack.items.len - 1].dependants.items[0]);
+    }
+
+    // Now, `step_stack` has the subtree that we want to print, in reverse order.
+    try ttyconf.setColor(stderr, .dim);
+    var indent: usize = 0;
+    while (step_stack.popOrNull()) |s| : (indent += 1) {
+        if (indent > 0) {
+            try stderr.writer().writeByteNTimes(' ', (indent - 1) * 3);
+            try printChildNodePrefix(stderr, ttyconf);
+        }
+
+        try stderr.writeAll(s.name);
+
+        if (s == failing_step) {
+            try printStepFailure(s, stderr, ttyconf);
+        } else {
+            try stderr.writeAll("\n");
+        }
+    }
+    try ttyconf.setColor(stderr, .reset);
+
+    // Penultimately, the compilation errors.
+    if (!run.prominent_compile_errors and failing_step.result_error_bundle.errorMessageCount() > 0)
+        try failing_step.result_error_bundle.renderToWriter(renderOptions(ttyconf), stderr.writer());
+
+    // Finally, generic error messages.
+    for (failing_step.result_error_msgs.items) |msg| {
+        try ttyconf.setColor(stderr, .red);
+        try stderr.writeAll("error: ");
+        try ttyconf.setColor(stderr, .reset);
+        try stderr.writeAll(msg);
+        try stderr.writeAll("\n");
     }
 }
 
@@ -990,6 +1091,7 @@ fn usage(builder: *std.Build, already_ran_build: bool, out_stream: anytype) !voi
         \\  -l, --list-steps             Print available steps
         \\  --verbose                    Print commands before executing them
         \\  --color [auto|off|on]        Enable or disable colored error messages
+        \\  --prominent-compile-errors   Buffer compile errors and display at end
         \\  --summary [mode]             Control the printing of the build summary
         \\    all                        Print the build summary in its entirety
         \\    failures                   (Default) Only print failed steps
@@ -1034,6 +1136,7 @@ fn usage(builder: *std.Build, already_ran_build: bool, out_stream: anytype) !voi
         \\  --global-cache-dir [path]    Override path to global Zig cache directory
         \\  --zig-lib-dir [arg]          Override path to Zig lib directory
         \\  --build-runner [file]        Override path to build runner
+        \\  --seed [integer]             For shuffling dependency traversal order (default: random)
         \\  --debug-log [scope]          Enable debugging the compiler
         \\  --debug-pkg-config           Fail if unknown pkg-config flags encountered
         \\  --verbose-link               Enable compiler debug output for linking
@@ -1073,7 +1176,7 @@ fn cleanExit() void {
 const Color = enum { auto, off, on };
 const Summary = enum { all, failures, none };
 
-fn get_tty_conf(color: Color, stderr: std.fs.File) std.io.tty.Config {
+fn get_tty_conf(color: Color, stderr: File) std.io.tty.Config {
     return switch (color) {
         .auto => std.io.tty.detectConfig(stderr),
         .on => .escape_codes,

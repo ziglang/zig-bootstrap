@@ -1,5 +1,6 @@
 pub fn scanRelocs(macho_file: *MachO) !void {
-    const gpa = macho_file.base.allocator;
+    const comp = macho_file.base.comp;
+    const gpa = comp.gpa;
 
     for (macho_file.objects.items, 0..) |*object, object_id| {
         var cies = std.AutoHashMap(u32, void).init(gpa);
@@ -35,8 +36,10 @@ pub fn calcSectionSize(macho_file: *MachO, unwind_info: *const UnwindInfo) error
     sect.@"align" = 3;
     sect.size = 0;
 
-    const cpu_arch = macho_file.base.options.target.cpu.arch;
-    const gpa = macho_file.base.allocator;
+    const target = macho_file.base.comp.root_mod.resolved_target.result;
+    const cpu_arch = target.cpu.arch;
+    const comp = macho_file.base.comp;
+    const gpa = comp.gpa;
     var size: u32 = 0;
 
     for (macho_file.objects.items, 0..) |*object, object_id| {
@@ -86,8 +89,10 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
     const seg_id = macho_file.sections.items(.segment_index)[sect_id];
     const seg = macho_file.segments.items[seg_id];
 
-    const cpu_arch = macho_file.base.options.target.cpu.arch;
-    const gpa = macho_file.base.allocator;
+    const target = macho_file.base.comp.root_mod.resolved_target.result;
+    const cpu_arch = target.cpu.arch;
+    const comp = macho_file.base.comp;
+    const gpa = comp.gpa;
 
     var eh_records = std.AutoArrayHashMap(u32, EhFrameRecord(true)).init(gpa);
     defer {
@@ -109,11 +114,11 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
 
         for (object.exec_atoms.items) |atom_index| {
             var inner_syms_it = Atom.getInnerSymbolsIterator(macho_file, atom_index);
-            while (inner_syms_it.next()) |target| {
-                const fde_record_offset = object.eh_frame_records_lookup.get(target) orelse continue;
+            while (inner_syms_it.next()) |reloc_target| {
+                const fde_record_offset = object.eh_frame_records_lookup.get(reloc_target) orelse continue;
                 if (object.eh_frame_relocs_lookup.get(fde_record_offset).?.dead) continue;
 
-                const record_id = unwind_info.records_lookup.get(target) orelse continue;
+                const record_id = unwind_info.records_lookup.get(reloc_target) orelse continue;
                 const record = &unwind_info.records.items[record_id];
 
                 // TODO skip this check if no __compact_unwind is present
@@ -153,7 +158,7 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
                     .aarch64 => {}, // relocs take care of LSDA pointers
                     .x86_64 => {
                         // We need to relocate target symbol address ourselves.
-                        const atom_sym = macho_file.getSymbol(target);
+                        const atom_sym = macho_file.getSymbol(reloc_target);
                         try fde_record.setTargetSymbolAddress(atom_sym.n_value, .{
                             .base_addr = sect.addr,
                             .base_offset = eh_frame_offset,
@@ -209,7 +214,7 @@ pub fn write(macho_file: *MachO, unwind_info: *UnwindInfo) !void {
     const writer = buffer.writer();
 
     for (eh_records.values()) |record| {
-        try writer.writeIntLittle(u32, record.size);
+        try writer.writeInt(u32, record.size, .little);
         try buffer.appendSlice(record.data);
     }
 
@@ -259,7 +264,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
             base_offset: u64,
         }) u64 {
             assert(rec.tag == .fde);
-            const addend = mem.readIntLittle(i64, rec.data[4..][0..8]);
+            const addend = mem.readInt(i64, rec.data[4..][0..8], .little);
             return @as(u64, @intCast(@as(i64, @intCast(ctx.base_addr + ctx.base_offset + 8)) + addend));
         }
 
@@ -269,7 +274,7 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
         }) !void {
             assert(rec.tag == .fde);
             const addend = @as(i64, @intCast(value)) - @as(i64, @intCast(ctx.base_addr + ctx.base_offset + 8));
-            mem.writeIntLittle(i64, rec.data[4..][0..8], addend);
+            mem.writeInt(i64, rec.data[4..][0..8], addend, .little);
         }
 
         pub fn getPersonalityPointerReloc(
@@ -278,7 +283,8 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
             object_id: u32,
             source_offset: u32,
         ) ?SymbolWithLoc {
-            const cpu_arch = macho_file.base.options.target.cpu.arch;
+            const target = macho_file.base.comp.root_mod.resolved_target.result;
+            const cpu_arch = target.cpu.arch;
             const relocs = getRelocs(macho_file, object_id, source_offset);
             for (relocs) |rel| {
                 switch (cpu_arch) {
@@ -301,13 +307,13 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
                     },
                     else => unreachable,
                 }
-                const target = Atom.parseRelocTarget(macho_file, .{
+                const reloc_target = Atom.parseRelocTarget(macho_file, .{
                     .object_id = object_id,
                     .rel = rel,
                     .code = rec.data,
                     .base_offset = @as(i32, @intCast(source_offset)) + 4,
                 });
-                return target;
+                return reloc_target;
             }
             return null;
         }
@@ -319,11 +325,12 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
         }) !void {
             comptime assert(is_mutable);
 
-            const cpu_arch = macho_file.base.options.target.cpu.arch;
+            const target = macho_file.base.comp.root_mod.resolved_target.result;
+            const cpu_arch = target.cpu.arch;
             const relocs = getRelocs(macho_file, object_id, ctx.source_offset);
 
             for (relocs) |rel| {
-                const target = Atom.parseRelocTarget(macho_file, .{
+                const reloc_target = Atom.parseRelocTarget(macho_file, .{
                     .object_id = object_id,
                     .rel = rel,
                     .code = rec.data,
@@ -340,16 +347,16 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
                                 // Address of the __eh_frame in the source object file
                             },
                             .ARM64_RELOC_POINTER_TO_GOT => {
-                                const target_addr = macho_file.getGotEntryAddress(target).?;
+                                const target_addr = macho_file.getGotEntryAddress(reloc_target).?;
                                 const result = math.cast(i32, @as(i64, @intCast(target_addr)) - @as(i64, @intCast(source_addr))) orelse
                                     return error.Overflow;
-                                mem.writeIntLittle(i32, rec.data[rel_offset..][0..4], result);
+                                mem.writeInt(i32, rec.data[rel_offset..][0..4], result, .little);
                             },
                             .ARM64_RELOC_UNSIGNED => {
                                 assert(rel.r_extern == 1);
-                                const target_addr = Atom.getRelocTargetAddress(macho_file, target, false);
+                                const target_addr = Atom.getRelocTargetAddress(macho_file, reloc_target, false);
                                 const result = @as(i64, @intCast(target_addr)) - @as(i64, @intCast(source_addr));
-                                mem.writeIntLittle(i64, rec.data[rel_offset..][0..8], @as(i64, @intCast(result)));
+                                mem.writeInt(i64, rec.data[rel_offset..][0..8], @as(i64, @intCast(result)), .little);
                             },
                             else => unreachable,
                         }
@@ -358,11 +365,11 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
                         const rel_type = @as(macho.reloc_type_x86_64, @enumFromInt(rel.r_type));
                         switch (rel_type) {
                             .X86_64_RELOC_GOT => {
-                                const target_addr = macho_file.getGotEntryAddress(target).?;
-                                const addend = mem.readIntLittle(i32, rec.data[rel_offset..][0..4]);
+                                const target_addr = macho_file.getGotEntryAddress(reloc_target).?;
+                                const addend = mem.readInt(i32, rec.data[rel_offset..][0..4], .little);
                                 const adjusted_target_addr = @as(u64, @intCast(@as(i64, @intCast(target_addr)) + addend));
                                 const disp = try Relocation.calcPcRelativeDisplacementX86(source_addr, adjusted_target_addr, 0);
-                                mem.writeIntLittle(i32, rec.data[rel_offset..][0..4], disp);
+                                mem.writeInt(i32, rec.data[rel_offset..][0..4], disp, .little);
                             },
                             else => unreachable,
                         }
@@ -374,8 +381,9 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
 
         pub fn getCiePointerSource(rec: Record, object_id: u32, macho_file: *MachO, offset: u32) u32 {
             assert(rec.tag == .fde);
-            const cpu_arch = macho_file.base.options.target.cpu.arch;
-            const addend = mem.readIntLittle(u32, rec.data[0..4]);
+            const target = macho_file.base.comp.root_mod.resolved_target.result;
+            const cpu_arch = target.cpu.arch;
+            const addend = mem.readInt(u32, rec.data[0..4], .little);
             switch (cpu_arch) {
                 .aarch64 => {
                     const relocs = getRelocs(macho_file, object_id, offset);
@@ -397,12 +405,12 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
 
         pub fn getCiePointer(rec: Record) u32 {
             assert(rec.tag == .fde);
-            return mem.readIntLittle(u32, rec.data[0..4]);
+            return mem.readInt(u32, rec.data[0..4], .little);
         }
 
         pub fn setCiePointer(rec: *Record, ptr: u32) void {
             assert(rec.tag == .fde);
-            mem.writeIntLittle(u32, rec.data[0..4], ptr);
+            mem.writeInt(u32, rec.data[0..4], ptr, .little);
         }
 
         pub fn getAugmentationString(rec: Record) []const u8 {
@@ -509,14 +517,14 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
             if (enc == EH_PE.omit) return null;
 
             var ptr: i64 = switch (enc & 0x0F) {
-                EH_PE.absptr => @as(i64, @bitCast(try reader.readIntLittle(u64))),
-                EH_PE.udata2 => @as(i16, @bitCast(try reader.readIntLittle(u16))),
-                EH_PE.udata4 => @as(i32, @bitCast(try reader.readIntLittle(u32))),
-                EH_PE.udata8 => @as(i64, @bitCast(try reader.readIntLittle(u64))),
+                EH_PE.absptr => @as(i64, @bitCast(try reader.readInt(u64, .little))),
+                EH_PE.udata2 => @as(i16, @bitCast(try reader.readInt(u16, .little))),
+                EH_PE.udata4 => @as(i32, @bitCast(try reader.readInt(u32, .little))),
+                EH_PE.udata8 => @as(i64, @bitCast(try reader.readInt(u64, .little))),
                 EH_PE.uleb128 => @as(i64, @bitCast(try leb.readULEB128(u64, reader))),
-                EH_PE.sdata2 => try reader.readIntLittle(i16),
-                EH_PE.sdata4 => try reader.readIntLittle(i32),
-                EH_PE.sdata8 => try reader.readIntLittle(i64),
+                EH_PE.sdata2 => try reader.readInt(i16, .little),
+                EH_PE.sdata4 => try reader.readInt(i32, .little),
+                EH_PE.sdata8 => try reader.readInt(i64, .little),
                 EH_PE.sleb128 => try leb.readILEB128(i64, reader),
                 else => return null,
             };
@@ -552,14 +560,14 @@ pub fn EhFrameRecord(comptime is_mutable: bool) type {
             }
 
             switch (enc & 0x0F) {
-                EH_PE.absptr => try writer.writeIntLittle(u64, @as(u64, @bitCast(actual))),
-                EH_PE.udata2 => try writer.writeIntLittle(u16, @as(u16, @bitCast(@as(i16, @intCast(actual))))),
-                EH_PE.udata4 => try writer.writeIntLittle(u32, @as(u32, @bitCast(@as(i32, @intCast(actual))))),
-                EH_PE.udata8 => try writer.writeIntLittle(u64, @as(u64, @bitCast(actual))),
+                EH_PE.absptr => try writer.writeInt(u64, @as(u64, @bitCast(actual)), .little),
+                EH_PE.udata2 => try writer.writeInt(u16, @as(u16, @bitCast(@as(i16, @intCast(actual)))), .little),
+                EH_PE.udata4 => try writer.writeInt(u32, @as(u32, @bitCast(@as(i32, @intCast(actual)))), .little),
+                EH_PE.udata8 => try writer.writeInt(u64, @as(u64, @bitCast(actual)), .little),
                 EH_PE.uleb128 => try leb.writeULEB128(writer, @as(u64, @bitCast(actual))),
-                EH_PE.sdata2 => try writer.writeIntLittle(i16, @as(i16, @intCast(actual))),
-                EH_PE.sdata4 => try writer.writeIntLittle(i32, @as(i32, @intCast(actual))),
-                EH_PE.sdata8 => try writer.writeIntLittle(i64, actual),
+                EH_PE.sdata2 => try writer.writeInt(i16, @as(i16, @intCast(actual)), .little),
+                EH_PE.sdata4 => try writer.writeInt(i32, @as(i32, @intCast(actual)), .little),
+                EH_PE.sdata8 => try writer.writeInt(i64, actual, .little),
                 EH_PE.sleb128 => try leb.writeILEB128(writer, actual),
                 else => unreachable,
             }
@@ -586,13 +594,13 @@ pub const Iterator = struct {
         var stream = std.io.fixedBufferStream(it.data[it.pos..]);
         const reader = stream.reader();
 
-        var size = try reader.readIntLittle(u32);
+        const size = try reader.readInt(u32, .little);
         if (size == 0xFFFFFFFF) {
             log.debug("MachO doesn't support 64bit DWARF CFI __eh_frame records", .{});
             return error.BadDwarfCfi;
         }
 
-        const id = try reader.readIntLittle(u32);
+        const id = try reader.readInt(u32, .little);
         const tag: EhFrameRecordTag = if (id == 0) .cie else .fde;
         const offset: u32 = 4;
         const record = EhFrameRecord(false){

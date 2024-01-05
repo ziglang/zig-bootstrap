@@ -13,7 +13,7 @@ pub fn build(b: *std.Build) void {
 }
 
 fn add(b: *std.Build, test_step: *std.Build.Step, optimize: std.builtin.OptimizeMode) void {
-    const target: std.zig.CrossTarget = .{ .os_tag = .macos };
+    const target = b.resolveTargetQuery(.{ .os_tag = .macos });
 
     const exe = b.addExecutable(.{
         .name = "main",
@@ -25,7 +25,7 @@ fn add(b: *std.Build, test_step: *std.Build.Step, optimize: std.builtin.Optimize
     exe.stack_size = 0x100000000;
 
     const check_exe = exe.checkObject();
-    check_exe.checkStart();
+    check_exe.checkInHeaders();
     check_exe.checkExact("cmd MAIN");
     check_exe.checkExact("stacksize 100000000");
     test_step.dependOn(&check_exe.step);

@@ -45,7 +45,7 @@ if("${ZIG_VERSION}" STREQUAL "")
     find_program(GIT_EXE NAMES git NAMES_PER_DIR)
     if(GIT_EXE)
         execute_process(
-            COMMAND ${GIT_EXE} -C ${CMAKE_SOURCE_DIR} describe --match *.*.* --tags
+            COMMAND ${GIT_EXE} -C ${CMAKE_SOURCE_DIR} describe --match *.*.* --tags --abbrev=9
             RESULT_VARIABLE EXIT_STATUS
             OUTPUT_VARIABLE GIT_DESCRIBE
             OUTPUT_STRIP_TRAILING_WHITESPACE
@@ -209,9 +209,6 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/array_list.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/ascii.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/atomic.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/atomic/Atomic.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/atomic/queue.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/atomic/stack.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/base64.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/BitStack.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/buf_map.zig"
@@ -221,7 +218,6 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/builtin.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/c.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/c/linux.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/c/tokenizer.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/child_process.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/coff.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/comptime_string_map.zig"
@@ -247,7 +243,9 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/fmt/errol/lookup.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/fmt/parse_float.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/fs.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/fs/file.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/fs/AtomicFile.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/fs/Dir.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/fs/File.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/fs/get_app_data_dir.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/fs/path.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/hash.zig"
@@ -290,7 +288,6 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/mem/Allocator.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/meta.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/meta/trailer_flags.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/meta/trait.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/multi_array_list.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/os.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/os/linux.zig"
@@ -483,22 +480,23 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/compiler_rt/unordtf2.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/start.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/std.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/target.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/target/aarch64.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/target/amdgpu.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/target/arm.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/target/avr.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/target/bpf.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/target/hexagon.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/target/mips.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/target/msp430.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/target/nvptx.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/target/powerpc.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/target/riscv.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/target/sparc.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/target/s390x.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/target/wasm.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/target/x86.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Target.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Target/Query.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Target/aarch64.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Target/amdgpu.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Target/arm.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Target/avr.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Target/bpf.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Target/hexagon.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Target/mips.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Target/msp430.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Target/nvptx.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Target/powerpc.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Target/riscv.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Target/sparc.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Target/s390x.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Target/wasm.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/Target/x86.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/Thread.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/Thread/Futex.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/Thread/Mutex.zig"
@@ -510,7 +508,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/unicode.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/Ast.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/zig/CrossTarget.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/zig/AstRlAnnotate.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/c_builtins.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/Parse.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/render.zig"
@@ -518,13 +516,12 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/zig/string_literal.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/system.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/system/NativePaths.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/zig/system/NativeTargetInfo.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/system/x86.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/zig/tokenizer.zig"
     "${CMAKE_SOURCE_DIR}/src/Air.zig"
     "${CMAKE_SOURCE_DIR}/src/AstGen.zig"
-    "${CMAKE_SOURCE_DIR}/src/AstRlAnnotate.zig"
     "${CMAKE_SOURCE_DIR}/src/Compilation.zig"
+    "${CMAKE_SOURCE_DIR}/src/Compilation/Config.zig"
     "${CMAKE_SOURCE_DIR}/src/Liveness.zig"
     "${CMAKE_SOURCE_DIR}/src/Module.zig"
     "${CMAKE_SOURCE_DIR}/src/Package.zig"
@@ -594,7 +591,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/link/Elf/Object.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Elf/SharedObject.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Elf/Symbol.zig"
-    "${CMAKE_SOURCE_DIR}/src/link/Elf/ZigModule.zig"
+    "${CMAKE_SOURCE_DIR}/src/link/Elf/ZigObject.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Elf/eh_frame.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Elf/file.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Elf/gc.zig"
@@ -624,7 +621,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/link/Plan9/aout.zig"
     "${CMAKE_SOURCE_DIR}/src/link/Wasm.zig"
     "${CMAKE_SOURCE_DIR}/src/link/msdos-stub.bin"
-    "${CMAKE_SOURCE_DIR}/src/link/strtab.zig"
+    "${CMAKE_SOURCE_DIR}/src/link/StringTable.zig"
     "${CMAKE_SOURCE_DIR}/src/link/tapi.zig"
     "${CMAKE_SOURCE_DIR}/src/link/tapi/Tokenizer.zig"
     "${CMAKE_SOURCE_DIR}/src/link/tapi/parse.zig"
@@ -645,6 +642,8 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/src/value.zig"
     "${CMAKE_SOURCE_DIR}/src/wasi_libc.zig"
     "${CMAKE_SOURCE_DIR}/src/windows_sdk.zig"
+    "${CMAKE_SOURCE_DIR}/src/stubs/aro_builtins.zig"
+    "${CMAKE_SOURCE_DIR}/src/stubs/aro_names.zig"
 )
 
 if(MSVC)
@@ -811,13 +810,26 @@ endif()
 
 set(BUILD_ZIG2_ARGS
   "${CMAKE_SOURCE_DIR}/lib"
-  build-exe src/main.zig -ofmt=c -lc
-  -OReleaseSmall
-  --name zig2 -femit-bin="${ZIG2_C_SOURCE}"
-  --mod "build_options::${ZIG_CONFIG_ZIG_OUT}"
-  --mod "aro::deps/aro/lib.zig"
-  --deps build_options,aro
+  build-exe -ofmt=c -lc -OReleaseSmall
+  --name zig2
+  -femit-bin="${ZIG2_C_SOURCE}"
   -target "${ZIG_HOST_TARGET_TRIPLE}"
+  --dep "build_options"
+  --dep "aro"
+  --mod "root" "src/main.zig"
+  --mod "build_options" "${ZIG_CONFIG_ZIG_OUT}"
+  --mod "aro_options" "src/stubs/aro_options.zig"
+  --mod "Builtins/Builtin.def" "src/stubs/aro_builtins.zig"
+  --mod "Attribute/names.def" "src/stubs/aro_names.zig"
+  --mod "Diagnostics/messages.def" "src/stubs/aro_messages.zig"
+  --dep "build_options=aro_options"
+  --mod "aro_backend" "deps/aro/backend.zig"
+  --dep "Builtins/Builtin.def"
+  --dep "Attribute/names.def"
+  --dep "Diagnostics/messages.def"
+  --dep "build_options=aro_options"
+  --dep "backend=aro_backend"
+  --mod "aro" "deps/aro/aro.zig"
 )
 
 add_custom_command(
@@ -830,12 +842,13 @@ add_custom_command(
 
 set(BUILD_COMPILER_RT_ARGS
   "${CMAKE_SOURCE_DIR}/lib"
-  build-obj lib/compiler_rt.zig -ofmt=c
-  -OReleaseSmall
-  --name compiler_rt -femit-bin="${ZIG_COMPILER_RT_C_SOURCE}"
-  --mod "build_options::${ZIG_CONFIG_ZIG_OUT}"
-  --deps build_options
+  build-obj -ofmt=c -OReleaseSmall
+  --name compiler_rt
+  -femit-bin="${ZIG_COMPILER_RT_C_SOURCE}"
   -target "${ZIG_HOST_TARGET_TRIPLE}"
+  --dep "build_options"
+  --mod "root" "lib/compiler_rt.zig"
+  --mod "build_options" "${ZIG_CONFIG_ZIG_OUT}"
 )
 
 add_custom_command(

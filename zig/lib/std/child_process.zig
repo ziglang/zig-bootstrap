@@ -262,7 +262,7 @@ pub const ChildProcess = struct {
         return term;
     }
 
-    pub const ExecResult = struct {
+    pub const RunResult = struct {
         term: Term,
         stdout: []u8,
         stderr: []u8,
@@ -317,14 +317,14 @@ pub const ChildProcess = struct {
         stderr.* = fifoToOwnedArrayList(poller.fifo(.stderr));
     }
 
-    pub const ExecError = os.GetCwdError || os.ReadError || SpawnError || os.PollError || error{
+    pub const RunError = os.GetCwdError || os.ReadError || SpawnError || os.PollError || error{
         StdoutStreamTooLong,
         StderrStreamTooLong,
     };
 
     /// Spawns a child process, waits for it, collecting stdout and stderr, and then returns.
     /// If it succeeds, the caller owns result.stdout and result.stderr memory.
-    pub fn exec(args: struct {
+    pub fn run(args: struct {
         allocator: mem.Allocator,
         argv: []const []const u8,
         cwd: ?[]const u8 = null,
@@ -332,7 +332,7 @@ pub const ChildProcess = struct {
         env_map: ?*const EnvMap = null,
         max_output_bytes: usize = 50 * 1024,
         expand_arg0: Arg0Expand = .no_expand,
-    }) ExecError!ExecResult {
+    }) RunError!RunResult {
         var child = ChildProcess.init(args.argv, args.allocator);
         child.stdin_behavior = .Ignore;
         child.stdout_behavior = .Pipe;
@@ -352,7 +352,7 @@ pub const ChildProcess = struct {
         try child.spawn();
         try child.collectOutput(&stdout, &stderr, args.max_output_bytes);
 
-        return ExecResult{
+        return RunResult{
             .term = try child.wait(),
             .stdout = try stdout.toOwnedSlice(),
             .stderr = try stderr.toOwnedSlice(),
@@ -744,9 +744,6 @@ pub const ChildProcess = struct {
             windowsDestroyPipe(g_hChildStd_ERR_Rd, g_hChildStd_ERR_Wr);
         };
 
-        const cmd_line = try windowsCreateCommandLine(self.allocator, self.argv);
-        defer self.allocator.free(cmd_line);
-
         var siStartInfo = windows.STARTUPINFOW{
             .cb = @sizeOf(windows.STARTUPINFOW),
             .hStdError = g_hChildStd_ERR_Wr,
@@ -818,10 +815,14 @@ pub const ChildProcess = struct {
         const app_name_w = try unicode.utf8ToUtf16LeWithNull(self.allocator, app_basename_utf8);
         defer self.allocator.free(app_name_w);
 
-        const cmd_line_w = try unicode.utf8ToUtf16LeWithNull(self.allocator, cmd_line);
+        const cmd_line_w = argvToCommandLineWindows(self.allocator, self.argv) catch |err| switch (err) {
+            // argv[0] contains unsupported characters that will never resolve to a valid exe.
+            error.InvalidArg0 => return error.FileNotFound,
+            else => |e| return e,
+        };
         defer self.allocator.free(cmd_line_w);
 
-        exec: {
+        run: {
             const PATH: [:0]const u16 = std.os.getenvW(unicode.utf8ToUtf16LeStringLiteral("PATH")) orelse &[_:0]u16{};
             const PATHEXT: [:0]const u16 = std.os.getenvW(unicode.utf8ToUtf16LeStringLiteral("PATHEXT")) orelse &[_:0]u16{};
 
@@ -847,7 +848,7 @@ pub const ChildProcess = struct {
             }
 
             windowsCreateProcessPathExt(self.allocator, &dir_buf, &app_buf, PATHEXT, cmd_line_w.ptr, envp_ptr, cwd_w_ptr, &siStartInfo, &piProcInfo) catch |no_path_err| {
-                var original_err = switch (no_path_err) {
+                const original_err = switch (no_path_err) {
                     error.FileNotFound, error.InvalidExe, error.AccessDenied => |e| e,
                     error.UnrecoverableInvalidExe => return error.InvalidExe,
                     else => |e| return e,
@@ -873,7 +874,7 @@ pub const ChildProcess = struct {
                     dir_buf.shrinkRetainingCapacity(normalized_len);
 
                     if (windowsCreateProcessPathExt(self.allocator, &dir_buf, &app_buf, PATHEXT, cmd_line_w.ptr, envp_ptr, cwd_w_ptr, &siStartInfo, &piProcInfo)) {
-                        break :exec;
+                        break :run;
                     } else |err| switch (err) {
                         error.FileNotFound, error.AccessDenied, error.InvalidExe => continue,
                         error.UnrecoverableInvalidExe => return error.InvalidExe,
@@ -976,7 +977,8 @@ fn windowsCreateProcessPathExt(
         defer dir_buf.shrinkRetainingCapacity(dir_path_len);
         const dir_path_z = dir_buf.items[0 .. dir_buf.items.len - 1 :0];
         const prefixed_path = try windows.wToPrefixedFileW(null, dir_path_z);
-        break :dir fs.cwd().openDirW(prefixed_path.span().ptr, .{}, true) catch return error.FileNotFound;
+        break :dir fs.cwd().openDirW(prefixed_path.span().ptr, .{ .iterate = true }) catch
+            return error.FileNotFound;
     };
     defer dir.close();
 
@@ -1235,39 +1237,159 @@ test "windowsCreateProcessSupportsExtension" {
     try std.testing.expect(windowsCreateProcessSupportsExtension(&[_]u16{ '.', 'e', 'X', 'e', 'c' }) == null);
 }
 
-/// Caller must dealloc.
-fn windowsCreateCommandLine(allocator: mem.Allocator, argv: []const []const u8) ![:0]u8 {
+pub const ArgvToCommandLineError = error{ OutOfMemory, InvalidUtf8, InvalidArg0 };
+
+/// Serializes `argv` to a Windows command-line string suitable for passing to a child process and
+/// parsing by the `CommandLineToArgvW` algorithm. The caller owns the returned slice.
+pub fn argvToCommandLineWindows(
+    allocator: mem.Allocator,
+    argv: []const []const u8,
+) ArgvToCommandLineError![:0]u16 {
     var buf = std.ArrayList(u8).init(allocator);
     defer buf.deinit();
 
-    for (argv, 0..) |arg, arg_i| {
-        if (arg_i != 0) try buf.append(' ');
-        if (mem.indexOfAny(u8, arg, " \t\n\"") == null) {
-            try buf.appendSlice(arg);
-            continue;
-        }
-        try buf.append('"');
-        var backslash_count: usize = 0;
-        for (arg) |byte| {
-            switch (byte) {
-                '\\' => backslash_count += 1,
-                '"' => {
-                    try buf.appendNTimes('\\', backslash_count * 2 + 1);
-                    try buf.append('"');
-                    backslash_count = 0;
-                },
-                else => {
-                    try buf.appendNTimes('\\', backslash_count);
-                    try buf.append(byte);
-                    backslash_count = 0;
-                },
+    if (argv.len != 0) {
+        const arg0 = argv[0];
+
+        // The first argument must be quoted if it contains spaces or ASCII control characters
+        // (excluding DEL). It also follows special quoting rules where backslashes have no special
+        // interpretation, which makes it impossible to pass certain first arguments containing
+        // double quotes to a child process without characters from the first argument leaking into
+        // subsequent ones (which could have security implications).
+        //
+        // Empty arguments technically don't need quotes, but we quote them anyway for maximum
+        // compatibility with different implementations of the 'CommandLineToArgvW' algorithm.
+        //
+        // Double quotes are illegal in paths on Windows, so for the sake of simplicity we reject
+        // all first arguments containing double quotes, even ones that we could theoretically
+        // serialize in unquoted form.
+        var needs_quotes = arg0.len == 0;
+        for (arg0) |c| {
+            if (c <= ' ') {
+                needs_quotes = true;
+            } else if (c == '"') {
+                return error.InvalidArg0;
             }
         }
-        try buf.appendNTimes('\\', backslash_count * 2);
-        try buf.append('"');
+        if (needs_quotes) {
+            try buf.append('"');
+            try buf.appendSlice(arg0);
+            try buf.append('"');
+        } else {
+            try buf.appendSlice(arg0);
+        }
+
+        for (argv[1..]) |arg| {
+            try buf.append(' ');
+
+            // Subsequent arguments must be quoted if they contain spaces, tabs or double quotes,
+            // or if they are empty. For simplicity and for maximum compatibility with different
+            // implementations of the 'CommandLineToArgvW' algorithm, we also quote all ASCII
+            // control characters (again, excluding DEL).
+            needs_quotes = for (arg) |c| {
+                if (c <= ' ' or c == '"') {
+                    break true;
+                }
+            } else arg.len == 0;
+            if (!needs_quotes) {
+                try buf.appendSlice(arg);
+                continue;
+            }
+
+            try buf.append('"');
+            var backslash_count: usize = 0;
+            for (arg) |byte| {
+                switch (byte) {
+                    '\\' => {
+                        backslash_count += 1;
+                    },
+                    '"' => {
+                        try buf.appendNTimes('\\', backslash_count * 2 + 1);
+                        try buf.append('"');
+                        backslash_count = 0;
+                    },
+                    else => {
+                        try buf.appendNTimes('\\', backslash_count);
+                        try buf.append(byte);
+                        backslash_count = 0;
+                    },
+                }
+            }
+            try buf.appendNTimes('\\', backslash_count * 2);
+            try buf.append('"');
+        }
     }
 
-    return buf.toOwnedSliceSentinel(0);
+    return try unicode.utf8ToUtf16LeWithNull(allocator, buf.items);
+}
+
+test "argvToCommandLineWindows" {
+    const t = testArgvToCommandLineWindows;
+
+    try t(&.{
+        \\C:\Program Files\zig\zig.exe
+        ,
+        \\run
+        ,
+        \\.\src\main.zig
+        ,
+        \\-target
+        ,
+        \\x86_64-windows-gnu
+        ,
+        \\-O
+        ,
+        \\ReleaseSafe
+        ,
+        \\--
+        ,
+        \\--emoji=🗿
+        ,
+        \\--eval=new Regex("Dwayne \"The Rock\" Johnson")
+        ,
+    },
+        \\"C:\Program Files\zig\zig.exe" run .\src\main.zig -target x86_64-windows-gnu -O ReleaseSafe -- --emoji=🗿 "--eval=new Regex(\"Dwayne \\\"The Rock\\\" Johnson\")"
+    );
+
+    try t(&.{}, "");
+    try t(&.{""}, "\"\"");
+    try t(&.{" "}, "\" \"");
+    try t(&.{"\t"}, "\"\t\"");
+    try t(&.{"\x07"}, "\"\x07\"");
+    try t(&.{"🦎"}, "🦎");
+
+    try t(
+        &.{ "zig", "aa aa", "bb\tbb", "cc\ncc", "dd\r\ndd", "ee\x7Fee" },
+        "zig \"aa aa\" \"bb\tbb\" \"cc\ncc\" \"dd\r\ndd\" ee\x7Fee",
+    );
+
+    try t(
+        &.{ "\\\\foo bar\\foo bar\\", "\\\\zig zag\\zig zag\\" },
+        "\"\\\\foo bar\\foo bar\\\" \"\\\\zig zag\\zig zag\\\\\"",
+    );
+
+    try std.testing.expectError(
+        error.InvalidArg0,
+        argvToCommandLineWindows(std.testing.allocator, &.{"\"quotes\"quotes\""}),
+    );
+    try std.testing.expectError(
+        error.InvalidArg0,
+        argvToCommandLineWindows(std.testing.allocator, &.{"quotes\"quotes"}),
+    );
+    try std.testing.expectError(
+        error.InvalidArg0,
+        argvToCommandLineWindows(std.testing.allocator, &.{"q u o t e s \" q u o t e s"}),
+    );
+}
+
+fn testArgvToCommandLineWindows(argv: []const []const u8, expected_cmd_line: []const u8) !void {
+    const cmd_line_w = try argvToCommandLineWindows(std.testing.allocator, argv);
+    defer std.testing.allocator.free(cmd_line_w);
+
+    const cmd_line = try unicode.utf16leToUtf8Alloc(std.testing.allocator, cmd_line_w);
+    defer std.testing.allocator.free(cmd_line);
+
+    try std.testing.expectEqualStrings(expected_cmd_line, cmd_line);
 }
 
 fn windowsDestroyPipe(rd: ?windows.HANDLE, wr: ?windows.HANDLE) void {
@@ -1285,7 +1407,7 @@ fn windowsMakePipeIn(rd: *?windows.HANDLE, wr: *?windows.HANDLE, sattr: *const w
     wr.* = wr_h;
 }
 
-var pipe_name_counter = std.atomic.Atomic(u32).init(1);
+var pipe_name_counter = std.atomic.Value(u32).init(1);
 
 fn windowsMakeAsyncPipe(rd: *?windows.HANDLE, wr: *?windows.HANDLE, sattr: *const windows.SECURITY_ATTRIBUTES) !void {
     var tmp_bufw: [128]u16 = undefined;
@@ -1376,7 +1498,7 @@ fn writeIntFd(fd: i32, value: ErrInt) !void {
         .capable_io_mode = .blocking,
         .intended_io_mode = .blocking,
     };
-    file.writer().writeIntNative(u64, @as(u64, @intCast(value))) catch return error.SystemResources;
+    file.writer().writeInt(u64, @intCast(value), .little) catch return error.SystemResources;
 }
 
 fn readIntFd(fd: i32) !ErrInt {
@@ -1385,7 +1507,7 @@ fn readIntFd(fd: i32) !ErrInt {
         .capable_io_mode = .blocking,
         .intended_io_mode = .blocking,
     };
-    return @as(ErrInt, @intCast(file.reader().readIntNative(u64) catch return error.SystemResources));
+    return @as(ErrInt, @intCast(file.reader().readInt(u64, .little) catch return error.SystemResources));
 }
 
 /// Caller must free result.

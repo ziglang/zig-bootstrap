@@ -2,23 +2,40 @@
 //! Currently, we support linking x86_64 Linux, but in the future we
 //! will progressively relax those to exercise more combinations.
 
-pub fn build(b: *Build) void {
+pub fn testAll(b: *Build) *Step {
     const elf_step = b.step("test-elf", "Run ELF tests");
-    b.default_step = elf_step;
 
-    const musl_target = CrossTarget{
+    const default_target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64, // TODO relax this once ELF linker is able to handle other archs
         .os_tag = .linux,
+    });
+    const musl_target = b.resolveTargetQuery(.{
+        .cpu_arch = .x86_64,
+        .os_tag = .linux,
         .abi = .musl,
-    };
-    const glibc_target = CrossTarget{
+    });
+    const glibc_target = b.resolveTargetQuery(.{
         .cpu_arch = .x86_64,
         .os_tag = .linux,
         .abi = .gnu,
-    };
+    });
+
+    // Exercise linker in -r mode
+    elf_step.dependOn(testEmitRelocatable(b, .{ .use_llvm = false, .target = musl_target }));
+    elf_step.dependOn(testEmitRelocatable(b, .{ .target = musl_target }));
+    elf_step.dependOn(testRelocatableArchive(b, .{ .target = musl_target }));
+    elf_step.dependOn(testRelocatableEhFrame(b, .{ .target = musl_target }));
+    elf_step.dependOn(testRelocatableNoEhFrame(b, .{ .target = musl_target }));
+
+    // Exercise linker in ar mode
+    elf_step.dependOn(testEmitStaticLib(b, .{ .target = musl_target }));
+    elf_step.dependOn(testEmitStaticLibZig(b, .{ .use_llvm = false, .target = musl_target }));
 
     // Exercise linker with self-hosted backend (no LLVM)
-    elf_step.dependOn(testLinkingZig(b, .{ .use_llvm = false }));
+    elf_step.dependOn(testGcSectionsZig(b, .{ .use_llvm = false, .target = default_target }));
+    elf_step.dependOn(testLinkingObj(b, .{ .use_llvm = false, .target = default_target }));
+    elf_step.dependOn(testLinkingStaticLib(b, .{ .use_llvm = false, .target = default_target }));
+    elf_step.dependOn(testLinkingZig(b, .{ .use_llvm = false, .target = default_target }));
     elf_step.dependOn(testImportingDataDynamic(b, .{ .use_llvm = false, .target = glibc_target }));
     elf_step.dependOn(testImportingDataStatic(b, .{ .use_llvm = false, .target = musl_target }));
 
@@ -75,6 +92,9 @@ pub fn build(b: *Build) void {
     elf_step.dependOn(testLargeAlignmentExe(b, .{ .target = glibc_target }));
     elf_step.dependOn(testLargeBss(b, .{ .target = glibc_target }));
     elf_step.dependOn(testLinkOrder(b, .{ .target = glibc_target }));
+    elf_step.dependOn(testLdScript(b, .{ .target = glibc_target }));
+    elf_step.dependOn(testLdScriptPathError(b, .{ .target = glibc_target }));
+    elf_step.dependOn(testMismatchedCpuArchitectureError(b, .{ .target = glibc_target }));
     // https://github.com/ziglang/zig/issues/17451
     // elf_step.dependOn(testNoEhFrameHdr(b, .{ .target = glibc_target }));
     elf_step.dependOn(testPie(b, .{ .target = glibc_target }));
@@ -98,24 +118,32 @@ pub fn build(b: *Build) void {
     elf_step.dependOn(testTlsOffsetAlignment(b, .{ .target = glibc_target }));
     elf_step.dependOn(testTlsPic(b, .{ .target = glibc_target }));
     elf_step.dependOn(testTlsSmallAlignment(b, .{ .target = glibc_target }));
+    elf_step.dependOn(testUnknownFileTypeError(b, .{ .target = glibc_target }));
+    elf_step.dependOn(testUnresolvedError(b, .{ .target = glibc_target }));
     elf_step.dependOn(testWeakExports(b, .{ .target = glibc_target }));
     elf_step.dependOn(testWeakUndefsDso(b, .{ .target = glibc_target }));
     elf_step.dependOn(testZNow(b, .{ .target = glibc_target }));
     elf_step.dependOn(testZStackSize(b, .{ .target = glibc_target }));
     elf_step.dependOn(testZText(b, .{ .target = glibc_target }));
+
+    return elf_step;
 }
 
 fn testAbsSymbols(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "abs-symbols", opts);
 
-    const obj = addObject(b, "obj", opts);
-    addAsmSourceBytes(obj,
+    const obj = addObject(b, opts, .{
+        .name = "obj",
+        .asm_source_bytes =
         \\.globl foo
         \\foo = 0x800008
-    );
+        \\
+        ,
+    });
 
-    const exe = addExecutable(b, "test", opts);
-    addCSourceBytes(exe,
+    const exe = addExecutable(b, opts, .{
+        .name = "test",
+        .c_source_bytes =
         \\#include <signal.h>
         \\#include <stdio.h>
         \\#include <stdlib.h>
@@ -135,7 +163,8 @@ fn testAbsSymbols(b: *Build, opts: Options) *Step {
         \\  foo = 5;
         \\  return 0;
         \\}
-    , &.{});
+        ,
+    });
     exe.addObject(obj);
     exe.linkLibC();
 
@@ -149,31 +178,36 @@ fn testAbsSymbols(b: *Build, opts: Options) *Step {
 fn testAsNeeded(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "as-needed", opts);
 
-    const main_o = addObject(b, "main", opts);
-    addCSourceBytes(main_o,
+    const main_o = addObject(b, opts, .{
+        .name = "main",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\int baz();
         \\int main() {
         \\  printf("%d\n", baz());
         \\  return 0;
         \\}
-    , &.{});
+        \\
+        ,
+    });
     main_o.linkLibC();
 
-    const libfoo = addSharedLibrary(b, "foo", opts);
+    const libfoo = addSharedLibrary(b, opts, .{ .name = "foo" });
     addCSourceBytes(libfoo, "int foo() { return 42; }", &.{});
 
-    const libbar = addSharedLibrary(b, "bar", opts);
+    const libbar = addSharedLibrary(b, opts, .{ .name = "bar" });
     addCSourceBytes(libbar, "int bar() { return 42; }", &.{});
 
-    const libbaz = addSharedLibrary(b, "baz", opts);
+    const libbaz = addSharedLibrary(b, opts, .{ .name = "baz" });
     addCSourceBytes(libbaz,
         \\int foo();
         \\int baz() { return foo(); }
     , &.{});
 
     {
-        const exe = addExecutable(b, "test", opts);
+        const exe = addExecutable(b, opts, .{
+            .name = "test",
+        });
         exe.addObject(main_o);
         exe.linkSystemLibrary2("foo", .{ .needed = true });
         exe.addLibraryPath(libfoo.getEmittedBinDirectory());
@@ -185,6 +219,8 @@ fn testAsNeeded(b: *Build, opts: Options) *Step {
         exe.addLibraryPath(libbaz.getEmittedBinDirectory());
         exe.addRPath(libbaz.getEmittedBinDirectory());
         exe.linkLibC();
+        // https://github.com/ziglang/zig/issues/17619
+        exe.pie = true;
 
         const run = addRunArtifact(exe);
         run.expectStdOutEqual("42\n");
@@ -199,7 +235,9 @@ fn testAsNeeded(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = addExecutable(b, "test", opts);
+        const exe = addExecutable(b, opts, .{
+            .name = "test",
+        });
         exe.addObject(main_o);
         exe.linkSystemLibrary2("foo", .{ .needed = false });
         exe.addLibraryPath(libfoo.getEmittedBinDirectory());
@@ -211,6 +249,8 @@ fn testAsNeeded(b: *Build, opts: Options) *Step {
         exe.addLibraryPath(libbaz.getEmittedBinDirectory());
         exe.addRPath(libbaz.getEmittedBinDirectory());
         exe.linkLibC();
+        // https://github.com/ziglang/zig/issues/17619
+        exe.pie = true;
 
         const run = addRunArtifact(exe);
         run.expectStdOutEqual("42\n");
@@ -231,7 +271,7 @@ fn testAsNeeded(b: *Build, opts: Options) *Step {
 fn testCanonicalPlt(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "canonical-plt", opts);
 
-    const dso = addSharedLibrary(b, "a", opts);
+    const dso = addSharedLibrary(b, opts, .{ .name = "a" });
     addCSourceBytes(dso,
         \\void *foo() {
         \\  return foo;
@@ -241,17 +281,21 @@ fn testCanonicalPlt(b: *Build, opts: Options) *Step {
         \\}
     , &.{});
 
-    const b_o = addObject(b, "obj", opts);
-    addCSourceBytes(b_o,
+    const b_o = addObject(b, opts, .{
+        .name = "obj",
+        .c_source_bytes =
         \\void *bar();
         \\void *baz() {
         \\  return bar;
         \\}
-    , &.{});
-    b_o.force_pic = true;
+        \\
+        ,
+        .pic = true,
+    });
 
-    const main_o = addObject(b, "main", opts);
-    addCSourceBytes(main_o,
+    const main_o = addObject(b, opts, .{
+        .name = "main",
+        .c_source_bytes =
         \\#include <assert.h>
         \\void *foo();
         \\void *bar();
@@ -262,11 +306,15 @@ fn testCanonicalPlt(b: *Build, opts: Options) *Step {
         \\  assert(bar == baz());
         \\  return 0;
         \\}
-    , &.{});
+        \\
+        ,
+        .pic = false,
+    });
     main_o.linkLibC();
-    main_o.force_pic = false;
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{
+        .name = "main",
+    });
     exe.addObject(main_o);
     exe.addObject(b_o);
     exe.linkLibrary(dso);
@@ -283,7 +331,9 @@ fn testCanonicalPlt(b: *Build, opts: Options) *Step {
 fn testCommonSymbols(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "common-symbols", opts);
 
-    const exe = addExecutable(b, "test", opts);
+    const exe = addExecutable(b, opts, .{
+        .name = "test",
+    });
     addCSourceBytes(exe,
         \\int foo;
         \\int bar;
@@ -310,8 +360,9 @@ fn testCommonSymbols(b: *Build, opts: Options) *Step {
 fn testCommonSymbolsInArchive(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "common-symbols-in-archive", opts);
 
-    const a_o = addObject(b, "a", opts);
-    addCSourceBytes(a_o,
+    const a_o = addObject(b, opts, .{
+        .name = "a",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\int foo;
         \\int bar;
@@ -320,28 +371,43 @@ fn testCommonSymbolsInArchive(b: *Build, opts: Options) *Step {
         \\int main() {
         \\  printf("%d %d %d %d\n", foo, bar, baz, two ? two() : -1);
         \\}
-    , &.{"-fcommon"});
+        \\
+        ,
+        .c_source_flags = &.{"-fcommon"},
+    });
     a_o.linkLibC();
 
-    const b_o = addObject(b, "b", opts);
-    addCSourceBytes(b_o, "int foo = 5;", &.{"-fcommon"});
+    const b_o = addObject(b, opts, .{
+        .name = "b",
+        .c_source_bytes = "int foo = 5;",
+        .c_source_flags = &.{"-fcommon"},
+    });
 
     {
-        const c_o = addObject(b, "c", opts);
-        addCSourceBytes(c_o,
+        const c_o = addObject(b, opts, .{
+            .name = "c",
+            .c_source_bytes =
             \\int bar;
             \\int two() { return 2; }
-        , &.{"-fcommon"});
+            \\
+            ,
+            .c_source_flags = &.{"-fcommon"},
+        });
 
-        const d_o = addObject(b, "d", opts);
-        addCSourceBytes(d_o, "int baz;", &.{"-fcommon"});
+        const d_o = addObject(b, opts, .{
+            .name = "d",
+            .c_source_bytes = "int baz;",
+            .c_source_flags = &.{"-fcommon"},
+        });
 
-        const lib = addStaticLibrary(b, "lib", opts);
+        const lib = addStaticLibrary(b, opts, .{ .name = "lib" });
         lib.addObject(b_o);
         lib.addObject(c_o);
         lib.addObject(d_o);
 
-        const exe = addExecutable(b, "test", opts);
+        const exe = addExecutable(b, opts, .{
+            .name = "test",
+        });
         exe.addObject(a_o);
         exe.linkLibrary(lib);
         exe.linkLibC();
@@ -352,18 +418,23 @@ fn testCommonSymbolsInArchive(b: *Build, opts: Options) *Step {
     }
 
     {
-        const e_o = addObject(b, "e", opts);
-        addCSourceBytes(e_o,
+        const e_o = addObject(b, opts, .{
+            .name = "e",
+            .c_source_bytes =
             \\int bar = 0;
             \\int baz = 7;
             \\int two() { return 2; }
-        , &.{"-fcommon"});
+            ,
+            .c_source_flags = &.{"-fcommon"},
+        });
 
-        const lib = addStaticLibrary(b, "lib", opts);
+        const lib = addStaticLibrary(b, opts, .{ .name = "lib" });
         lib.addObject(b_o);
         lib.addObject(e_o);
 
-        const exe = addExecutable(b, "test", opts);
+        const exe = addExecutable(b, opts, .{
+            .name = "test",
+        });
         exe.addObject(a_o);
         exe.linkLibrary(lib);
         exe.linkLibC();
@@ -379,23 +450,27 @@ fn testCommonSymbolsInArchive(b: *Build, opts: Options) *Step {
 fn testCopyrel(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "copyrel", opts);
 
-    const dso = addSharedLibrary(b, "a", opts);
+    const dso = addSharedLibrary(b, opts, .{ .name = "a" });
     addCSourceBytes(dso,
         \\int foo = 3;
         \\int bar = 5;
     , &.{});
 
-    const exe = addExecutable(b, "main", opts);
-    addCSourceBytes(exe,
+    const exe = addExecutable(b, opts, .{
+        .name = "main",
+        .c_source_bytes =
         \\#include<stdio.h>
         \\extern int foo, bar;
         \\int main() {
         \\  printf("%d %d\n", foo, bar);
         \\  return 0;
         \\}
-    , &.{});
+        ,
+    });
     exe.linkLibrary(dso);
     exe.linkLibC();
+    // https://github.com/ziglang/zig/issues/17619
+    exe.pie = true;
 
     const run = addRunArtifact(exe);
     run.expectStdOutEqual("3 5\n");
@@ -407,7 +482,7 @@ fn testCopyrel(b: *Build, opts: Options) *Step {
 fn testCopyrelAlias(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "copyrel-alias", opts);
 
-    const dso = addSharedLibrary(b, "a", opts);
+    const dso = addSharedLibrary(b, opts, .{ .name = "a" });
     addCSourceBytes(dso,
         \\int bruh = 31;
         \\int foo = 42;
@@ -415,7 +490,10 @@ fn testCopyrelAlias(b: *Build, opts: Options) *Step {
         \\extern int baz __attribute__((alias("foo")));
     , &.{});
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{
+        .name = "main",
+        .pic = false,
+    });
     addCSourceBytes(exe,
         \\#include<stdio.h>
         \\extern int foo;
@@ -431,7 +509,6 @@ fn testCopyrelAlias(b: *Build, opts: Options) *Step {
     , &.{});
     exe.linkLibrary(dso);
     exe.linkLibC();
-    exe.force_pic = false;
     exe.pie = false;
 
     const run = addRunArtifact(exe);
@@ -444,28 +521,31 @@ fn testCopyrelAlias(b: *Build, opts: Options) *Step {
 fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "copyrel-alignment", opts);
 
-    const a_so = addSharedLibrary(b, "a", opts);
+    const a_so = addSharedLibrary(b, opts, .{ .name = "a" });
     addCSourceBytes(a_so, "__attribute__((aligned(32))) int foo = 5;", &.{});
 
-    const b_so = addSharedLibrary(b, "b", opts);
+    const b_so = addSharedLibrary(b, opts, .{ .name = "b" });
     addCSourceBytes(b_so, "__attribute__((aligned(8))) int foo = 5;", &.{});
 
-    const c_so = addSharedLibrary(b, "c", opts);
+    const c_so = addSharedLibrary(b, opts, .{ .name = "c" });
     addCSourceBytes(c_so, "__attribute__((aligned(256))) int foo = 5;", &.{});
 
-    const obj = addObject(b, "main", opts);
-    addCSourceBytes(obj,
+    const obj = addObject(b, opts, .{
+        .name = "main",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\extern int foo;
         \\int main() { printf("%d\n", foo); }
-    , &.{});
+        \\
+        ,
+        .pic = false,
+    });
     obj.linkLibC();
-    obj.force_pic = false;
 
     const exp_stdout = "5\n";
 
     {
-        const exe = addExecutable(b, "main", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main" });
         exe.addObject(obj);
         exe.linkLibrary(a_so);
         exe.linkLibC();
@@ -476,7 +556,7 @@ fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
         test_step.dependOn(&run.step);
 
         const check = exe.checkObject();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("section headers");
         check.checkExact("name .copyrel");
         check.checkExact("addralign 20");
@@ -484,7 +564,7 @@ fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = addExecutable(b, "main", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main" });
         exe.addObject(obj);
         exe.linkLibrary(b_so);
         exe.linkLibC();
@@ -495,7 +575,7 @@ fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
         test_step.dependOn(&run.step);
 
         const check = exe.checkObject();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("section headers");
         check.checkExact("name .copyrel");
         check.checkExact("addralign 8");
@@ -503,7 +583,7 @@ fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = addExecutable(b, "main", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main" });
         exe.addObject(obj);
         exe.linkLibrary(c_so);
         exe.linkLibC();
@@ -514,7 +594,7 @@ fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
         test_step.dependOn(&run.step);
 
         const check = exe.checkObject();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("section headers");
         check.checkExact("name .copyrel");
         check.checkExact("addralign 100");
@@ -527,7 +607,7 @@ fn testCopyrelAlignment(b: *Build, opts: Options) *Step {
 fn testDsoPlt(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "dso-plt", opts);
 
-    const dso = addSharedLibrary(b, "dso", opts);
+    const dso = addSharedLibrary(b, opts, .{ .name = "dso" });
     addCSourceBytes(dso,
         \\#include<stdio.h>
         \\void world() {
@@ -543,7 +623,7 @@ fn testDsoPlt(b: *Build, opts: Options) *Step {
     , &.{});
     dso.linkLibC();
 
-    const exe = addExecutable(b, "test", opts);
+    const exe = addExecutable(b, opts, .{ .name = "test" });
     addCSourceBytes(exe,
         \\#include<stdio.h>
         \\void world() {
@@ -556,6 +636,8 @@ fn testDsoPlt(b: *Build, opts: Options) *Step {
     , &.{});
     exe.linkLibrary(dso);
     exe.linkLibC();
+    // https://github.com/ziglang/zig/issues/17619
+    exe.pie = true;
 
     const run = addRunArtifact(exe);
     run.expectStdOutEqual("Hello WORLD\n");
@@ -567,7 +649,7 @@ fn testDsoPlt(b: *Build, opts: Options) *Step {
 fn testDsoUndef(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "dso-undef", opts);
 
-    const dso = addSharedLibrary(b, "dso", opts);
+    const dso = addSharedLibrary(b, opts, .{ .name = "dso" });
     addCSourceBytes(dso,
         \\extern int foo;
         \\int bar = 5;
@@ -575,13 +657,15 @@ fn testDsoUndef(b: *Build, opts: Options) *Step {
     , &.{});
     dso.linkLibC();
 
-    const obj = addObject(b, "obj", opts);
-    addCSourceBytes(obj, "int foo = 3;", &.{});
+    const obj = addObject(b, opts, .{
+        .name = "obj",
+        .c_source_bytes = "int foo = 3;",
+    });
 
-    const lib = addStaticLibrary(b, "lib", opts);
+    const lib = addStaticLibrary(b, opts, .{ .name = "lib" });
     lib.addObject(obj);
 
-    const exe = addExecutable(b, "test", opts);
+    const exe = addExecutable(b, opts, .{ .name = "test" });
     exe.linkLibrary(dso);
     exe.linkLibrary(lib);
     addCSourceBytes(exe,
@@ -591,6 +675,8 @@ fn testDsoUndef(b: *Build, opts: Options) *Step {
         \\}
     , &.{});
     exe.linkLibC();
+    // https://github.com/ziglang/zig/issues/17619
+    exe.pie = true;
 
     const run = addRunArtifact(exe);
     run.expectExitCode(0);
@@ -604,10 +690,169 @@ fn testDsoUndef(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testEmitRelocatable(b: *Build, opts: Options) *Step {
+    const test_step = addTestStep(b, "emit-relocatable", opts);
+
+    const obj1 = addObject(b, opts, .{
+        .name = "obj1",
+        .zig_source_bytes =
+        \\const std = @import("std");
+        \\extern var bar: i32;
+        \\export fn foo() i32 {
+        \\   return bar;
+        \\}
+        \\export fn printFoo() void {
+        \\    std.debug.print("foo={d}\n", .{foo()});
+        \\}
+        ,
+        .c_source_bytes =
+        \\#include <stdio.h>
+        \\int bar = 42;
+        \\void printBar() {
+        \\  fprintf(stderr, "bar=%d\n", bar);
+        \\}
+        ,
+    });
+    obj1.linkLibC();
+
+    const exe = addExecutable(b, opts, .{
+        .name = "test",
+        .zig_source_bytes =
+        \\const std = @import("std");
+        \\extern fn printFoo() void;
+        \\extern fn printBar() void;
+        \\pub fn main() void {
+        \\    printFoo();
+        \\    printBar();
+        \\}
+        ,
+    });
+    exe.addObject(obj1);
+    exe.linkLibC();
+
+    const run = addRunArtifact(exe);
+    run.expectStdErrEqual(
+        \\foo=42
+        \\bar=42
+        \\
+    );
+    test_step.dependOn(&run.step);
+
+    return test_step;
+}
+
+fn testEmitStaticLib(b: *Build, opts: Options) *Step {
+    const test_step = addTestStep(b, "emit-static-lib", opts);
+
+    const obj1 = addObject(b, opts, .{
+        .name = "obj1",
+        .c_source_bytes =
+        \\int foo = 0;
+        \\int bar = 2;
+        \\int fooBar() {
+        \\  return foo + bar;
+        \\}
+        ,
+    });
+
+    const obj2 = addObject(b, opts, .{
+        .name = "obj2",
+        .c_source_bytes = "int tentative;",
+        .c_source_flags = &.{"-fcommon"},
+    });
+
+    const obj3 = addObject(b, opts, .{
+        .name = "a_very_long_file_name_so_that_it_ends_up_in_strtab",
+        .zig_source_bytes =
+        \\fn weakFoo() callconv(.C) usize {
+        \\    return 42;
+        \\}
+        \\export var strongBar: usize = 100;
+        \\comptime {
+        \\    @export(weakFoo, .{ .name = "weakFoo", .linkage = .Weak });
+        \\    @export(strongBar, .{ .name = "strongBarAlias", .linkage = .Strong });
+        \\}
+        ,
+    });
+
+    const lib = addStaticLibrary(b, opts, .{ .name = "lib" });
+    lib.addObject(obj1);
+    lib.addObject(obj2);
+    lib.addObject(obj3);
+
+    const check = lib.checkObject();
+    check.checkInArchiveSymtab();
+    check.checkExactPath("in object", obj1.getEmittedBin());
+    check.checkExact("foo");
+    check.checkInArchiveSymtab();
+    check.checkExactPath("in object", obj1.getEmittedBin());
+    check.checkExact("bar");
+    check.checkInArchiveSymtab();
+    check.checkExactPath("in object", obj1.getEmittedBin());
+    check.checkExact("fooBar");
+    check.checkInArchiveSymtab();
+    check.checkExactPath("in object", obj2.getEmittedBin());
+    check.checkExact("tentative");
+    check.checkInArchiveSymtab();
+    check.checkExactPath("in object", obj3.getEmittedBin());
+    check.checkExact("weakFoo");
+    check.checkInArchiveSymtab();
+    check.checkExactPath("in object", obj3.getEmittedBin());
+    check.checkExact("strongBar");
+    check.checkInArchiveSymtab();
+    check.checkExactPath("in object", obj3.getEmittedBin());
+    check.checkExact("strongBarAlias");
+    test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testEmitStaticLibZig(b: *Build, opts: Options) *Step {
+    const test_step = addTestStep(b, "emit-static-lib-zig", opts);
+
+    const obj1 = addObject(b, opts, .{
+        .name = "obj1",
+        .zig_source_bytes =
+        \\export var foo: i32 = 42;
+        \\export var bar: i32 = 2;
+        ,
+    });
+
+    const lib = addStaticLibrary(b, opts, .{
+        .name = "lib",
+        .zig_source_bytes =
+        \\extern var foo: i32;
+        \\extern var bar: i32;
+        \\export fn fooBar() i32 {
+        \\  return foo + bar;
+        \\}
+        ,
+    });
+    lib.addObject(obj1);
+
+    const exe = addExecutable(b, opts, .{
+        .name = "test",
+        .zig_source_bytes =
+        \\const std = @import("std");
+        \\extern fn fooBar() i32;
+        \\pub fn main() void {
+        \\  std.debug.print("{d}", .{fooBar()});
+        \\}
+        ,
+    });
+    exe.linkLibrary(lib);
+
+    const run = addRunArtifact(exe);
+    run.expectStdErrEqual("44");
+    test_step.dependOn(&run.step);
+
+    return test_step;
+}
+
 fn testEmptyObject(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "empty-object", opts);
 
-    const exe = addExecutable(b, "test", opts);
+    const exe = addExecutable(b, opts, .{ .name = "test" });
     addCSourceBytes(exe, "int main() { return 0; }", &.{});
     addCSourceBytes(exe, "", &.{});
     exe.linkLibC();
@@ -622,24 +867,29 @@ fn testEmptyObject(b: *Build, opts: Options) *Step {
 fn testEntryPoint(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "entry-point", opts);
 
-    const a_o = addObject(b, "a", opts);
-    addAsmSourceBytes(a_o,
+    const a_o = addObject(b, opts, .{
+        .name = "a",
+        .asm_source_bytes =
         \\.globl foo, bar
         \\foo = 0x1000
         \\bar = 0x2000
-    );
+        \\
+        ,
+    });
 
-    const b_o = addObject(b, "b", opts);
-    addCSourceBytes(b_o, "int main() { return 0; }", &.{});
+    const b_o = addObject(b, opts, .{
+        .name = "b",
+        .c_source_bytes = "int main() { return 0; }",
+    });
 
     {
-        const exe = addExecutable(b, "main", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main" });
         exe.addObject(a_o);
         exe.addObject(b_o);
-        exe.entry_symbol_name = "foo";
+        exe.entry = .{ .symbol_name = "foo" };
 
         const check = exe.checkObject();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("header");
         check.checkExact("entry 1000");
         test_step.dependOn(&check.step);
@@ -649,13 +899,13 @@ fn testEntryPoint(b: *Build, opts: Options) *Step {
         // TODO looks like not assigning a unique name to this executable will
         // cause an artifact collision taking the cached executable from the above
         // step instead of generating a new one.
-        const exe = addExecutable(b, "other", opts);
+        const exe = addExecutable(b, opts, .{ .name = "other" });
         exe.addObject(a_o);
         exe.addObject(b_o);
-        exe.entry_symbol_name = "bar";
+        exe.entry = .{ .symbol_name = "bar" };
 
         const check = exe.checkObject();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("header");
         check.checkExact("entry 2000");
         test_step.dependOn(&check.step);
@@ -667,8 +917,9 @@ fn testEntryPoint(b: *Build, opts: Options) *Step {
 fn testExportDynamic(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "export-dynamic", opts);
 
-    const obj = addObject(b, "obj", opts);
-    addAsmSourceBytes(obj,
+    const obj = addObject(b, opts, .{
+        .name = "obj",
+        .asm_source_bytes =
         \\.text
         \\  .globl foo
         \\  .hidden foo
@@ -680,12 +931,14 @@ fn testExportDynamic(b: *Build, opts: Options) *Step {
         \\  .globl _start
         \\_start:
         \\  nop
-    );
+        \\
+        ,
+    });
 
-    const dso = addSharedLibrary(b, "a", opts);
+    const dso = addSharedLibrary(b, opts, .{ .name = "a" });
     addCSourceBytes(dso, "int baz = 10;", &.{});
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe,
         \\extern int baz;
         \\int callBaz() {
@@ -709,7 +962,7 @@ fn testExportDynamic(b: *Build, opts: Options) *Step {
 fn testExportSymbolsFromExe(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "export-symbols-from-exe", opts);
 
-    const dso = addSharedLibrary(b, "a", opts);
+    const dso = addSharedLibrary(b, opts, .{ .name = "a" });
     addCSourceBytes(dso,
         \\void expfn1();
         \\void expfn2() {}
@@ -719,7 +972,7 @@ fn testExportSymbolsFromExe(b: *Build, opts: Options) *Step {
         \\}
     , &.{});
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe,
         \\void expfn1() {}
         \\void expfn2() {}
@@ -747,10 +1000,10 @@ fn testExportSymbolsFromExe(b: *Build, opts: Options) *Step {
 fn testFuncAddress(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "func-address", opts);
 
-    const dso = addSharedLibrary(b, "a", opts);
+    const dso = addSharedLibrary(b, opts, .{ .name = "a" });
     addCSourceBytes(dso, "void fn() {}", &.{});
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe,
         \\#include <assert.h>
         \\typedef void Func();
@@ -761,7 +1014,7 @@ fn testFuncAddress(b: *Build, opts: Options) *Step {
         \\}
     , &.{});
     exe.linkLibrary(dso);
-    exe.force_pic = false;
+    exe.root_module.pic = false;
     exe.pie = false;
 
     const run = addRunArtifact(exe);
@@ -774,8 +1027,9 @@ fn testFuncAddress(b: *Build, opts: Options) *Step {
 fn testGcSections(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "gc-sections", opts);
 
-    const obj = addObject(b, "obj", opts);
-    addCppSourceBytes(obj,
+    const obj = addObject(b, opts, .{
+        .name = "obj",
+        .cpp_source_bytes =
         \\#include <stdio.h>
         \\int two() { return 2; }
         \\int live_var1 = 1;
@@ -790,14 +1044,15 @@ fn testGcSections(b: *Build, opts: Options) *Step {
         \\  printf("%d %d\n", live_var1, live_var2);
         \\  live_fn2();
         \\}
-    , &.{});
+        ,
+    });
     obj.link_function_sections = true;
     obj.link_data_sections = true;
     obj.linkLibC();
     obj.linkLibCpp();
 
     {
-        const exe = addExecutable(b, "test", opts);
+        const exe = addExecutable(b, opts, .{ .name = "test" });
         exe.addObject(obj);
         exe.link_gc_sections = false;
         exe.linkLibC();
@@ -828,7 +1083,7 @@ fn testGcSections(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = addExecutable(b, "test", opts);
+        const exe = addExecutable(b, opts, .{ .name = "test" });
         exe.addObject(obj);
         exe.link_gc_sections = true;
         exe.linkLibC();
@@ -861,10 +1116,119 @@ fn testGcSections(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testGcSectionsZig(b: *Build, opts: Options) *Step {
+    const test_step = addTestStep(b, "gc-sections-zig", opts);
+
+    const obj = addObject(b, .{
+        .target = opts.target,
+        .use_llvm = true,
+    }, .{
+        .name = "obj",
+        .c_source_bytes =
+        \\int live_var1 = 1;
+        \\int live_var2 = 2;
+        \\int dead_var1 = 3;
+        \\int dead_var2 = 4;
+        \\void live_fn1() {}
+        \\void live_fn2() { live_fn1(); }
+        \\void dead_fn1() {}
+        \\void dead_fn2() { dead_fn1(); }
+        ,
+    });
+    obj.link_function_sections = true;
+    obj.link_data_sections = true;
+
+    {
+        const exe = addExecutable(b, opts, .{
+            .name = "test1",
+            .zig_source_bytes =
+            \\const std = @import("std");
+            \\extern var live_var1: i32;
+            \\extern var live_var2: i32;
+            \\extern fn live_fn2() void;
+            \\pub fn main() void {
+            \\    const stdout = std.io.getStdOut();
+            \\    stdout.writer().print("{d} {d}\n", .{ live_var1, live_var2 }) catch unreachable;
+            \\    live_fn2();
+            \\}
+            ,
+        });
+        exe.addObject(obj);
+        exe.link_gc_sections = false;
+
+        const run = addRunArtifact(exe);
+        run.expectStdOutEqual("1 2\n");
+        test_step.dependOn(&run.step);
+
+        const check = exe.checkObject();
+        check.checkInSymtab();
+        check.checkContains("live_var1");
+        check.checkInSymtab();
+        check.checkContains("live_var2");
+        check.checkInSymtab();
+        check.checkContains("dead_var1");
+        check.checkInSymtab();
+        check.checkContains("dead_var2");
+        check.checkInSymtab();
+        check.checkContains("live_fn1");
+        check.checkInSymtab();
+        check.checkContains("live_fn2");
+        check.checkInSymtab();
+        check.checkContains("dead_fn1");
+        check.checkInSymtab();
+        check.checkContains("dead_fn2");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = addExecutable(b, opts, .{
+            .name = "test2",
+            .zig_source_bytes =
+            \\const std = @import("std");
+            \\extern var live_var1: i32;
+            \\extern var live_var2: i32;
+            \\extern fn live_fn2() void;
+            \\pub fn main() void {
+            \\    const stdout = std.io.getStdOut();
+            \\    stdout.writer().print("{d} {d}\n", .{ live_var1, live_var2 }) catch unreachable;
+            \\    live_fn2();
+            \\}
+            ,
+        });
+        exe.addObject(obj);
+        exe.link_gc_sections = true;
+
+        const run = addRunArtifact(exe);
+        run.expectStdOutEqual("1 2\n");
+        test_step.dependOn(&run.step);
+
+        const check = exe.checkObject();
+        check.checkInSymtab();
+        check.checkContains("live_var1");
+        check.checkInSymtab();
+        check.checkContains("live_var2");
+        check.checkInSymtab();
+        check.checkNotPresent("dead_var1");
+        check.checkInSymtab();
+        check.checkNotPresent("dead_var2");
+        check.checkInSymtab();
+        check.checkContains("live_fn1");
+        check.checkInSymtab();
+        check.checkContains("live_fn2");
+        check.checkInSymtab();
+        check.checkNotPresent("dead_fn1");
+        check.checkInSymtab();
+        check.checkNotPresent("dead_fn2");
+        test_step.dependOn(&check.step);
+    }
+
+    return test_step;
+}
+
 fn testHiddenWeakUndef(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "hidden-weak-undef", opts);
 
-    const dso = addSharedLibrary(b, "a", opts);
+    const dso = addSharedLibrary(b, opts, .{ .name = "a" });
     addCSourceBytes(dso,
         \\__attribute__((weak, visibility("hidden"))) void foo();
         \\void bar() { foo(); }
@@ -883,7 +1247,7 @@ fn testHiddenWeakUndef(b: *Build, opts: Options) *Step {
 fn testIFuncAlias(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "ifunc-alias", opts);
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe,
         \\#include <assert.h>
         \\void foo() {}
@@ -894,8 +1258,10 @@ fn testIFuncAlias(b: *Build, opts: Options) *Step {
         \\  assert(bar == bar2);
         \\}
     , &.{});
-    exe.force_pic = true;
+    exe.root_module.pic = true;
     exe.linkLibC();
+    // https://github.com/ziglang/zig/issues/17619
+    exe.pie = true;
 
     const run = addRunArtifact(exe);
     run.expectExitCode(0);
@@ -907,7 +1273,7 @@ fn testIFuncAlias(b: *Build, opts: Options) *Step {
 fn testIFuncDlopen(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "ifunc-dlopen", opts);
 
-    const dso = addSharedLibrary(b, "a", opts);
+    const dso = addSharedLibrary(b, opts, .{ .name = "a" });
     addCSourceBytes(dso,
         \\__attribute__((ifunc("resolve_foo")))
         \\void foo(void);
@@ -919,7 +1285,7 @@ fn testIFuncDlopen(b: *Build, opts: Options) *Step {
         \\}
     , &.{});
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe,
         \\#include <dlfcn.h>
         \\#include <assert.h>
@@ -938,7 +1304,7 @@ fn testIFuncDlopen(b: *Build, opts: Options) *Step {
     exe.linkLibrary(dso);
     exe.linkLibC();
     exe.linkSystemLibrary2("dl", .{});
-    exe.force_pic = false;
+    exe.root_module.pic = false;
     exe.pie = false;
 
     const run = addRunArtifact(exe);
@@ -951,8 +1317,9 @@ fn testIFuncDlopen(b: *Build, opts: Options) *Step {
 fn testIFuncDso(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "ifunc-dso", opts);
 
-    const dso = addSharedLibrary(b, "a", opts);
-    addCSourceBytes(dso,
+    const dso = addSharedLibrary(b, opts, .{
+        .name = "a",
+        .c_source_bytes =
         \\#include<stdio.h>
         \\__attribute__((ifunc("resolve_foobar")))
         \\void foobar(void);
@@ -963,16 +1330,19 @@ fn testIFuncDso(b: *Build, opts: Options) *Step {
         \\static Func *resolve_foobar(void) {
         \\  return real_foobar;
         \\}
-    , &.{});
+        ,
+    });
     dso.linkLibC();
 
-    const exe = addExecutable(b, "main", opts);
-    addCSourceBytes(exe,
+    const exe = addExecutable(b, opts, .{
+        .name = "main",
+        .c_source_bytes =
         \\void foobar(void);
         \\int main() {
         \\  foobar();
         \\}
-    , &.{});
+        ,
+    });
     exe.linkLibrary(dso);
 
     const run = addRunArtifact(exe);
@@ -1002,19 +1372,23 @@ fn testIFuncDynamic(b: *Build, opts: Options) *Step {
     ;
 
     {
-        const exe = addExecutable(b, "main", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main" });
         addCSourceBytes(exe, main_c, &.{});
         exe.linkLibC();
         exe.link_z_lazy = true;
+        // https://github.com/ziglang/zig/issues/17619
+        exe.pie = true;
 
         const run = addRunArtifact(exe);
         run.expectStdOutEqual("Hello world\n");
         test_step.dependOn(&run.step);
     }
     {
-        const exe = addExecutable(b, "other", opts);
+        const exe = addExecutable(b, opts, .{ .name = "other" });
         addCSourceBytes(exe, main_c, &.{});
         exe.linkLibC();
+        // https://github.com/ziglang/zig/issues/17619
+        exe.pie = true;
 
         const run = addRunArtifact(exe);
         run.expectStdOutEqual("Hello world\n");
@@ -1027,7 +1401,7 @@ fn testIFuncDynamic(b: *Build, opts: Options) *Step {
 fn testIFuncExport(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "ifunc-export", opts);
 
-    const dso = addSharedLibrary(b, "a", opts);
+    const dso = addSharedLibrary(b, opts, .{ .name = "a" });
     addCSourceBytes(dso,
         \\#include <stdio.h>
         \\__attribute__((ifunc("resolve_foobar")))
@@ -1053,7 +1427,7 @@ fn testIFuncExport(b: *Build, opts: Options) *Step {
 fn testIFuncFuncPtr(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "ifunc-func-ptr", opts);
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe,
         \\typedef int Fn();
         \\int foo() __attribute__((ifunc("resolve_foo")));
@@ -1076,8 +1450,10 @@ fn testIFuncFuncPtr(b: *Build, opts: Options) *Step {
         \\  printf("%d\n", f());
         \\}
     , &.{});
-    exe.force_pic = true;
+    exe.root_module.pic = true;
     exe.linkLibC();
+    // https://github.com/ziglang/zig/issues/17619
+    exe.pie = true;
 
     const run = addRunArtifact(exe);
     run.expectStdOutEqual("3\n");
@@ -1089,7 +1465,7 @@ fn testIFuncFuncPtr(b: *Build, opts: Options) *Step {
 fn testIFuncNoPlt(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "ifunc-noplt", opts);
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe,
         \\#include <stdio.h>
         \\__attribute__((ifunc("resolve_foo")))
@@ -1105,8 +1481,10 @@ fn testIFuncNoPlt(b: *Build, opts: Options) *Step {
         \\  foo();
         \\}
     , &.{"-fno-plt"});
-    exe.force_pic = true;
+    exe.root_module.pic = true;
     exe.linkLibC();
+    // https://github.com/ziglang/zig/issues/17619
+    exe.pie = true;
 
     const run = addRunArtifact(exe);
     run.expectStdOutEqual("Hello world\n");
@@ -1118,7 +1496,7 @@ fn testIFuncNoPlt(b: *Build, opts: Options) *Step {
 fn testIFuncStatic(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "ifunc-static", opts);
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe,
         \\#include <stdio.h>
         \\void foo() __attribute__((ifunc("resolve_foo")));
@@ -1146,7 +1524,7 @@ fn testIFuncStatic(b: *Build, opts: Options) *Step {
 fn testIFuncStaticPie(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "ifunc-static-pie", opts);
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe,
         \\#include <stdio.h>
         \\void foo() __attribute__((ifunc("resolve_foo")));
@@ -1162,7 +1540,7 @@ fn testIFuncStaticPie(b: *Build, opts: Options) *Step {
         \\}
     , &.{});
     exe.linkage = .static;
-    exe.force_pic = true;
+    exe.root_module.pic = true;
     exe.pie = true;
     exe.linkLibC();
 
@@ -1171,13 +1549,13 @@ fn testIFuncStaticPie(b: *Build, opts: Options) *Step {
     test_step.dependOn(&run.step);
 
     const check = exe.checkObject();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("header");
     check.checkExact("type DYN");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("section headers");
     check.checkExact("name .dynamic");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("section headers");
     check.checkNotPresent("name .interp");
     test_step.dependOn(&check.step);
@@ -1189,7 +1567,7 @@ fn testImageBase(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "image-base", opts);
 
     {
-        const exe = addExecutable(b, "main1", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main1" });
         addCSourceBytes(exe,
             \\#include <stdio.h>
             \\int main() {
@@ -1205,7 +1583,7 @@ fn testImageBase(b: *Build, opts: Options) *Step {
         test_step.dependOn(&run.step);
 
         const check = exe.checkObject();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("header");
         check.checkExtract("entry {addr}");
         check.checkComputeCompare("addr", .{ .op = .gte, .value = .{ .literal = 0x8000000 } });
@@ -1213,12 +1591,12 @@ fn testImageBase(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = addExecutable(b, "main2", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main2" });
         addCSourceBytes(exe, "void _start() {}", &.{});
         exe.image_base = 0xffffffff8000000;
 
         const check = exe.checkObject();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("header");
         check.checkExtract("entry {addr}");
         check.checkComputeCompare("addr", .{ .op = .gte, .value = .{ .literal = 0xffffffff8000000 } });
@@ -1231,22 +1609,26 @@ fn testImageBase(b: *Build, opts: Options) *Step {
 fn testImportingDataDynamic(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "importing-data-dynamic", opts);
 
-    const dso = addSharedLibrary(b, "a", .{
+    const dso = addSharedLibrary(b, .{
         .target = opts.target,
         .optimize = opts.optimize,
         .use_llvm = true,
+    }, .{
+        .name = "a",
+        .c_source_bytes = "int foo = 42;",
     });
-    addCSourceBytes(dso, "int foo = 42;", &.{});
 
-    const main = addExecutable(b, "main", opts);
-    addZigSourceBytes(main,
+    const main = addExecutable(b, opts, .{
+        .name = "main",
+        .zig_source_bytes =
         \\extern var foo: i32;
         \\pub fn main() void {
         \\    @import("std").debug.print("{d}\n", .{foo});
         \\}
-    );
+        ,
+        .strip = true, // TODO temp hack
+    });
     main.pie = true;
-    main.strip = true; // TODO temp hack
     main.linkLibrary(dso);
     main.linkLibC();
 
@@ -1260,28 +1642,34 @@ fn testImportingDataDynamic(b: *Build, opts: Options) *Step {
 fn testImportingDataStatic(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "importing-data-static", opts);
 
-    const obj = addObject(b, "a", .{
+    const obj = addObject(b, .{
         .target = opts.target,
         .optimize = opts.optimize,
         .use_llvm = true,
+    }, .{
+        .name = "a",
+        .c_source_bytes = "int foo = 42;",
     });
-    addCSourceBytes(obj, "int foo = 42;", &.{});
 
-    const lib = addStaticLibrary(b, "a", .{
+    const lib = addStaticLibrary(b, .{
         .target = opts.target,
         .optimize = opts.optimize,
         .use_llvm = true,
+    }, .{
+        .name = "a",
     });
     lib.addObject(obj);
 
-    const main = addExecutable(b, "main", opts);
-    addZigSourceBytes(main,
+    const main = addExecutable(b, opts, .{
+        .name = "main",
+        .zig_source_bytes =
         \\extern var foo: i32;
         \\pub fn main() void {
         \\    @import("std").debug.print("{d}\n", .{foo});
         \\}
-    );
-    main.strip = true; // TODO temp hack
+        ,
+        .strip = true, // TODO temp hack
+    });
     main.linkLibrary(lib);
     main.linkLibC();
 
@@ -1295,63 +1683,76 @@ fn testImportingDataStatic(b: *Build, opts: Options) *Step {
 fn testInitArrayOrder(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "init-array-order", opts);
 
-    const a_o = addObject(b, "a", opts);
-    addCSourceBytes(a_o,
+    const a_o = addObject(b, opts, .{
+        .name = "a",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\__attribute__((constructor(10000))) void init4() { printf("1"); }
-    , &.{});
+        ,
+    });
     a_o.linkLibC();
 
-    const b_o = addObject(b, "b", opts);
-    addCSourceBytes(b_o,
+    const b_o = addObject(b, opts, .{
+        .name = "b",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\__attribute__((constructor(1000))) void init3() { printf("2"); }
-    , &.{});
+        ,
+    });
     b_o.linkLibC();
 
-    const c_o = addObject(b, "c", opts);
-    addCSourceBytes(c_o,
+    const c_o = addObject(b, opts, .{
+        .name = "c",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\__attribute__((constructor)) void init1() { printf("3"); }
-    , &.{});
+        ,
+    });
     c_o.linkLibC();
 
-    const d_o = addObject(b, "d", opts);
-    addCSourceBytes(d_o,
+    const d_o = addObject(b, opts, .{
+        .name = "d",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\__attribute__((constructor)) void init2() { printf("4"); }
-    , &.{});
+        ,
+    });
     d_o.linkLibC();
 
-    const e_o = addObject(b, "e", opts);
-    addCSourceBytes(e_o,
+    const e_o = addObject(b, opts, .{
+        .name = "e",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\__attribute__((destructor(10000))) void fini4() { printf("5"); }
-    , &.{});
+        ,
+    });
     e_o.linkLibC();
 
-    const f_o = addObject(b, "f", opts);
-    addCSourceBytes(f_o,
+    const f_o = addObject(b, opts, .{
+        .name = "f",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\__attribute__((destructor(1000))) void fini3() { printf("6"); }
-    , &.{});
+        ,
+    });
     f_o.linkLibC();
 
-    const g_o = addObject(b, "g", opts);
-    addCSourceBytes(g_o,
+    const g_o = addObject(b, opts, .{
+        .name = "g",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\__attribute__((destructor)) void fini1() { printf("7"); }
-    , &.{});
+        ,
+    });
     g_o.linkLibC();
 
-    const h_o = addObject(b, "h", opts);
-    addCSourceBytes(h_o,
-        \\#include <stdio.h>
-        \\__attribute__((destructor)) void fini2() { printf("8"); }
-    , &.{});
+    const h_o = addObject(b, opts, .{ .name = "h", .c_source_bytes = 
+    \\#include <stdio.h>
+    \\__attribute__((destructor)) void fini2() { printf("8"); }
+    });
     h_o.linkLibC();
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe, "int main() { return 0; }", &.{});
     exe.addObject(a_o);
     exe.addObject(b_o);
@@ -1362,7 +1763,7 @@ fn testInitArrayOrder(b: *Build, opts: Options) *Step {
     exe.addObject(g_o);
     exe.addObject(h_o);
 
-    if (opts.target.isGnuLibC()) {
+    if (opts.target.result.isGnuLibC()) {
         // TODO I think we need to clarify our use of `-fPIC -fPIE` flags for different targets
         exe.pie = true;
     }
@@ -1377,7 +1778,7 @@ fn testInitArrayOrder(b: *Build, opts: Options) *Step {
 fn testLargeAlignmentDso(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "large-alignment-dso", opts);
 
-    const dso = addSharedLibrary(b, "dso", opts);
+    const dso = addSharedLibrary(b, opts, .{ .name = "dso" });
     addCSourceBytes(dso,
         \\#include <stdio.h>
         \\#include <stdint.h>
@@ -1406,13 +1807,15 @@ fn testLargeAlignmentDso(b: *Build, opts: Options) *Step {
     check.checkComputeCompare("addr2 16 %", .{ .op = .eq, .value = .{ .literal = 0 } });
     test_step.dependOn(&check.step);
 
-    const exe = addExecutable(b, "test", opts);
+    const exe = addExecutable(b, opts, .{ .name = "test" });
     addCSourceBytes(exe,
         \\void greet();
         \\int main() { greet(); }
     , &.{});
     exe.linkLibrary(dso);
     exe.linkLibC();
+    // https://github.com/ziglang/zig/issues/17619
+    exe.pie = true;
 
     const run = addRunArtifact(exe);
     run.expectStdOutEqual("Hello world");
@@ -1424,7 +1827,7 @@ fn testLargeAlignmentDso(b: *Build, opts: Options) *Step {
 fn testLargeAlignmentExe(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "large-alignment-exe", opts);
 
-    const exe = addExecutable(b, "test", opts);
+    const exe = addExecutable(b, opts, .{ .name = "test" });
     addCSourceBytes(exe,
         \\#include <stdio.h>
         \\#include <stdint.h>
@@ -1447,6 +1850,8 @@ fn testLargeAlignmentExe(b: *Build, opts: Options) *Step {
     , &.{});
     exe.link_function_sections = true;
     exe.linkLibC();
+    // https://github.com/ziglang/zig/issues/17619
+    exe.pie = true;
 
     const check = exe.checkObject();
     check.checkInSymtab();
@@ -1467,7 +1872,7 @@ fn testLargeAlignmentExe(b: *Build, opts: Options) *Step {
 fn testLargeBss(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "large-bss", opts);
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe,
         \\char arr[0x100000000];
         \\int main() {
@@ -1475,6 +1880,8 @@ fn testLargeBss(b: *Build, opts: Options) *Step {
         \\}
     , &.{});
     exe.linkLibC();
+    // https://github.com/ziglang/zig/issues/17619
+    exe.pie = true;
 
     const run = addRunArtifact(exe);
     run.expectExitCode(0);
@@ -1486,27 +1893,31 @@ fn testLargeBss(b: *Build, opts: Options) *Step {
 fn testLinkOrder(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "link-order", opts);
 
-    const obj = addObject(b, "obj", opts);
-    addCSourceBytes(obj, "void foo() {}", &.{});
-    obj.force_pic = true;
+    const obj = addObject(b, opts, .{
+        .name = "obj",
+        .c_source_bytes = "void foo() {}",
+        .pic = true,
+    });
 
-    const dso = addSharedLibrary(b, "a", opts);
+    const dso = addSharedLibrary(b, opts, .{ .name = "a" });
     dso.addObject(obj);
 
-    const lib = addStaticLibrary(b, "b", opts);
+    const lib = addStaticLibrary(b, opts, .{ .name = "b" });
     lib.addObject(obj);
 
-    const main_o = addObject(b, "main", opts);
-    addCSourceBytes(main_o,
+    const main_o = addObject(b, opts, .{
+        .name = "main",
+        .c_source_bytes =
         \\void foo();
         \\int main() {
         \\  foo();
         \\}
-    , &.{});
+        ,
+    });
 
     // https://github.com/ziglang/zig/issues/17450
     // {
-    //     const exe = addExecutable(b, "main1", opts);
+    //     const exe = addExecutable(b, opts, .{ .name = "main1"});
     //     exe.addObject(main_o);
     //     exe.linkSystemLibrary2("a", .{});
     //     exe.addLibraryPath(dso.getEmittedBinDirectory());
@@ -1523,7 +1934,7 @@ fn testLinkOrder(b: *Build, opts: Options) *Step {
     // }
 
     {
-        const exe = addExecutable(b, "main2", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main2" });
         exe.addObject(main_o);
         exe.linkSystemLibrary2("b", .{});
         exe.addLibraryPath(lib.getEmittedBinDirectory());
@@ -1542,10 +1953,94 @@ fn testLinkOrder(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testLdScript(b: *Build, opts: Options) *Step {
+    const test_step = addTestStep(b, "ld-script", opts);
+
+    const dso = addSharedLibrary(b, opts, .{ .name = "bar" });
+    addCSourceBytes(dso, "int foo() { return 42; }", &.{});
+
+    const scripts = WriteFile.create(b);
+    _ = scripts.add("liba.so", "INPUT(libfoo.so)");
+    _ = scripts.add("libfoo.so", "GROUP(AS_NEEDED(-lbar))");
+
+    const exe = addExecutable(b, opts, .{ .name = "main" });
+    addCSourceBytes(exe,
+        \\int foo();
+        \\int main() {
+        \\  return foo() - 42;
+        \\}
+    , &.{});
+    exe.linkSystemLibrary2("a", .{});
+    exe.addLibraryPath(scripts.getDirectory());
+    exe.addLibraryPath(dso.getEmittedBinDirectory());
+    exe.addRPath(dso.getEmittedBinDirectory());
+    exe.linkLibC();
+    // https://github.com/ziglang/zig/issues/17619
+    exe.pie = true;
+
+    const run = addRunArtifact(exe);
+    run.expectExitCode(0);
+    test_step.dependOn(&run.step);
+
+    return test_step;
+}
+
+fn testLdScriptPathError(b: *Build, opts: Options) *Step {
+    const test_step = addTestStep(b, "ld-script-path-error", opts);
+
+    const scripts = WriteFile.create(b);
+    _ = scripts.add("liba.so", "INPUT(libfoo.so)");
+
+    const exe = addExecutable(b, opts, .{ .name = "main" });
+    addCSourceBytes(exe, "int main() { return 0; }", &.{});
+    exe.linkSystemLibrary2("a", .{});
+    exe.addLibraryPath(scripts.getDirectory());
+    exe.linkLibC();
+
+    expectLinkErrors(
+        exe,
+        test_step,
+        .{
+            .contains = "error: missing library dependency: GNU ld script '/?/liba.so' requires 'libfoo.so', but file not found",
+        },
+    );
+
+    return test_step;
+}
+
+fn testMismatchedCpuArchitectureError(b: *Build, opts: Options) *Step {
+    const test_step = addTestStep(b, "mismatched-cpu-architecture-error", opts);
+
+    const obj = addObject(b, .{
+        .target = b.resolveTargetQuery(.{ .cpu_arch = .aarch64, .os_tag = .linux, .abi = .gnu }),
+    }, .{
+        .name = "a",
+        .c_source_bytes = "int foo;",
+        .strip = true,
+    });
+
+    const exe = addExecutable(b, opts, .{ .name = "main" });
+    addCSourceBytes(exe,
+        \\extern int foo;
+        \\int main() {
+        \\  return foo;
+        \\}
+    , &.{});
+    exe.addObject(obj);
+    exe.linkLibC();
+
+    expectLinkErrors(exe, test_step, .{ .exact = &.{
+        "invalid cpu architecture: aarch64",
+        "note: while parsing /?/a.o",
+    } });
+
+    return test_step;
+}
+
 fn testLinkingC(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "linking-c", opts);
 
-    const exe = addExecutable(b, "test", opts);
+    const exe = addExecutable(b, opts, .{ .name = "test" });
     addCSourceBytes(exe,
         \\#include <stdio.h>
         \\int main() {
@@ -1560,10 +2055,10 @@ fn testLinkingC(b: *Build, opts: Options) *Step {
     test_step.dependOn(&run.step);
 
     const check = exe.checkObject();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("header");
     check.checkExact("type EXEC");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("section headers");
     check.checkNotPresent("name .dynamic");
     test_step.dependOn(&check.step);
@@ -1574,7 +2069,7 @@ fn testLinkingC(b: *Build, opts: Options) *Step {
 fn testLinkingCpp(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "linking-cpp", opts);
 
-    const exe = addExecutable(b, "test", opts);
+    const exe = addExecutable(b, opts, .{ .name = "test" });
     addCppSourceBytes(exe,
         \\#include <iostream>
         \\int main() {
@@ -1590,10 +2085,10 @@ fn testLinkingCpp(b: *Build, opts: Options) *Step {
     test_step.dependOn(&run.step);
 
     const check = exe.checkObject();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("header");
     check.checkExact("type EXEC");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("section headers");
     check.checkNotPresent("name .dynamic");
     test_step.dependOn(&check.step);
@@ -1601,25 +2096,99 @@ fn testLinkingCpp(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testLinkingObj(b: *Build, opts: Options) *Step {
+    const test_step = addTestStep(b, "linking-obj", opts);
+
+    const obj = addObject(b, opts, .{
+        .name = "aobj",
+        .zig_source_bytes =
+        \\extern var mod: usize;
+        \\export fn callMe() usize {
+        \\    return me * mod;
+        \\}
+        \\var me: usize = 42;
+        ,
+    });
+
+    const exe = addExecutable(b, opts, .{
+        .name = "testobj",
+        .zig_source_bytes =
+        \\const std = @import("std");
+        \\extern fn callMe() usize;
+        \\export var mod: usize = 2;
+        \\pub fn main() void {
+        \\    std.debug.print("{d}\n", .{callMe()});
+        \\}
+        ,
+    });
+    exe.addObject(obj);
+
+    const run = addRunArtifact(exe);
+    run.expectStdErrEqual("84\n");
+    test_step.dependOn(&run.step);
+
+    return test_step;
+}
+
+fn testLinkingStaticLib(b: *Build, opts: Options) *Step {
+    const test_step = addTestStep(b, "linking-static-lib", opts);
+
+    const obj = addObject(b, opts, .{
+        .name = "bobj",
+        .zig_source_bytes = "export var bar: i32 = -42;",
+    });
+
+    const lib = addStaticLibrary(b, opts, .{
+        .name = "alib",
+        .zig_source_bytes =
+        \\export fn foo() i32 {
+        \\    return 42;
+        \\}
+        ,
+    });
+    lib.addObject(obj);
+
+    const exe = addExecutable(b, opts, .{
+        .name = "testlib",
+        .zig_source_bytes =
+        \\const std = @import("std");
+        \\extern fn foo() i32;
+        \\extern var bar: i32;
+        \\pub fn main() void {
+        \\    std.debug.print("{d}\n", .{foo() + bar});
+        \\}
+        ,
+    });
+    exe.linkLibrary(lib);
+
+    const run = addRunArtifact(exe);
+    run.expectStdErrEqual("0\n");
+    test_step.dependOn(&run.step);
+
+    return test_step;
+}
+
 fn testLinkingZig(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "linking-zig-static", opts);
 
-    const exe = addExecutable(b, "test", opts);
-    addZigSourceBytes(exe,
+    const exe = addExecutable(b, opts, .{
+        .name = "test",
+        .zig_source_bytes =
         \\pub fn main() void {
         \\    @import("std").debug.print("Hello World!\n", .{});
         \\}
-    );
+        ,
+    });
 
     const run = addRunArtifact(exe);
     run.expectStdErrEqual("Hello World!\n");
     test_step.dependOn(&run.step);
 
     const check = exe.checkObject();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("header");
     check.checkExact("type EXEC");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("section headers");
     check.checkNotPresent("name .dynamic");
     test_step.dependOn(&check.step);
@@ -1630,13 +2199,13 @@ fn testLinkingZig(b: *Build, opts: Options) *Step {
 fn testNoEhFrameHdr(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "no-eh-frame-hdr", opts);
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe, "int main() { return 0; }", &.{});
     exe.link_eh_frame_hdr = false;
     exe.linkLibC();
 
     const check = exe.checkObject();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("section headers");
     check.checkNotPresent("name .eh_frame_hdr");
     test_step.dependOn(&check.step);
@@ -1647,7 +2216,7 @@ fn testNoEhFrameHdr(b: *Build, opts: Options) *Step {
 fn testPie(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "hello-pie", opts);
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe,
         \\#include <stdio.h>
         \\int main() {
@@ -1656,7 +2225,7 @@ fn testPie(b: *Build, opts: Options) *Step {
         \\}
     , &.{});
     exe.linkLibC();
-    exe.force_pic = true;
+    exe.root_module.pic = true;
     exe.pie = true;
 
     const run = addRunArtifact(exe);
@@ -1664,10 +2233,10 @@ fn testPie(b: *Build, opts: Options) *Step {
     test_step.dependOn(&run.step);
 
     const check = exe.checkObject();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("header");
     check.checkExact("type DYN");
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("section headers");
     check.checkExact("name .dynamic");
     test_step.dependOn(&check.step);
@@ -1678,7 +2247,7 @@ fn testPie(b: *Build, opts: Options) *Step {
 fn testPltGot(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "plt-got", opts);
 
-    const dso = addSharedLibrary(b, "a", opts);
+    const dso = addSharedLibrary(b, opts, .{ .name = "a" });
     addCSourceBytes(dso,
         \\#include <stdio.h>
         \\void ignore(void *foo) {}
@@ -1688,7 +2257,7 @@ fn testPltGot(b: *Build, opts: Options) *Step {
     , &.{});
     dso.linkLibC();
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe,
         \\void ignore(void *);
         \\int hello();
@@ -1696,8 +2265,10 @@ fn testPltGot(b: *Build, opts: Options) *Step {
         \\int main() { hello(); }
     , &.{});
     exe.linkLibrary(dso);
-    exe.force_pic = true;
+    exe.root_module.pic = true;
     exe.linkLibC();
+    // https://github.com/ziglang/zig/issues/17619
+    exe.pie = true;
 
     const run = addRunArtifact(exe);
     run.expectStdOutEqual("Hello world\n");
@@ -1710,10 +2281,12 @@ fn testPreinitArray(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "preinit-array", opts);
 
     {
-        const obj = addObject(b, "obj", opts);
-        addCSourceBytes(obj, "void _start() {}", &.{});
+        const obj = addObject(b, opts, .{
+            .name = "obj",
+            .c_source_bytes = "void _start() {}",
+        });
 
-        const exe = addExecutable(b, "main1", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main1" });
         exe.addObject(obj);
 
         const check = exe.checkObject();
@@ -1722,7 +2295,7 @@ fn testPreinitArray(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = addExecutable(b, "main2", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main2" });
         addCSourceBytes(exe,
             \\void preinit_fn() {}
             \\int main() {}
@@ -1739,26 +2312,207 @@ fn testPreinitArray(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testRelocatableArchive(b: *Build, opts: Options) *Step {
+    const test_step = addTestStep(b, "relocatable-archive", opts);
+
+    const obj1 = addObject(b, opts, .{
+        .name = "obj1",
+        .c_source_bytes =
+        \\void bar();
+        \\void foo() {
+        \\  bar();
+        \\}
+        ,
+    });
+
+    const obj2 = addObject(b, opts, .{
+        .name = "obj2",
+        .c_source_bytes =
+        \\void bar() {}
+        ,
+    });
+
+    const obj3 = addObject(b, opts, .{
+        .name = "obj3",
+        .c_source_bytes =
+        \\void baz();
+        ,
+    });
+
+    const obj4 = addObject(b, opts, .{
+        .name = "obj4",
+        .c_source_bytes =
+        \\void foo();
+        \\int main() {
+        \\  foo();
+        \\}
+        ,
+    });
+
+    const lib = addStaticLibrary(b, opts, .{ .name = "lib" });
+    lib.addObject(obj1);
+    lib.addObject(obj2);
+    lib.addObject(obj3);
+
+    const obj5 = addObject(b, opts, .{
+        .name = "obj5",
+    });
+    obj5.addObject(obj4);
+    obj5.linkLibrary(lib);
+
+    const check = obj5.checkObject();
+    check.checkInSymtab();
+    check.checkContains("foo");
+    check.checkInSymtab();
+    check.checkContains("bar");
+    check.checkInSymtab();
+    check.checkNotPresent("baz");
+    test_step.dependOn(&check.step);
+
+    return test_step;
+}
+
+fn testRelocatableEhFrame(b: *Build, opts: Options) *Step {
+    const test_step = addTestStep(b, "relocatable-eh-frame", opts);
+
+    {
+        const obj = addObject(b, opts, .{
+            .name = "obj1",
+            .cpp_source_bytes =
+            \\#include <stdexcept>
+            \\int try_me() {
+            \\  throw std::runtime_error("Oh no!");
+            \\}
+            ,
+        });
+        addCppSourceBytes(obj,
+            \\extern int try_me();
+            \\int try_again() {
+            \\  return try_me();
+            \\}
+        , &.{});
+        obj.linkLibCpp();
+
+        const exe = addExecutable(b, opts, .{ .name = "test1" });
+        addCppSourceBytes(exe,
+            \\#include <iostream>
+            \\#include <stdexcept>
+            \\extern int try_again();
+            \\int main() {
+            \\  try {
+            \\    try_again();
+            \\  } catch (const std::exception &e) {
+            \\    std::cout << "exception=" << e.what();
+            \\  }
+            \\  return 0;
+            \\}
+        , &.{});
+        exe.addObject(obj);
+        exe.linkLibCpp();
+
+        const run = addRunArtifact(exe);
+        run.expectStdOutEqual("exception=Oh no!");
+        test_step.dependOn(&run.step);
+    }
+
+    {
+        // Let's make the object file COMDAT group heavy!
+        const obj = addObject(b, opts, .{
+            .name = "obj2",
+            .cpp_source_bytes =
+            \\#include <stdexcept>
+            \\int try_me() {
+            \\  throw std::runtime_error("Oh no!");
+            \\}
+            ,
+        });
+        addCppSourceBytes(obj,
+            \\extern int try_me();
+            \\int try_again() {
+            \\  return try_me();
+            \\}
+        , &.{});
+        addCppSourceBytes(obj,
+            \\#include <iostream>
+            \\#include <stdexcept>
+            \\extern int try_again();
+            \\int main() {
+            \\  try {
+            \\    try_again();
+            \\  } catch (const std::exception &e) {
+            \\    std::cout << "exception=" << e.what();
+            \\  }
+            \\  return 0;
+            \\}
+        , &.{});
+        obj.linkLibCpp();
+
+        const exe = addExecutable(b, opts, .{ .name = "test2" });
+        exe.addObject(obj);
+        exe.linkLibCpp();
+
+        const run = addRunArtifact(exe);
+        run.expectStdOutEqual("exception=Oh no!");
+        test_step.dependOn(&run.step);
+    }
+
+    return test_step;
+}
+
+fn testRelocatableNoEhFrame(b: *Build, opts: Options) *Step {
+    const test_step = addTestStep(b, "relocatable-no-eh-frame", opts);
+
+    const obj1 = addObject(b, opts, .{
+        .name = "obj1",
+        .c_source_bytes = "int bar() { return 42; }",
+        .c_source_flags = &.{
+            "-fno-unwind-tables",
+            "-fno-asynchronous-unwind-tables",
+        },
+    });
+
+    const obj2 = addObject(b, opts, .{
+        .name = "obj2",
+    });
+    obj2.addObject(obj1);
+
+    const check1 = obj1.checkObject();
+    check1.checkInHeaders();
+    check1.checkExact("section headers");
+    check1.checkNotPresent(".eh_frame");
+    test_step.dependOn(&check1.step);
+
+    const check2 = obj2.checkObject();
+    check2.checkInHeaders();
+    check2.checkExact("section headers");
+    check2.checkNotPresent(".eh_frame");
+    test_step.dependOn(&check2.step);
+
+    return test_step;
+}
+
 fn testSharedAbsSymbol(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "shared-abs-symbol", opts);
 
-    const dso = addSharedLibrary(b, "a", opts);
+    const dso = addSharedLibrary(b, opts, .{ .name = "a" });
     addAsmSourceBytes(dso,
         \\.globl foo
         \\foo = 3;
     );
 
-    const obj = addObject(b, "obj", opts);
-    addCSourceBytes(obj,
+    const obj = addObject(b, opts, .{
+        .name = "obj",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\extern char foo;
         \\int main() { printf("foo=%p\n", &foo); }
-    , &.{});
-    obj.force_pic = true;
+        ,
+        .pic = true,
+    });
     obj.linkLibC();
 
     {
-        const exe = addExecutable(b, "main1", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main1" });
         exe.addObject(obj);
         exe.linkLibrary(dso);
         exe.pie = true;
@@ -1768,7 +2522,7 @@ fn testSharedAbsSymbol(b: *Build, opts: Options) *Step {
         test_step.dependOn(&run.step);
 
         const check = exe.checkObject();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("header");
         check.checkExact("type DYN");
         // TODO fix/improve in CheckObject
@@ -1779,7 +2533,7 @@ fn testSharedAbsSymbol(b: *Build, opts: Options) *Step {
 
     // https://github.com/ziglang/zig/issues/17430
     // {
-    //     const exe = addExecutable(b, "main2", opts);
+    //     const exe = addExecutable(b, opts, .{ .name = "main2"});
     //     exe.addObject(obj);
     //     exe.linkLibrary(dso);
     //     exe.pie = false;
@@ -1789,7 +2543,7 @@ fn testSharedAbsSymbol(b: *Build, opts: Options) *Step {
     //     test_step.dependOn(&run.step);
 
     //     const check = exe.checkObject();
-    //     check.checkStart();
+    //     check.checkInHeaders();
     //     check.checkExact("header");
     //     check.checkExact("type EXEC");
     //     // TODO fix/improve in CheckObject
@@ -1804,37 +2558,39 @@ fn testSharedAbsSymbol(b: *Build, opts: Options) *Step {
 fn testStrip(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "strip", opts);
 
-    const obj = addObject(b, "obj", opts);
-    addCSourceBytes(obj,
+    const obj = addObject(b, opts, .{
+        .name = "obj",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\int main() {
         \\  printf("Hello!\n");
         \\  return 0;
         \\}
-    , &.{});
+        ,
+    });
     obj.linkLibC();
 
     {
-        const exe = addExecutable(b, "main1", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main1" });
         exe.addObject(obj);
-        exe.strip = false;
+        exe.root_module.strip = false;
         exe.linkLibC();
 
         const check = exe.checkObject();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("section headers");
         check.checkExact("name .debug_info");
         test_step.dependOn(&check.step);
     }
 
     {
-        const exe = addExecutable(b, "main2", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main2" });
         exe.addObject(obj);
-        exe.strip = true;
+        exe.root_module.strip = true;
         exe.linkLibC();
 
         const check = exe.checkObject();
-        check.checkStart();
+        check.checkInHeaders();
         check.checkExact("section headers");
         check.checkNotPresent("name .debug_info");
         test_step.dependOn(&check.step);
@@ -1846,16 +2602,19 @@ fn testStrip(b: *Build, opts: Options) *Step {
 fn testTlsDfStaticTls(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "tls-df-static-tls", opts);
 
-    const obj = addObject(b, "obj", opts);
-    addCSourceBytes(obj,
+    const obj = addObject(b, opts, .{
+        .name = "obj",
+        .c_source_bytes =
         \\static _Thread_local int foo = 5;
         \\void mutate() { ++foo; }
         \\int bar() { return foo; }
-    , &.{"-ftls-model=initial-exec"});
-    obj.force_pic = true;
+        ,
+        .c_source_flags = &.{"-ftls-model=initial-exec"},
+        .pic = true,
+    });
 
     {
-        const dso = addSharedLibrary(b, "a", opts);
+        const dso = addSharedLibrary(b, opts, .{ .name = "a" });
         dso.addObject(obj);
         // dso.link_relax = true;
 
@@ -1867,7 +2626,7 @@ fn testTlsDfStaticTls(b: *Build, opts: Options) *Step {
 
     // TODO add -Wl,--no-relax
     // {
-    //     const dso = addSharedLibrary(b, "a", opts);
+    //     const dso = addSharedLibrary(b, opts, .{ .name = "a"});
     //     dso.addObject(obj);
     //     dso.link_relax = false;
 
@@ -1883,7 +2642,7 @@ fn testTlsDfStaticTls(b: *Build, opts: Options) *Step {
 fn testTlsDso(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "tls-dso", opts);
 
-    const dso = addSharedLibrary(b, "a", opts);
+    const dso = addSharedLibrary(b, opts, .{ .name = "a" });
     addCSourceBytes(dso,
         \\extern _Thread_local int foo;
         \\_Thread_local int bar;
@@ -1891,7 +2650,7 @@ fn testTlsDso(b: *Build, opts: Options) *Step {
         \\int get_bar1() { return bar; }
     , &.{});
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe,
         \\#include <stdio.h>
         \\_Thread_local int foo;
@@ -1912,6 +2671,8 @@ fn testTlsDso(b: *Build, opts: Options) *Step {
     , &.{});
     exe.linkLibrary(dso);
     exe.linkLibC();
+    // https://github.com/ziglang/zig/issues/17619
+    exe.pie = true;
 
     const run = addRunArtifact(exe);
     run.expectStdOutEqual("5 3 5 3 5 3\n");
@@ -1923,8 +2684,9 @@ fn testTlsDso(b: *Build, opts: Options) *Step {
 fn testTlsGd(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "tls-gd", opts);
 
-    const main_o = addObject(b, "main", opts);
-    addCSourceBytes(main_o,
+    const main_o = addObject(b, opts, .{
+        .name = "main",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x1 = 1;
         \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x2;
@@ -1937,37 +2699,42 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
         \\  printf("%d %d %d %d %d %d\n", x1, x2, x3, x4, get_x5(), get_x6());
         \\  return 0;
         \\}
-    , &.{});
+        ,
+        .pic = true,
+    });
     main_o.linkLibC();
-    main_o.force_pic = true;
 
-    const a_o = addObject(b, "a", opts);
-    addCSourceBytes(a_o,
+    const a_o = addObject(b, opts, .{
+        .name = "a",
+        .c_source_bytes =
         \\__attribute__((tls_model("global-dynamic"))) _Thread_local int x3 = 3;
         \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x5 = 5;
         \\int get_x5() { return x5; }
-    , &.{});
-    a_o.force_pic = true;
+        ,
+        .pic = true,
+    });
 
-    const b_o = addObject(b, "b", opts);
-    addCSourceBytes(b_o,
+    const b_o = addObject(b, opts, .{
+        .name = "b",
+        .c_source_bytes =
         \\__attribute__((tls_model("global-dynamic"))) _Thread_local int x4 = 4;
         \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x6 = 6;
         \\int get_x6() { return x6; }
-    , &.{});
-    b_o.force_pic = true;
+        ,
+        .pic = true,
+    });
 
     const exp_stdout = "1 2 3 4 5 6\n";
 
-    const dso1 = addSharedLibrary(b, "a", opts);
+    const dso1 = addSharedLibrary(b, opts, .{ .name = "a" });
     dso1.addObject(a_o);
 
-    const dso2 = addSharedLibrary(b, "b", opts);
+    const dso2 = addSharedLibrary(b, opts, .{ .name = "b" });
     dso2.addObject(b_o);
     // dso2.link_relax = false; // TODO
 
     {
-        const exe = addExecutable(b, "main1", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main1" });
         exe.addObject(main_o);
         exe.linkLibrary(dso1);
         exe.linkLibrary(dso2);
@@ -1978,7 +2745,7 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = addExecutable(b, "main2", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main2" });
         exe.addObject(main_o);
         // exe.link_relax = false; // TODO
         exe.linkLibrary(dso1);
@@ -1991,7 +2758,7 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
 
     // https://github.com/ziglang/zig/issues/17430 ??
     // {
-    //     const exe = addExecutable(b, "main3", opts);
+    //     const exe = addExecutable(b, opts, .{ .name = "main3"});
     //     exe.addObject(main_o);
     //     exe.linkLibrary(dso1);
     //     exe.linkLibrary(dso2);
@@ -2003,7 +2770,7 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
     // }
 
     // {
-    //     const exe = addExecutable(b, "main4", opts);
+    //     const exe = addExecutable(b, opts, .{ .name = "main4"});
     //     exe.addObject(main_o);
     //     // exe.link_relax = false; // TODO
     //     exe.linkLibrary(dso1);
@@ -2021,8 +2788,9 @@ fn testTlsGd(b: *Build, opts: Options) *Step {
 fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "tls-gd-no-plt", opts);
 
-    const obj = addObject(b, "obj", opts);
-    addCSourceBytes(obj,
+    const obj = addObject(b, opts, .{
+        .name = "obj",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x1 = 1;
         \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x2;
@@ -2036,18 +2804,20 @@ fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
         \\  printf("%d %d %d %d %d %d\n", x1, x2, x3, x4, get_x5(), get_x6());
         \\  return 0;
         \\}
-    , &.{"-fno-plt"});
-    obj.force_pic = true;
+        ,
+        .c_source_flags = &.{"-fno-plt"},
+        .pic = true,
+    });
     obj.linkLibC();
 
-    const a_so = addSharedLibrary(b, "a", opts);
+    const a_so = addSharedLibrary(b, opts, .{ .name = "a" });
     addCSourceBytes(a_so,
         \\__attribute__((tls_model("global-dynamic"))) _Thread_local int x3 = 3;
         \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x5 = 5;
         \\int get_x5() { return x5; }
     , &.{"-fno-plt"});
 
-    const b_so = addSharedLibrary(b, "b", opts);
+    const b_so = addSharedLibrary(b, opts, .{ .name = "b" });
     addCSourceBytes(b_so,
         \\__attribute__((tls_model("global-dynamic"))) _Thread_local int x4 = 4;
         \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x6 = 6;
@@ -2056,11 +2826,13 @@ fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
     // b_so.link_relax = false; // TODO
 
     {
-        const exe = addExecutable(b, "main1", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main1" });
         exe.addObject(obj);
         exe.linkLibrary(a_so);
         exe.linkLibrary(b_so);
         exe.linkLibC();
+        // https://github.com/ziglang/zig/issues/17619
+        exe.pie = true;
 
         const run = addRunArtifact(exe);
         run.expectStdOutEqual("1 2 3 4 5 6\n");
@@ -2068,12 +2840,14 @@ fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = addExecutable(b, "main2", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main2" });
         exe.addObject(obj);
         exe.linkLibrary(a_so);
         exe.linkLibrary(b_so);
         exe.linkLibC();
         // exe.link_relax = false; // TODO
+        // https://github.com/ziglang/zig/issues/17619
+        exe.pie = true;
 
         const run = addRunArtifact(exe);
         run.expectStdOutEqual("1 2 3 4 5 6\n");
@@ -2086,8 +2860,9 @@ fn testTlsGdNoPlt(b: *Build, opts: Options) *Step {
 fn testTlsGdToIe(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "tls-gd-to-ie", opts);
 
-    const a_o = addObject(b, "a", opts);
-    addCSourceBytes(a_o,
+    const a_o = addObject(b, opts, .{
+        .name = "a",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int x1 = 1;
         \\__attribute__((tls_model("global-dynamic"))) _Thread_local int x2 = 2;
@@ -2098,25 +2873,30 @@ fn testTlsGdToIe(b: *Build, opts: Options) *Step {
         \\  printf("%d %d %d\n", x1, x2, x3);
         \\  return 0;
         \\}
-    , &.{});
+        ,
+        .pic = true,
+    });
     a_o.linkLibC();
-    a_o.force_pic = true;
 
-    const b_o = addObject(b, "b", opts);
-    addCSourceBytes(b_o,
+    const b_o = addObject(b, opts, .{
+        .name = "b",
+        .c_source_bytes =
         \\int foo();
         \\int main() { foo(); }
-    , &.{});
-    b_o.force_pic = true;
+        ,
+        .pic = true,
+    });
 
     {
-        const dso = addSharedLibrary(b, "a1", opts);
+        const dso = addSharedLibrary(b, opts, .{ .name = "a1" });
         dso.addObject(a_o);
 
-        const exe = addExecutable(b, "main1", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main1" });
         exe.addObject(b_o);
         exe.linkLibrary(dso);
         exe.linkLibC();
+        // https://github.com/ziglang/zig/issues/17619
+        exe.pie = true;
 
         const run = addRunArtifact(exe);
         run.expectStdOutEqual("1 2 3\n");
@@ -2124,14 +2904,16 @@ fn testTlsGdToIe(b: *Build, opts: Options) *Step {
     }
 
     {
-        const dso = addSharedLibrary(b, "a2", opts);
+        const dso = addSharedLibrary(b, opts, .{ .name = "a2" });
         dso.addObject(a_o);
         // dso.link_relax = false; // TODO
 
-        const exe = addExecutable(b, "main2", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main2" });
         exe.addObject(b_o);
         exe.linkLibrary(dso);
         exe.linkLibC();
+        // https://github.com/ziglang/zig/issues/17619
+        exe.pie = true;
 
         const run = addRunArtifact(exe);
         run.expectStdOutEqual("1 2 3\n");
@@ -2139,11 +2921,11 @@ fn testTlsGdToIe(b: *Build, opts: Options) *Step {
     }
 
     // {
-    //     const dso = addSharedLibrary(b, "a", opts);
+    //     const dso = addSharedLibrary(b, opts, .{ .name = "a"});
     //     dso.addObject(a_o);
     //     dso.link_z_nodlopen = true;
 
-    //     const exe = addExecutable(b, "main", opts);
+    //     const exe = addExecutable(b, opts, .{ .name = "main"});
     //     exe.addObject(b_o);
     //     exe.linkLibrary(dso);
 
@@ -2153,12 +2935,12 @@ fn testTlsGdToIe(b: *Build, opts: Options) *Step {
     // }
 
     // {
-    //     const dso = addSharedLibrary(b, "a", opts);
+    //     const dso = addSharedLibrary(b, opts, .{ .name = "a"});
     //     dso.addObject(a_o);
     //     dso.link_relax = false;
     //     dso.link_z_nodlopen = true;
 
-    //     const exe = addExecutable(b, "main", opts);
+    //     const exe = addExecutable(b, opts, .{ .name = "main"});
     //     exe.addObject(b_o);
     //     exe.linkLibrary(dso);
 
@@ -2173,7 +2955,7 @@ fn testTlsGdToIe(b: *Build, opts: Options) *Step {
 fn testTlsIe(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "tls-ie", opts);
 
-    const dso = addSharedLibrary(b, "a", opts);
+    const dso = addSharedLibrary(b, opts, .{ .name = "a" });
     addCSourceBytes(dso,
         \\#include <stdio.h>
         \\__attribute__((tls_model("initial-exec"))) static _Thread_local int foo;
@@ -2188,8 +2970,9 @@ fn testTlsIe(b: *Build, opts: Options) *Step {
     , &.{});
     dso.linkLibC();
 
-    const main_o = addObject(b, "main", opts);
-    addCSourceBytes(main_o,
+    const main_o = addObject(b, opts, .{
+        .name = "main",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\_Thread_local int baz;
         \\void set();
@@ -2201,16 +2984,19 @@ fn testTlsIe(b: *Build, opts: Options) *Step {
         \\  print();
         \\  printf("%d\n", baz);
         \\}
-    , &.{});
+        ,
+    });
     main_o.linkLibC();
 
     const exp_stdout = "0 0 3 5 7\n";
 
     {
-        const exe = addExecutable(b, "main1", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main1" });
         exe.addObject(main_o);
         exe.linkLibrary(dso);
         exe.linkLibC();
+        // https://github.com/ziglang/zig/issues/17619
+        exe.pie = true;
 
         const run = addRunArtifact(exe);
         run.expectStdOutEqual(exp_stdout);
@@ -2218,11 +3004,13 @@ fn testTlsIe(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = addExecutable(b, "main2", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main2" });
         exe.addObject(main_o);
         exe.linkLibrary(dso);
         exe.linkLibC();
         // exe.link_relax = false; // TODO
+        // https://github.com/ziglang/zig/issues/17619
+        exe.pie = true;
 
         const run = addRunArtifact(exe);
         run.expectStdOutEqual(exp_stdout);
@@ -2235,41 +3023,51 @@ fn testTlsIe(b: *Build, opts: Options) *Step {
 fn testTlsLargeAlignment(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "tls-large-alignment", opts);
 
-    const a_o = addObject(b, "a", opts);
-    addCSourceBytes(a_o,
+    const a_o = addObject(b, opts, .{
+        .name = "a",
+        .c_source_bytes =
         \\__attribute__((section(".tdata1")))
         \\_Thread_local int x = 42;
-    , &.{"-std=c11"});
-    a_o.force_pic = true;
+        ,
+        .c_source_flags = &.{"-std=c11"},
+        .pic = true,
+    });
 
-    const b_o = addObject(b, "b", opts);
-    addCSourceBytes(b_o,
+    const b_o = addObject(b, opts, .{
+        .name = "b",
+        .c_source_bytes =
         \\__attribute__((section(".tdata2")))
         \\_Alignas(256) _Thread_local int y[] = { 1, 2, 3 };
-    , &.{"-std=c11"});
-    b_o.force_pic = true;
+        ,
+        .c_source_flags = &.{"-std=c11"},
+        .pic = true,
+    });
 
-    const c_o = addObject(b, "c", opts);
-    addCSourceBytes(c_o,
+    const c_o = addObject(b, opts, .{
+        .name = "c",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\extern _Thread_local int x;
         \\extern _Thread_local int y[];
         \\int main() {
         \\  printf("%d %d %d %d\n", x, y[0], y[1], y[2]);
         \\}
-    , &.{});
-    c_o.force_pic = true;
+        ,
+        .pic = true,
+    });
     c_o.linkLibC();
 
     {
-        const dso = addSharedLibrary(b, "a", opts);
+        const dso = addSharedLibrary(b, opts, .{ .name = "a" });
         dso.addObject(a_o);
         dso.addObject(b_o);
 
-        const exe = addExecutable(b, "main", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main" });
         exe.addObject(c_o);
         exe.linkLibrary(dso);
         exe.linkLibC();
+        // https://github.com/ziglang/zig/issues/17619
+        exe.pie = true;
 
         const run = addRunArtifact(exe);
         run.expectStdOutEqual("42 1 2 3\n");
@@ -2277,11 +3075,13 @@ fn testTlsLargeAlignment(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = addExecutable(b, "main", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main" });
         exe.addObject(a_o);
         exe.addObject(b_o);
         exe.addObject(c_o);
         exe.linkLibC();
+        // https://github.com/ziglang/zig/issues/17619
+        exe.pie = true;
 
         const run = addRunArtifact(exe);
         run.expectStdOutEqual("42 1 2 3\n");
@@ -2294,7 +3094,7 @@ fn testTlsLargeAlignment(b: *Build, opts: Options) *Step {
 fn testTlsLargeTbss(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "tls-large-tbss", opts);
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addAsmSourceBytes(exe,
         \\.globl x, y
         \\.section .tbss,"awT",@nobits
@@ -2315,6 +3115,8 @@ fn testTlsLargeTbss(b: *Build, opts: Options) *Step {
         \\}
     , &.{});
     exe.linkLibC();
+    // https://github.com/ziglang/zig/issues/17619
+    exe.pie = true;
 
     const run = addRunArtifact(exe);
     run.expectStdOutEqual("3 0 5 0 0 0\n");
@@ -2326,7 +3128,7 @@ fn testTlsLargeTbss(b: *Build, opts: Options) *Step {
 fn testTlsLargeStaticImage(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "tls-large-static-image", opts);
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe, "_Thread_local int x[] = { 1, 2, 3, [10000] = 5 };", &.{});
     addCSourceBytes(exe,
         \\#include <stdio.h>
@@ -2335,8 +3137,10 @@ fn testTlsLargeStaticImage(b: *Build, opts: Options) *Step {
         \\  printf("%d %d %d %d %d\n", x[0], x[1], x[2], x[3], x[10000]);
         \\}
     , &.{});
-    exe.force_pic = true;
+    exe.root_module.pic = true;
     exe.linkLibC();
+    // https://github.com/ziglang/zig/issues/17619
+    exe.pie = true;
 
     const run = addRunArtifact(exe);
     run.expectStdOutEqual("1 2 3 0 5\n");
@@ -2348,8 +3152,9 @@ fn testTlsLargeStaticImage(b: *Build, opts: Options) *Step {
 fn testTlsLd(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "tls-ld", opts);
 
-    const main_o = addObject(b, "main", opts);
-    addCSourceBytes(main_o,
+    const main_o = addObject(b, opts, .{
+        .name = "main",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\extern _Thread_local int foo;
         \\static _Thread_local int bar;
@@ -2360,21 +3165,28 @@ fn testTlsLd(b: *Build, opts: Options) *Step {
         \\  printf("%d %d %d %d\n", *get_foo_addr(), *get_bar_addr(), foo, bar);
         \\  return 0;
         \\}
-    , &.{"-ftls-model=local-dynamic"});
-    main_o.force_pic = true;
+        ,
+        .c_source_flags = &.{"-ftls-model=local-dynamic"},
+        .pic = true,
+    });
     main_o.linkLibC();
 
-    const a_o = addObject(b, "a", opts);
-    addCSourceBytes(a_o, "_Thread_local int foo = 3;", &.{"-ftls-model=local-dynamic"});
-    a_o.force_pic = true;
+    const a_o = addObject(b, opts, .{
+        .name = "a",
+        .c_source_bytes = "_Thread_local int foo = 3;",
+        .c_source_flags = &.{"-ftls-model=local-dynamic"},
+        .pic = true,
+    });
 
     const exp_stdout = "3 5 3 5\n";
 
     {
-        const exe = addExecutable(b, "main1", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main1" });
         exe.addObject(main_o);
         exe.addObject(a_o);
         exe.linkLibC();
+        // https://github.com/ziglang/zig/issues/17619
+        exe.pie = true;
 
         const run = addRunArtifact(exe);
         run.expectStdOutEqual(exp_stdout);
@@ -2382,11 +3194,13 @@ fn testTlsLd(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = addExecutable(b, "main2", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main2" });
         exe.addObject(main_o);
         exe.addObject(a_o);
         exe.linkLibC();
         // exe.link_relax = false; // TODO
+        // https://github.com/ziglang/zig/issues/17619
+        exe.pie = true;
 
         const run = addRunArtifact(exe);
         run.expectStdOutEqual(exp_stdout);
@@ -2399,14 +3213,14 @@ fn testTlsLd(b: *Build, opts: Options) *Step {
 fn testTlsLdDso(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "tls-ld-dso", opts);
 
-    const dso = addSharedLibrary(b, "a", opts);
+    const dso = addSharedLibrary(b, opts, .{ .name = "a" });
     addCSourceBytes(dso,
         \\static _Thread_local int def, def1;
         \\int f0() { return ++def; }
         \\int f1() { return ++def1 + def; }
     , &.{"-ftls-model=local-dynamic"});
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe,
         \\#include <stdio.h>
         \\extern int f0();
@@ -2420,6 +3234,8 @@ fn testTlsLdDso(b: *Build, opts: Options) *Step {
     , &.{});
     exe.linkLibrary(dso);
     exe.linkLibC();
+    // https://github.com/ziglang/zig/issues/17619
+    exe.pie = true;
 
     const run = addRunArtifact(exe);
     run.expectStdOutEqual("1 2\n");
@@ -2431,8 +3247,9 @@ fn testTlsLdDso(b: *Build, opts: Options) *Step {
 fn testTlsLdNoPlt(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "tls-ld-no-plt", opts);
 
-    const a_o = addObject(b, "a", opts);
-    addCSourceBytes(a_o,
+    const a_o = addObject(b, opts, .{
+        .name = "a",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\extern _Thread_local int foo;
         \\static _Thread_local int bar;
@@ -2444,19 +3261,26 @@ fn testTlsLdNoPlt(b: *Build, opts: Options) *Step {
         \\  printf("%d %d %d %d\n", *get_foo_addr(), *get_bar_addr(), foo, bar);
         \\  return 0;
         \\}
-    , &.{ "-ftls-model=local-dynamic", "-fno-plt" });
+        ,
+        .c_source_flags = &.{ "-ftls-model=local-dynamic", "-fno-plt" },
+        .pic = true,
+    });
     a_o.linkLibC();
-    a_o.force_pic = true;
 
-    const b_o = addObject(b, "b", opts);
-    addCSourceBytes(b_o, "_Thread_local int foo = 3;", &.{ "-ftls-model=local-dynamic", "-fno-plt" });
-    b_o.force_pic = true;
+    const b_o = addObject(b, opts, .{
+        .name = "b",
+        .c_source_bytes = "_Thread_local int foo = 3;",
+        .c_source_flags = &.{ "-ftls-model=local-dynamic", "-fno-plt" },
+        .pic = true,
+    });
 
     {
-        const exe = addExecutable(b, "main1", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main1" });
         exe.addObject(a_o);
         exe.addObject(b_o);
         exe.linkLibC();
+        // https://github.com/ziglang/zig/issues/17619
+        exe.pie = true;
 
         const run = addRunArtifact(exe);
         run.expectStdOutEqual("3 5 3 5\n");
@@ -2464,11 +3288,13 @@ fn testTlsLdNoPlt(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = addExecutable(b, "main2", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main2" });
         exe.addObject(a_o);
         exe.addObject(b_o);
         exe.linkLibC();
         // exe.link_relax = false; // TODO
+        // https://github.com/ziglang/zig/issues/17619
+        exe.pie = true;
 
         const run = addRunArtifact(exe);
         run.expectStdOutEqual("3 5 3 5\n");
@@ -2481,7 +3307,7 @@ fn testTlsLdNoPlt(b: *Build, opts: Options) *Step {
 fn testTlsNoPic(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "tls-no-pic", opts);
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe,
         \\#include <stdio.h>
         \\__attribute__((tls_model("global-dynamic"))) extern _Thread_local int foo;
@@ -2499,7 +3325,7 @@ fn testTlsNoPic(b: *Build, opts: Options) *Step {
     addCSourceBytes(exe,
         \\__attribute__((tls_model("global-dynamic"))) _Thread_local int foo;
     , &.{});
-    exe.force_pic = false;
+    exe.root_module.pic = false;
     exe.linkLibC();
 
     const run = addRunArtifact(exe);
@@ -2512,7 +3338,7 @@ fn testTlsNoPic(b: *Build, opts: Options) *Step {
 fn testTlsOffsetAlignment(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "tls-offset-alignment", opts);
 
-    const dso = addSharedLibrary(b, "a", opts);
+    const dso = addSharedLibrary(b, opts, .{ .name = "a" });
     addCSourceBytes(dso,
         \\#include <assert.h>
         \\#include <stdlib.h>
@@ -2530,7 +3356,7 @@ fn testTlsOffsetAlignment(b: *Build, opts: Options) *Step {
     , &.{});
     dso.linkLibC();
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe,
         \\#include <pthread.h>
         \\#include <dlfcn.h>
@@ -2553,7 +3379,9 @@ fn testTlsOffsetAlignment(b: *Build, opts: Options) *Step {
     , &.{});
     exe.addRPath(dso.getEmittedBinDirectory());
     exe.linkLibC();
-    exe.force_pic = true;
+    exe.root_module.pic = true;
+    // https://github.com/ziglang/zig/issues/17619
+    exe.pie = true;
 
     const run = addRunArtifact(exe);
     run.expectExitCode(0);
@@ -2565,8 +3393,9 @@ fn testTlsOffsetAlignment(b: *Build, opts: Options) *Step {
 fn testTlsPic(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "tls-pic", opts);
 
-    const obj = addObject(b, "obj", opts);
-    addCSourceBytes(obj,
+    const obj = addObject(b, opts, .{
+        .name = "obj",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\__attribute__((tls_model("global-dynamic"))) extern _Thread_local int foo;
         \\__attribute__((tls_model("global-dynamic"))) static _Thread_local int bar;
@@ -2578,16 +3407,19 @@ fn testTlsPic(b: *Build, opts: Options) *Step {
         \\  printf("%d %d %d %d\n", *get_foo_addr(), *get_bar_addr(), foo, bar);
         \\  return 0;
         \\}
-    , &.{});
+        ,
+        .pic = true,
+    });
     obj.linkLibC();
-    obj.force_pic = true;
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe,
         \\__attribute__((tls_model("global-dynamic"))) _Thread_local int foo = 3;
     , &.{});
     exe.addObject(obj);
     exe.linkLibC();
+    // https://github.com/ziglang/zig/issues/17619
+    exe.pie = true;
 
     const run = addRunArtifact(exe);
     run.expectStdOutEqual("3 5 3 5\n");
@@ -2599,34 +3431,44 @@ fn testTlsPic(b: *Build, opts: Options) *Step {
 fn testTlsSmallAlignment(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "tls-small-alignment", opts);
 
-    const a_o = addObject(b, "a", opts);
-    addAsmSourceBytes(a_o,
+    const a_o = addObject(b, opts, .{
+        .name = "a",
+        .asm_source_bytes =
         \\.text
         \\.byte 0
-    );
-    a_o.force_pic = true;
+        \\
+        ,
+        .pic = true,
+    });
 
-    const b_o = addObject(b, "b", opts);
-    addCSourceBytes(b_o, "_Thread_local char x = 42;", &.{"-std=c11"});
-    b_o.force_pic = true;
+    const b_o = addObject(b, opts, .{
+        .name = "b",
+        .c_source_bytes = "_Thread_local char x = 42;",
+        .c_source_flags = &.{"-std=c11"},
+        .pic = true,
+    });
 
-    const c_o = addObject(b, "c", opts);
-    addCSourceBytes(c_o,
+    const c_o = addObject(b, opts, .{
+        .name = "c",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\extern _Thread_local char x;
         \\int main() {
         \\  printf("%d\n", x);
         \\}
-    , &.{});
+        ,
+        .pic = true,
+    });
     c_o.linkLibC();
-    c_o.force_pic = true;
 
     {
-        const exe = addExecutable(b, "main", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main" });
         exe.addObject(a_o);
         exe.addObject(b_o);
         exe.addObject(c_o);
         exe.linkLibC();
+        // https://github.com/ziglang/zig/issues/17619
+        exe.pie = true;
 
         const run = addRunArtifact(exe);
         run.expectStdOutEqual("42\n");
@@ -2634,14 +3476,16 @@ fn testTlsSmallAlignment(b: *Build, opts: Options) *Step {
     }
 
     {
-        const dso = addSharedLibrary(b, "a", opts);
+        const dso = addSharedLibrary(b, opts, .{ .name = "a" });
         dso.addObject(a_o);
         dso.addObject(b_o);
 
-        const exe = addExecutable(b, "main", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main" });
         exe.addObject(c_o);
         exe.linkLibrary(dso);
         exe.linkLibC();
+        // https://github.com/ziglang/zig/issues/17619
+        exe.pie = true;
 
         const run = addRunArtifact(exe);
         run.expectStdOutEqual("42\n");
@@ -2654,7 +3498,7 @@ fn testTlsSmallAlignment(b: *Build, opts: Options) *Step {
 fn testTlsStatic(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "tls-static", opts);
 
-    const exe = addExecutable(b, "test", opts);
+    const exe = addExecutable(b, opts, .{ .name = "test" });
     addCSourceBytes(exe,
         \\#include <stdio.h>
         \\_Thread_local int a = 10;
@@ -2682,22 +3526,98 @@ fn testTlsStatic(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
+fn testUnknownFileTypeError(b: *Build, opts: Options) *Step {
+    const test_step = addTestStep(b, "unknown-file-type-error", opts);
+
+    const dylib = addSharedLibrary(b, .{
+        .target = b.resolveTargetQuery(.{ .cpu_arch = .x86_64, .os_tag = .macos }),
+    }, .{
+        .name = "a",
+        .zig_source_bytes = "export var foo: i32 = 0;",
+    });
+
+    const exe = addExecutable(b, opts, .{ .name = "main" });
+    addCSourceBytes(exe,
+        \\extern int foo;
+        \\int main() {
+        \\  return foo;
+        \\}
+    , &.{});
+    exe.linkLibrary(dylib);
+    exe.linkLibC();
+
+    expectLinkErrors(exe, test_step, .{ .exact = &.{
+        "invalid token in LD script: '\\x00\\x00\\x00\\x0c\\x00\\x00\\x00/usr/lib/dyld\\x00\\x00\\x00\\x00\\x00\\x00\\x00\\x0d' (0:829)",
+        "note: while parsing /?/liba.dylib",
+        "unexpected error: parsing input file failed with error InvalidLdScript",
+        "note: while parsing /?/liba.dylib",
+    } });
+
+    return test_step;
+}
+
+fn testUnresolvedError(b: *Build, opts: Options) *Step {
+    const test_step = addTestStep(b, "unresolved-error", opts);
+
+    const obj1 = addObject(b, opts, .{
+        .name = "a",
+        .c_source_bytes =
+        \\#include <stdio.h>
+        \\int foo();
+        \\int bar() {
+        \\  return foo() + 1;
+        \\}
+        ,
+        .c_source_flags = &.{"-ffunction-sections"},
+    });
+    obj1.linkLibC();
+
+    const obj2 = addObject(b, opts, .{
+        .name = "b",
+        .c_source_bytes =
+        \\#include <stdio.h>
+        \\int foo();
+        \\int bar();
+        \\int main() {
+        \\  return foo() + bar();
+        \\}
+        ,
+        .c_source_flags = &.{"-ffunction-sections"},
+    });
+    obj2.linkLibC();
+
+    const exe = addExecutable(b, opts, .{ .name = "main" });
+    exe.addObject(obj1);
+    exe.addObject(obj2);
+    exe.linkLibC();
+
+    expectLinkErrors(exe, test_step, .{ .exact = &.{
+        "error: undefined symbol: foo",
+        "note: referenced by /?/a.o:.text.bar",
+        "note: referenced by /?/b.o:.text.main",
+    } });
+
+    return test_step;
+}
+
 fn testWeakExports(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "weak-exports", opts);
 
-    const obj = addObject(b, "obj", opts);
-    addCSourceBytes(obj,
+    const obj = addObject(b, opts, .{
+        .name = "obj",
+        .c_source_bytes =
         \\#include <stdio.h>
         \\__attribute__((weak)) int foo();
         \\int main() {
         \\  printf("%d\n", foo ? foo() : 3);
         \\}
-    , &.{});
+        ,
+        .pic = true,
+    });
     obj.linkLibC();
-    obj.force_pic = true;
 
     {
-        const dso = addSharedLibrary(b, "a", opts);
+        const dso = addSharedLibrary(b, opts, .{ .name = "a" });
         dso.addObject(obj);
         dso.linkLibC();
 
@@ -2708,9 +3628,11 @@ fn testWeakExports(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = addExecutable(b, "main", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main" });
         exe.addObject(obj);
         exe.linkLibC();
+        // https://github.com/ziglang/zig/issues/17619
+        exe.pie = true;
 
         const check = exe.checkObject();
         check.checkInDynamicSymtab();
@@ -2728,14 +3650,14 @@ fn testWeakExports(b: *Build, opts: Options) *Step {
 fn testWeakUndefsDso(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "weak-undef-dso", opts);
 
-    const dso = addSharedLibrary(b, "a", opts);
+    const dso = addSharedLibrary(b, opts, .{ .name = "a" });
     addCSourceBytes(dso,
         \\__attribute__((weak)) int foo();
         \\int bar() { return foo ? foo() : -1; }
     , &.{});
 
     {
-        const exe = addExecutable(b, "main", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main" });
         addCSourceBytes(exe,
             \\#include <stdio.h>
             \\int bar();
@@ -2743,6 +3665,8 @@ fn testWeakUndefsDso(b: *Build, opts: Options) *Step {
         , &.{});
         exe.linkLibrary(dso);
         exe.linkLibC();
+        // https://github.com/ziglang/zig/issues/17619
+        exe.pie = true;
 
         const run = addRunArtifact(exe);
         run.expectStdOutEqual("bar=-1\n");
@@ -2750,7 +3674,7 @@ fn testWeakUndefsDso(b: *Build, opts: Options) *Step {
     }
 
     {
-        const exe = addExecutable(b, "main", opts);
+        const exe = addExecutable(b, opts, .{ .name = "main" });
         addCSourceBytes(exe,
             \\#include <stdio.h>
             \\int foo() { return 5; }
@@ -2759,6 +3683,8 @@ fn testWeakUndefsDso(b: *Build, opts: Options) *Step {
         , &.{});
         exe.linkLibrary(dso);
         exe.linkLibC();
+        // https://github.com/ziglang/zig/issues/17619
+        exe.pie = true;
 
         const run = addRunArtifact(exe);
         run.expectStdOutEqual("bar=5\n");
@@ -2771,12 +3697,14 @@ fn testWeakUndefsDso(b: *Build, opts: Options) *Step {
 fn testZNow(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "z-now", opts);
 
-    const obj = addObject(b, "obj", opts);
-    addCSourceBytes(obj, "int main() { return 0; }", &.{});
-    obj.force_pic = true;
+    const obj = addObject(b, opts, .{
+        .name = "obj",
+        .c_source_bytes = "int main() { return 0; }",
+        .pic = true,
+    });
 
     {
-        const dso = addSharedLibrary(b, "a", opts);
+        const dso = addSharedLibrary(b, opts, .{ .name = "a" });
         dso.addObject(obj);
 
         const check = dso.checkObject();
@@ -2786,7 +3714,7 @@ fn testZNow(b: *Build, opts: Options) *Step {
     }
 
     {
-        const dso = addSharedLibrary(b, "a", opts);
+        const dso = addSharedLibrary(b, opts, .{ .name = "a" });
         dso.addObject(obj);
         dso.link_z_lazy = true;
 
@@ -2802,13 +3730,13 @@ fn testZNow(b: *Build, opts: Options) *Step {
 fn testZStackSize(b: *Build, opts: Options) *Step {
     const test_step = addTestStep(b, "z-stack-size", opts);
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe, "int main() { return 0; }", &.{});
     exe.stack_size = 0x800000;
     exe.linkLibC();
 
     const check = exe.checkObject();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("program headers");
     check.checkExact("type GNU_STACK");
     check.checkExact("memsz 800000");
@@ -2827,8 +3755,9 @@ fn testZText(b: *Build, opts: Options) *Step {
     // musl supports only a very limited number of text relocations and only in DSOs (and
     // rightly so!).
 
-    const a_o = addObject(b, "a", opts);
-    addAsmSourceBytes(a_o,
+    const a_o = addObject(b, opts, .{
+        .name = "a",
+        .asm_source_bytes =
         \\.globl fn1
         \\fn1:
         \\  sub $8, %rsp
@@ -2836,10 +3765,13 @@ fn testZText(b: *Build, opts: Options) *Step {
         \\  call *%rax
         \\  add $8, %rsp
         \\  ret
-    );
+        \\
+        ,
+    });
 
-    const b_o = addObject(b, "b", opts);
-    addCSourceBytes(b_o,
+    const b_o = addObject(b, opts, .{
+        .name = "b",
+        .c_source_bytes =
         \\int fn1();
         \\int fn2() {
         \\  return 3;
@@ -2848,15 +3780,16 @@ fn testZText(b: *Build, opts: Options) *Step {
         \\int fnn() {
         \\  return fn1();
         \\}
-    , &.{});
-    b_o.force_pic = true;
+        ,
+        .pic = true,
+    });
 
-    const dso = addSharedLibrary(b, "a", opts);
+    const dso = addSharedLibrary(b, opts, .{ .name = "a" });
     dso.addObject(a_o);
     dso.addObject(b_o);
     dso.link_z_notext = true;
 
-    const exe = addExecutable(b, "main", opts);
+    const exe = addExecutable(b, opts, .{ .name = "main" });
     addCSourceBytes(exe,
         \\#include <stdio.h>
         \\int fnn();
@@ -2866,6 +3799,8 @@ fn testZText(b: *Build, opts: Options) *Step {
     , &.{});
     exe.linkLibrary(dso);
     exe.linkLibC();
+    // https://github.com/ziglang/zig/issues/17619
+    exe.pie = true;
 
     const run = addRunArtifact(exe);
     run.expectStdOutEqual("3\n");
@@ -2881,103 +3816,23 @@ fn testZText(b: *Build, opts: Options) *Step {
     return test_step;
 }
 
-const Options = struct {
-    target: CrossTarget = .{ .cpu_arch = .x86_64, .os_tag = .linux },
-    optimize: std.builtin.OptimizeMode = .Debug,
-    use_llvm: bool = true,
-};
-
 fn addTestStep(b: *Build, comptime prefix: []const u8, opts: Options) *Step {
-    const target = opts.target.zigTriple(b.allocator) catch @panic("OOM");
-    const optimize = @tagName(opts.optimize);
-    const use_llvm = if (opts.use_llvm) "llvm" else "no-llvm";
-    const name = std.fmt.allocPrint(b.allocator, "test-elf-" ++ prefix ++ "-{s}-{s}-{s}", .{
-        target,
-        optimize,
-        use_llvm,
-    }) catch @panic("OOM");
-    return b.step(name, "");
+    return link.addTestStep(b, "elf-" ++ prefix, opts);
 }
 
-fn addExecutable(b: *Build, name: []const u8, opts: Options) *Compile {
-    return b.addExecutable(.{
-        .name = name,
-        .target = opts.target,
-        .optimize = opts.optimize,
-        .use_llvm = opts.use_llvm,
-        .use_lld = false,
-    });
-}
-
-fn addObject(b: *Build, name: []const u8, opts: Options) *Compile {
-    return b.addObject(.{
-        .name = name,
-        .target = opts.target,
-        .optimize = opts.optimize,
-        .use_llvm = opts.use_llvm,
-        .use_lld = false,
-    });
-}
-
-fn addStaticLibrary(b: *Build, name: []const u8, opts: Options) *Compile {
-    return b.addStaticLibrary(.{
-        .name = name,
-        .target = opts.target,
-        .optimize = opts.optimize,
-        .use_llvm = opts.use_llvm,
-        .use_lld = true,
-    });
-}
-
-fn addSharedLibrary(b: *Build, name: []const u8, opts: Options) *Compile {
-    return b.addSharedLibrary(.{
-        .name = name,
-        .target = opts.target,
-        .optimize = opts.optimize,
-        .use_llvm = opts.use_llvm,
-        .use_lld = false,
-    });
-}
-
-fn addRunArtifact(comp: *Compile) *Run {
-    const b = comp.step.owner;
-    const run = b.addRunArtifact(comp);
-    run.skip_foreign_checks = true;
-    return run;
-}
-
-fn addZigSourceBytes(comp: *Compile, bytes: []const u8) void {
-    const b = comp.step.owner;
-    const file = WriteFile.create(b).add("a.zig", bytes);
-    file.addStepDependencies(&comp.step);
-    comp.root_src = file;
-}
-
-fn addCSourceBytes(comp: *Compile, bytes: []const u8, flags: []const []const u8) void {
-    const b = comp.step.owner;
-    const file = WriteFile.create(b).add("a.c", bytes);
-    comp.addCSourceFile(.{ .file = file, .flags = flags });
-}
-
-fn addCppSourceBytes(comp: *Compile, bytes: []const u8, flags: []const []const u8) void {
-    const b = comp.step.owner;
-    const file = WriteFile.create(b).add("a.cpp", bytes);
-    comp.addCSourceFile(.{ .file = file, .flags = flags });
-}
-
-fn addAsmSourceBytes(comp: *Compile, bytes: []const u8) void {
-    const b = comp.step.owner;
-    const actual_bytes = std.fmt.allocPrint(b.allocator, "{s}\n", .{bytes}) catch @panic("OOM");
-    const file = WriteFile.create(b).add("a.s", actual_bytes);
-    comp.addAssemblyFile(file);
-}
-
+const addAsmSourceBytes = link.addAsmSourceBytes;
+const addCSourceBytes = link.addCSourceBytes;
+const addCppSourceBytes = link.addCppSourceBytes;
+const addExecutable = link.addExecutable;
+const addObject = link.addObject;
+const addRunArtifact = link.addRunArtifact;
+const addSharedLibrary = link.addSharedLibrary;
+const addStaticLibrary = link.addStaticLibrary;
+const expectLinkErrors = link.expectLinkErrors;
+const link = @import("link.zig");
 const std = @import("std");
 
 const Build = std.Build;
-const Compile = Step.Compile;
-const CrossTarget = std.zig.CrossTarget;
-const LazyPath = Build.LazyPath;
-const Run = Step.Run;
+const Options = link.Options;
 const Step = Build.Step;
 const WriteFile = Step.WriteFile;

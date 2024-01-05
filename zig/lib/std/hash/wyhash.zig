@@ -131,7 +131,7 @@ pub const Wyhash = struct {
     inline fn read(comptime bytes: usize, data: []const u8) u64 {
         std.debug.assert(bytes <= 8);
         const T = std.meta.Int(.unsigned, 8 * bytes);
-        return @as(u64, std.mem.readIntLittle(T, data[0..bytes]));
+        return @as(u64, std.mem.readInt(T, data[0..bytes], .little));
     }
 
     inline fn mum(a: *u64, b: *u64) void {
@@ -224,7 +224,7 @@ test "test vectors" {
 
 test "test vectors at comptime" {
     comptime {
-        inline for (vectors) |e| {
+        for (vectors) |e| {
             try expectEqual(e.expected, Wyhash.hash(e.seed, e.input));
         }
     }

@@ -16,19 +16,19 @@ fn add(b: *std.Build, test_step: *std.Build.Step, optimize: std.builtin.Optimize
     const exe = b.addExecutable(.{
         .name = "main",
         .optimize = optimize,
-        .target = .{ .os_tag = .macos },
+        .target = b.resolveTargetQuery(.{ .os_tag = .macos }),
     });
     exe.addCSourceFile(.{ .file = .{ .path = "main.c" }, .flags = &.{} });
     exe.linkLibC();
-    exe.entry_symbol_name = "_non_main";
+    exe.entry = .{ .symbol_name = "_non_main" };
 
     const check_exe = exe.checkObject();
 
-    check_exe.checkStart();
+    check_exe.checkInHeaders();
     check_exe.checkExact("segname __TEXT");
     check_exe.checkExtract("vmaddr {vmaddr}");
 
-    check_exe.checkStart();
+    check_exe.checkInHeaders();
     check_exe.checkExact("cmd MAIN");
     check_exe.checkExtract("entryoff {entryoff}");
 

@@ -9,13 +9,12 @@ const print = std.debug.print;
 const mem = std.mem;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
+const getExternalExecutor = std.zig.system.getExternalExecutor;
 
 const max_doc_file_size = 10 * 1024 * 1024;
 
-const exe_ext = @as(std.zig.CrossTarget, .{}).exeFileExt();
 const obj_ext = builtin.object_format.fileExt(builtin.cpu.arch);
 const tmp_dir_name = "docgen_tmp";
-const test_out_path = tmp_dir_name ++ fs.path.sep_str ++ "test" ++ exe_ext;
 
 const usage =
     \\Usage: docgen [--zig] [--skip-code-tests] input output"
@@ -1309,7 +1308,7 @@ fn genHtml(
     var env_map = try process.getEnvMap(allocator);
     try env_map.put("YES_COLOR", "1");
 
-    const host = try std.zig.system.NativeTargetInfo.detect(.{});
+    const host = try std.zig.system.resolveTargetQuery(.{});
     const builtin_code = try getBuiltinCode(allocator, &env_map, zig_exe, opt_zig_lib_dir);
 
     for (toc.nodes) |node| {
@@ -1424,9 +1423,7 @@ fn genHtml(
                             try build_args.append("-lc");
                             try shell_out.print("-lc ", .{});
                         }
-                        const target = try std.zig.CrossTarget.parse(.{
-                            .arch_os_abi = code.target_str orelse "native",
-                        });
+
                         if (code.target_str) |triple| {
                             try build_args.appendSlice(&[_][]const u8{ "-target", triple });
                             try shell_out.print("-target {s} ", .{triple});
@@ -1443,7 +1440,7 @@ fn genHtml(
                         try shell_out.print("\n", .{});
 
                         if (expected_outcome == .build_fail) {
-                            const result = try ChildProcess.exec(.{
+                            const result = try ChildProcess.run(.{
                                 .allocator = allocator,
                                 .argv = build_args.items,
                                 .cwd = tmp_dir_name,
@@ -1471,7 +1468,7 @@ fn genHtml(
                             try shell_out.writeAll(colored_stderr);
                             break :code_block;
                         }
-                        const exec_result = exec(allocator, &env_map, tmp_dir_name, build_args.items) catch
+                        const exec_result = run(allocator, &env_map, tmp_dir_name, build_args.items) catch
                             return parseError(tokenizer, code.source_token, "example failed to compile", .{});
 
                         if (code.verbose_cimport) {
@@ -1490,16 +1487,20 @@ fn genHtml(
                             }
                         }
 
+                        const target_query = try std.Target.Query.parse(.{
+                            .arch_os_abi = code.target_str orelse "native",
+                        });
+                        const target = try std.zig.system.resolveTargetQuery(target_query);
+
                         const path_to_exe = try std.fmt.allocPrint(allocator, "./{s}{s}", .{
-                            code.name,
-                            target.exeFileExt(),
+                            code.name, target.exeFileExt(),
                         });
                         const run_args = &[_][]const u8{path_to_exe};
 
                         var exited_with_signal = false;
 
                         const result = if (expected_outcome == .fail) blk: {
-                            const result = try ChildProcess.exec(.{
+                            const result = try ChildProcess.run(.{
                                 .allocator = allocator,
                                 .argv = run_args,
                                 .env_map = &env_map,
@@ -1520,7 +1521,7 @@ fn genHtml(
                             }
                             break :blk result;
                         } else blk: {
-                            break :blk exec(allocator, &env_map, tmp_dir_name, run_args) catch return parseError(tokenizer, code.source_token, "example crashed", .{});
+                            break :blk run(allocator, &env_map, tmp_dir_name, run_args) catch return parseError(tokenizer, code.source_token, "example crashed", .{});
                         };
 
                         const escaped_stderr = try escapeHtml(allocator, result.stderr);
@@ -1565,13 +1566,13 @@ fn genHtml(
                             try test_args.appendSlice(&[_][]const u8{ "-target", triple });
                             try shell_out.print("-target {s} ", .{triple});
 
-                            const cross_target = try std.zig.CrossTarget.parse(.{
+                            const target_query = try std.Target.Query.parse(.{
                                 .arch_os_abi = triple,
                             });
-                            const target_info = try std.zig.system.NativeTargetInfo.detect(
-                                cross_target,
+                            const target = try std.zig.system.resolveTargetQuery(
+                                target_query,
                             );
-                            switch (host.getExternalExecutor(&target_info, .{
+                            switch (getExternalExecutor(host, &target, .{
                                 .link_libc = code.link_libc,
                             })) {
                                 .native => {},
@@ -1581,7 +1582,7 @@ fn genHtml(
                                 },
                             }
                         }
-                        const result = exec(allocator, &env_map, null, test_args.items) catch
+                        const result = run(allocator, &env_map, null, test_args.items) catch
                             return parseError(tokenizer, code.source_token, "test failed", .{});
                         const escaped_stderr = try escapeHtml(allocator, result.stderr);
                         const escaped_stdout = try escapeHtml(allocator, result.stdout);
@@ -1612,7 +1613,7 @@ fn genHtml(
                             try test_args.append("-lc");
                             try shell_out.print("-lc ", .{});
                         }
-                        const result = try ChildProcess.exec(.{
+                        const result = try ChildProcess.run(.{
                             .allocator = allocator,
                             .argv = test_args.items,
                             .env_map = &env_map,
@@ -1671,7 +1672,7 @@ fn genHtml(
                             },
                         }
 
-                        const result = try ChildProcess.exec(.{
+                        const result = try ChildProcess.run(.{
                             .allocator = allocator,
                             .argv = test_args.items,
                             .env_map = &env_map,
@@ -1744,7 +1745,7 @@ fn genHtml(
                         }
 
                         if (maybe_error_match) |error_match| {
-                            const result = try ChildProcess.exec(.{
+                            const result = try ChildProcess.run(.{
                                 .allocator = allocator,
                                 .argv = build_args.items,
                                 .env_map = &env_map,
@@ -1775,7 +1776,7 @@ fn genHtml(
                             const colored_stderr = try termColor(allocator, escaped_stderr);
                             try shell_out.print("\n{s} ", .{colored_stderr});
                         } else {
-                            _ = exec(allocator, &env_map, null, build_args.items) catch return parseError(tokenizer, code.source_token, "example failed to compile", .{});
+                            _ = run(allocator, &env_map, null, build_args.items) catch return parseError(tokenizer, code.source_token, "example failed to compile", .{});
                         }
                         try shell_out.writeAll("\n");
                     },
@@ -1828,7 +1829,7 @@ fn genHtml(
                             try test_args.append(option);
                             try shell_out.print("{s} ", .{option});
                         }
-                        const result = exec(allocator, &env_map, null, test_args.items) catch return parseError(tokenizer, code.source_token, "test failed", .{});
+                        const result = run(allocator, &env_map, null, test_args.items) catch return parseError(tokenizer, code.source_token, "test failed", .{});
                         const escaped_stderr = try escapeHtml(allocator, result.stderr);
                         const escaped_stdout = try escapeHtml(allocator, result.stdout);
                         try shell_out.print("\n{s}{s}\n", .{ escaped_stderr, escaped_stdout });
@@ -1843,13 +1844,13 @@ fn genHtml(
     }
 }
 
-fn exec(
+fn run(
     allocator: Allocator,
     env_map: *process.EnvMap,
     cwd: ?[]const u8,
     args: []const []const u8,
-) !ChildProcess.ExecResult {
-    const result = try ChildProcess.exec(.{
+) !ChildProcess.RunResult {
+    const result = try ChildProcess.run(.{
         .allocator = allocator,
         .argv = args,
         .env_map = env_map,
@@ -1880,12 +1881,12 @@ fn getBuiltinCode(
     opt_zig_lib_dir: ?[]const u8,
 ) ![]const u8 {
     if (opt_zig_lib_dir) |zig_lib_dir| {
-        const result = try exec(allocator, env_map, null, &.{
+        const result = try run(allocator, env_map, null, &.{
             zig_exe, "build-obj", "--show-builtin", "--zig-lib-dir", zig_lib_dir,
         });
         return result.stdout;
     } else {
-        const result = try exec(allocator, env_map, null, &.{
+        const result = try run(allocator, env_map, null, &.{
             zig_exe, "build-obj", "--show-builtin",
         });
         return result.stdout;

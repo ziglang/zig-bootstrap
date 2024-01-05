@@ -410,7 +410,8 @@ test "Type.Union" {
             .decls = &.{},
         },
     });
-    var packed_untagged = PackedUntagged{ .signed = -1 };
+    var packed_untagged: PackedUntagged = .{ .signed = -1 };
+    _ = &packed_untagged;
     try testing.expectEqual(@as(i32, -1), packed_untagged.signed);
     try testing.expectEqual(~@as(u32, 0), packed_untagged.unsigned);
 
@@ -437,9 +438,9 @@ test "Type.Union" {
         },
     });
     var tagged = Tagged{ .signed = -1 };
-    try testing.expectEqual(Tag.signed, tagged);
+    try testing.expectEqual(Tag.signed, @as(Tag, tagged));
     tagged = .{ .unsigned = 1 };
-    try testing.expectEqual(Tag.unsigned, tagged);
+    try testing.expectEqual(Tag.unsigned, @as(Tag, tagged));
 }
 
 test "Type.Union from Type.Enum" {
@@ -479,6 +480,39 @@ test "Type.Union from regular enum" {
         },
     });
     _ = @typeInfo(T).Union;
+}
+
+test "Type.Union from empty regular enum" {
+    const E = enum {};
+    const U = @Type(.{
+        .Union = .{
+            .layout = .Auto,
+            .tag_type = E,
+            .fields = &.{},
+            .decls = &.{},
+        },
+    });
+    try testing.expectEqual(@sizeOf(U), 0);
+}
+
+test "Type.Union from empty Type.Enum" {
+    const E = @Type(.{
+        .Enum = .{
+            .tag_type = u0,
+            .fields = &.{},
+            .decls = &.{},
+            .is_exhaustive = true,
+        },
+    });
+    const U = @Type(.{
+        .Union = .{
+            .layout = .Auto,
+            .tag_type = E,
+            .fields = &.{},
+            .decls = &.{},
+        },
+    });
+    try testing.expectEqual(@sizeOf(U), 0);
 }
 
 test "Type.Fn" {
@@ -529,7 +563,7 @@ test "reified struct field name from optional payload" {
                 .decls = &.{},
                 .is_tuple = false,
             } });
-            var t: T = .{ .a = 123 };
+            const t: T = .{ .a = 123 };
             try std.testing.expect(t.a == 123);
         }
     }

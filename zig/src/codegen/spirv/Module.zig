@@ -184,6 +184,7 @@ pub fn deinit(self: *Module) void {
     self.sections.debug_strings.deinit(self.gpa);
     self.sections.debug_names.deinit(self.gpa);
     self.sections.annotations.deinit(self.gpa);
+    self.sections.types_globals_constants.deinit(self.gpa);
     self.sections.functions.deinit(self.gpa);
 
     self.source_file_names.deinit(self.gpa);
@@ -504,17 +505,6 @@ pub fn arrayType(self: *Module, len: u32, elem_ty_ref: CacheRef) !CacheRef {
     return try self.resolve(.{ .array_type = .{
         .element_type = elem_ty_ref,
         .length = len_ref,
-    } });
-}
-
-pub fn ptrType(
-    self: *Module,
-    child: CacheRef,
-    storage_class: spec.StorageClass,
-) !CacheRef {
-    return try self.resolve(.{ .ptr_type = .{
-        .storage_class = storage_class,
-        .child_type = child,
     } });
 }
 

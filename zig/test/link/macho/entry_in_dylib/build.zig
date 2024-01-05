@@ -16,7 +16,7 @@ fn add(b: *std.Build, test_step: *std.Build.Step, optimize: std.builtin.Optimize
     const lib = b.addSharedLibrary(.{
         .name = "bootstrap",
         .optimize = optimize,
-        .target = .{ .os_tag = .macos },
+        .target = b.resolveTargetQuery(.{ .os_tag = .macos }),
     });
     lib.addCSourceFile(.{ .file = .{ .path = "bootstrap.c" }, .flags = &.{} });
     lib.linkLibC();
@@ -25,24 +25,24 @@ fn add(b: *std.Build, test_step: *std.Build.Step, optimize: std.builtin.Optimize
     const exe = b.addExecutable(.{
         .name = "main",
         .optimize = optimize,
-        .target = .{ .os_tag = .macos },
+        .target = b.resolveTargetQuery(.{ .os_tag = .macos }),
     });
     exe.addCSourceFile(.{ .file = .{ .path = "main.c" }, .flags = &.{} });
     exe.linkLibrary(lib);
     exe.linkLibC();
-    exe.entry_symbol_name = "_bootstrap";
+    exe.entry = .{ .symbol_name = "_bootstrap" };
     exe.forceUndefinedSymbol("_my_main");
 
     const check_exe = exe.checkObject();
-    check_exe.checkStart();
+    check_exe.checkInHeaders();
     check_exe.checkExact("segname __TEXT");
     check_exe.checkExtract("vmaddr {text_vmaddr}");
 
-    check_exe.checkStart();
+    check_exe.checkInHeaders();
     check_exe.checkExact("sectname __stubs");
     check_exe.checkExtract("addr {stubs_vmaddr}");
 
-    check_exe.checkStart();
+    check_exe.checkInHeaders();
     check_exe.checkExact("cmd MAIN");
     check_exe.checkExtract("entryoff {entryoff}");
 

@@ -52,8 +52,13 @@ pub fn expectError(expected_error: anyerror, actual_error_union: anytype) !void 
 /// This function is intended to be used only in tests. When the two values are not
 /// equal, prints diagnostics to stderr to show exactly how they are not equal,
 /// then returns a test failure error.
-/// `actual` is casted to the type of `expected`.
-pub fn expectEqual(expected: anytype, actual: @TypeOf(expected)) !void {
+/// `actual` and `expected` are coerced to a common type using peer type resolution.
+pub inline fn expectEqual(expected: anytype, actual: anytype) !void {
+    const T = @TypeOf(expected, actual);
+    return expectEqualInner(T, expected, actual);
+}
+
+fn expectEqualInner(comptime T: type, expected: T, actual: T) !void {
     switch (@typeInfo(@TypeOf(actual))) {
         .NoReturn,
         .Opaque,
@@ -224,9 +229,13 @@ pub fn expectFmt(expected: []const u8, comptime template: []const u8, args: anyt
 /// to show exactly how they are not equal, then returns a test failure error.
 /// See `math.approxEqAbs` for more information on the tolerance parameter.
 /// The types must be floating-point.
-pub fn expectApproxEqAbs(expected: anytype, actual: @TypeOf(expected), tolerance: @TypeOf(expected)) !void {
-    const T = @TypeOf(expected);
+/// `actual` and `expected` are coerced to a common type using peer type resolution.
+pub inline fn expectApproxEqAbs(expected: anytype, actual: anytype, tolerance: anytype) !void {
+    const T = @TypeOf(expected, actual, tolerance);
+    return expectApproxEqAbsInner(T, expected, actual, tolerance);
+}
 
+fn expectApproxEqAbsInner(comptime T: type, expected: T, actual: T, tolerance: T) !void {
     switch (@typeInfo(T)) {
         .Float => if (!math.approxEqAbs(T, expected, actual, tolerance)) {
             print("actual {}, not within absolute tolerance {} of expected {}\n", .{ actual, tolerance, expected });
@@ -256,9 +265,13 @@ test "expectApproxEqAbs" {
 /// to show exactly how they are not equal, then returns a test failure error.
 /// See `math.approxEqRel` for more information on the tolerance parameter.
 /// The types must be floating-point.
-pub fn expectApproxEqRel(expected: anytype, actual: @TypeOf(expected), tolerance: @TypeOf(expected)) !void {
-    const T = @TypeOf(expected);
+/// `actual` and `expected` are coerced to a common type using peer type resolution.
+pub inline fn expectApproxEqRel(expected: anytype, actual: anytype, tolerance: anytype) !void {
+    const T = @TypeOf(expected, actual, tolerance);
+    return expectApproxEqRelInner(T, expected, actual, tolerance);
+}
 
+fn expectApproxEqRelInner(comptime T: type, expected: T, actual: T, tolerance: T) !void {
     switch (@typeInfo(T)) {
         .Float => if (!math.approxEqRel(T, expected, actual, tolerance)) {
             print("actual {}, not within relative tolerance {} of expected {}\n", .{ actual, tolerance, expected });
@@ -399,7 +412,7 @@ fn SliceDiffer(comptime T: type) type {
 
         pub fn write(self: Self, writer: anytype) !void {
             for (self.expected, 0..) |value, i| {
-                var full_index = self.start_index + i;
+                const full_index = self.start_index + i;
                 const diff = if (i < self.actual.len) !std.meta.eql(self.actual[i], value) else true;
                 if (diff) try self.ttyconf.setColor(writer, .red);
                 if (@typeInfo(T) == .Pointer) {
@@ -424,7 +437,7 @@ const BytesDiffer = struct {
             // to avoid having to calculate diffs twice per chunk
             var diffs: std.bit_set.IntegerBitSet(16) = .{ .mask = 0 };
             for (chunk, 0..) |byte, i| {
-                var absolute_byte_index = (expected_iterator.index - chunk.len) + i;
+                const absolute_byte_index = (expected_iterator.index - chunk.len) + i;
                 const diff = if (absolute_byte_index < self.actual.len) self.actual[absolute_byte_index] != byte else true;
                 if (diff) diffs.set(i);
                 try self.writeByteDiff(writer, "{X:0>2} ", byte, diff);
@@ -543,61 +556,23 @@ pub const TmpDir = struct {
     }
 };
 
-pub const TmpIterableDir = struct {
-    iterable_dir: std.fs.IterableDir,
-    parent_dir: std.fs.Dir,
-    sub_path: [sub_path_len]u8,
-
-    const random_bytes_count = 12;
-    const sub_path_len = std.fs.base64_encoder.calcSize(random_bytes_count);
-
-    pub fn cleanup(self: *TmpIterableDir) void {
-        self.iterable_dir.close();
-        self.parent_dir.deleteTree(&self.sub_path) catch {};
-        self.parent_dir.close();
-        self.* = undefined;
-    }
-};
-
 pub fn tmpDir(opts: std.fs.Dir.OpenDirOptions) TmpDir {
     var random_bytes: [TmpDir.random_bytes_count]u8 = undefined;
     std.crypto.random.bytes(&random_bytes);
     var sub_path: [TmpDir.sub_path_len]u8 = undefined;
     _ = std.fs.base64_encoder.encode(&sub_path, &random_bytes);
 
-    var cwd = std.fs.cwd();
+    const cwd = std.fs.cwd();
     var cache_dir = cwd.makeOpenPath("zig-cache", .{}) catch
         @panic("unable to make tmp dir for testing: unable to make and open zig-cache dir");
     defer cache_dir.close();
-    var parent_dir = cache_dir.makeOpenPath("tmp", .{}) catch
+    const parent_dir = cache_dir.makeOpenPath("tmp", .{}) catch
         @panic("unable to make tmp dir for testing: unable to make and open zig-cache/tmp dir");
-    var dir = parent_dir.makeOpenPath(&sub_path, opts) catch
+    const dir = parent_dir.makeOpenPath(&sub_path, opts) catch
         @panic("unable to make tmp dir for testing: unable to make and open the tmp dir");
 
     return .{
         .dir = dir,
-        .parent_dir = parent_dir,
-        .sub_path = sub_path,
-    };
-}
-
-pub fn tmpIterableDir(opts: std.fs.Dir.OpenDirOptions) TmpIterableDir {
-    var random_bytes: [TmpIterableDir.random_bytes_count]u8 = undefined;
-    std.crypto.random.bytes(&random_bytes);
-    var sub_path: [TmpIterableDir.sub_path_len]u8 = undefined;
-    _ = std.fs.base64_encoder.encode(&sub_path, &random_bytes);
-
-    var cwd = std.fs.cwd();
-    var cache_dir = cwd.makeOpenPath("zig-cache", .{}) catch
-        @panic("unable to make tmp dir for testing: unable to make and open zig-cache dir");
-    defer cache_dir.close();
-    var parent_dir = cache_dir.makeOpenPath("tmp", .{}) catch
-        @panic("unable to make tmp dir for testing: unable to make and open zig-cache/tmp dir");
-    var dir = parent_dir.makeOpenPathIterable(&sub_path, opts) catch
-        @panic("unable to make tmp dir for testing: unable to make and open the tmp dir");
-
-    return .{
-        .iterable_dir = dir,
         .parent_dir = parent_dir,
         .sub_path = sub_path,
     };
@@ -618,8 +593,8 @@ test "expectEqual nested array" {
 }
 
 test "expectEqual vector" {
-    var a: @Vector(4, u32) = @splat(4);
-    var b: @Vector(4, u32) = @splat(4);
+    const a: @Vector(4, u32) = @splat(4);
+    const b: @Vector(4, u32) = @splat(4);
 
     try expectEqual(a, b);
 }
@@ -691,17 +666,22 @@ pub fn expectStringEndsWith(actual: []const u8, expected_ends_with: []const u8) 
 /// This function is intended to be used only in tests. When the two values are not
 /// deeply equal, prints diagnostics to stderr to show exactly how they are not equal,
 /// then returns a test failure error.
-/// `actual` is casted to the type of `expected`.
+/// `actual` and `expected` are coerced to a common type using peer type resolution.
 ///
 /// Deeply equal is defined as follows:
-/// Primitive types are deeply equal if they are equal using  `==` operator.
+/// Primitive types are deeply equal if they are equal using `==` operator.
 /// Struct values are deeply equal if their corresponding fields are deeply equal.
 /// Container types(like Array/Slice/Vector) deeply equal when their corresponding elements are deeply equal.
 /// Pointer values are deeply equal if values they point to are deeply equal.
 ///
 /// Note: Self-referential structs are supported (e.g. things like std.SinglyLinkedList)
 /// but may cause infinite recursion or stack overflow when a container has a pointer to itself.
-pub fn expectEqualDeep(expected: anytype, actual: @TypeOf(expected)) error{TestExpectedEqual}!void {
+pub inline fn expectEqualDeep(expected: anytype, actual: anytype) error{TestExpectedEqual}!void {
+    const T = @TypeOf(expected, actual);
+    return expectEqualDeepInner(T, expected, actual);
+}
+
+fn expectEqualDeepInner(comptime T: type, expected: T, actual: T) error{TestExpectedEqual}!void {
     switch (@typeInfo(@TypeOf(actual))) {
         .NoReturn,
         .Opaque,

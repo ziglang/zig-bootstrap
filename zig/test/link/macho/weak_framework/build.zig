@@ -17,13 +17,14 @@ fn add(b: *std.Build, test_step: *std.Build.Step, optimize: std.builtin.Optimize
     const exe = b.addExecutable(.{
         .name = "test",
         .optimize = optimize,
+        .target = b.host,
     });
     exe.addCSourceFile(.{ .file = .{ .path = "main.c" }, .flags = &[0][]const u8{} });
     exe.linkLibC();
     exe.linkFrameworkWeak("Cocoa");
 
     const check = exe.checkObject();
-    check.checkStart();
+    check.checkInHeaders();
     check.checkExact("cmd LOAD_WEAK_DYLIB");
     check.checkContains("Cocoa");
     test_step.dependOn(&check.step);

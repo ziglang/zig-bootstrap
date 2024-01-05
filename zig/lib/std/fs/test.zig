@@ -8,10 +8,8 @@ const wasi = std.os.wasi;
 
 const ArenaAllocator = std.heap.ArenaAllocator;
 const Dir = std.fs.Dir;
-const IterableDir = std.fs.IterableDir;
 const File = std.fs.File;
 const tmpDir = testing.tmpDir;
-const tmpIterableDir = testing.tmpIterableDir;
 
 const PathType = enum {
     relative,
@@ -74,19 +72,17 @@ const PathType = enum {
 const TestContext = struct {
     path_type: PathType,
     arena: ArenaAllocator,
-    tmp: testing.TmpIterableDir,
+    tmp: testing.TmpDir,
     dir: std.fs.Dir,
-    iterable_dir: std.fs.IterableDir,
     transform_fn: *const PathType.TransformFn,
 
     pub fn init(path_type: PathType, allocator: mem.Allocator, transform_fn: *const PathType.TransformFn) TestContext {
-        var tmp = tmpIterableDir(.{});
+        const tmp = tmpDir(.{ .iterate = true });
         return .{
             .path_type = path_type,
             .arena = ArenaAllocator.init(allocator),
             .tmp = tmp,
-            .dir = tmp.iterable_dir.dir,
-            .iterable_dir = tmp.iterable_dir,
+            .dir = tmp.dir,
             .transform_fn = transform_fn,
         };
     }
@@ -158,6 +154,88 @@ fn testReadLink(dir: Dir, target_path: []const u8, symlink_path: []const u8) !vo
     var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
     const given = try dir.readLink(symlink_path, buffer[0..]);
     try testing.expectEqualStrings(target_path, given);
+}
+
+test "File.stat on a File that is a symlink returns Kind.sym_link" {
+    // This test requires getting a file descriptor of a symlink which
+    // is not possible on all targets
+    switch (builtin.target.os.tag) {
+        .windows, .linux => {},
+        else => return error.SkipZigTest,
+    }
+
+    try testWithAllSupportedPathTypes(struct {
+        fn impl(ctx: *TestContext) !void {
+            const dir_target_path = try ctx.transformPath("subdir");
+            try ctx.dir.makeDir(dir_target_path);
+
+            ctx.dir.symLink(dir_target_path, "symlink", .{ .is_directory = true }) catch |err| switch (err) {
+                // Symlink requires admin privileges on windows, so this test can legitimately fail.
+                error.AccessDenied => return error.SkipZigTest,
+                else => return err,
+            };
+
+            var symlink = switch (builtin.target.os.tag) {
+                .windows => windows_symlink: {
+                    const w = std.os.windows;
+
+                    const sub_path_w = try std.os.windows.cStrToPrefixedFileW(ctx.dir.fd, "symlink");
+
+                    var result = Dir{
+                        .fd = undefined,
+                    };
+
+                    const path_len_bytes = @as(u16, @intCast(sub_path_w.span().len * 2));
+                    var nt_name = w.UNICODE_STRING{
+                        .Length = path_len_bytes,
+                        .MaximumLength = path_len_bytes,
+                        .Buffer = @constCast(&sub_path_w.data),
+                    };
+                    var attr = w.OBJECT_ATTRIBUTES{
+                        .Length = @sizeOf(w.OBJECT_ATTRIBUTES),
+                        .RootDirectory = if (fs.path.isAbsoluteWindowsW(sub_path_w.span())) null else ctx.dir.fd,
+                        .Attributes = 0,
+                        .ObjectName = &nt_name,
+                        .SecurityDescriptor = null,
+                        .SecurityQualityOfService = null,
+                    };
+                    var io: w.IO_STATUS_BLOCK = undefined;
+                    const rc = w.ntdll.NtCreateFile(
+                        &result.fd,
+                        w.STANDARD_RIGHTS_READ | w.FILE_READ_ATTRIBUTES | w.FILE_READ_EA | w.SYNCHRONIZE | w.FILE_TRAVERSE,
+                        &attr,
+                        &io,
+                        null,
+                        w.FILE_ATTRIBUTE_NORMAL,
+                        w.FILE_SHARE_READ | w.FILE_SHARE_WRITE,
+                        w.FILE_OPEN,
+                        // FILE_OPEN_REPARSE_POINT is the important thing here
+                        w.FILE_OPEN_REPARSE_POINT | w.FILE_DIRECTORY_FILE | w.FILE_SYNCHRONOUS_IO_NONALERT | w.FILE_OPEN_FOR_BACKUP_INTENT,
+                        null,
+                        0,
+                    );
+
+                    switch (rc) {
+                        .SUCCESS => break :windows_symlink result,
+                        else => return w.unexpectedStatus(rc),
+                    }
+                },
+                .linux => linux_symlink: {
+                    const sub_path_c = try os.toPosixPath("symlink");
+                    // the O_NOFOLLOW | O_PATH combination can obtain a fd to a symlink
+                    // note that if O_DIRECTORY is set, then this will error with ENOTDIR
+                    const flags = os.O.NOFOLLOW | os.O.PATH | os.O.RDONLY | os.O.CLOEXEC;
+                    const fd = try os.openatZ(ctx.dir.fd, &sub_path_c, flags, 0);
+                    break :linux_symlink Dir{ .fd = fd };
+                },
+                else => unreachable,
+            };
+            defer symlink.close();
+
+            const stat = try symlink.stat();
+            try testing.expectEqual(File.Kind.sym_link, stat.kind);
+        }
+    }.impl);
 }
 
 test "relative symlink to parent directory" {
@@ -323,28 +401,28 @@ fn testReadLinkAbsolute(target_path: []const u8, symlink_path: []const u8) !void
 }
 
 test "Dir.Iterator" {
-    var tmp_dir = tmpIterableDir(.{});
+    var tmp_dir = tmpDir(.{ .iterate = true });
     defer tmp_dir.cleanup();
 
     // First, create a couple of entries to iterate over.
-    const file = try tmp_dir.iterable_dir.dir.createFile("some_file", .{});
+    const file = try tmp_dir.dir.createFile("some_file", .{});
     file.close();
 
-    try tmp_dir.iterable_dir.dir.makeDir("some_dir");
+    try tmp_dir.dir.makeDir("some_dir");
 
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var entries = std.ArrayList(IterableDir.Entry).init(allocator);
+    var entries = std.ArrayList(Dir.Entry).init(allocator);
 
     // Create iterator.
-    var iter = tmp_dir.iterable_dir.iterate();
+    var iter = tmp_dir.dir.iterate();
     while (try iter.next()) |entry| {
         // We cannot just store `entry` as on Windows, we're re-using the name buffer
         // which means we'll actually share the `name` pointer between entries!
         const name = try allocator.dupe(u8, entry.name);
-        try entries.append(.{ .name = name, .kind = entry.kind });
+        try entries.append(Dir.Entry{ .name = name, .kind = entry.kind });
     }
 
     try testing.expectEqual(@as(usize, 2), entries.items.len); // note that the Iterator skips '.' and '..'
@@ -353,7 +431,7 @@ test "Dir.Iterator" {
 }
 
 test "Dir.Iterator many entries" {
-    var tmp_dir = tmpIterableDir(.{});
+    var tmp_dir = tmpDir(.{ .iterate = true });
     defer tmp_dir.cleanup();
 
     const num = 1024;
@@ -361,7 +439,7 @@ test "Dir.Iterator many entries" {
     var buf: [4]u8 = undefined; // Enough to store "1024".
     while (i < num) : (i += 1) {
         const name = try std.fmt.bufPrint(&buf, "{}", .{i});
-        const file = try tmp_dir.iterable_dir.dir.createFile(name, .{});
+        const file = try tmp_dir.dir.createFile(name, .{});
         file.close();
     }
 
@@ -369,10 +447,10 @@ test "Dir.Iterator many entries" {
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    var entries = std.ArrayList(IterableDir.Entry).init(allocator);
+    var entries = std.ArrayList(Dir.Entry).init(allocator);
 
     // Create iterator.
-    var iter = tmp_dir.iterable_dir.iterate();
+    var iter = tmp_dir.dir.iterate();
     while (try iter.next()) |entry| {
         // We cannot just store `entry` as on Windows, we're re-using the name buffer
         // which means we'll actually share the `name` pointer between entries!
@@ -388,14 +466,14 @@ test "Dir.Iterator many entries" {
 }
 
 test "Dir.Iterator twice" {
-    var tmp_dir = tmpIterableDir(.{});
+    var tmp_dir = tmpDir(.{ .iterate = true });
     defer tmp_dir.cleanup();
 
     // First, create a couple of entries to iterate over.
-    const file = try tmp_dir.iterable_dir.dir.createFile("some_file", .{});
+    const file = try tmp_dir.dir.createFile("some_file", .{});
     file.close();
 
-    try tmp_dir.iterable_dir.dir.makeDir("some_dir");
+    try tmp_dir.dir.makeDir("some_dir");
 
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
@@ -403,15 +481,15 @@ test "Dir.Iterator twice" {
 
     var i: u8 = 0;
     while (i < 2) : (i += 1) {
-        var entries = std.ArrayList(IterableDir.Entry).init(allocator);
+        var entries = std.ArrayList(Dir.Entry).init(allocator);
 
         // Create iterator.
-        var iter = tmp_dir.iterable_dir.iterate();
+        var iter = tmp_dir.dir.iterate();
         while (try iter.next()) |entry| {
             // We cannot just store `entry` as on Windows, we're re-using the name buffer
             // which means we'll actually share the `name` pointer between entries!
             const name = try allocator.dupe(u8, entry.name);
-            try entries.append(.{ .name = name, .kind = entry.kind });
+            try entries.append(Dir.Entry{ .name = name, .kind = entry.kind });
         }
 
         try testing.expectEqual(@as(usize, 2), entries.items.len); // note that the Iterator skips '.' and '..'
@@ -421,25 +499,25 @@ test "Dir.Iterator twice" {
 }
 
 test "Dir.Iterator reset" {
-    var tmp_dir = tmpIterableDir(.{});
+    var tmp_dir = tmpDir(.{ .iterate = true });
     defer tmp_dir.cleanup();
 
     // First, create a couple of entries to iterate over.
-    const file = try tmp_dir.iterable_dir.dir.createFile("some_file", .{});
+    const file = try tmp_dir.dir.createFile("some_file", .{});
     file.close();
 
-    try tmp_dir.iterable_dir.dir.makeDir("some_dir");
+    try tmp_dir.dir.makeDir("some_dir");
 
     var arena = ArenaAllocator.init(testing.allocator);
     defer arena.deinit();
     const allocator = arena.allocator();
 
     // Create iterator.
-    var iter = tmp_dir.iterable_dir.iterate();
+    var iter = tmp_dir.dir.iterate();
 
     var i: u8 = 0;
     while (i < 2) : (i += 1) {
-        var entries = std.ArrayList(IterableDir.Entry).init(allocator);
+        var entries = std.ArrayList(Dir.Entry).init(allocator);
 
         while (try iter.next()) |entry| {
             // We cannot just store `entry` as on Windows, we're re-using the name buffer
@@ -461,10 +539,10 @@ test "Dir.Iterator but dir is deleted during iteration" {
     defer tmp.cleanup();
 
     // Create directory and setup an iterator for it
-    var iterable_subdir = try tmp.dir.makeOpenPathIterable("subdir", .{});
-    defer iterable_subdir.close();
+    var subdir = try tmp.dir.makeOpenPath("subdir", .{ .iterate = true });
+    defer subdir.close();
 
-    var iterator = iterable_subdir.iterate();
+    var iterator = subdir.iterate();
 
     // Create something to iterate over within the subdir
     try tmp.dir.makePath("subdir/b");
@@ -485,11 +563,11 @@ test "Dir.Iterator but dir is deleted during iteration" {
     }
 }
 
-fn entryEql(lhs: IterableDir.Entry, rhs: IterableDir.Entry) bool {
+fn entryEql(lhs: Dir.Entry, rhs: Dir.Entry) bool {
     return mem.eql(u8, lhs.name, rhs.name) and lhs.kind == rhs.kind;
 }
 
-fn contains(entries: *const std.ArrayList(IterableDir.Entry), el: IterableDir.Entry) bool {
+fn contains(entries: *const std.ArrayList(Dir.Entry), el: Dir.Entry) bool {
     for (entries.items) |entry| {
         if (entryEql(entry, el)) return true;
     }
@@ -582,9 +660,6 @@ test "readAllAlloc" {
 }
 
 test "Dir.statFile" {
-    // TODO: Re-enable once https://github.com/ziglang/zig/issues/17034 is solved
-    if (builtin.os.tag == .linux and builtin.link_libc and builtin.abi == .gnu) return error.SkipZigTest;
-
     try testWithAllSupportedPathTypes(struct {
         fn impl(ctx: *TestContext) !void {
             const test_file_name = try ctx.transformPath("test_file");
@@ -661,6 +736,18 @@ test "file operations on directories" {
             dir.close();
         }
     }.impl);
+}
+
+test "makeOpenPath parent dirs do not exist" {
+    var tmp_dir = tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    var dir = try tmp_dir.dir.makeOpenPath("root_dir/parent_dir/some_dir", .{});
+    dir.close();
+
+    // double check that the full directory structure was created
+    var dir_verification = try tmp_dir.dir.openDir("root_dir/parent_dir/some_dir", .{});
+    dir_verification.close();
 }
 
 test "deleteDir" {
@@ -909,6 +996,57 @@ test "openSelfExe" {
     self_exe_file.close();
 }
 
+test "deleteTree does not follow symlinks" {
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+
+    try tmp.dir.makePath("b");
+    {
+        var a = try tmp.dir.makeOpenPath("a", .{});
+        defer a.close();
+
+        a.symLink("../b", "b", .{ .is_directory = true }) catch |err| switch (err) {
+            // Symlink requires admin privileges on windows, so this test can legitimately fail.
+            error.AccessDenied => return error.SkipZigTest,
+            else => return err,
+        };
+    }
+
+    try tmp.dir.deleteTree("a");
+
+    try testing.expectError(error.FileNotFound, tmp.dir.access("a", .{}));
+    try tmp.dir.access("b", .{});
+}
+
+test "deleteTree on a symlink" {
+    var tmp = tmpDir(.{});
+    defer tmp.cleanup();
+
+    // Symlink to a file
+    try tmp.dir.writeFile("file", "");
+    tmp.dir.symLink("file", "filelink", .{}) catch |err| switch (err) {
+        // Symlink requires admin privileges on windows, so this test can legitimately fail.
+        error.AccessDenied => return error.SkipZigTest,
+        else => return err,
+    };
+
+    try tmp.dir.deleteTree("filelink");
+    try testing.expectError(error.FileNotFound, tmp.dir.access("filelink", .{}));
+    try tmp.dir.access("file", .{});
+
+    // Symlink to a directory
+    try tmp.dir.makePath("dir");
+    tmp.dir.symLink("dir", "dirlink", .{ .is_directory = true }) catch |err| switch (err) {
+        // Symlink requires admin privileges on windows, so this test can legitimately fail.
+        error.AccessDenied => return error.SkipZigTest,
+        else => return err,
+    };
+
+    try tmp.dir.deleteTree("dirlink");
+    try testing.expectError(error.FileNotFound, tmp.dir.access("dirlink", .{}));
+    try tmp.dir.access("dir", .{});
+}
+
 test "makePath, put some files in it, deleteTree" {
     try testWithAllSupportedPathTypes(struct {
         fn impl(ctx: *TestContext) !void {
@@ -951,10 +1089,10 @@ test "makePath in a directory that no longer exists" {
     try testing.expectError(error.FileNotFound, tmp.dir.makePath("sub-path"));
 }
 
-fn testFilenameLimits(iterable_dir: IterableDir, maxed_filename: []const u8) !void {
+fn testFilenameLimits(iterable_dir: Dir, maxed_filename: []const u8) !void {
     // setup, create a dir and a nested file both with maxed filenames, and walk the dir
     {
-        var maxed_dir = try iterable_dir.dir.makeOpenPath(maxed_filename, .{});
+        var maxed_dir = try iterable_dir.makeOpenPath(maxed_filename, .{});
         defer maxed_dir.close();
 
         try maxed_dir.writeFile(maxed_filename, "");
@@ -971,27 +1109,27 @@ fn testFilenameLimits(iterable_dir: IterableDir, maxed_filename: []const u8) !vo
     }
 
     // ensure that we can delete the tree
-    try iterable_dir.dir.deleteTree(maxed_filename);
+    try iterable_dir.deleteTree(maxed_filename);
 }
 
 test "max file name component lengths" {
-    var tmp = tmpIterableDir(.{});
+    var tmp = tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     if (builtin.os.tag == .windows) {
         // U+FFFF is the character with the largest code point that is encoded as a single
         // UTF-16 code unit, so Windows allows for NAME_MAX of them.
         const maxed_windows_filename = ("\u{FFFF}".*) ** std.os.windows.NAME_MAX;
-        try testFilenameLimits(tmp.iterable_dir, &maxed_windows_filename);
+        try testFilenameLimits(tmp.dir, &maxed_windows_filename);
     } else if (builtin.os.tag == .wasi) {
         // On WASI, the maxed filename depends on the host OS, so in order for this test to
         // work on any host, we need to use a length that will work for all platforms
         // (i.e. the minimum MAX_NAME_BYTES of all supported platforms).
         const maxed_wasi_filename = [_]u8{'1'} ** 255;
-        try testFilenameLimits(tmp.iterable_dir, &maxed_wasi_filename);
+        try testFilenameLimits(tmp.dir, &maxed_wasi_filename);
     } else {
         const maxed_ascii_filename = [_]u8{'1'} ** std.fs.MAX_NAME_BYTES;
-        try testFilenameLimits(tmp.iterable_dir, &maxed_ascii_filename);
+        try testFilenameLimits(tmp.dir, &maxed_ascii_filename);
     }
 }
 
@@ -1372,7 +1510,7 @@ test "open file with exclusive nonblocking lock twice (absolute paths)" {
 test "walker" {
     if (builtin.os.tag == .wasi and builtin.link_libc) return error.SkipZigTest;
 
-    var tmp = tmpIterableDir(.{});
+    var tmp = tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
     // iteration order of walker is undefined, so need lookup maps to check against
@@ -1398,10 +1536,10 @@ test "walker" {
     });
 
     for (expected_paths.kvs) |kv| {
-        try tmp.iterable_dir.dir.makePath(kv.key);
+        try tmp.dir.makePath(kv.key);
     }
 
-    var walker = try tmp.iterable_dir.walk(testing.allocator);
+    var walker = try tmp.dir.walk(testing.allocator);
     defer walker.deinit();
 
     var num_walked: usize = 0;
@@ -1425,17 +1563,17 @@ test "walker" {
 test "walker without fully iterating" {
     if (builtin.os.tag == .wasi and builtin.link_libc) return error.SkipZigTest;
 
-    var tmp = tmpIterableDir(.{});
+    var tmp = tmpDir(.{ .iterate = true });
     defer tmp.cleanup();
 
-    var walker = try tmp.iterable_dir.walk(testing.allocator);
+    var walker = try tmp.dir.walk(testing.allocator);
     defer walker.deinit();
 
     // Create 2 directories inside the tmp directory, but then only iterate once before breaking.
     // This ensures that walker doesn't try to close the initial directory when not fully iterating.
 
-    try tmp.iterable_dir.dir.makePath("a");
-    try tmp.iterable_dir.dir.makePath("b");
+    try tmp.dir.makePath("a");
+    try tmp.dir.makePath("b");
 
     var num_walked: usize = 0;
     while (try walker.next()) |_| {
@@ -1478,7 +1616,7 @@ test ". and .. in fs.Dir functions" {
 
             try ctx.dir.writeFile(update_path, "something");
             const prev_status = try ctx.dir.updateFile(file_path, ctx.dir, update_path, .{});
-            try testing.expectEqual(fs.PrevStatus.stale, prev_status);
+            try testing.expectEqual(fs.Dir.PrevStatus.stale, prev_status);
 
             try ctx.dir.deleteDir(subdir_path);
         }
@@ -1524,7 +1662,7 @@ test ". and .. in absolute functions" {
     try update_file.writeAll("something");
     update_file.close();
     const prev_status = try fs.updateFileAbsolute(created_file_path, update_file_path, .{});
-    try testing.expectEqual(fs.PrevStatus.stale, prev_status);
+    try testing.expectEqual(fs.Dir.PrevStatus.stale, prev_status);
 
     try fs.deleteDirAbsolute(subdir_path);
 }
@@ -1544,11 +1682,11 @@ test "chmod" {
     try testing.expectEqual(@as(File.Mode, 0o644), (try file.stat()).mode & 0o7777);
 
     try tmp.dir.makeDir("test_dir");
-    var iterable_dir = try tmp.dir.openIterableDir("test_dir", .{});
-    defer iterable_dir.close();
+    var dir = try tmp.dir.openDir("test_dir", .{ .iterate = true });
+    defer dir.close();
 
-    try iterable_dir.chmod(0o700);
-    try testing.expectEqual(@as(File.Mode, 0o700), (try iterable_dir.dir.stat()).mode & 0o7777);
+    try dir.chmod(0o700);
+    try testing.expectEqual(@as(File.Mode, 0o700), (try dir.stat()).mode & 0o7777);
 }
 
 test "chown" {
@@ -1564,9 +1702,9 @@ test "chown" {
 
     try tmp.dir.makeDir("test_dir");
 
-    var iterable_dir = try tmp.dir.openIterableDir("test_dir", .{});
-    defer iterable_dir.close();
-    try iterable_dir.chown(null, null);
+    var dir = try tmp.dir.openDir("test_dir", .{ .iterate = true });
+    defer dir.close();
+    try dir.chown(null, null);
 }
 
 test "File.Metadata" {
