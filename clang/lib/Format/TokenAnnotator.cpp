@@ -3065,8 +3065,8 @@ void TokenAnnotator::setCommentLineLevels(
 
     // If the comment is currently aligned with the line immediately following
     // it, that's probably intentional and we should keep it.
-    if (NextNonCommentLine && !NextNonCommentLine->First->Finalized &&
-        Line->isComment() && NextNonCommentLine->First->NewlinesBefore <= 1 &&
+    if (NextNonCommentLine && NextNonCommentLine->First->NewlinesBefore < 2 &&
+        Line->isComment() && !isClangFormatOff(Line->First->TokenText) &&
         NextNonCommentLine->First->OriginalColumn ==
             Line->First->OriginalColumn) {
       const bool PPDirectiveOrImportStmt =
@@ -3176,6 +3176,12 @@ static bool isFunctionDeclarationName(bool IsCpp, const FormatToken &Current,
     const auto *Previous = Current.Previous;
     if (Previous->Tok.getIdentifierInfo() &&
         !Previous->isOneOf(tok::kw_return, tok::kw_co_return)) {
+      return true;
+    }
+    if (Previous->is(tok::r_paren) && Previous->is(TT_TypeDeclarationParen)) {
+      assert(Previous->MatchingParen);
+      assert(Previous->MatchingParen->is(tok::l_paren));
+      assert(Previous->MatchingParen->is(TT_TypeDeclarationParen));
       return true;
     }
     if (!Previous->isOneOf(tok::star, tok::amp, tok::ampamp, TT_TemplateCloser))
