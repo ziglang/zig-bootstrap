@@ -141,6 +141,7 @@ is more portable across Linux distributions.
 | `x86_64-linux-musl`        | OK             |
 | `x86_64-windows-gnu`       | OK             |
 | `x86_64-macos-none`        | OK             |
+| `loongarch64-linux-musl`   | [#164](https://github.com/ziglang/zig-bootstrap/issues/164) |
 
 #### Other Notable Targets Known to Work
 
