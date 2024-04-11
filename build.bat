@@ -16,6 +16,7 @@ if %ERRORLEVEL% neq 0 (
 
 if "%1" == "" (set "TARGET=x86_64-windows-gnu") ELSE (set TARGET=%~1)
 if "%2" == "" (set "MCPU=native") ELSE (set MCPU=%~2)
+if "%3" == "" (set "ZIG_OPTIMIZE_MODE=ReleaseSafe") ELSE (set ZIG_OPTIMIZE_MODE=%~3)
 if "%VSCMD_ARG_HOST_ARCH%"=="x86" set HOST_TARGET=x86-windows-msvc
 if "%VSCMD_ARG_HOST_ARCH%"=="x64" set HOST_TARGET=x86_64-windows-msvc
 echo Boostrapping targeting %TARGET% (%MCPU%), using %HOST_TARGET% as the host compiler
@@ -266,7 +267,7 @@ cd "%ROOTDIR%\zig"
   --search-prefix "%ROOTDIR%%OUTDIR%\%TARGET%-%MCPU%" ^
   -Dflat ^
   -Dstatic-llvm ^
-  -Doptimize=ReleaseFast ^
+  -Doptimize="%ZIG_OPTIMIZE_MODE%" ^
   -Dstrip ^
   -Dtarget="%TARGET%" ^
   -Dcpu="%MCPU%" ^

@@ -5,6 +5,7 @@ set -eu
 
 TARGET="$1" # Example: riscv64-linux-gnu
 MCPU="$2" # Examples: `baseline`, `native`, `generic+v7a`, or `arm1176jzf_s`
+ZIG_OPTIMIZE_MODE="$3"
 
 ROOTDIR="$(pwd)"
 ZIG_VERSION="0.12.0-dev.2058+04ac028a2"
@@ -195,7 +196,7 @@ $ZIG build \
   --search-prefix "$ROOTDIR/out/$TARGET-$MCPU" \
   -Dflat \
   -Dstatic-llvm \
-  -Doptimize=ReleaseFast \
+  -Doptimize="$ZIG_OPTIMIZE_MODE" \
   -Dstrip \
   -Dtarget="$TARGET" \
   -Dcpu="$MCPU" \
