@@ -569,39 +569,33 @@ fn renderExpression(r: *Render, node: Ast.Node.Index, space: Space) Error!void {
         },
 
         .assign_destructure => {
-            const lhs_count = tree.extra_data[datas[node].lhs];
-            assert(lhs_count > 1);
-            const lhs_exprs = tree.extra_data[datas[node].lhs + 1 ..][0..lhs_count];
-            const rhs = datas[node].rhs;
-
-            const maybe_comptime_token = tree.firstToken(node) - 1;
-            if (token_tags[maybe_comptime_token] == .keyword_comptime) {
-                try renderToken(r, maybe_comptime_token, .space);
+            const full = tree.assignDestructure(node);
+            if (full.comptime_token) |comptime_token| {
+                try renderToken(r, comptime_token, .space);
             }
 
-            for (lhs_exprs, 0..) |lhs_node, i| {
-                const lhs_space: Space = if (i == lhs_exprs.len - 1) .space else .comma_space;
-                switch (node_tags[lhs_node]) {
+            for (full.ast.variables, 0..) |variable_node, i| {
+                const variable_space: Space = if (i == full.ast.variables.len - 1) .space else .comma_space;
+                switch (node_tags[variable_node]) {
                     .global_var_decl,
                     .local_var_decl,
                     .simple_var_decl,
                     .aligned_var_decl,
                     => {
-                        try renderVarDecl(r, tree.fullVarDecl(lhs_node).?, true, lhs_space);
+                        try renderVarDecl(r, tree.fullVarDecl(variable_node).?, true, variable_space);
                     },
-                    else => try renderExpression(r, lhs_node, lhs_space),
+                    else => try renderExpression(r, variable_node, variable_space),
                 }
             }
-            const equal_token = main_tokens[node];
-            if (tree.tokensOnSameLine(equal_token, equal_token + 1)) {
-                try renderToken(r, equal_token, .space);
+            if (tree.tokensOnSameLine(full.ast.equal_token, full.ast.equal_token + 1)) {
+                try renderToken(r, full.ast.equal_token, .space);
             } else {
                 ais.pushIndent();
-                try renderToken(r, equal_token, .newline);
+                try renderToken(r, full.ast.equal_token, .newline);
                 ais.popIndent();
             }
             ais.pushIndentOneShot();
-            return renderExpression(r, rhs, space);
+            return renderExpression(r, full.ast.value_expr, space);
         },
 
         .bit_not,
@@ -1591,93 +1585,7 @@ fn renderBuiltinCall(
     const token_tags = tree.tokens.items(.tag);
     const main_tokens = tree.nodes.items(.main_token);
 
-    // TODO remove before release of 0.12.0
-    const slice = tree.tokenSlice(builtin_token);
-    const rewrite_two_param_cast = params.len == 2 and for ([_][]const u8{
-        "@bitCast",
-        "@errorCast",
-        "@floatCast",
-        "@intCast",
-        "@ptrCast",
-        "@intFromFloat",
-        "@floatToInt",
-        "@enumFromInt",
-        "@intToEnum",
-        "@floatFromInt",
-        "@intToFloat",
-        "@ptrFromInt",
-        "@intToPtr",
-        "@truncate",
-    }) |name| {
-        if (mem.eql(u8, slice, name)) break true;
-    } else false;
-
-    if (rewrite_two_param_cast) {
-        const after_last_param_token = tree.lastToken(params[1]) + 1;
-        if (token_tags[after_last_param_token] != .comma) {
-            // Render all on one line, no trailing comma.
-            try ais.writer().writeAll("@as");
-            try renderToken(r, builtin_token + 1, .none); // (
-            try renderExpression(r, params[0], .comma_space);
-        } else {
-            // Render one param per line.
-            try ais.writer().writeAll("@as");
-            ais.pushIndent();
-            try renderToken(r, builtin_token + 1, .newline); // (
-            try renderExpression(r, params[0], .comma);
-        }
-    }
-    // Corresponding logic below builtin name rewrite below
-
-    // TODO remove before release of 0.11.0
-    if (mem.eql(u8, slice, "@maximum")) {
-        try ais.writer().writeAll("@max");
-    } else if (mem.eql(u8, slice, "@minimum")) {
-        try ais.writer().writeAll("@min");
-    }
-    // TODO remove before release of 0.12.0
-    else if (mem.eql(u8, slice, "@boolToInt")) {
-        try ais.writer().writeAll("@intFromBool");
-    } else if (mem.eql(u8, slice, "@enumToInt")) {
-        try ais.writer().writeAll("@intFromEnum");
-    } else if (mem.eql(u8, slice, "@errorToInt")) {
-        try ais.writer().writeAll("@intFromError");
-    } else if (mem.eql(u8, slice, "@floatToInt")) {
-        try ais.writer().writeAll("@intFromFloat");
-    } else if (mem.eql(u8, slice, "@intToEnum")) {
-        try ais.writer().writeAll("@enumFromInt");
-    } else if (mem.eql(u8, slice, "@intToError")) {
-        try ais.writer().writeAll("@errorFromInt");
-    } else if (mem.eql(u8, slice, "@intToFloat")) {
-        try ais.writer().writeAll("@floatFromInt");
-    } else if (mem.eql(u8, slice, "@intToPtr")) {
-        try ais.writer().writeAll("@ptrFromInt");
-    } else if (mem.eql(u8, slice, "@ptrToInt")) {
-        try ais.writer().writeAll("@intFromPtr");
-    } else if (mem.eql(u8, slice, "@fabs")) {
-        try ais.writer().writeAll("@abs");
-    } else if (mem.eql(u8, slice, "@errSetCast")) {
-        try ais.writer().writeAll("@errorCast");
-    } else {
-        try renderToken(r, builtin_token, .none); // @name
-    }
-
-    if (rewrite_two_param_cast) {
-        // Matches with corresponding logic above builtin name rewrite
-        const after_last_param_token = tree.lastToken(params[1]) + 1;
-        try ais.writer().writeAll("(");
-        try renderExpression(r, params[1], .none);
-        try ais.writer().writeAll(")");
-        if (token_tags[after_last_param_token] != .comma) {
-            // Render all on one line, no trailing comma.
-            return renderToken(r, after_last_param_token, space); // )
-        } else {
-            // Render one param per line.
-            ais.popIndent();
-            try renderToken(r, after_last_param_token, .newline); // ,
-            return renderToken(r, after_last_param_token + 1, space); // )
-        }
-    }
+    try renderToken(r, builtin_token, .none); // @name
 
     if (params.len == 0) {
         try renderToken(r, builtin_token + 1, .none); // (
@@ -1685,6 +1593,7 @@ fn renderBuiltinCall(
     }
 
     if (r.fixups.rebase_imported_paths) |prefix| {
+        const slice = tree.tokenSlice(builtin_token);
         if (mem.eql(u8, slice, "@import")) f: {
             const param = params[0];
             const str_lit_token = main_tokens[param];
@@ -1979,9 +1888,6 @@ fn renderSwitchCase(
     // Render everything before the arrow
     if (switch_case.ast.values.len == 0) {
         try renderToken(r, switch_case.ast.arrow_token - 1, .space); // else keyword
-    } else if (switch_case.ast.values.len == 1 and !has_comment_before_arrow) {
-        // render on one line and drop the trailing comma if any
-        try renderExpression(r, switch_case.ast.values[0], .space);
     } else if (trailing_comma or has_comment_before_arrow) {
         // Render each value on a new line
         try renderExpressions(r, switch_case.ast.values, .comma);
@@ -2941,8 +2847,8 @@ fn renderIdentifier(r: *Render, token_index: Ast.TokenIndex, space: Space, quote
         return renderQuotedIdentifier(r, token_index, space, false);
     }
 
-    // Special case for _ which would incorrectly be rejected by isValidId below.
-    if (contents.len == 1 and contents[0] == '_') switch (quote) {
+    // Special case for _.
+    if (std.zig.isUnderscore(contents)) switch (quote) {
         .eagerly_unquote => return renderQuotedIdentifier(r, token_index, space, true),
         .eagerly_unquote_except_underscore,
         .preserve_when_shadowing,

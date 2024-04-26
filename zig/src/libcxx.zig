@@ -115,7 +115,7 @@ pub fn buildLibCXX(comp: *Compilation, prog_node: *std.Progress.Node) !void {
 
     const root_name = "c++";
     const output_mode = .Lib;
-    const link_mode = .Static;
+    const link_mode = .static;
     const target = comp.root_mod.resolved_target.result;
     const basename = try std.zig.binNameAlloc(arena, .{
         .root_name = root_name,
@@ -153,6 +153,7 @@ pub fn buildLibCXX(comp: *Compilation, prog_node: *std.Progress.Node) !void {
         .root_strip = strip,
         .link_libc = true,
         .lto = comp.config.lto,
+        .any_sanitize_thread = comp.config.any_sanitize_thread,
     });
 
     const root_mod = try Module.create(arena, .{
@@ -180,6 +181,7 @@ pub fn buildLibCXX(comp: *Compilation, prog_node: *std.Progress.Node) !void {
         .cc_argv = &.{},
         .parent = null,
         .builtin_mod = null,
+        .builtin_modules = null, // there is only one module in this compilation
     });
 
     var c_source_files = try std.ArrayList(Compilation.CSourceFile).initCapacity(arena, libcxx_files.len);
@@ -230,6 +232,13 @@ pub fn buildLibCXX(comp: *Compilation, prog_node: *std.Progress.Node) !void {
 
         if (target.abi.isMusl()) {
             try cflags.append("-D_LIBCPP_HAS_MUSL_LIBC");
+        }
+
+        if (target.isGnuLibC()) {
+            // glibc 2.16 introduced aligned_alloc
+            if (target.os.version_range.linux.glibc.order(.{ .major = 2, .minor = 16, .patch = 0 }) == .lt) {
+                try cflags.append("-D_LIBCPP_HAS_NO_LIBRARY_ALIGNED_ALLOCATION");
+            }
         }
 
         if (target.os.tag == .wasi) {
@@ -318,7 +327,7 @@ pub fn buildLibCXXABI(comp: *Compilation, prog_node: *std.Progress.Node) !void {
 
     const root_name = "c++abi";
     const output_mode = .Lib;
-    const link_mode = .Static;
+    const link_mode = .static;
     const target = comp.root_mod.resolved_target.result;
     const basename = try std.zig.binNameAlloc(arena, .{
         .root_name = root_name,
@@ -358,6 +367,7 @@ pub fn buildLibCXXABI(comp: *Compilation, prog_node: *std.Progress.Node) !void {
         .link_libc = true,
         .any_unwind_tables = unwind_tables,
         .lto = comp.config.lto,
+        .any_sanitize_thread = comp.config.any_sanitize_thread,
     });
 
     const root_mod = try Module.create(arena, .{
@@ -386,6 +396,7 @@ pub fn buildLibCXXABI(comp: *Compilation, prog_node: *std.Progress.Node) !void {
         .cc_argv = &.{},
         .parent = null,
         .builtin_mod = null,
+        .builtin_modules = null, // there is only one module in this compilation
     });
 
     var c_source_files = try std.ArrayList(Compilation.CSourceFile).initCapacity(arena, libcxxabi_files.len);
@@ -409,7 +420,8 @@ pub fn buildLibCXXABI(comp: *Compilation, prog_node: *std.Progress.Node) !void {
             try cflags.append("-D_LIBCXXABI_HAS_NO_THREADS");
             try cflags.append("-D_LIBCPP_HAS_NO_THREADS");
         } else if (target.abi.isGnu()) {
-            try cflags.append("-DHAVE___CXA_THREAD_ATEXIT_IMPL");
+            if (target.os.tag != .linux or !(target.os.version_range.linux.glibc.order(.{ .major = 2, .minor = 18, .patch = 0 }) == .lt))
+                try cflags.append("-DHAVE___CXA_THREAD_ATEXIT_IMPL");
         }
 
         try cflags.append("-D_LIBCPP_DISABLE_EXTERN_TEMPLATE");
@@ -428,6 +440,13 @@ pub fn buildLibCXXABI(comp: *Compilation, prog_node: *std.Progress.Node) !void {
 
         if (target.abi.isMusl()) {
             try cflags.append("-D_LIBCPP_HAS_MUSL_LIBC");
+        }
+
+        if (target.isGnuLibC()) {
+            // glibc 2.16 introduced aligned_alloc
+            if (target.os.version_range.linux.glibc.order(.{ .major = 2, .minor = 16, .patch = 0 }) == .lt) {
+                try cflags.append("-D_LIBCPP_HAS_NO_LIBRARY_ALIGNED_ALLOCATION");
+            }
         }
 
         if (target_util.supports_fpic(target)) {

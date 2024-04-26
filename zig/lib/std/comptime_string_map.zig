@@ -142,7 +142,7 @@ const TestEnum = enum {
     E,
 };
 
-test "ComptimeStringMap list literal of list literals" {
+test "list literal of list literals" {
     const map = ComptimeStringMap(TestEnum, .{
         .{ "these", .D },
         .{ "have", .A },
@@ -157,7 +157,7 @@ test "ComptimeStringMap list literal of list literals" {
     try std.testing.expect(null == map.get("NOTHING"));
 }
 
-test "ComptimeStringMap array of structs" {
+test "array of structs" {
     const KV = struct { []const u8, TestEnum };
     const map = ComptimeStringMap(TestEnum, [_]KV{
         .{ "these", .D },
@@ -170,7 +170,7 @@ test "ComptimeStringMap array of structs" {
     try testMap(map);
 }
 
-test "ComptimeStringMap slice of structs" {
+test "slice of structs" {
     const KV = struct { []const u8, TestEnum };
     const slice: []const KV = &[_]KV{
         .{ "these", .D },
@@ -198,7 +198,7 @@ fn testMap(comptime map: anytype) !void {
     try std.testing.expect(null == map.get("averylongstringthathasnomatches"));
 }
 
-test "ComptimeStringMap void value type, slice of structs" {
+test "void value type, slice of structs" {
     const KV = struct { []const u8 };
     const slice: []const KV = &[_]KV{
         .{"these"},
@@ -215,7 +215,7 @@ test "ComptimeStringMap void value type, slice of structs" {
     try std.testing.expect(null == map.get("NOTHING"));
 }
 
-test "ComptimeStringMap void value type, list literal of list literals" {
+test "void value type, list literal of list literals" {
     const map = ComptimeStringMap(void, .{
         .{"these"},
         .{"have"},
@@ -258,7 +258,7 @@ test "ComptimeStringMapWithEql" {
     try std.testing.expect(map.has("ThESe"));
 }
 
-test "ComptimeStringMap empty" {
+test "empty" {
     const m1 = ComptimeStringMap(usize, .{});
     try std.testing.expect(null == m1.get("anything"));
 
@@ -266,7 +266,7 @@ test "ComptimeStringMap empty" {
     try std.testing.expect(null == m2.get("anything"));
 }
 
-test "ComptimeStringMap redundant entries" {
+test "redundant entries" {
     const map = ComptimeStringMap(TestEnum, .{
         .{ "redundant", .D },
         .{ "theNeedle", .A },
@@ -284,7 +284,7 @@ test "ComptimeStringMap redundant entries" {
     try std.testing.expectEqual(TestEnum.A, map.get("theNeedle").?);
 }
 
-test "ComptimeStringMap redundant insensitive" {
+test "redundant insensitive" {
     const map = ComptimeStringMapWithEql(TestEnum, .{
         .{ "redundant", .D },
         .{ "theNeedle", .A },
@@ -298,4 +298,23 @@ test "ComptimeStringMap redundant insensitive" {
     try std.testing.expect(null != map.get("ReDuNdAnT"));
 
     try std.testing.expectEqual(TestEnum.A, map.get("theNeedle").?);
+}
+
+test "comptime-only value" {
+    const map = std.ComptimeStringMap(type, .{
+        .{ "a", struct {
+            pub const foo = 1;
+        } },
+        .{ "b", struct {
+            pub const foo = 2;
+        } },
+        .{ "c", struct {
+            pub const foo = 3;
+        } },
+    });
+
+    try std.testing.expect(map.get("a").?.foo == 1);
+    try std.testing.expect(map.get("b").?.foo == 2);
+    try std.testing.expect(map.get("c").?.foo == 3);
+    try std.testing.expect(map.get("d") == null);
 }
