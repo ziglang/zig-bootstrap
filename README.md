@@ -11,7 +11,7 @@ to find and inspect the patch diffs.
  * LLVM, LLD, Clang release/18.x (commit 78b99c73ee4b96fe9ce0e294d4632326afb2db42)
  * zlib 1.3
  * zstd 1.5.2
- * zig 0.13.0-dev.62+10e6f8dc6 (llvm18 branch)
+ * zig 0.13.0-dev.67+ed7afdfb7 (llvm18 branch)
 
 For other versions, check the git tags of this repository.
 
