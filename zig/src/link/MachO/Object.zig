@@ -34,6 +34,7 @@ output_ar_state: Archive.ArState = .{},
 const InArchive = struct {
     path: []const u8,
     offset: u64,
+    size: u32,
 };
 
 pub fn isObject(path: []const u8) !bool {
@@ -1330,14 +1331,16 @@ pub fn updateArSymtab(self: Object, ar_symtab: *Archive.ArSymtab, macho_file: *M
 }
 
 pub fn updateArSize(self: *Object, macho_file: *MachO) !void {
-    const file = macho_file.getFileHandle(self.file_handle);
-    const size = (try file.stat()).size;
-    self.output_ar_state.size = size;
+    self.output_ar_state.size = if (self.archive) |ar| ar.size else size: {
+        const file = macho_file.getFileHandle(self.file_handle);
+        break :size (try file.stat()).size;
+    };
 }
 
 pub fn writeAr(self: Object, ar_format: Archive.Format, macho_file: *MachO, writer: anytype) !void {
     // Header
     const size = std.math.cast(usize, self.output_ar_state.size) orelse return error.Overflow;
+    const offset: u64 = if (self.archive) |ar| ar.offset else 0;
     try Archive.writeHeader(self.path, size, ar_format, writer);
     // Data
     const file = macho_file.getFileHandle(self.file_handle);
@@ -1345,7 +1348,7 @@ pub fn writeAr(self: Object, ar_format: Archive.Format, macho_file: *MachO, writ
     const gpa = macho_file.base.comp.gpa;
     const data = try gpa.alloc(u8, size);
     defer gpa.free(data);
-    const amt = try file.preadAll(data, 0);
+    const amt = try file.preadAll(data, offset);
     if (amt != size) return error.InputOutput;
     try writer.writeAll(data);
 }
@@ -1385,7 +1388,6 @@ pub fn calcSymtabSize(self: *Object, macho_file: *MachO) !void {
 
 pub fn calcStabsSize(self: *Object, macho_file: *MachO) error{Overflow}!void {
     if (self.dwarf_info) |dw| {
-        // TODO handle multiple CUs
         const cu = dw.compile_units.items[0];
         const comp_dir = try cu.getCompileDir(dw) orelse return;
         const tu_name = try cu.getSourceFile(dw) orelse return;
@@ -1504,7 +1506,6 @@ pub fn writeStabs(self: *const Object, macho_file: *MachO, ctx: anytype) error{O
     var index = self.output_symtab_ctx.istab;
 
     if (self.dwarf_info) |dw| {
-        // TODO handle multiple CUs
         const cu = dw.compile_units.items[0];
         const comp_dir = try cu.getCompileDir(dw) orelse return;
         const tu_name = try cu.getSourceFile(dw) orelse return;
@@ -1750,7 +1751,6 @@ pub fn hasEhFrameRecords(self: Object) bool {
     return self.cies.items.len > 0;
 }
 
-/// TODO handle multiple CUs
 pub fn hasDebugInfo(self: Object) bool {
     if (self.dwarf_info) |dw| {
         return dw.compile_units.items.len > 0;
