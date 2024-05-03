@@ -36,7 +36,7 @@ project(zig C CXX)
 set(CMAKE_MODULE_PATH ${CMAKE_SOURCE_DIR}/cmake ${CMAKE_MODULE_PATH})
 
 set(ZIG_VERSION_MAJOR 0)
-set(ZIG_VERSION_MINOR 12)
+set(ZIG_VERSION_MINOR 13)
 set(ZIG_VERSION_PATCH 0)
 set(ZIG_VERSION "" CACHE STRING "Override Zig version string. Default is to find out with git.")
 
@@ -222,7 +222,7 @@ set(ZIG_STAGE2_SOURCES
     "${CMAKE_SOURCE_DIR}/lib/std/c/linux.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/child_process.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/coff.zig"
-    "${CMAKE_SOURCE_DIR}/lib/std/comptime_string_map.zig"
+    "${CMAKE_SOURCE_DIR}/lib/std/static_string_map.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/crypto.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/crypto/blake3.zig"
     "${CMAKE_SOURCE_DIR}/lib/std/crypto/siphash.zig"
