@@ -17,6 +17,7 @@ For other versions, check the git tags of this repository.
 
 ### Patches
 
+ * https://github.com/llvm/llvm-project/pull/91425
  * all: Deleted unused files.
  * LLVM: Support .lib extension for static zstd.
  * LLVM: Portable handling of .def linker flag
