@@ -178,7 +178,7 @@ test "Dir.readLink" {
         fn impl(ctx: *TestContext) !void {
             // Create some targets
             const file_target_path = try ctx.transformPath("file.txt");
-            try ctx.dir.writeFile(.{ .sub_path = file_target_path, .data = "nonsense" });
+            try ctx.dir.writeFile(file_target_path, "nonsense");
             const dir_target_path = try ctx.transformPath("subdir");
             try ctx.dir.makeDir(dir_target_path);
 
@@ -398,7 +398,7 @@ test "readLinkAbsolute" {
     defer tmp.cleanup();
 
     // Create some targets
-    try tmp.dir.writeFile(.{ .sub_path = "file.txt", .data = "nonsense" });
+    try tmp.dir.writeFile("file.txt", "nonsense");
     try tmp.dir.makeDir("subdir");
 
     // Get base abs path
@@ -620,7 +620,7 @@ test "Dir.realpath smoke test" {
             try testing.expectError(error.FileNotFound, ctx.dir.realpath(test_dir_path, &buf));
 
             // Now create the file and dir
-            try ctx.dir.writeFile(.{ .sub_path = test_file_path, .data = "" });
+            try ctx.dir.writeFile(test_file_path, "");
             try ctx.dir.makeDir(test_dir_path);
 
             const base_path = try ctx.transformPath(".");
@@ -695,7 +695,7 @@ test "Dir.statFile" {
 
             try testing.expectError(error.FileNotFound, ctx.dir.statFile(test_file_name));
 
-            try ctx.dir.writeFile(.{ .sub_path = test_file_name, .data = "" });
+            try ctx.dir.writeFile(test_file_name, "");
 
             const stat = try ctx.dir.statFile(test_file_name);
             try testing.expectEqual(File.Kind.file, stat.kind);
@@ -803,7 +803,7 @@ test "deleteDir" {
 
             // deleting a non-empty directory
             try ctx.dir.makeDir(test_dir_path);
-            try ctx.dir.writeFile(.{ .sub_path = test_file_path, .data = "" });
+            try ctx.dir.writeFile(test_file_path, "");
             try testing.expectError(error.DirNotEmpty, ctx.dir.deleteDir(test_dir_path));
 
             // deleting an empty directory
@@ -1071,7 +1071,7 @@ test "deleteTree on a symlink" {
     defer tmp.cleanup();
 
     // Symlink to a file
-    try tmp.dir.writeFile(.{ .sub_path = "file", .data = "" });
+    try tmp.dir.writeFile("file", "");
     try setupSymlink(tmp.dir, "file", "filelink", .{});
 
     try tmp.dir.deleteTree("filelink");
@@ -1094,14 +1094,8 @@ test "makePath, put some files in it, deleteTree" {
             const dir_path = try ctx.transformPath("os_test_tmp");
 
             try ctx.dir.makePath(try fs.path.join(allocator, &.{ "os_test_tmp", "b", "c" }));
-            try ctx.dir.writeFile(.{
-                .sub_path = try fs.path.join(allocator, &.{ "os_test_tmp", "b", "c", "file.txt" }),
-                .data = "nonsense",
-            });
-            try ctx.dir.writeFile(.{
-                .sub_path = try fs.path.join(allocator, &.{ "os_test_tmp", "b", "file2.txt" }),
-                .data = "blah",
-            });
+            try ctx.dir.writeFile(try fs.path.join(allocator, &.{ "os_test_tmp", "b", "c", "file.txt" }), "nonsense");
+            try ctx.dir.writeFile(try fs.path.join(allocator, &.{ "os_test_tmp", "b", "file2.txt" }), "blah");
 
             try ctx.dir.deleteTree(dir_path);
             try testing.expectError(error.FileNotFound, ctx.dir.openDir(dir_path, .{}));
@@ -1116,14 +1110,8 @@ test "makePath, put some files in it, deleteTreeMinStackSize" {
             const dir_path = try ctx.transformPath("os_test_tmp");
 
             try ctx.dir.makePath(try fs.path.join(allocator, &.{ "os_test_tmp", "b", "c" }));
-            try ctx.dir.writeFile(.{
-                .sub_path = try fs.path.join(allocator, &.{ "os_test_tmp", "b", "c", "file.txt" }),
-                .data = "nonsense",
-            });
-            try ctx.dir.writeFile(.{
-                .sub_path = try fs.path.join(allocator, &.{ "os_test_tmp", "b", "file2.txt" }),
-                .data = "blah",
-            });
+            try ctx.dir.writeFile(try fs.path.join(allocator, &.{ "os_test_tmp", "b", "c", "file.txt" }), "nonsense");
+            try ctx.dir.writeFile(try fs.path.join(allocator, &.{ "os_test_tmp", "b", "file2.txt" }), "blah");
 
             try ctx.dir.deleteTreeMinStackSize(dir_path);
             try testing.expectError(error.FileNotFound, ctx.dir.openDir(dir_path, .{}));
@@ -1146,7 +1134,7 @@ test "makePath but sub_path contains pre-existing file" {
     defer tmp.cleanup();
 
     try tmp.dir.makeDir("foo");
-    try tmp.dir.writeFile(.{ .sub_path = "foo/bar", .data = "" });
+    try tmp.dir.writeFile("foo/bar", "");
 
     try testing.expectError(error.NotDir, tmp.dir.makePath("foo/bar/baz"));
 }
@@ -1239,7 +1227,7 @@ fn testFilenameLimits(iterable_dir: Dir, maxed_filename: []const u8) !void {
         var maxed_dir = try iterable_dir.makeOpenPath(maxed_filename, .{});
         defer maxed_dir.close();
 
-        try maxed_dir.writeFile(.{ .sub_path = maxed_filename, .data = "" });
+        try maxed_dir.writeFile(maxed_filename, "");
 
         var walker = try iterable_dir.walk(testing.allocator);
         defer walker.deinit();
@@ -1288,22 +1276,22 @@ test "writev, readv" {
     var buf2: [line2.len]u8 = undefined;
     var write_vecs = [_]posix.iovec_const{
         .{
-            .base = line1,
-            .len = line1.len,
+            .iov_base = line1,
+            .iov_len = line1.len,
         },
         .{
-            .base = line2,
-            .len = line2.len,
+            .iov_base = line2,
+            .iov_len = line2.len,
         },
     };
     var read_vecs = [_]posix.iovec{
         .{
-            .base = &buf2,
-            .len = buf2.len,
+            .iov_base = &buf2,
+            .iov_len = buf2.len,
         },
         .{
-            .base = &buf1,
-            .len = buf1.len,
+            .iov_base = &buf1,
+            .iov_len = buf1.len,
         },
     };
 
@@ -1330,22 +1318,22 @@ test "pwritev, preadv" {
     var buf2: [line2.len]u8 = undefined;
     var write_vecs = [_]posix.iovec_const{
         .{
-            .base = line1,
-            .len = line1.len,
+            .iov_base = line1,
+            .iov_len = line1.len,
         },
         .{
-            .base = line2,
-            .len = line2.len,
+            .iov_base = line2,
+            .iov_len = line2.len,
         },
     };
     var read_vecs = [_]posix.iovec{
         .{
-            .base = &buf2,
-            .len = buf2.len,
+            .iov_base = &buf2,
+            .iov_len = buf2.len,
         },
         .{
-            .base = &buf1,
-            .len = buf1.len,
+            .iov_base = &buf1,
+            .iov_len = buf1.len,
         },
     };
 
@@ -1369,7 +1357,7 @@ test "access file" {
             try ctx.dir.makePath(dir_path);
             try testing.expectError(error.FileNotFound, ctx.dir.access(file_path, .{}));
 
-            try ctx.dir.writeFile(.{ .sub_path = file_path, .data = "" });
+            try ctx.dir.writeFile(file_path, "");
             try ctx.dir.access(file_path, .{});
             try ctx.dir.deleteTree(dir_path);
         }
@@ -1390,12 +1378,12 @@ test "sendfile" {
     const line2 = "second line\n";
     var vecs = [_]posix.iovec_const{
         .{
-            .base = line1,
-            .len = line1.len,
+            .iov_base = line1,
+            .iov_len = line1.len,
         },
         .{
-            .base = line2,
-            .len = line2.len,
+            .iov_base = line2,
+            .iov_len = line2.len,
         },
     };
 
@@ -1413,20 +1401,20 @@ test "sendfile" {
     const trailer2 = "second trailer\n";
     var hdtr = [_]posix.iovec_const{
         .{
-            .base = header1,
-            .len = header1.len,
+            .iov_base = header1,
+            .iov_len = header1.len,
         },
         .{
-            .base = header2,
-            .len = header2.len,
+            .iov_base = header2,
+            .iov_len = header2.len,
         },
         .{
-            .base = trailer1,
-            .len = trailer1.len,
+            .iov_base = trailer1,
+            .iov_len = trailer1.len,
         },
         .{
-            .base = trailer2,
-            .len = trailer2.len,
+            .iov_base = trailer2,
+            .iov_len = trailer2.len,
         },
     };
 
@@ -1475,7 +1463,7 @@ test "copyFile" {
             const dest_file = try ctx.transformPath("tmp_test_copy_file2.txt");
             const dest_file2 = try ctx.transformPath("tmp_test_copy_file3.txt");
 
-            try ctx.dir.writeFile(.{ .sub_path = src_file, .data = data });
+            try ctx.dir.writeFile(src_file, data);
             defer ctx.dir.deleteFile(src_file) catch {};
 
             try ctx.dir.copyFile(src_file, ctx.dir, dest_file, .{});
@@ -1653,7 +1641,7 @@ test "walker" {
 
     // iteration order of walker is undefined, so need lookup maps to check against
 
-    const expected_paths = std.StaticStringMap(void).initComptime(.{
+    const expected_paths = std.ComptimeStringMap(void, .{
         .{"dir1"},
         .{"dir2"},
         .{"dir3"},
@@ -1663,7 +1651,7 @@ test "walker" {
         .{"dir3" ++ fs.path.sep_str ++ "sub2" ++ fs.path.sep_str ++ "subsub1"},
     });
 
-    const expected_basenames = std.StaticStringMap(void).initComptime(.{
+    const expected_basenames = std.ComptimeStringMap(void, .{
         .{"dir1"},
         .{"dir2"},
         .{"dir3"},
@@ -1673,8 +1661,8 @@ test "walker" {
         .{"subsub1"},
     });
 
-    for (expected_paths.keys()) |key| {
-        try tmp.dir.makePath(key);
+    for (expected_paths.kvs) |kv| {
+        try tmp.dir.makePath(kv.key);
     }
 
     var walker = try tmp.dir.walk(testing.allocator);
@@ -1752,7 +1740,7 @@ test "'.' and '..' in fs.Dir functions" {
             renamed_file.close();
             try ctx.dir.deleteFile(rename_path);
 
-            try ctx.dir.writeFile(.{ .sub_path = update_path, .data = "something" });
+            try ctx.dir.writeFile(update_path, "something");
             const prev_status = try ctx.dir.updateFile(file_path, ctx.dir, update_path, .{});
             try testing.expectEqual(fs.Dir.PrevStatus.stale, prev_status);
 
@@ -2021,7 +2009,11 @@ test "invalid UTF-8/WTF-8 paths" {
             try testing.expectError(expected_err, ctx.dir.deleteTree(invalid_path));
             try testing.expectError(expected_err, ctx.dir.deleteTreeMinStackSize(invalid_path));
 
-            try testing.expectError(expected_err, ctx.dir.writeFile(.{ .sub_path = invalid_path, .data = "" }));
+            try testing.expectError(expected_err, ctx.dir.writeFile(invalid_path, ""));
+            try testing.expectError(expected_err, ctx.dir.writeFile2(.{
+                .sub_path = invalid_path,
+                .data = "",
+            }));
 
             try testing.expectError(expected_err, ctx.dir.access(invalid_path, .{}));
             try testing.expectError(expected_err, ctx.dir.accessZ(invalid_path, .{}));

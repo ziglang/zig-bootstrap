@@ -41,9 +41,7 @@ pub fn tryLockShared(rwl: *RwLock) bool {
     return rwl.impl.tryLockShared();
 }
 
-/// Obtains shared lock ownership.
-/// Blocks if another thread has exclusive ownership.
-/// May block if another thread is attempting to get exclusive ownership.
+/// Blocks until shared lock ownership is acquired.
 pub fn lockShared(rwl: *RwLock) void {
     return rwl.impl.lockShared();
 }

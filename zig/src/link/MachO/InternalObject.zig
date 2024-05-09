@@ -115,8 +115,7 @@ fn addObjcSelrefsSection(
             .has_subtractor = false,
         },
     });
-    try atom.addExtra(.{ .rel_index = 0, .rel_count = 1 }, macho_file);
-    atom.flags.relocs = true;
+    atom.relocs = .{ .pos = 0, .len = 1 };
     self.num_rebase_relocs += 1;
 
     return atom_index;
@@ -184,11 +183,9 @@ pub fn getAtomData(self: *const InternalObject, atom: Atom, buffer: []u8) !void 
     @memcpy(buffer, data[off..][0..size]);
 }
 
-pub fn getAtomRelocs(self: *const InternalObject, atom: Atom, macho_file: *MachO) []const Relocation {
-    if (!atom.flags.relocs) return &[0]Relocation{};
-    const extra = atom.getExtra(macho_file).?;
+pub fn getAtomRelocs(self: *const InternalObject, atom: Atom) []const Relocation {
     const relocs = self.sections.items(.relocs)[atom.n_sect];
-    return relocs.items[extra.rel_index..][0..extra.rel_count];
+    return relocs.items[atom.relocs.pos..][0..atom.relocs.len];
 }
 
 fn addString(self: *InternalObject, allocator: Allocator, name: [:0]const u8) error{OutOfMemory}!u32 {
