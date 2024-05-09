@@ -1079,6 +1079,8 @@ test "result location initialization of error union with OPV payload" {
 }
 
 test "return error union with i65" {
+    if (builtin.zig_backend == .stage2_wasm) return error.SkipZigTest;
+
     try expect(try add(1000, 234) == 1234);
 }
 
