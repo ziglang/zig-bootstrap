@@ -47,7 +47,7 @@ pub const Os = struct {
         tvos,
         watchos,
         driverkit,
-        xros,
+        visionos,
         mesa3d,
         contiki,
         amdpal,
@@ -67,7 +67,7 @@ pub const Os = struct {
 
         pub inline fn isDarwin(tag: Tag) bool {
             return switch (tag) {
-                .ios, .macos, .watchos, .tvos => true,
+                .ios, .macos, .watchos, .tvos, .visionos => true,
                 else => false,
             };
         }
@@ -108,7 +108,7 @@ pub const Os = struct {
         pub fn dynamicLibSuffix(tag: Tag) [:0]const u8 {
             return switch (tag) {
                 .windows, .uefi => ".dll",
-                .ios, .macos, .watchos, .tvos => ".dylib",
+                .ios, .macos, .watchos, .tvos, .visionos => ".dylib",
                 else => ".so",
             };
         }
@@ -178,7 +178,7 @@ pub const Os = struct {
                 .ios,
                 .tvos,
                 .watchos,
-                .xros,
+                .visionos,
                 .netbsd,
                 .openbsd,
                 .dragonfly,
@@ -434,7 +434,12 @@ pub const Os = struct {
                         .max = .{ .major = 17, .minor = 1, .patch = 0 },
                     },
                 },
-                .xros => @panic("TODO what version is xros on right now?"),
+                .visionos => .{
+                    .semver = .{
+                        .min = .{ .major = 1, .minor = 0, .patch = 0 },
+                        .max = .{ .major = 1, .minor = 0, .patch = 0 },
+                    },
+                },
                 .netbsd => .{
                     .semver = .{
                         .min = .{ .major = 8, .minor = 0, .patch = 0 },
@@ -531,7 +536,7 @@ pub const Os = struct {
             .ios,
             .tvos,
             .watchos,
-            .xros,
+            .visionos,
             .dragonfly,
             .openbsd,
             .haiku,
@@ -644,6 +649,7 @@ pub const Abi = enum {
     callable,
     mesh,
     amplification,
+    ohos,
 
     pub fn default(arch: Cpu.Arch, os: Os) Abi {
         return if (arch.isWasm()) .musl else switch (os.tag) {
@@ -683,6 +689,7 @@ pub const Abi = enum {
             .wasi,
             .emscripten,
             => .musl,
+            .liteos => .ohos,
             .opencl, // TODO: SPIR-V ABIs with Linkage capability
             .glsl450,
             .vulkan,
@@ -691,10 +698,9 @@ pub const Abi = enum {
             .ios,
             .tvos,
             .watchos,
-            .xros,
+            .visionos,
             .driverkit,
             .shadermodel,
-            .liteos, // TODO: audit this
             .solaris,
             .illumos,
             .serenity,
@@ -711,7 +717,8 @@ pub const Abi = enum {
 
     pub inline fn isMusl(abi: Abi) bool {
         return switch (abi) {
-            .musl, .musleabi, .musleabihf => true,
+            .musl, .musleabi, .musleabihf, .muslx32 => true,
+            .ohos => true,
             else => false,
         };
     }
@@ -722,6 +729,7 @@ pub const Abi = enum {
             .eabihf,
             .musleabihf,
             => .hard,
+            .ohos => .soft,
             else => .soft,
         };
     }
@@ -768,7 +776,7 @@ pub const ObjectFormat = enum {
     pub fn default(os_tag: Os.Tag, arch: Cpu.Arch) ObjectFormat {
         return switch (os_tag) {
             .windows, .uefi => .coff,
-            .ios, .macos, .watchos, .tvos => .macho,
+            .ios, .macos, .watchos, .tvos, .visionos => .macho,
             .plan9 => .plan9,
             else => switch (arch) {
                 .wasm32, .wasm64 => .wasm,
@@ -1529,6 +1537,7 @@ pub const Cpu = struct {
                 .x86 => &x86.cpu.pentium4,
                 .nvptx, .nvptx64 => &nvptx.cpu.sm_20,
                 .sparc, .sparcel => &sparc.cpu.v8,
+                .loongarch64 => &loongarch.cpu.loongarch64,
 
                 else => generic(arch),
             };
@@ -1633,6 +1642,7 @@ pub inline fn hasDynamicLinker(target: Target) bool {
         .tvos,
         .watchos,
         .macos,
+        .visionos,
         .uefi,
         .windows,
         .emscripten,
@@ -1807,7 +1817,7 @@ pub const DynamicLinker = struct {
             .tvos,
             .watchos,
             .macos,
-            .xros,
+            .visionos,
             => init("/usr/lib/dyld"),
 
             // Operating systems in this list have been verified as not having a standard
@@ -1977,6 +1987,7 @@ pub fn stackAlignment(target: Target) u16 {
         .ve,
         .wasm32,
         .wasm64,
+        .loongarch64,
         => 16,
         .powerpc64,
         .powerpc64le,
@@ -2287,7 +2298,7 @@ pub fn c_type_bit_size(target: Target, c_type: CType) u16 {
             },
         },
 
-        .macos, .ios, .tvos, .watchos, .xros => switch (c_type) {
+        .macos, .ios, .tvos, .watchos, .visionos => switch (c_type) {
             .char => return 8,
             .short, .ushort => return 16,
             .int, .uint, .float => return 32,
@@ -2407,7 +2418,7 @@ pub fn c_type_alignment(target: Target, c_type: CType) u16 {
 
                     else => 4,
                 },
-                .ios, .tvos, .watchos => 4,
+                .ios, .tvos, .watchos, .visionos => 4,
                 else => 8,
             },
 
@@ -2500,7 +2511,7 @@ pub fn c_type_preferred_alignment(target: Target, c_type: CType) u16 {
                     else => {},
                 },
             },
-            .ios, .tvos, .watchos => switch (c_type) {
+            .ios, .tvos, .watchos, .visionos => switch (c_type) {
                 .longdouble => return 4,
                 else => {},
             },
