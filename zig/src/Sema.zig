@@ -1901,7 +1901,6 @@ pub fn resolveConstStringIntern(
 
 pub fn resolveType(sema: *Sema, block: *Block, src: LazySrcLoc, zir_ref: Zir.Inst.Ref) !Type {
     const air_inst = try sema.resolveInst(zir_ref);
-    assert(air_inst != .var_args_param_type);
     const ty = try sema.analyzeAsType(block, src, air_inst);
     if (ty.isGenericPoison()) return error.GenericPoison;
     return ty;
@@ -4572,12 +4571,10 @@ fn zirValidateRefTy(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileErr
     const src = un_tok.src();
     // In case of GenericPoison, we don't actually have a type, so this will be
     // treated as an untyped address-of operator.
-    if (un_tok.operand == .var_args_param_type) return;
     const operand_air_inst = sema.resolveInst(un_tok.operand) catch |err| switch (err) {
         error.GenericPoison => return,
         else => |e| return e,
     };
-    if (operand_air_inst == .var_args_param_type) return;
     const ty_operand = sema.analyzeAsType(block, src, operand_air_inst) catch |err| switch (err) {
         error.GenericPoison => return,
         else => |e| return e,
@@ -7363,7 +7360,7 @@ const CallArgsInfo = union(enum) {
     }
 
     /// Analyzes the arg at `arg_index` and coerces it to `param_ty`.
-    /// `param_ty` may be `generic_poison` or `var_args_param`.
+    /// `param_ty` may be `generic_poison`. A value of `null` indicates a varargs parameter.
     /// `func_ty_info` may be the type before instantiation, even if a generic
     /// instantiation has been partially completed.
     fn analyzeArg(
@@ -7371,16 +7368,16 @@ const CallArgsInfo = union(enum) {
         sema: *Sema,
         block: *Block,
         arg_index: usize,
-        param_ty: Type,
+        maybe_param_ty: ?Type,
         func_ty_info: InternPool.Key.FuncType,
         func_inst: Air.Inst.Ref,
     ) CompileError!Air.Inst.Ref {
         const mod = sema.mod;
         const param_count = func_ty_info.param_types.len;
-        switch (param_ty.toIntern()) {
-            .generic_poison_type, .var_args_param_type => {},
+        if (maybe_param_ty) |param_ty| switch (param_ty.toIntern()) {
+            .generic_poison_type => {},
             else => try sema.queueFullTypeResolution(param_ty),
-        }
+        };
         const uncoerced_arg: Air.Inst.Ref = switch (cai) {
             inline .resolved, .call_builtin => |resolved| resolved.args[arg_index],
             .zir_call => |zir_call| arg_val: {
@@ -7409,7 +7406,8 @@ const CallArgsInfo = union(enum) {
                     // TODO set comptime_reason
                 }
                 // Give the arg its result type
-                sema.inst_map.putAssumeCapacity(zir_call.call_inst, Air.internedToRef(param_ty.toIntern()));
+                const provide_param_ty = if (maybe_param_ty) |t| t else Type.generic_poison;
+                sema.inst_map.putAssumeCapacity(zir_call.call_inst, Air.internedToRef(provide_param_ty.toIntern()));
                 // Resolve the arg!
                 const uncoerced_arg = try sema.resolveInlineBody(block, arg_body, zir_call.call_inst);
 
@@ -7426,9 +7424,11 @@ const CallArgsInfo = union(enum) {
                 break :arg_val uncoerced_arg;
             },
         };
+        const param_ty = maybe_param_ty orelse {
+            return sema.coerceVarArgParam(block, uncoerced_arg, cai.argSrc(block, arg_index));
+        };
         switch (param_ty.toIntern()) {
             .generic_poison_type => return uncoerced_arg,
-            .var_args_param_type => return sema.coerceVarArgParam(block, uncoerced_arg, cai.argSrc(block, arg_index)),
             else => return sema.coerceExtra(
                 block,
                 param_ty,
@@ -7970,10 +7970,10 @@ fn analyzeCall(
         const args = try sema.arena.alloc(Air.Inst.Ref, args_info.count());
         for (args, 0..) |*arg_out, arg_idx| {
             // Non-generic, so param types are already resolved
-            const param_ty = if (arg_idx < func_ty_info.param_types.len) ty: {
+            const param_ty: ?Type = if (arg_idx < func_ty_info.param_types.len) ty: {
                 break :ty Type.fromInterned(func_ty_info.param_types.get(ip)[arg_idx]);
-            } else Type.fromInterned(InternPool.Index.var_args_param_type);
-            assert(!param_ty.isGenericPoison());
+            } else null;
+            if (param_ty) |t| assert(!t.isGenericPoison());
             arg_out.* = try args_info.analyzeArg(sema, block, arg_idx, param_ty, func_ty_info, func);
             try sema.validateRuntimeValue(block, args_info.argSrc(block, arg_idx), arg_out.*);
             if (sema.typeOf(arg_out.*).zigTypeTag(mod) == .NoReturn) {
@@ -9700,18 +9700,18 @@ fn funcCommon(
         {
             return sema.fail(block, param_src, "non-pointer parameter declared noalias", .{});
         }
-
-        if (cc_resolved == .Interrupt) switch (target.cpu.arch) {
-            .x86, .x86_64 => {
+        switch (cc_resolved) {
+            .Interrupt => if (target.cpu.arch.isX86()) {
                 const err_code_size = target.ptrBitWidth();
                 switch (i) {
-                    0 => if (param_ty.zigTypeTag(mod) != .Pointer) return sema.fail(block, param_src, "parameter must be a pointer type", .{}),
-                    1 => if (param_ty.bitSize(mod) != err_code_size) return sema.fail(block, param_src, "parameter must be a {d}-bit integer", .{err_code_size}),
-                    else => return sema.fail(block, param_src, "Interrupt calling convention supports up to 2 parameters, found {d}", .{i + 1}),
+                    0 => if (param_ty.zigTypeTag(mod) != .Pointer) return sema.fail(block, param_src, "first parameter of function with 'Interrupt' calling convention must be a pointer type", .{}),
+                    1 => if (param_ty.bitSize(mod) != err_code_size) return sema.fail(block, param_src, "second parameter of function with 'Interrupt' calling convention must be a {d}-bit integer", .{err_code_size}),
+                    else => return sema.fail(block, param_src, "'Interrupt' calling convention supports up to 2 parameters, found {d}", .{i + 1}),
                 }
-            },
-            else => return sema.fail(block, param_src, "parameters are not allowed with Interrupt calling convention", .{}),
-        };
+            } else return sema.fail(block, param_src, "parameters are not allowed with 'Interrupt' calling convention", .{}),
+            .Signal => return sema.fail(block, param_src, "parameters are not allowed with 'Signal' calling convention", .{}),
+            else => {},
+        }
     }
 
     var ret_ty_requires_comptime = false;
@@ -10017,6 +10017,16 @@ fn finishFunc(
         return sema.failWithOwnedErrorMsg(block, msg);
     }
 
+    switch (cc_resolved) {
+        .Interrupt, .Signal => if (return_type.zigTypeTag(mod) != .Void and return_type.zigTypeTag(mod) != .NoReturn) {
+            return sema.fail(block, ret_ty_src, "function with calling convention '{s}' must return 'void' or 'noreturn'", .{@tagName(cc_resolved)});
+        },
+        .Inline => if (is_noinline) {
+            return sema.fail(block, cc_src, "'noinline' function cannot have callconv 'Inline'", .{});
+        },
+        else => {},
+    }
+
     const arch = target.cpu.arch;
     if (@as(?[]const u8, switch (cc_resolved) {
         .Unspecified, .C, .Naked, .Async, .Inline => null,
@@ -10060,20 +10070,7 @@ fn finishFunc(
         });
     }
 
-    if (cc_resolved == .Interrupt and return_type.zigTypeTag(mod) != .Void) {
-        return sema.fail(
-            block,
-            cc_src,
-            "non-void return type '{}' not allowed in function with calling convention 'Interrupt'",
-            .{return_type.fmt(mod)},
-        );
-    }
-
-    if (cc_resolved == .Inline and is_noinline) {
-        return sema.fail(block, cc_src, "'noinline' function cannot have callconv 'Inline'", .{});
-    }
     if (is_generic and sema.no_partial_func_ty) return error.GenericPoison;
-
     if (!final_is_generic and sema.wantErrorReturnTracing(return_type)) {
         // Make sure that StackTrace's fields are resolved so that the backend can
         // lower this fn type.
@@ -10226,12 +10223,10 @@ fn analyzeAs(
 ) CompileError!Air.Inst.Ref {
     const mod = sema.mod;
     const operand = try sema.resolveInst(zir_operand);
-    if (zir_dest_type == .var_args_param_type) return operand;
     const operand_air_inst = sema.resolveInst(zir_dest_type) catch |err| switch (err) {
         error.GenericPoison => return operand,
         else => |e| return e,
     };
-    if (operand_air_inst == .var_args_param_type) return operand;
     const dest_ty = sema.analyzeAsType(block, src, operand_air_inst) catch |err| switch (err) {
         error.GenericPoison => return operand,
         else => |e| return e,
@@ -22709,7 +22704,16 @@ fn zirPtrFromInt(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!
             .storage = .{ .elems = new_elems },
         } }));
     }
+    if (try sema.typeRequiresComptime(ptr_ty)) {
+        return sema.failWithOwnedErrorMsg(block, msg: {
+            const msg = try sema.errMsg(block, src, "pointer to comptime-only type '{}' must be comptime-known, but operand is runtime-known", .{ptr_ty.fmt(mod)});
+            errdefer msg.destroy(sema.gpa);
 
+            const src_decl = mod.declPtr(block.src_decl);
+            try sema.explainWhyTypeIsComptime(msg, src_decl.toSrcLoc(src, mod), ptr_ty);
+            break :msg msg;
+        });
+    }
     try sema.requireRuntimeBlock(block, src, operand_src);
     if (!is_vector) {
         if (block.wantSafety() and (try sema.typeHasRuntimeBits(elem_ty) or elem_ty.zigTypeTag(mod) == .Fn)) {
@@ -24294,6 +24298,14 @@ fn zirSplat(sema: *Sema, block: *Block, inst: Zir.Inst.Index) CompileError!Air.I
     const dest_ty = try sema.resolveDestType(block, src, extra.lhs, .remove_eu_opt, "@splat");
 
     if (!dest_ty.isVector(mod)) return sema.fail(block, src, "expected vector type, found '{}'", .{dest_ty.fmt(mod)});
+
+    if (!dest_ty.hasRuntimeBits(mod)) {
+        const empty_aggregate = try mod.intern(.{ .aggregate = .{
+            .ty = dest_ty.toIntern(),
+            .storage = .{ .elems = &[_]InternPool.Index{} },
+        } });
+        return Air.internedToRef(empty_aggregate);
+    }
 
     const operand = try sema.resolveInst(extra.rhs);
     const scalar_ty = dest_ty.childType(mod);
@@ -26232,7 +26244,7 @@ fn zirWasmMemoryGrow(
     const index: u32 = @intCast(try sema.resolveInt(block, index_src, extra.lhs, Type.u32, .{
         .needed_comptime_reason = "wasm memory size index must be comptime-known",
     }));
-    const delta = try sema.coerce(block, Type.u32, try sema.resolveInst(extra.rhs), delta_src);
+    const delta = try sema.coerce(block, Type.usize, try sema.resolveInst(extra.rhs), delta_src);
 
     try sema.requireRuntimeBlock(block, builtin_src, null);
     return block.addInst(.{
@@ -35656,8 +35668,6 @@ pub fn resolveTypeFields(sema: *Sema, ty: Type) CompileError!void {
     const ty_ip = ty.toIntern();
 
     switch (ty_ip) {
-        .var_args_param_type => unreachable,
-
         .none => unreachable,
 
         .u0_type,
@@ -37176,7 +37186,6 @@ pub fn typeHasOnePossibleValue(sema: *Sema, ty: Type) CompileError!?Value {
         .empty_struct,
         .generic_poison,
         // invalid
-        .var_args_param_type,
         .none,
         => unreachable,
 
