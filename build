@@ -185,7 +185,7 @@ cmake "$ROOTDIR/llvm" \
   -DCLANG_TOOL_C_ARCMT_TEST_BUILD=OFF \
   -DCLANG_TOOL_LIBCLANG_BUILD=OFF \
   -DLIBCLANG_BUILD_STATIC=ON \
-  -DLLD_BUILD_TOOLS=OFF
+  -DLLD_BUILD_TOOLS=OFF $ZIG_BOOTSTRAP_EXTRA_LLVM_CMAKE_CONFIG
 cmake --build . --target install
 
 # Finally, we can cross compile Zig itself, with Zig.

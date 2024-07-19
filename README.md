@@ -57,6 +57,8 @@ significantly affect how long it takes to build:
  * `CMAKE_BUILD_PARALLEL_LEVEL` can be used to introduce parallelism to build
    systems (such as make) which do not default to parallel builds. This option
    is irrelevant when using Ninja.
+ * `ZIG_BOOTSTRAP_EXTRA_LLVM_CMAKE_CONFIG` can be used to pass additional cmake
+   configuration flags to LLVM. For example, `-DLLVM_ENABLE_ASSERTIONS=ON`.
 
 When it succeeds, output can be found in `out/zig-<triple>-<cpu>/`.
 
