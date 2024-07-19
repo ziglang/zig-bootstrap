@@ -19,7 +19,7 @@ const root = @import("root");
 const std = @import("std.zig");
 const mem = std.mem;
 const fs = std.fs;
-const max_path_bytes = fs.MAX_PATH_BYTES;
+const max_path_bytes = fs.max_path_bytes;
 const maxInt = std.math.maxInt;
 const cast = std.math.cast;
 const assert = std.debug.assert;
@@ -493,7 +493,7 @@ pub fn fchown(fd: fd_t, owner: ?uid_t, group: ?gid_t) FChownError!void {
         switch (errno(res)) {
             .SUCCESS => return,
             .INTR => continue,
-            .BADF => unreachable, // Can be reached if the fd refers to a directory opened without `OpenDirOptions{ .iterate = true }`
+            .BADF => unreachable, // Can be reached if the fd refers to a directory opened without `Dir.OpenOptions{ .iterate = true }`
 
             .FAULT => unreachable,
             .INVAL => unreachable,
@@ -2770,9 +2770,6 @@ pub fn renameatW(
             .SUCCESS => return,
             // INVALID_PARAMETER here means that the filesystem does not support FileRenameInformationEx
             .INVALID_PARAMETER => {},
-            .DIRECTORY_NOT_EMPTY => return error.PathAlreadyExists,
-            .FILE_IS_A_DIRECTORY => return error.IsDir,
-            .NOT_A_DIRECTORY => return error.NotDir,
             // For all other statuses, fall down to the switch below to handle them.
             else => need_fallback = false,
         }
@@ -2815,6 +2812,9 @@ pub fn renameatW(
         .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
         .NOT_SAME_DEVICE => return error.RenameAcrossMountPoints,
         .OBJECT_NAME_COLLISION => return error.PathAlreadyExists,
+        .DIRECTORY_NOT_EMPTY => return error.PathAlreadyExists,
+        .FILE_IS_A_DIRECTORY => return error.IsDir,
+        .NOT_A_DIRECTORY => return error.NotDir,
         else => return windows.unexpectedStatus(rc),
     }
 }
@@ -3474,7 +3474,7 @@ pub const SocketError = error{
 pub fn socket(domain: u32, socket_type: u32, protocol: u32) SocketError!socket_t {
     if (native_os == .windows) {
         // NOTE: windows translates the SOCK.NONBLOCK/SOCK.CLOEXEC flags into
-        // windows-analagous operations
+        // windows-analogous operations
         const filtered_sock_type = socket_type & ~@as(u32, SOCK.NONBLOCK | SOCK.CLOEXEC);
         const flags: u32 = if ((socket_type & SOCK.CLOEXEC) != 0)
             windows.ws2_32.WSA_FLAG_NO_HANDLE_INHERIT
@@ -3968,7 +3968,7 @@ pub const EpollCtlError = error{
     FileDescriptorIncompatibleWithEpoll,
 } || UnexpectedError;
 
-pub fn epoll_ctl(epfd: i32, op: u32, fd: i32, event: ?*linux.epoll_event) EpollCtlError!void {
+pub fn epoll_ctl(epfd: i32, op: u32, fd: i32, event: ?*system.epoll_event) EpollCtlError!void {
     const rc = system.epoll_ctl(epfd, op, fd, event);
     switch (errno(rc)) {
         .SUCCESS => return,
@@ -3988,7 +3988,7 @@ pub fn epoll_ctl(epfd: i32, op: u32, fd: i32, event: ?*linux.epoll_event) EpollC
 /// Waits for an I/O event on an epoll file descriptor.
 /// Returns the number of file descriptors ready for the requested I/O,
 /// or zero if no file descriptor became ready during the requested timeout milliseconds.
-pub fn epoll_wait(epfd: i32, events: []linux.epoll_event, timeout: i32) usize {
+pub fn epoll_wait(epfd: i32, events: []system.epoll_event, timeout: i32) usize {
     while (true) {
         // TODO get rid of the @intCast
         const rc = system.epoll_wait(epfd, events.ptr, @intCast(events.len), timeout);
@@ -4501,7 +4501,7 @@ pub const FanotifyInitError = error{
     PermissionDenied,
 } || UnexpectedError;
 
-pub fn fanotify_init(flags: u32, event_f_flags: u32) FanotifyInitError!i32 {
+pub fn fanotify_init(flags: std.os.linux.fanotify.InitFlags, event_f_flags: u32) FanotifyInitError!i32 {
     const rc = system.fanotify_init(flags, event_f_flags);
     switch (errno(rc)) {
         .SUCCESS => return @intCast(rc),
@@ -4530,16 +4530,28 @@ pub const FanotifyMarkError = error{
     NameTooLong,
 } || UnexpectedError;
 
-pub fn fanotify_mark(fanotify_fd: i32, flags: u32, mask: u64, dirfd: i32, pathname: ?[]const u8) FanotifyMarkError!void {
+pub fn fanotify_mark(
+    fanotify_fd: fd_t,
+    flags: std.os.linux.fanotify.MarkFlags,
+    mask: std.os.linux.fanotify.MarkMask,
+    dirfd: fd_t,
+    pathname: ?[]const u8,
+) FanotifyMarkError!void {
     if (pathname) |path| {
         const path_c = try toPosixPath(path);
         return fanotify_markZ(fanotify_fd, flags, mask, dirfd, &path_c);
+    } else {
+        return fanotify_markZ(fanotify_fd, flags, mask, dirfd, null);
     }
-
-    return fanotify_markZ(fanotify_fd, flags, mask, dirfd, null);
 }
 
-pub fn fanotify_markZ(fanotify_fd: i32, flags: u32, mask: u64, dirfd: i32, pathname: ?[*:0]const u8) FanotifyMarkError!void {
+pub fn fanotify_markZ(
+    fanotify_fd: fd_t,
+    flags: std.os.linux.fanotify.MarkFlags,
+    mask: std.os.linux.fanotify.MarkMask,
+    dirfd: fd_t,
+    pathname: ?[*:0]const u8,
+) FanotifyMarkError!void {
     const rc = system.fanotify_mark(fanotify_fd, flags, mask, dirfd, pathname);
     switch (errno(rc)) {
         .SUCCESS => return,
@@ -5933,6 +5945,8 @@ pub fn sendmsg(
 pub const SendToError = SendMsgError || error{
     /// The destination address is not reachable by the bound address.
     UnreachableAddress,
+    /// The destination address is not listening.
+    ConnectionRefused,
 };
 
 /// Transmit a message to another socket.
@@ -6005,6 +6019,7 @@ pub fn sendto(
             .AGAIN => return error.WouldBlock,
             .ALREADY => return error.FastOpenAlreadyInProgress,
             .BADF => unreachable, // always a race condition
+            .CONNREFUSED => return error.ConnectionRefused,
             .CONNRESET => return error.ConnectionResetByPeer,
             .DESTADDRREQ => unreachable, // The socket is not connection-mode, and no peer address is set.
             .FAULT => unreachable, // An invalid user space address was specified for an argument.
@@ -6066,6 +6081,7 @@ pub fn send(
         error.AddressNotAvailable => unreachable,
         error.SocketNotConnected => unreachable,
         error.UnreachableAddress => unreachable,
+        error.ConnectionRefused => unreachable,
         else => |e| return e,
     };
 }
@@ -6475,33 +6491,31 @@ pub const PollError = error{
 } || UnexpectedError;
 
 pub fn poll(fds: []pollfd, timeout: i32) PollError!usize {
+    if (native_os == .windows) {
+        switch (windows.poll(fds.ptr, @intCast(fds.len), timeout)) {
+            windows.ws2_32.SOCKET_ERROR => switch (windows.ws2_32.WSAGetLastError()) {
+                .WSANOTINITIALISED => unreachable,
+                .WSAENETDOWN => return error.NetworkSubsystemFailed,
+                .WSAENOBUFS => return error.SystemResources,
+                // TODO: handle more errors
+                else => |err| return windows.unexpectedWSAError(err),
+            },
+            else => |rc| return @intCast(rc),
+        }
+    }
     while (true) {
         const fds_count = cast(nfds_t, fds.len) orelse return error.SystemResources;
         const rc = system.poll(fds.ptr, fds_count, timeout);
-        if (native_os == .windows) {
-            if (rc == windows.ws2_32.SOCKET_ERROR) {
-                switch (windows.ws2_32.WSAGetLastError()) {
-                    .WSANOTINITIALISED => unreachable,
-                    .WSAENETDOWN => return error.NetworkSubsystemFailed,
-                    .WSAENOBUFS => return error.SystemResources,
-                    // TODO: handle more errors
-                    else => |err| return windows.unexpectedWSAError(err),
-                }
-            } else {
-                return @intCast(rc);
-            }
-        } else {
-            switch (errno(rc)) {
-                .SUCCESS => return @intCast(rc),
-                .FAULT => unreachable,
-                .INTR => continue,
-                .INVAL => unreachable,
-                .NOMEM => return error.SystemResources,
-                else => |err| return unexpectedErrno(err),
-            }
+        switch (errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .FAULT => unreachable,
+            .INTR => continue,
+            .INVAL => unreachable,
+            .NOMEM => return error.SystemResources,
+            else => |err| return unexpectedErrno(err),
         }
-        unreachable;
     }
+    unreachable;
 }
 
 pub const PPollError = error{
@@ -6898,7 +6912,7 @@ pub fn fsync(fd: fd_t) SyncError!void {
     if (native_os == .windows) {
         if (windows.kernel32.FlushFileBuffers(fd) != 0)
             return;
-        switch (windows.kernel32.GetLastError()) {
+        switch (windows.GetLastError()) {
             .SUCCESS => return,
             .INVALID_HANDLE => unreachable,
             .ACCESS_DENIED => return error.AccessDenied, // a sync was performed but the system couldn't update the access time
@@ -7138,32 +7152,35 @@ pub const PerfEventOpenError = error{
 } || UnexpectedError;
 
 pub fn perf_event_open(
-    attr: *linux.perf_event_attr,
+    attr: *system.perf_event_attr,
     pid: pid_t,
     cpu: i32,
     group_fd: fd_t,
     flags: usize,
 ) PerfEventOpenError!fd_t {
-    const rc = linux.perf_event_open(attr, pid, cpu, group_fd, flags);
-    switch (errno(rc)) {
-        .SUCCESS => return @intCast(rc),
-        .@"2BIG" => return error.TooBig,
-        .ACCES => return error.PermissionDenied,
-        .BADF => unreachable, // group_fd file descriptor is not valid.
-        .BUSY => return error.DeviceBusy,
-        .FAULT => unreachable, // Segmentation fault.
-        .INVAL => unreachable, // Bad attr settings.
-        .INTR => unreachable, // Mixed perf and ftrace handling for a uprobe.
-        .MFILE => return error.ProcessResources,
-        .NODEV => return error.EventRequiresUnsupportedCpuFeature,
-        .NOENT => unreachable, // Invalid type setting.
-        .NOSPC => return error.TooManyBreakpoints,
-        .NOSYS => return error.SampleStackNotSupported,
-        .OPNOTSUPP => return error.EventNotSupported,
-        .OVERFLOW => return error.SampleMaxStackOverflow,
-        .PERM => return error.PermissionDenied,
-        .SRCH => return error.ProcessNotFound,
-        else => |err| return unexpectedErrno(err),
+    if (native_os == .linux) {
+        // There is no syscall wrapper for this function exposed by libcs
+        const rc = linux.perf_event_open(attr, pid, cpu, group_fd, flags);
+        switch (errno(rc)) {
+            .SUCCESS => return @intCast(rc),
+            .@"2BIG" => return error.TooBig,
+            .ACCES => return error.PermissionDenied,
+            .BADF => unreachable, // group_fd file descriptor is not valid.
+            .BUSY => return error.DeviceBusy,
+            .FAULT => unreachable, // Segmentation fault.
+            .INVAL => unreachable, // Bad attr settings.
+            .INTR => unreachable, // Mixed perf and ftrace handling for a uprobe.
+            .MFILE => return error.ProcessResources,
+            .NODEV => return error.EventRequiresUnsupportedCpuFeature,
+            .NOENT => unreachable, // Invalid type setting.
+            .NOSPC => return error.TooManyBreakpoints,
+            .NOSYS => return error.SampleStackNotSupported,
+            .OPNOTSUPP => return error.EventNotSupported,
+            .OVERFLOW => return error.SampleMaxStackOverflow,
+            .PERM => return error.PermissionDenied,
+            .SRCH => return error.ProcessNotFound,
+            else => |err| return unexpectedErrno(err),
+        }
     }
 }
 
@@ -7178,8 +7195,8 @@ pub const TimerFdCreateError = error{
 pub const TimerFdGetError = error{InvalidHandle} || UnexpectedError;
 pub const TimerFdSetError = TimerFdGetError || error{Canceled};
 
-pub fn timerfd_create(clokid: i32, flags: linux.TFD) TimerFdCreateError!fd_t {
-    const rc = linux.timerfd_create(clokid, flags);
+pub fn timerfd_create(clokid: i32, flags: system.TFD) TimerFdCreateError!fd_t {
+    const rc = system.timerfd_create(clokid, @bitCast(flags));
     return switch (errno(rc)) {
         .SUCCESS => @intCast(rc),
         .INVAL => unreachable,
@@ -7194,11 +7211,11 @@ pub fn timerfd_create(clokid: i32, flags: linux.TFD) TimerFdCreateError!fd_t {
 
 pub fn timerfd_settime(
     fd: i32,
-    flags: linux.TFD.TIMER,
-    new_value: *const linux.itimerspec,
-    old_value: ?*linux.itimerspec,
+    flags: system.TFD.TIMER,
+    new_value: *const system.itimerspec,
+    old_value: ?*system.itimerspec,
 ) TimerFdSetError!void {
-    const rc = linux.timerfd_settime(fd, flags, new_value, old_value);
+    const rc = system.timerfd_settime(fd, @bitCast(flags), new_value, old_value);
     return switch (errno(rc)) {
         .SUCCESS => {},
         .BADF => error.InvalidHandle,
@@ -7209,9 +7226,9 @@ pub fn timerfd_settime(
     };
 }
 
-pub fn timerfd_gettime(fd: i32) TimerFdGetError!linux.itimerspec {
-    var curr_value: linux.itimerspec = undefined;
-    const rc = linux.timerfd_gettime(fd, &curr_value);
+pub fn timerfd_gettime(fd: i32) TimerFdGetError!system.itimerspec {
+    var curr_value: system.itimerspec = undefined;
+    const rc = system.timerfd_gettime(fd, &curr_value);
     return switch (errno(rc)) {
         .SUCCESS => return curr_value,
         .BADF => error.InvalidHandle,
@@ -7267,6 +7284,44 @@ pub fn ptrace(request: u32, pid: pid_t, addr: usize, signal: usize) PtraceError!
             else => |err| return unexpectedErrno(err),
         },
     };
+}
+
+pub const NameToFileHandleAtError = error{
+    FileNotFound,
+    NotDir,
+    OperationNotSupported,
+    NameTooLong,
+    Unexpected,
+};
+
+pub fn name_to_handle_at(
+    dirfd: fd_t,
+    pathname: []const u8,
+    handle: *std.os.linux.file_handle,
+    mount_id: *i32,
+    flags: u32,
+) NameToFileHandleAtError!void {
+    const pathname_c = try toPosixPath(pathname);
+    return name_to_handle_atZ(dirfd, &pathname_c, handle, mount_id, flags);
+}
+
+pub fn name_to_handle_atZ(
+    dirfd: fd_t,
+    pathname_z: [*:0]const u8,
+    handle: *std.os.linux.file_handle,
+    mount_id: *i32,
+    flags: u32,
+) NameToFileHandleAtError!void {
+    switch (errno(system.name_to_handle_at(dirfd, pathname_z, handle, mount_id, flags))) {
+        .SUCCESS => {},
+        .FAULT => unreachable, // pathname, mount_id, or handle outside accessible address space
+        .INVAL => unreachable, // bad flags, or handle_bytes too big
+        .NOENT => return error.FileNotFound,
+        .NOTDIR => return error.NotDir,
+        .OPNOTSUPP => return error.OperationNotSupported,
+        .OVERFLOW => return error.NameTooLong,
+        else => |err| return unexpectedErrno(err),
+    }
 }
 
 pub const IoCtl_SIOCGIFINDEX_Error = error{

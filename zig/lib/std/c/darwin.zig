@@ -851,8 +851,8 @@ pub const pthread_attr_t = extern struct {
 };
 
 pub extern "c" fn pthread_threadid_np(thread: ?std.c.pthread_t, thread_id: *u64) c_int;
-pub extern "c" fn pthread_setname_np(name: [*:0]const u8) E;
-pub extern "c" fn pthread_getname_np(thread: std.c.pthread_t, name: [*:0]u8, len: usize) E;
+pub extern "c" fn pthread_setname_np(name: [*:0]const u8) c_int;
+pub extern "c" fn pthread_getname_np(thread: std.c.pthread_t, name: [*:0]u8, len: usize) c_int;
 pub extern "c" fn pthread_attr_set_qos_class_np(attr: *pthread_attr_t, qos_class: qos_class_t, relative_priority: c_int) c_int;
 pub extern "c" fn pthread_attr_get_qos_class_np(attr: *pthread_attr_t, qos_class: *qos_class_t, relative_priority: *c_int) c_int;
 pub extern "c" fn pthread_set_qos_class_self_np(qos_class: qos_class_t, relative_priority: c_int) c_int;
@@ -2523,7 +2523,7 @@ pub const F = struct {
     /// add signature from same file (used by dyld for shared libs)
     pub const ADDFILESIGS = 61;
     /// used in conjunction with F.NOCACHE to indicate that DIRECT, synchronous writes
-    /// should not be used (i.e. its ok to temporaily create cached pages)
+    /// should not be used (i.e. its ok to temporarily create cached pages)
     pub const NODIRECT = 62;
     ///Get the protection class of a file from the EA, returns int
     pub const GETPROTECTIONCLASS = 63;

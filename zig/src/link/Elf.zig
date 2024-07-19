@@ -543,18 +543,19 @@ pub fn deinit(self: *Elf) void {
     self.comdat_group_sections.deinit(gpa);
 }
 
-pub fn getDeclVAddr(self: *Elf, decl_index: InternPool.DeclIndex, reloc_info: link.File.RelocInfo) !u64 {
+pub fn getDeclVAddr(self: *Elf, _: Zcu.PerThread, decl_index: InternPool.DeclIndex, reloc_info: link.File.RelocInfo) !u64 {
     assert(self.llvm_object == null);
     return self.zigObjectPtr().?.getDeclVAddr(self, decl_index, reloc_info);
 }
 
 pub fn lowerAnonDecl(
     self: *Elf,
+    pt: Zcu.PerThread,
     decl_val: InternPool.Index,
     explicit_alignment: InternPool.Alignment,
-    src_loc: Module.SrcLoc,
+    src_loc: Module.LazySrcLoc,
 ) !codegen.Result {
-    return self.zigObjectPtr().?.lowerAnonDecl(self, decl_val, explicit_alignment, src_loc);
+    return self.zigObjectPtr().?.lowerAnonDecl(self, pt, decl_val, explicit_alignment, src_loc);
 }
 
 pub fn getAnonDeclVAddr(self: *Elf, decl_val: InternPool.Index, reloc_info: link.File.RelocInfo) !u64 {
@@ -1064,15 +1065,15 @@ pub fn markDirty(self: *Elf, shdr_index: u32) void {
     }
 }
 
-pub fn flush(self: *Elf, arena: Allocator, prog_node: std.Progress.Node) link.File.FlushError!void {
+pub fn flush(self: *Elf, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: std.Progress.Node) link.File.FlushError!void {
     const use_lld = build_options.have_llvm and self.base.comp.config.use_lld;
     if (use_lld) {
-        return self.linkWithLLD(arena, prog_node);
+        return self.linkWithLLD(arena, tid, prog_node);
     }
-    try self.flushModule(arena, prog_node);
+    try self.flushModule(arena, tid, prog_node);
 }
 
-pub fn flushModule(self: *Elf, arena: Allocator, prog_node: std.Progress.Node) link.File.FlushError!void {
+pub fn flushModule(self: *Elf, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: std.Progress.Node) link.File.FlushError!void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -1103,7 +1104,7 @@ pub fn flushModule(self: *Elf, arena: Allocator, prog_node: std.Progress.Node) l
     // --verbose-link
     if (comp.verbose_link) try self.dumpArgv(comp);
 
-    if (self.zigObjectPtr()) |zig_object| try zig_object.flushModule(self);
+    if (self.zigObjectPtr()) |zig_object| try zig_object.flushModule(self, tid);
     if (self.base.isStaticLib()) return relocatable.flushStaticLib(self, comp, module_obj_path);
     if (self.base.isObject()) return relocatable.flushObject(self, comp, module_obj_path);
 
@@ -1145,7 +1146,7 @@ pub fn flushModule(self: *Elf, arena: Allocator, prog_node: std.Progress.Node) l
 
     // TSAN
     if (comp.config.any_sanitize_thread) {
-        try positionals.append(.{ .path = comp.tsan_static_lib.?.full_object_path });
+        try positionals.append(.{ .path = comp.tsan_lib.?.full_object_path });
     }
 
     // libc
@@ -1603,7 +1604,7 @@ fn dumpArgv(self: *Elf, comp: *Compilation) !void {
         }
 
         if (comp.config.any_sanitize_thread) {
-            try argv.append(comp.tsan_static_lib.?.full_object_path);
+            try argv.append(comp.tsan_lib.?.full_object_path);
         }
 
         // libc
@@ -1831,7 +1832,7 @@ fn parseLdScript(self: *Elf, lib: SystemLib) ParseError!void {
                         break :success;
                 }
             } else {
-                var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
+                var buffer: [fs.max_path_bytes]u8 = undefined;
                 if (fs.realpath(scr_obj.path, &buffer)) |path| {
                     test_path.clearRetainingCapacity();
                     try test_path.writer().writeAll(path);
@@ -2146,7 +2147,7 @@ fn scanRelocs(self: *Elf) !void {
     }
 }
 
-fn linkWithLLD(self: *Elf, arena: Allocator, prog_node: std.Progress.Node) !void {
+fn linkWithLLD(self: *Elf, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: std.Progress.Node) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -2159,7 +2160,7 @@ fn linkWithLLD(self: *Elf, arena: Allocator, prog_node: std.Progress.Node) !void
     // If there is no Zig code to compile, then we should skip flushing the output file because it
     // will not be part of the linker line anyway.
     const module_obj_path: ?[]const u8 = if (comp.module != null) blk: {
-        try self.flushModule(arena, prog_node);
+        try self.flushModule(arena, tid, prog_node);
 
         if (fs.path.dirname(full_out_path)) |dirname| {
             break :blk try fs.path.join(arena, &.{ dirname, self.base.zcu_object_sub_path.? });
@@ -2610,7 +2611,7 @@ fn linkWithLLD(self: *Elf, arena: Allocator, prog_node: std.Progress.Node) !void
         }
 
         if (comp.config.any_sanitize_thread) {
-            try argv.append(comp.tsan_static_lib.?.full_object_path);
+            try argv.append(comp.tsan_lib.?.full_object_path);
         }
 
         // libc
@@ -2983,55 +2984,55 @@ pub fn freeDecl(self: *Elf, decl_index: InternPool.DeclIndex) void {
     return self.zigObjectPtr().?.freeDecl(self, decl_index);
 }
 
-pub fn updateFunc(self: *Elf, mod: *Module, func_index: InternPool.Index, air: Air, liveness: Liveness) !void {
+pub fn updateFunc(self: *Elf, pt: Zcu.PerThread, func_index: InternPool.Index, air: Air, liveness: Liveness) !void {
     if (build_options.skip_non_native and builtin.object_format != .elf) {
         @panic("Attempted to compile for object format that was disabled by build configuration");
     }
-    if (self.llvm_object) |llvm_object| return llvm_object.updateFunc(mod, func_index, air, liveness);
-    return self.zigObjectPtr().?.updateFunc(self, mod, func_index, air, liveness);
+    if (self.llvm_object) |llvm_object| return llvm_object.updateFunc(pt, func_index, air, liveness);
+    return self.zigObjectPtr().?.updateFunc(self, pt, func_index, air, liveness);
 }
 
 pub fn updateDecl(
     self: *Elf,
-    mod: *Module,
+    pt: Zcu.PerThread,
     decl_index: InternPool.DeclIndex,
 ) link.File.UpdateDeclError!void {
     if (build_options.skip_non_native and builtin.object_format != .elf) {
         @panic("Attempted to compile for object format that was disabled by build configuration");
     }
-    if (self.llvm_object) |llvm_object| return llvm_object.updateDecl(mod, decl_index);
-    return self.zigObjectPtr().?.updateDecl(self, mod, decl_index);
+    if (self.llvm_object) |llvm_object| return llvm_object.updateDecl(pt, decl_index);
+    return self.zigObjectPtr().?.updateDecl(self, pt, decl_index);
 }
 
-pub fn lowerUnnamedConst(self: *Elf, val: Value, decl_index: InternPool.DeclIndex) !u32 {
-    return self.zigObjectPtr().?.lowerUnnamedConst(self, val, decl_index);
+pub fn lowerUnnamedConst(self: *Elf, pt: Zcu.PerThread, val: Value, decl_index: InternPool.DeclIndex) !u32 {
+    return self.zigObjectPtr().?.lowerUnnamedConst(self, pt, val, decl_index);
 }
 
 pub fn updateExports(
     self: *Elf,
-    mod: *Module,
+    pt: Zcu.PerThread,
     exported: Module.Exported,
-    exports: []const *Module.Export,
+    export_indices: []const u32,
 ) link.File.UpdateExportsError!void {
     if (build_options.skip_non_native and builtin.object_format != .elf) {
         @panic("Attempted to compile for object format that was disabled by build configuration");
     }
-    if (self.llvm_object) |llvm_object| return llvm_object.updateExports(mod, exported, exports);
-    return self.zigObjectPtr().?.updateExports(self, mod, exported, exports);
+    if (self.llvm_object) |llvm_object| return llvm_object.updateExports(pt, exported, export_indices);
+    return self.zigObjectPtr().?.updateExports(self, pt, exported, export_indices);
 }
 
-pub fn updateDeclLineNumber(self: *Elf, mod: *Module, decl_index: InternPool.DeclIndex) !void {
+pub fn updateDeclLineNumber(self: *Elf, pt: Zcu.PerThread, decl_index: InternPool.DeclIndex) !void {
     if (self.llvm_object) |_| return;
-    return self.zigObjectPtr().?.updateDeclLineNumber(mod, decl_index);
+    return self.zigObjectPtr().?.updateDeclLineNumber(pt, decl_index);
 }
 
-pub fn deleteDeclExport(
+pub fn deleteExport(
     self: *Elf,
-    decl_index: InternPool.DeclIndex,
+    exported: Zcu.Exported,
     name: InternPool.NullTerminatedString,
 ) void {
     if (self.llvm_object) |_| return;
-    return self.zigObjectPtr().?.deleteDeclExport(self, decl_index, name);
+    return self.zigObjectPtr().?.deleteExport(self, exported, name);
 }
 
 fn addLinkerDefinedSymbols(self: *Elf) !void {
@@ -3706,7 +3707,7 @@ fn sortInitFini(self: *Elf) !void {
                 }
                 const default: i32 = if (is_ctor_dtor) -1 else std.math.maxInt(i32);
                 const name = atom_ptr.name(self);
-                var it = mem.splitBackwards(u8, name, ".");
+                var it = mem.splitBackwardsScalar(u8, name, '.');
                 const priority = std.fmt.parseUnsigned(u16, it.first(), 10) catch default;
                 break :blk priority;
             };
@@ -5842,7 +5843,8 @@ pub fn tpAddress(self: *Elf) i64 {
     const addr = switch (self.getTarget().cpu.arch) {
         .x86_64 => mem.alignForward(u64, phdr.p_vaddr + phdr.p_memsz, phdr.p_align),
         .aarch64 => mem.alignBackward(u64, phdr.p_vaddr - 16, phdr.p_align),
-        else => @panic("TODO implement getTpAddress for this arch"),
+        .riscv64 => phdr.p_vaddr,
+        else => |arch| std.debug.panic("TODO implement getTpAddress for {s}", .{@tagName(arch)}),
     };
     return @intCast(addr);
 }
@@ -6465,7 +6467,9 @@ const Liveness = @import("../Liveness.zig");
 const LlvmObject = @import("../codegen/llvm.zig").Object;
 const MergeSection = merge_section.MergeSection;
 const MergeSubsection = merge_section.MergeSubsection;
-const Module = @import("../Module.zig");
+const Zcu = @import("../Zcu.zig");
+/// Deprecated.
+const Module = Zcu;
 const Object = @import("Elf/Object.zig");
 const InternPool = @import("../InternPool.zig");
 const PltSection = synthetic_sections.PltSection;

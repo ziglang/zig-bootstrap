@@ -414,7 +414,7 @@ pub const Iterator = switch (native_os) {
         index: usize,
         end_index: usize,
         first_iter: bool,
-        name_data: [fs.MAX_NAME_BYTES]u8,
+        name_data: [fs.max_name_bytes]u8,
 
         const Self = @This();
 
@@ -740,7 +740,7 @@ pub const Walker = struct {
 
 /// Recursively iterates over a directory.
 ///
-/// `self` must have been opened with `OpenDirOptions{.iterate = true}`.
+/// `self` must have been opened with `OpenOptions{.iterate = true}`.
 ///
 /// `Walker.deinit` releases allocated memory and directory handles.
 ///
@@ -1233,7 +1233,7 @@ fn makeOpenPathAccessMaskW(self: Dir, sub_path: []const u8, access_mask: u32, no
 /// On Windows, `sub_path` should be encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
 /// On WASI, `sub_path` should be encoded as valid UTF-8.
 /// On other platforms, `sub_path` is an opaque sequence of bytes with no particular encoding.
-pub fn makeOpenPath(self: Dir, sub_path: []const u8, open_dir_options: OpenDirOptions) (MakeError || OpenError || StatFileError)!Dir {
+pub fn makeOpenPath(self: Dir, sub_path: []const u8, open_dir_options: OpenOptions) (MakeError || OpenError || StatFileError)!Dir {
     return switch (native_os) {
         .windows => {
             const w = windows;
@@ -1309,7 +1309,7 @@ pub fn realpathZ(self: Dir, pathname: [*:0]const u8, out_buffer: []u8) RealPathE
     };
     defer posix.close(fd);
 
-    var buffer: [fs.MAX_PATH_BYTES]u8 = undefined;
+    var buffer: [fs.max_path_bytes]u8 = undefined;
     const out_path = try std.os.getFdPath(fd, &buffer);
 
     if (out_path.len > out_buffer.len) {
@@ -1347,7 +1347,7 @@ pub fn realpathW(self: Dir, pathname: []const u16, out_buffer: []u8) RealPathErr
 
     var wide_buf: [w.PATH_MAX_WIDE]u16 = undefined;
     const wide_slice = try w.GetFinalPathNameByHandle(h_file, .{}, &wide_buf);
-    var big_out_buf: [fs.MAX_PATH_BYTES]u8 = undefined;
+    var big_out_buf: [fs.max_path_bytes]u8 = undefined;
     const end_index = std.unicode.wtf16LeToWtf8(&big_out_buf, wide_slice);
     if (end_index > out_buffer.len)
         return error.NameTooLong;
@@ -1361,13 +1361,13 @@ pub const RealPathAllocError = RealPathError || Allocator.Error;
 /// Same as `Dir.realpath` except caller must free the returned memory.
 /// See also `Dir.realpath`.
 pub fn realpathAlloc(self: Dir, allocator: Allocator, pathname: []const u8) RealPathAllocError![]u8 {
-    // Use of MAX_PATH_BYTES here is valid as the realpath function does not
+    // Use of max_path_bytes here is valid as the realpath function does not
     // have a variant that takes an arbitrary-size buffer.
     // TODO(#4812): Consider reimplementing realpath or using the POSIX.1-2008
     // NULL out parameter (GNU's canonicalize_file_name) to handle overelong
     // paths. musl supports passing NULL but restricts the output to PATH_MAX
     // anyway.
-    var buf: [fs.MAX_PATH_BYTES]u8 = undefined;
+    var buf: [fs.max_path_bytes]u8 = undefined;
     return allocator.dupe(u8, try self.realpath(pathname, buf[0..]));
 }
 
@@ -1393,7 +1393,10 @@ pub fn setAsCwd(self: Dir) !void {
     try posix.fchdir(self.fd);
 }
 
-pub const OpenDirOptions = struct {
+/// Deprecated: use `OpenOptions`
+pub const OpenDirOptions = OpenOptions;
+
+pub const OpenOptions = struct {
     /// `true` means the opened directory can be used as the `Dir` parameter
     /// for functions which operate based on an open directory handle. When `false`,
     /// such operations are Illegal Behavior.
@@ -1415,7 +1418,7 @@ pub const OpenDirOptions = struct {
 /// On WASI, `sub_path` should be encoded as valid UTF-8.
 /// On other platforms, `sub_path` is an opaque sequence of bytes with no particular encoding.
 /// Asserts that the path parameter has no null bytes.
-pub fn openDir(self: Dir, sub_path: []const u8, args: OpenDirOptions) OpenError!Dir {
+pub fn openDir(self: Dir, sub_path: []const u8, args: OpenOptions) OpenError!Dir {
     switch (native_os) {
         .windows => {
             const sub_path_w = try windows.sliceToPrefixedFileW(self.fd, sub_path);
@@ -1473,7 +1476,7 @@ pub fn openDir(self: Dir, sub_path: []const u8, args: OpenDirOptions) OpenError!
 }
 
 /// Same as `openDir` except the parameter is null-terminated.
-pub fn openDirZ(self: Dir, sub_path_c: [*:0]const u8, args: OpenDirOptions) OpenError!Dir {
+pub fn openDirZ(self: Dir, sub_path_c: [*:0]const u8, args: OpenOptions) OpenError!Dir {
     switch (native_os) {
         .windows => {
             const sub_path_w = try windows.cStrToPrefixedFileW(self.fd, sub_path_c);
@@ -1530,7 +1533,7 @@ pub fn openDirZ(self: Dir, sub_path_c: [*:0]const u8, args: OpenDirOptions) Open
 
 /// Same as `openDir` except the path parameter is WTF-16 LE encoded, NT-prefixed.
 /// This function asserts the target OS is Windows.
-pub fn openDirW(self: Dir, sub_path_w: [*:0]const u16, args: OpenDirOptions) OpenError!Dir {
+pub fn openDirW(self: Dir, sub_path_w: [*:0]const u16, args: OpenOptions) OpenError!Dir {
     const w = windows;
     // TODO remove some of these flags if args.access_sub_paths is false
     const base_flags = w.STANDARD_RIGHTS_READ | w.FILE_READ_ATTRIBUTES | w.FILE_READ_EA |
@@ -2192,10 +2195,10 @@ fn deleteTreeMinStackSizeWithKindHint(self: Dir, sub_path: []const u8, kind_hint
         var cleanup_dir = true;
         defer if (cleanup_dir) dir.close();
 
-        // Valid use of MAX_PATH_BYTES because dir_name_buf will only
+        // Valid use of max_path_bytes because dir_name_buf will only
         // ever store a single path component that was returned from the
         // filesystem.
-        var dir_name_buf: [fs.MAX_PATH_BYTES]u8 = undefined;
+        var dir_name_buf: [fs.max_path_bytes]u8 = undefined;
         var dir_name: []const u8 = sub_path;
 
         // Here we must avoid recursion, in order to provide O(1) memory guarantee of this function.
@@ -2650,7 +2653,7 @@ pub const ChmodError = File.ChmodError;
 /// The process must have the correct privileges in order to do this
 /// successfully, or must have the effective user ID matching the owner
 /// of the directory. Additionally, the directory must have been opened
-/// with `OpenDirOptions{ .iterate = true }`.
+/// with `OpenOptions{ .iterate = true }`.
 pub fn chmod(self: Dir, new_mode: File.Mode) ChmodError!void {
     const file: File = .{ .handle = self.fd };
     try file.chmod(new_mode);
@@ -2660,7 +2663,7 @@ pub fn chmod(self: Dir, new_mode: File.Mode) ChmodError!void {
 /// The process must have the correct privileges in order to do this
 /// successfully. The group may be changed by the owner of the directory to
 /// any group of which the owner is a member. Additionally, the directory
-/// must have been opened with `OpenDirOptions{ .iterate = true }`. If the
+/// must have been opened with `OpenOptions{ .iterate = true }`. If the
 /// owner or group is specified as `null`, the ID is not changed.
 pub fn chown(self: Dir, owner: ?File.Uid, group: ?File.Gid) ChownError!void {
     const file: File = .{ .handle = self.fd };

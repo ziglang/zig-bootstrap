@@ -80,6 +80,8 @@ pub const Options = struct {
 pub const Node = struct {
     index: OptionalIndex,
 
+    pub const none: Node = .{ .index = .none };
+
     pub const max_name_len = 40;
 
     const Storage = extern struct {
@@ -88,7 +90,7 @@ pub const Node = struct {
         /// 0 means unknown.
         /// Little endian.
         estimated_total_count: u32,
-        name: [max_name_len]u8,
+        name: [max_name_len]u8 align(@alignOf(usize)),
 
         /// Not thread-safe.
         fn getIpcFd(s: Storage) ?posix.fd_t {
@@ -177,9 +179,9 @@ pub const Node = struct {
     pub fn start(node: Node, name: []const u8, estimated_total_items: usize) Node {
         if (noop_impl) {
             assert(node.index == .none);
-            return .{ .index = .none };
+            return Node.none;
         }
-        const node_index = node.index.unwrap() orelse return .{ .index = .none };
+        const node_index = node.index.unwrap() orelse return Node.none;
         const parent = node_index.toParent();
 
         const freelist_head = &global_progress.node_freelist_first;
@@ -196,7 +198,7 @@ pub const Node = struct {
         if (free_index >= global_progress.node_storage.len) {
             // Ran out of node storage memory. Progress for this node will not be tracked.
             _ = @atomicRmw(u32, &global_progress.node_end_index, .Sub, 1, .monotonic);
-            return .{ .index = .none };
+            return Node.none;
         }
 
         return init(@enumFromInt(free_index), parent, name, estimated_total_items);
@@ -267,6 +269,19 @@ pub const Node = struct {
         storageByIndex(index).setIpcFd(fd);
     }
 
+    /// Posix-only. Thread-safe. Assumes the node is storing an IPC file
+    /// descriptor.
+    pub fn getIpcFd(node: Node) ?posix.fd_t {
+        const index = node.index.unwrap() orelse return null;
+        const storage = storageByIndex(index);
+        const int = @atomicLoad(u32, &storage.completed_count, .monotonic);
+        return switch (@typeInfo(posix.fd_t)) {
+            .Int => @bitCast(int),
+            .Pointer => @ptrFromInt(int),
+            else => @compileError("unsupported fd_t of " ++ @typeName(posix.fd_t)),
+        };
+    }
+
     fn storageByIndex(index: Node.Index) *Node.Storage {
         return &global_progress.node_storage[@intFromEnum(index)];
     }
@@ -280,16 +295,15 @@ pub const Node = struct {
     }
 
     fn init(free_index: Index, parent: Parent, name: []const u8, estimated_total_items: usize) Node {
-        assert(parent != .unused);
+        assert(parent == .none or @intFromEnum(parent) < node_storage_buffer_len);
 
         const storage = storageByIndex(free_index);
-        storage.* = .{
-            .completed_count = 0,
-            .estimated_total_count = std.math.lossyCast(u32, estimated_total_items),
-            .name = [1]u8{0} ** max_name_len,
-        };
+        @atomicStore(u32, &storage.completed_count, 0, .monotonic);
+        @atomicStore(u32, &storage.estimated_total_count, std.math.lossyCast(u32, estimated_total_items), .monotonic);
         const name_len = @min(max_name_len, name.len);
-        @memcpy(storage.name[0..name_len], name[0..name_len]);
+        copyAtomicStore(storage.name[0..name_len], name[0..name_len]);
+        if (name_len < storage.name.len)
+            @atomicStore(u8, &storage.name[name_len], 0, .monotonic);
 
         const parent_ptr = parentByIndex(free_index);
         assert(parent_ptr.* == .unused);
@@ -328,6 +342,11 @@ var default_draw_buffer: [4096]u8 = undefined;
 
 var debug_start_trace = std.debug.Trace.init;
 
+pub const have_ipc = switch (builtin.os.tag) {
+    .wasi, .freestanding, .windows => false,
+    else => true,
+};
+
 const noop_impl = builtin.single_threaded or switch (builtin.os.tag) {
     .wasi, .freestanding => true,
     else => false,
@@ -357,7 +376,7 @@ pub fn start(options: Options) Node {
     global_progress.initial_delay_ns = options.initial_delay_ns;
 
     if (noop_impl)
-        return .{ .index = .none };
+        return Node.none;
 
     if (std.process.parseEnvVarInt("ZIG_PROGRESS", u31, 10)) |ipc_fd| {
         global_progress.update_thread = std.Thread.spawn(.{}, ipcThreadRun, .{
@@ -368,12 +387,12 @@ pub fn start(options: Options) Node {
             }),
         }) catch |err| {
             std.log.warn("failed to spawn IPC thread for communicating progress to parent: {s}", .{@errorName(err)});
-            return .{ .index = .none };
+            return Node.none;
         };
     } else |env_err| switch (env_err) {
         error.EnvironmentVariableNotFound => {
             if (options.disable_printing) {
-                return .{ .index = .none };
+                return Node.none;
             }
             const stderr = std.io.getStdErr();
             global_progress.terminal = stderr;
@@ -386,7 +405,7 @@ pub fn start(options: Options) Node {
             }
 
             if (global_progress.terminal_mode == .off) {
-                return .{ .index = .none };
+                return Node.none;
             }
 
             if (have_sigwinch) {
@@ -408,12 +427,12 @@ pub fn start(options: Options) Node {
                 global_progress.update_thread = thread;
             } else |err| {
                 std.log.warn("unable to spawn thread for printing progress to terminal: {s}", .{@errorName(err)});
-                return .{ .index = .none };
+                return Node.none;
             }
         },
         else => |e| {
             std.log.warn("invalid ZIG_PROGRESS file descriptor integer: {s}", .{@errorName(e)});
-            return .{ .index = .none };
+            return Node.none;
         },
     }
 
@@ -521,6 +540,8 @@ fn windowsApiUpdateThreadRun() void {
 /// Allows the caller to freely write to stderr until `unlockStdErr` is called.
 ///
 /// During the lock, any `std.Progress` information is cleared from the terminal.
+///
+/// The lock is recursive; the same thread may hold the lock multiple times.
 pub fn lockStdErr() void {
     stderr_mutex.lock();
     clearWrittenWithEscapeCodes() catch {};
@@ -648,14 +669,8 @@ fn appendTreeSymbol(symbol: TreeSymbol, buf: []u8, start_i: usize) usize {
 fn clearWrittenWithEscapeCodes() anyerror!void {
     if (!global_progress.need_clear) return;
 
-    var i: usize = 0;
-    const buf = global_progress.draw_buffer;
-
-    buf[i..][0..clear.len].* = clear.*;
-    i += clear.len;
-
     global_progress.need_clear = false;
-    try write(buf[0..i]);
+    try write(clear);
 }
 
 /// U+25BA or ►
@@ -734,7 +749,7 @@ const Serialized = struct {
     const Buffer = struct {
         parents: [node_storage_buffer_len]Node.Parent,
         storage: [node_storage_buffer_len]Node.Storage,
-        map: [node_storage_buffer_len]Node.Index,
+        map: [node_storage_buffer_len]Node.OptionalIndex,
 
         parents_copy: [node_storage_buffer_len]Node.Parent,
         storage_copy: [node_storage_buffer_len]Node.Storage,
@@ -753,25 +768,34 @@ fn serialize(serialized_buffer: *Serialized.Buffer) Serialized {
     // Iterate all of the nodes and construct a serializable copy of the state that can be examined
     // without atomics.
     const end_index = @atomicLoad(u32, &global_progress.node_end_index, .monotonic);
-    const node_parents = global_progress.node_parents[0..end_index];
-    const node_storage = global_progress.node_storage[0..end_index];
-    for (node_parents, node_storage, 0..) |*parent_ptr, *storage_ptr, i| {
+    for (
+        global_progress.node_parents[0..end_index],
+        global_progress.node_storage[0..end_index],
+        serialized_buffer.map[0..end_index],
+    ) |*parent_ptr, *storage_ptr, *map| {
         var begin_parent = @atomicLoad(Node.Parent, parent_ptr, .acquire);
         while (begin_parent != .unused) {
             const dest_storage = &serialized_buffer.storage[serialized_len];
-            @memcpy(&dest_storage.name, &storage_ptr.name);
+            copyAtomicLoad(&dest_storage.name, &storage_ptr.name);
             dest_storage.estimated_total_count = @atomicLoad(u32, &storage_ptr.estimated_total_count, .acquire);
             dest_storage.completed_count = @atomicLoad(u32, &storage_ptr.completed_count, .monotonic);
             const end_parent = @atomicLoad(Node.Parent, parent_ptr, .acquire);
             if (begin_parent == end_parent) {
                 any_ipc = any_ipc or (dest_storage.getIpcFd() != null);
                 serialized_buffer.parents[serialized_len] = begin_parent;
-                serialized_buffer.map[i] = @enumFromInt(serialized_len);
+                map.* = @enumFromInt(serialized_len);
                 serialized_len += 1;
                 break;
             }
 
             begin_parent = end_parent;
+        } else {
+            // A node may be freed during the execution of this loop, causing
+            // there to be a parent reference to a nonexistent node. Without
+            // this assignment, this would lead to the map entry containing
+            // stale data. By assigning none, the child node with the bad
+            // parent pointer will be harmlessly omitted from the tree.
+            map.* = .none;
         }
     }
 
@@ -1369,4 +1393,33 @@ const have_sigwinch = switch (builtin.os.tag) {
     else => false,
 };
 
-var stderr_mutex: std.Thread.Mutex = .{};
+/// The primary motivation for recursive mutex here is so that a panic while
+/// stderr mutex is held still dumps the stack trace and other debug
+/// information.
+var stderr_mutex = std.Thread.Mutex.Recursive.init;
+
+fn copyAtomicStore(dest: []align(@alignOf(usize)) u8, src: []const u8) void {
+    assert(dest.len == src.len);
+    const chunked_len = dest.len / @sizeOf(usize);
+    const dest_chunked: []usize = @as([*]usize, @ptrCast(dest))[0..chunked_len];
+    const src_chunked: []align(1) const usize = @as([*]align(1) const usize, @ptrCast(src))[0..chunked_len];
+    for (dest_chunked, src_chunked) |*d, s| {
+        @atomicStore(usize, d, s, .monotonic);
+    }
+    const remainder_start = chunked_len * @sizeOf(usize);
+    for (dest[remainder_start..], src[remainder_start..]) |*d, s| {
+        @atomicStore(u8, d, s, .monotonic);
+    }
+}
+
+fn copyAtomicLoad(
+    dest: *align(@alignOf(usize)) [Node.max_name_len]u8,
+    src: *align(@alignOf(usize)) const [Node.max_name_len]u8,
+) void {
+    const chunked_len = @divExact(dest.len, @sizeOf(usize));
+    const dest_chunked: *[chunked_len]usize = @ptrCast(dest);
+    const src_chunked: *const [chunked_len]usize = @ptrCast(src);
+    for (dest_chunked, src_chunked) |*d, *s| {
+        d.* = @atomicLoad(usize, s, .monotonic);
+    }
+}

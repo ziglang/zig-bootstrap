@@ -126,12 +126,17 @@ pub const StdIo = union(enum) {
 };
 
 pub const Arg = union(enum) {
-    artifact: *Step.Compile,
+    artifact: PrefixedArtifact,
     lazy_path: PrefixedLazyPath,
     directory_source: PrefixedLazyPath,
     bytes: []u8,
     output_file: *Output,
     output_directory: *Output,
+};
+
+pub const PrefixedArtifact = struct {
+    prefix: []const u8,
+    artifact: *Step.Compile,
 };
 
 pub const PrefixedLazyPath = struct {
@@ -185,10 +190,20 @@ pub fn enableTestRunnerMode(run: *Run) void {
 }
 
 pub fn addArtifactArg(run: *Run, artifact: *Step.Compile) void {
+    run.addPrefixedArtifactArg("", artifact);
+}
+
+pub fn addPrefixedArtifactArg(run: *Run, prefix: []const u8, artifact: *Step.Compile) void {
     const b = run.step.owner;
+
+    const prefixed_artifact: PrefixedArtifact = .{
+        .prefix = b.dupe(prefix),
+        .artifact = artifact,
+    };
+    run.argv.append(b.allocator, .{ .artifact = prefixed_artifact }) catch @panic("OOM");
+
     const bin_file = artifact.getEmittedBin();
     bin_file.addStepDependencies(&run.step);
-    run.argv.append(b.allocator, Arg{ .artifact = artifact }) catch @panic("OOM");
 }
 
 /// Provides a file path as a command line argument to the command being run.
@@ -580,7 +595,8 @@ const IndexedOutput = struct {
     tag: @typeInfo(Arg).Union.tag_type.?,
     output: *Output,
 };
-fn make(step: *Step, prog_node: std.Progress.Node) !void {
+fn make(step: *Step, options: Step.MakeOptions) !void {
+    const prog_node = options.progress_node;
     const b = step.owner;
     const arena = b.allocator;
     const run: *Run = @fieldParentPtr("step", step);
@@ -610,14 +626,16 @@ fn make(step: *Step, prog_node: std.Progress.Node) !void {
                 man.hash.addBytes(file.prefix);
                 man.hash.addBytes(file_path);
             },
-            .artifact => |artifact| {
+            .artifact => |pa| {
+                const artifact = pa.artifact;
+
                 if (artifact.rootModuleTarget().os.tag == .windows) {
                     // On Windows we don't have rpaths so we have to add .dll search paths to PATH
                     run.addPathForDynLibs(artifact);
                 }
-                const file_path = artifact.installed_path orelse artifact.generated_bin.?.path.?; // the path is guaranteed to be set
+                const file_path = artifact.installed_path orelse artifact.generated_bin.?.path.?;
 
-                try argv_list.append(file_path);
+                try argv_list.append(b.fmt("{s}{s}", .{ pa.prefix, file_path }));
 
                 _ = try man.addFile(file_path, null);
             },
@@ -665,7 +683,7 @@ fn make(step: *Step, prog_node: std.Progress.Node) !void {
         _ = try man.addFile(lazy_path.getPath2(b, step), null);
     }
 
-    if (!has_side_effects and try step.cacheHit(&man)) {
+    if (!has_side_effects and try step.cacheHitAndWatch(&man)) {
         // cache hit, skip running command
         const digest = man.final();
 
@@ -719,7 +737,7 @@ fn make(step: *Step, prog_node: std.Progress.Node) !void {
         }
 
         try runCommand(run, argv_list.items, has_side_effects, output_dir_path, prog_node);
-        if (!has_side_effects) try step.writeManifest(&man);
+        if (!has_side_effects) try step.writeManifestAndWatch(&man);
         return;
     };
 
@@ -795,7 +813,7 @@ fn make(step: *Step, prog_node: std.Progress.Node) !void {
         };
     }
 
-    if (!has_side_effects) try step.writeManifest(&man);
+    if (!has_side_effects) try step.writeManifestAndWatch(&man);
 
     try populateGeneratedPaths(
         arena,
@@ -912,7 +930,7 @@ fn runCommand(
             // work even for the edge case that the binary was produced by a
             // third party.
             const exe = switch (run.argv.items[0]) {
-                .artifact => |exe| exe,
+                .artifact => |exe| exe.artifact,
                 else => break :interpret,
             };
             switch (exe.kind) {
@@ -923,7 +941,7 @@ fn runCommand(
             const need_cross_glibc = exe.rootModuleTarget().isGnuLibC() and
                 exe.is_linking_libc;
             const other_target = exe.root_module.resolved_target.?.result;
-            switch (std.zig.system.getExternalExecutor(b.host.result, &other_target, .{
+            switch (std.zig.system.getExternalExecutor(b.graph.host.result, &other_target, .{
                 .qemu_fixes_dl = need_cross_glibc and b.glibc_runtimes_dir != null,
                 .link_libc = exe.is_linking_libc,
             })) {
@@ -996,7 +1014,7 @@ fn runCommand(
                 .bad_dl => |foreign_dl| {
                     if (allow_skip) return error.MakeSkipped;
 
-                    const host_dl = b.host.result.dynamic_linker.get() orelse "(none)";
+                    const host_dl = b.graph.host.result.dynamic_linker.get() orelse "(none)";
 
                     return step.fail(
                         \\the host system is unable to execute binaries from the target
@@ -1008,7 +1026,7 @@ fn runCommand(
                 .bad_os_or_cpu => {
                     if (allow_skip) return error.MakeSkipped;
 
-                    const host_name = try b.host.result.zigTriple(b.allocator);
+                    const host_name = try b.graph.host.result.zigTriple(b.allocator);
                     const foreign_name = try exe.rootModuleTarget().zigTriple(b.allocator);
 
                     return step.fail("the host system ({s}) is unable to execute binaries from the target ({s})", .{
@@ -1564,7 +1582,7 @@ fn failForeign(
                 return error.MakeSkipped;
 
             const b = run.step.owner;
-            const host_name = try b.host.result.zigTriple(b.allocator);
+            const host_name = try b.graph.host.result.zigTriple(b.allocator);
             const foreign_name = try exe.rootModuleTarget().zigTriple(b.allocator);
 
             return run.step.fail(

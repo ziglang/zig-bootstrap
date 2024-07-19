@@ -398,18 +398,28 @@ pub fn dumpStackTrace(stack_trace: std.builtin.StackTrace) void {
     }
 }
 
-/// This function invokes undefined behavior when `ok` is `false`.
+/// Invokes detectable illegal behavior when `ok` is `false`.
+///
 /// In Debug and ReleaseSafe modes, calls to this function are always
 /// generated, and the `unreachable` statement triggers a panic.
-/// In ReleaseFast and ReleaseSmall modes, calls to this function are
-/// optimized away, and in fact the optimizer is able to use the assertion
-/// in its heuristics.
-/// Inside a test block, it is best to use the `std.testing` module rather
-/// than this function, because this function may not detect a test failure
-/// in ReleaseFast and ReleaseSmall mode. Outside of a test block, this assert
+///
+/// In ReleaseFast and ReleaseSmall modes, calls to this function are optimized
+/// away, and in fact the optimizer is able to use the assertion in its
+/// heuristics.
+///
+/// Inside a test block, it is best to use the `std.testing` module rather than
+/// this function, because this function may not detect a test failure in
+/// ReleaseFast and ReleaseSmall mode. Outside of a test block, this assert
 /// function is the correct function to use.
 pub fn assert(ok: bool) void {
     if (!ok) unreachable; // assertion failure
+}
+
+/// Invokes detectable illegal behavior when the provided slice is not mapped
+/// or lacks read permissions.
+pub fn assertReadable(slice: []const volatile u8) void {
+    if (!runtime_safety) return;
+    for (slice) |*byte| _ = byte.*;
 }
 
 pub fn panic(comptime format: []const u8, args: anytype) noreturn {
@@ -447,9 +457,6 @@ pub fn panicExtra(
 /// The counter is incremented/decremented atomically.
 var panicking = std.atomic.Value(u8).init(0);
 
-// Locked to avoid interleaving panic messages from multiple threads.
-var panic_mutex = std.Thread.Mutex{};
-
 /// Counts how many times the panic handler is invoked by this thread.
 /// This is used to catch and handle panics triggered by the panic handler.
 threadlocal var panic_stage: usize = 0;
@@ -474,8 +481,8 @@ pub fn panicImpl(trace: ?*const std.builtin.StackTrace, first_trace_addr: ?usize
 
             // Make sure to release the mutex when done
             {
-                panic_mutex.lock();
-                defer panic_mutex.unlock();
+                lockStdErr();
+                defer unlockStdErr();
 
                 const stderr = io.getStdErr().writer();
                 if (builtin.single_threaded) {
@@ -563,6 +570,7 @@ pub const StackIterator = struct {
     first_address: ?usize,
     // Last known value of the frame pointer register.
     fp: usize,
+    ma: MemoryAccessor = MemoryAccessor.init,
 
     // When DebugInfo and a register context is available, this iterator can unwind
     // stacks with frames that don't use a frame pointer (ie. -fomit-frame-pointer),
@@ -602,23 +610,23 @@ pub const StackIterator = struct {
             var iterator = init(first_address, null);
             iterator.unwind_state = .{
                 .debug_info = debug_info,
-                .dwarf_context = try DW.UnwindContext.init(debug_info.allocator, context, &isValidMemory),
+                .dwarf_context = try DW.UnwindContext.init(debug_info.allocator, context),
             };
 
             return iterator;
         }
     }
 
-    pub fn deinit(self: *StackIterator) void {
-        if (have_ucontext and self.unwind_state != null) self.unwind_state.?.dwarf_context.deinit();
+    pub fn deinit(it: *StackIterator) void {
+        if (have_ucontext and it.unwind_state != null) it.unwind_state.?.dwarf_context.deinit();
     }
 
-    pub fn getLastError(self: *StackIterator) ?struct {
+    pub fn getLastError(it: *StackIterator) ?struct {
         err: UnwindError,
         address: usize,
     } {
         if (!have_ucontext) return null;
-        if (self.unwind_state) |*unwind_state| {
+        if (it.unwind_state) |*unwind_state| {
             if (unwind_state.last_error) |err| {
                 unwind_state.last_error = null;
                 return .{
@@ -655,14 +663,14 @@ pub const StackIterator = struct {
     else
         @sizeOf(usize);
 
-    pub fn next(self: *StackIterator) ?usize {
-        var address = self.next_internal() orelse return null;
+    pub fn next(it: *StackIterator) ?usize {
+        var address = it.next_internal() orelse return null;
 
-        if (self.first_address) |first_address| {
+        if (it.first_address) |first_address| {
             while (address != first_address) {
-                address = self.next_internal() orelse return null;
+                address = it.next_internal() orelse return null;
             }
-            self.first_address = null;
+            it.first_address = null;
         }
 
         return address;
@@ -711,15 +719,81 @@ pub const StackIterator = struct {
         }
     }
 
-    fn next_unwind(self: *StackIterator) !usize {
-        const unwind_state = &self.unwind_state.?;
+    pub const MemoryAccessor = struct {
+        var cached_pid: posix.pid_t = -1;
+
+        mem: switch (native_os) {
+            .linux => File,
+            else => void,
+        },
+
+        pub const init: MemoryAccessor = .{
+            .mem = switch (native_os) {
+                .linux => .{ .handle = -1 },
+                else => {},
+            },
+        };
+
+        fn read(ma: *MemoryAccessor, address: usize, buf: []u8) bool {
+            switch (native_os) {
+                .linux => while (true) switch (ma.mem.handle) {
+                    -2 => break,
+                    -1 => {
+                        const linux = std.os.linux;
+                        const pid = switch (@atomicLoad(posix.pid_t, &cached_pid, .monotonic)) {
+                            -1 => pid: {
+                                const pid = linux.getpid();
+                                @atomicStore(posix.pid_t, &cached_pid, pid, .monotonic);
+                                break :pid pid;
+                            },
+                            else => |pid| pid,
+                        };
+                        const bytes_read = linux.process_vm_readv(
+                            pid,
+                            &.{.{ .base = buf.ptr, .len = buf.len }},
+                            &.{.{ .base = @ptrFromInt(address), .len = buf.len }},
+                            0,
+                        );
+                        switch (linux.E.init(bytes_read)) {
+                            .SUCCESS => return bytes_read == buf.len,
+                            .FAULT => return false,
+                            .INVAL, .PERM, .SRCH => unreachable, // own pid is always valid
+                            .NOMEM, .NOSYS => {},
+                            else => unreachable, // unexpected
+                        }
+                        var path_buf: [
+                            std.fmt.count("/proc/{d}/mem", .{math.minInt(posix.pid_t)})
+                        ]u8 = undefined;
+                        const path = std.fmt.bufPrint(&path_buf, "/proc/{d}/mem", .{pid}) catch
+                            unreachable;
+                        ma.mem = std.fs.openFileAbsolute(path, .{}) catch {
+                            ma.mem.handle = -2;
+                            break;
+                        };
+                    },
+                    else => return (ma.mem.pread(buf, address) catch return false) == buf.len,
+                },
+                else => {},
+            }
+            if (!isValidMemory(address)) return false;
+            @memcpy(buf, @as([*]const u8, @ptrFromInt(address)));
+            return true;
+        }
+        pub fn load(ma: *MemoryAccessor, comptime Type: type, address: usize) ?Type {
+            var result: Type = undefined;
+            return if (ma.read(address, std.mem.asBytes(&result))) result else null;
+        }
+    };
+
+    fn next_unwind(it: *StackIterator) !usize {
+        const unwind_state = &it.unwind_state.?;
         const module = try unwind_state.debug_info.getModuleForAddress(unwind_state.dwarf_context.pc);
         switch (native_os) {
             .macos, .ios, .watchos, .tvos, .visionos => {
                 // __unwind_info is a requirement for unwinding on Darwin. It may fall back to DWARF, but unwinding
                 // via DWARF before attempting to use the compact unwind info will produce incorrect results.
                 if (module.unwind_info) |unwind_info| {
-                    if (DW.unwindFrameMachO(&unwind_state.dwarf_context, unwind_info, module.eh_frame, module.base_address)) |return_address| {
+                    if (DW.unwindFrameMachO(&unwind_state.dwarf_context, &it.ma, unwind_info, module.eh_frame, module.base_address)) |return_address| {
                         return return_address;
                     } else |err| {
                         if (err != error.RequiresDWARFUnwind) return err;
@@ -730,17 +804,17 @@ pub const StackIterator = struct {
         }
 
         if (try module.getDwarfInfoForAddress(unwind_state.debug_info.allocator, unwind_state.dwarf_context.pc)) |di| {
-            return di.unwindFrame(&unwind_state.dwarf_context, null);
+            return di.unwindFrame(&unwind_state.dwarf_context, &it.ma, null);
         } else return error.MissingDebugInfo;
     }
 
-    fn next_internal(self: *StackIterator) ?usize {
+    fn next_internal(it: *StackIterator) ?usize {
         if (have_ucontext) {
-            if (self.unwind_state) |*unwind_state| {
+            if (it.unwind_state) |*unwind_state| {
                 if (!unwind_state.failed) {
                     if (unwind_state.dwarf_context.pc == 0) return null;
-                    defer self.fp = unwind_state.dwarf_context.getFp() catch 0;
-                    if (self.next_unwind()) |return_address| {
+                    defer it.fp = unwind_state.dwarf_context.getFp() catch 0;
+                    if (it.next_unwind()) |return_address| {
                         return return_address;
                     } else |err| {
                         unwind_state.last_error = err;
@@ -756,29 +830,24 @@ pub const StackIterator = struct {
 
         const fp = if (comptime native_arch.isSPARC())
             // On SPARC the offset is positive. (!)
-            math.add(usize, self.fp, fp_offset) catch return null
+            math.add(usize, it.fp, fp_offset) catch return null
         else
-            math.sub(usize, self.fp, fp_offset) catch return null;
+            math.sub(usize, it.fp, fp_offset) catch return null;
 
         // Sanity check.
-        if (fp == 0 or !mem.isAligned(fp, @alignOf(usize)) or !isValidMemory(fp))
+        if (fp == 0 or !mem.isAligned(fp, @alignOf(usize))) return null;
+        const new_fp = math.add(usize, it.ma.load(usize, fp) orelse return null, fp_bias) catch
             return null;
-
-        const new_fp = math.add(usize, @as(*const usize, @ptrFromInt(fp)).*, fp_bias) catch return null;
 
         // Sanity check: the stack grows down thus all the parent frames must be
         // be at addresses that are greater (or equal) than the previous one.
         // A zero frame pointer often signals this is the last frame, that case
         // is gracefully handled by the next call to next_internal.
-        if (new_fp != 0 and new_fp < self.fp)
+        if (new_fp != 0 and new_fp < it.fp) return null;
+        const new_pc = it.ma.load(usize, math.add(usize, fp, pc_offset) catch return null) orelse
             return null;
 
-        const new_pc = @as(
-            *const usize,
-            @ptrFromInt(math.add(usize, fp, pc_offset) catch return null),
-        ).*;
-
-        self.fp = new_fp;
+        it.fp = new_fp;
 
         return new_pc;
     }
@@ -1301,7 +1370,7 @@ pub fn readElfDebugInfo(
                     if (readElfDebugInfo(allocator, path, null, separate_debug_crc, &sections, mapped_mem)) |debug_info| return debug_info else |_| {}
                 }
 
-                var cwd_buf: [fs.MAX_PATH_BYTES]u8 = undefined;
+                var cwd_buf: [fs.max_path_bytes]u8 = undefined;
                 const cwd_path = posix.realpath(".", &cwd_buf) catch break :blk;
 
                 // <global debug directory>/<absolute folder of current binary>/<gnu_debuglink>
@@ -1712,7 +1781,7 @@ pub const DebugInfo = struct {
 
             const handle = windows.kernel32.CreateToolhelp32Snapshot(windows.TH32CS_SNAPMODULE | windows.TH32CS_SNAPMODULE32, 0);
             if (handle == windows.INVALID_HANDLE_VALUE) {
-                switch (windows.kernel32.GetLastError()) {
+                switch (windows.GetLastError()) {
                     else => |err| return windows.unexpectedError(err),
                 }
             }
@@ -1918,7 +1987,7 @@ pub const DebugInfo = struct {
                     @memcpy(name_buffer[0..4], &[_]u16{ '\\', '?', '?', '\\' });
 
                     const process_handle = windows.kernel32.GetCurrentProcess();
-                    const len = windows.kernel32.K32GetModuleFileNameExW(
+                    const len = windows.kernel32.GetModuleFileNameExW(
                         process_handle,
                         module.handle,
                         @ptrCast(&name_buffer[4]),
@@ -2604,8 +2673,8 @@ fn handleSegfaultPosix(sig: i32, info: *const posix.siginfo_t, ctx_ptr: ?*anyopa
             _ = panicking.fetchAdd(1, .seq_cst);
 
             {
-                panic_mutex.lock();
-                defer panic_mutex.unlock();
+                lockStdErr();
+                defer unlockStdErr();
 
                 dumpSegfaultInfoPosix(sig, code, addr, ctx_ptr);
             }
@@ -2680,8 +2749,8 @@ fn handleSegfaultWindowsExtra(
                 _ = panicking.fetchAdd(1, .seq_cst);
 
                 {
-                    panic_mutex.lock();
-                    defer panic_mutex.unlock();
+                    lockStdErr();
+                    defer unlockStdErr();
 
                     dumpSegfaultInfoWindows(info, msg, label);
                 }

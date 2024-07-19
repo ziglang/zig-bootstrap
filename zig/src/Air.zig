@@ -1,4 +1,5 @@
 //! Analyzed Intermediate Representation.
+//!
 //! This data is produced by Sema and consumed by codegen.
 //! Unlike ZIR where there is one instance for an entire source file, each function
 //! gets its own `Air` instance.
@@ -9,9 +10,9 @@ const assert = std.debug.assert;
 
 const Air = @This();
 const Value = @import("Value.zig");
-const Type = @import("type.zig").Type;
+const Type = @import("Type.zig");
 const InternPool = @import("InternPool.zig");
-const Module = @import("Module.zig");
+const Zcu = @import("Zcu.zig");
 
 instructions: std.MultiArrayList(Inst).Slice,
 /// The meaning of this data is determined by `Inst.Tag` value.
@@ -1032,7 +1033,12 @@ pub const Inst = struct {
         ty: Type,
         arg: struct {
             ty: Ref,
-            src_index: u32,
+            /// Index into `extra` of a null-terminated string representing the parameter name.
+            /// This is `.none` if debug info is stripped.
+            name: enum(u32) {
+                none = std.math.maxInt(u32),
+                _,
+            },
         },
         ty_op: struct {
             ty: Ref,
@@ -1561,12 +1567,12 @@ pub fn internedToRef(ip_index: InternPool.Index) Inst.Ref {
 }
 
 /// Returns `null` if runtime-known.
-pub fn value(air: Air, inst: Inst.Ref, mod: *Module) !?Value {
+pub fn value(air: Air, inst: Inst.Ref, pt: Zcu.PerThread) !?Value {
     if (inst.toInterned()) |ip_index| {
         return Value.fromInterned(ip_index);
     }
     const index = inst.toIndex().?;
-    return air.typeOfIndex(index, &mod.intern_pool).onePossibleValue(mod);
+    return air.typeOfIndex(index, &pt.zcu.intern_pool).onePossibleValue(pt);
 }
 
 pub fn nullTerminatedString(air: Air, index: usize) [:0]const u8 {
@@ -1799,3 +1805,5 @@ pub fn mustLower(air: Air, inst: Air.Inst.Index, ip: *const InternPool) bool {
         .atomic_load => air.typeOf(data.atomic_load.ptr, ip).isVolatilePtrIp(ip),
     };
 }
+
+pub const typesFullyResolved = @import("Air/types_resolved.zig").typesFullyResolved;

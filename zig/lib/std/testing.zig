@@ -147,18 +147,10 @@ fn expectEqualInner(comptime T: type, expected: T, actual: T) !void {
 
             try expectEqual(expectedTag, actualTag);
 
-            // we only reach this loop if the tags are equal
-            inline for (std.meta.fields(@TypeOf(actual))) |fld| {
-                if (std.mem.eql(u8, fld.name, @tagName(actualTag))) {
-                    try expectEqual(@field(expected, fld.name), @field(actual, fld.name));
-                    return;
-                }
+            // we only reach this switch if the tags are equal
+            switch (expected) {
+                inline else => |val, tag| try expectEqual(val, @field(actual, @tagName(tag))),
             }
-
-            // we iterate over *all* union fields
-            // => we should never get here as the loop above is
-            //    including all possible values.
-            unreachable;
         },
 
         .Optional => {
@@ -206,6 +198,16 @@ test "expectEqual.union(enum)" {
     const a10 = T{ .a = 10 };
 
     try expectEqual(a10, a10);
+}
+
+test "expectEqual union with comptime-only field" {
+    const U = union(enum) {
+        a: void,
+        b: void,
+        c: comptime_int,
+    };
+
+    try expectEqual(U{ .a = {} }, .a);
 }
 
 /// This function is intended to be used only in tests. When the formatted result of the template
@@ -556,7 +558,7 @@ pub const TmpDir = struct {
     }
 };
 
-pub fn tmpDir(opts: std.fs.Dir.OpenDirOptions) TmpDir {
+pub fn tmpDir(opts: std.fs.Dir.OpenOptions) TmpDir {
     var random_bytes: [TmpDir.random_bytes_count]u8 = undefined;
     std.crypto.random.bytes(&random_bytes);
     var sub_path: [TmpDir.sub_path_len]u8 = undefined;
@@ -809,7 +811,7 @@ fn expectEqualDeepInner(comptime T: type, expected: T, actual: T) error{TestExpe
 
             try expectEqual(expectedTag, actualTag);
 
-            // we only reach this loop if the tags are equal
+            // we only reach this switch if the tags are equal
             switch (expected) {
                 inline else => |val, tag| {
                     try expectEqualDeep(val, @field(actual, @tagName(tag)));
