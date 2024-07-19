@@ -1,4 +1,4 @@
 out/
 out-win/
 out-win-x86/
-zig-cache
+.zig-cache
