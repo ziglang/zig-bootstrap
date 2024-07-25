@@ -36,6 +36,15 @@ For other versions, check the git tags of this repository.
 
 ## Build Instructions
 
+TL;DR:
+
+```
+CMAKE_GENERATOR=Ninja ./build x86_64-linux-gnu baseline
+./out/zig-x86_64-linux-gnu-baseline/zig version
+```
+
+## UNIX Build Instructions
+
 ```
 ./build <arch>-<os>-<abi> <mcpu>
 ```
