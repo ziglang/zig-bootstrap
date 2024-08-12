@@ -28,6 +28,14 @@ pub const Message = struct {
         /// The remaining bytes is the file path relative to that prefix.
         /// The prefixes are hard-coded in Compilation.create (cwd, zig lib dir, local cache dir)
         file_system_inputs,
+        /// Body is a u64le that indicates the file path within the cache used
+        /// to store coverage information. The integer is a hash of the PCs
+        /// stored within that file.
+        coverage_id,
+        /// Body is a u64le that indicates the function pointer virtual memory
+        /// address of the fuzz unit test. This is used to provide a starting
+        /// point to view coverage.
+        fuzz_start_addr,
 
         _,
     };
@@ -53,7 +61,7 @@ pub const Message = struct {
     ///   - null-terminated string_bytes index
     /// * expected_panic_msg: [tests_len]u32,
     ///   - null-terminated string_bytes index
-    ///   - 0 means does not expect pani
+    ///   - 0 means does not expect panic
     /// * string_bytes: [string_bytes_len]u8,
     pub const TestMetadata = extern struct {
         string_bytes_len: u32,
@@ -68,7 +76,8 @@ pub const Message = struct {
             fail: bool,
             skip: bool,
             leak: bool,
-            log_err_count: u29 = 0,
+            fuzz: bool,
+            log_err_count: u28 = 0,
         };
     };
 
@@ -109,6 +118,7 @@ pub fn deinit(s: *Server) void {
 pub fn receiveMessage(s: *Server) !InMessage.Header {
     const Header = InMessage.Header;
     const fifo = &s.receive_fifo;
+    var last_amt_zero = false;
 
     while (true) {
         const buf = fifo.readableSlice(0);
@@ -136,6 +146,10 @@ pub fn receiveMessage(s: *Server) !InMessage.Header {
         const write_buffer = try fifo.writableWithSize(256);
         const amt = try s.in.read(write_buffer);
         fifo.update(amt);
+        if (amt == 0) {
+            if (last_amt_zero) return error.BrokenPipe;
+            last_amt_zero = true;
+        }
     }
 }
 
@@ -174,6 +188,14 @@ pub fn serveMessage(
     try s.out.writevAll(iovecs[0 .. bufs.len + 1]);
 }
 
+pub fn serveU64Message(s: *Server, tag: OutMessage.Tag, int: u64) !void {
+    const msg_le = bswap(int);
+    return s.serveMessage(.{
+        .tag = tag,
+        .bytes_len = @sizeOf(u64),
+    }, &.{std.mem.asBytes(&msg_le)});
+}
+
 pub fn serveEmitBinPath(
     s: *Server,
     fs_path: []const u8,
@@ -181,7 +203,7 @@ pub fn serveEmitBinPath(
 ) !void {
     try s.serveMessage(.{
         .tag = .emit_bin_path,
-        .bytes_len = @as(u32, @intCast(fs_path.len + @sizeOf(OutMessage.EmitBinPath))),
+        .bytes_len = @intCast(fs_path.len + @sizeOf(OutMessage.EmitBinPath)),
     }, &.{
         std.mem.asBytes(&header),
         fs_path,
@@ -195,7 +217,7 @@ pub fn serveTestResults(
     const msg_le = bswap(msg);
     try s.serveMessage(.{
         .tag = .test_results,
-        .bytes_len = @as(u32, @intCast(@sizeOf(OutMessage.TestResults))),
+        .bytes_len = @intCast(@sizeOf(OutMessage.TestResults)),
     }, &.{
         std.mem.asBytes(&msg_le),
     });
@@ -203,14 +225,14 @@ pub fn serveTestResults(
 
 pub fn serveErrorBundle(s: *Server, error_bundle: std.zig.ErrorBundle) !void {
     const eb_hdr: OutMessage.ErrorBundle = .{
-        .extra_len = @as(u32, @intCast(error_bundle.extra.len)),
-        .string_bytes_len = @as(u32, @intCast(error_bundle.string_bytes.len)),
+        .extra_len = @intCast(error_bundle.extra.len),
+        .string_bytes_len = @intCast(error_bundle.string_bytes.len),
     };
     const bytes_len = @sizeOf(OutMessage.ErrorBundle) +
         4 * error_bundle.extra.len + error_bundle.string_bytes.len;
     try s.serveMessage(.{
         .tag = .error_bundle,
-        .bytes_len = @as(u32, @intCast(bytes_len)),
+        .bytes_len = @intCast(bytes_len),
     }, &.{
         std.mem.asBytes(&eb_hdr),
         // TODO: implement @ptrCast between slices changing the length
@@ -245,7 +267,7 @@ pub fn serveTestMetadata(s: *Server, test_metadata: TestMetadata) !void {
 
     return s.serveMessage(.{
         .tag = .test_metadata,
-        .bytes_len = @as(u32, @intCast(bytes_len)),
+        .bytes_len = @intCast(bytes_len),
     }, &.{
         std.mem.asBytes(&header),
         // TODO: implement @ptrCast between slices changing the length

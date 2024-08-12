@@ -2817,6 +2817,7 @@ fn addEnsureResult(gz: *GenZir, maybe_unused_result: Zir.Inst.Ref, statement: As
 
             .extended => switch (gz.astgen.instructions.items(.data)[@intFromEnum(inst)].extended.opcode) {
                 .breakpoint,
+                .disable_instrumentation,
                 .fence,
                 .set_float_mode,
                 .set_align_stack,
@@ -9305,12 +9306,13 @@ fn builtinCall(
         },
 
         // zig fmt: off
-        .This               => return rvalue(gz, ri, try gz.addNodeExtended(.this,               node), node),
-        .return_address     => return rvalue(gz, ri, try gz.addNodeExtended(.ret_addr,           node), node),
-        .error_return_trace => return rvalue(gz, ri, try gz.addNodeExtended(.error_return_trace, node), node),
-        .frame              => return rvalue(gz, ri, try gz.addNodeExtended(.frame,              node), node),
-        .frame_address      => return rvalue(gz, ri, try gz.addNodeExtended(.frame_address,      node), node),
-        .breakpoint         => return rvalue(gz, ri, try gz.addNodeExtended(.breakpoint,         node), node),
+        .This                    => return rvalue(gz, ri, try gz.addNodeExtended(.this,                    node), node),
+        .return_address          => return rvalue(gz, ri, try gz.addNodeExtended(.ret_addr,                node), node),
+        .error_return_trace      => return rvalue(gz, ri, try gz.addNodeExtended(.error_return_trace,      node), node),
+        .frame                   => return rvalue(gz, ri, try gz.addNodeExtended(.frame,                   node), node),
+        .frame_address           => return rvalue(gz, ri, try gz.addNodeExtended(.frame_address,           node), node),
+        .breakpoint              => return rvalue(gz, ri, try gz.addNodeExtended(.breakpoint,              node), node),
+        .disable_instrumentation => return rvalue(gz, ri, try gz.addNodeExtended(.disable_instrumentation, node), node),
 
         .type_info   => return simpleUnOpType(gz, scope, ri, node, params[0], .type_info),
         .size_of     => return simpleUnOpType(gz, scope, ri, node, params[0], .size_of),
@@ -11348,6 +11350,9 @@ fn failWithStrLitError(astgen: *AstGen, err: std.zig.string_literal.Error, token
                 "invalid byte in string or character literal: '{c}'",
                 .{raw_string[bad_index]},
             );
+        },
+        .empty_char_literal => {
+            return astgen.failOff(token, offset, "empty character literal", .{});
         },
     }
 }
@@ -13818,20 +13823,8 @@ fn lowerAstErrors(astgen: *AstGen) !void {
     var msg: std.ArrayListUnmanaged(u8) = .{};
     defer msg.deinit(gpa);
 
-    const token_starts = tree.tokens.items(.start);
-    const token_tags = tree.tokens.items(.tag);
-
     var notes: std.ArrayListUnmanaged(u32) = .{};
     defer notes.deinit(gpa);
-
-    const tok = parse_err.token + @intFromBool(parse_err.token_is_prev);
-    if (token_tags[tok] == .invalid) {
-        const bad_off: u32 = @intCast(tree.tokenSlice(tok).len);
-        const byte_abs = token_starts[tok] + bad_off;
-        try notes.append(gpa, try astgen.errNoteTokOff(tok, bad_off, "invalid byte: '{'}'", .{
-            std.zig.fmtEscapes(tree.source[byte_abs..][0..1]),
-        }));
-    }
 
     for (tree.errors[1..]) |note| {
         if (!note.is_note) break;

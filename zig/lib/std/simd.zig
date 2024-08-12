@@ -18,7 +18,7 @@ pub fn suggestVectorLengthForCpu(comptime T: type, comptime cpu: std.Target.Cpu)
             if (std.Target.x86.featureSetHasAny(cpu.features, .{ .prefer_256_bit, .avx2 }) and !std.Target.x86.featureSetHas(cpu.features, .prefer_128_bit)) break :blk 256;
             if (std.Target.x86.featureSetHas(cpu.features, .sse)) break :blk 128;
             if (std.Target.x86.featureSetHasAny(cpu.features, .{ .mmx, .@"3dnow" })) break :blk 64;
-        } else if (cpu.arch.isARM()) {
+        } else if (cpu.arch.isArmOrThumb()) {
             if (std.Target.arm.featureSetHas(cpu.features, .neon)) break :blk 128;
         } else if (cpu.arch.isAARCH64()) {
             // SVE allows up to 2048 bits in the specification, as of 2022 the most powerful machine has implemented 512-bit
@@ -26,7 +26,7 @@ pub fn suggestVectorLengthForCpu(comptime T: type, comptime cpu: std.Target.Cpu)
             // TODO: Check on this return when bigger values are more common
             if (std.Target.aarch64.featureSetHas(cpu.features, .sve)) break :blk 128;
             if (std.Target.aarch64.featureSetHas(cpu.features, .neon)) break :blk 128;
-        } else if (cpu.arch.isPPC() or cpu.arch.isPPC64()) {
+        } else if (cpu.arch.isPowerPC()) {
             if (std.Target.powerpc.featureSetHas(cpu.features, .altivec)) break :blk 128;
         } else if (cpu.arch.isMIPS()) {
             if (std.Target.mips.featureSetHas(cpu.features, .msa)) break :blk 128;
@@ -232,11 +232,6 @@ pub fn extract(
 
 test "vector patterns" {
     if (builtin.zig_backend == .stage2_x86_64) return error.SkipZigTest;
-
-    if (builtin.zig_backend == .stage2_llvm and builtin.cpu.arch == .aarch64) {
-        // https://github.com/ziglang/zig/issues/12012
-        return error.SkipZigTest;
-    }
 
     const base = @Vector(4, u32){ 10, 20, 30, 40 };
     const other_base = @Vector(4, u32){ 55, 66, 77, 88 };

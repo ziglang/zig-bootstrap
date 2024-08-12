@@ -348,9 +348,9 @@ fn emit(lower: *Lower, prefix: Prefix, mnemonic: Mnemonic, ops: []const Operand)
                     assert(mem_op.sib.disp == 0);
                     assert(mem_op.sib.scale_index.scale == 0);
 
-                    if (lower.bin_file.cast(link.File.Elf)) |elf_file| {
-                        const sym_index = elf_file.zigObjectPtr().?.symbol(sym.sym_index);
-                        const elf_sym = elf_file.symbol(sym_index);
+                    if (lower.bin_file.cast(.elf)) |elf_file| {
+                        const zo = elf_file.zigObjectPtr().?;
+                        const elf_sym = zo.symbol(sym.sym_index);
 
                         if (elf_sym.flags.is_tls) {
                             // TODO handle extern TLS vars, i.e., emit GD model
@@ -424,7 +424,7 @@ fn emit(lower: *Lower, prefix: Prefix, mnemonic: Mnemonic, ops: []const Operand)
                             },
                             else => unreachable,
                         };
-                    } else if (lower.bin_file.cast(link.File.MachO)) |macho_file| {
+                    } else if (lower.bin_file.cast(.macho)) |macho_file| {
                         const zo = macho_file.getZigObject().?;
                         const macho_sym = zo.symbols.items[sym.sym_index];
 
@@ -451,7 +451,7 @@ fn emit(lower: *Lower, prefix: Prefix, mnemonic: Mnemonic, ops: []const Operand)
                                 break :op .{ .mem = Memory.rip(mem_op.sib.ptr_size, 0) };
                             },
                             .mov => {
-                                if (is_obj_or_static_lib and macho_sym.flags.needs_zig_got) emit_mnemonic = .lea;
+                                if (is_obj_or_static_lib and macho_sym.getSectionFlags().needs_zig_got) emit_mnemonic = .lea;
                                 break :op .{ .mem = Memory.rip(mem_op.sib.ptr_size, 0) };
                             },
                             else => unreachable,

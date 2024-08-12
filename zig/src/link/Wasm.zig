@@ -6,6 +6,7 @@ const assert = std.debug.assert;
 const build_options = @import("build_options");
 const builtin = @import("builtin");
 const codegen = @import("../codegen.zig");
+const dev = @import("../dev.zig");
 const fs = std.fs;
 const leb = std.leb;
 const link = @import("../link.zig");
@@ -38,8 +39,6 @@ const ZigObject = @import("Wasm/ZigObject.zig");
 pub const Atom = @import("Wasm/Atom.zig");
 pub const Relocation = types.Relocation;
 
-pub const base_tag: link.File.Tag = .wasm;
-
 base: link.File,
 /// Symbol name of the entry function to export
 entry_name: ?[]const u8,
@@ -60,7 +59,7 @@ export_table: bool,
 /// Output name of the file
 name: []const u8,
 /// If this is not null, an object file is created by LLVM and linked with LLD afterwards.
-llvm_object: ?*LlvmObject = null,
+llvm_object: ?LlvmObject.Ptr = null,
 /// The file index of a `ZigObject`. This will only contain a valid index when a zcu exists,
 /// and the chosen backend is the Wasm backend.
 zig_object_index: File.Index = .null,
@@ -657,9 +656,9 @@ fn parseObjectFile(wasm: *Wasm, path: []const u8) !bool {
     var object = Object.create(wasm, obj_file, path, null) catch |err| switch (err) {
         error.InvalidMagicByte, error.NotObjectFile => return false,
         else => |e| {
-            var err_note = try wasm.addErrorWithNotes(1);
-            try err_note.addMsg(wasm, "Failed parsing object file: {s}", .{@errorName(e)});
-            try err_note.addNote(wasm, "while parsing '{s}'", .{path});
+            var err_note = try wasm.base.addErrorWithNotes(1);
+            try err_note.addMsg("Failed parsing object file: {s}", .{@errorName(e)});
+            try err_note.addNote("while parsing '{s}'", .{path});
             return error.FlushFailure;
         },
     };
@@ -713,9 +712,9 @@ fn parseArchive(wasm: *Wasm, path: []const u8, force_load: bool) !bool {
             return false;
         },
         else => |e| {
-            var err_note = try wasm.addErrorWithNotes(1);
-            try err_note.addMsg(wasm, "Failed parsing archive: {s}", .{@errorName(e)});
-            try err_note.addNote(wasm, "while parsing archive {s}", .{path});
+            var err_note = try wasm.base.addErrorWithNotes(1);
+            try err_note.addMsg("Failed parsing archive: {s}", .{@errorName(e)});
+            try err_note.addNote("while parsing archive {s}", .{path});
             return error.FlushFailure;
         },
     };
@@ -740,9 +739,9 @@ fn parseArchive(wasm: *Wasm, path: []const u8, force_load: bool) !bool {
 
     for (offsets.keys()) |file_offset| {
         var object = archive.parseObject(wasm, file_offset) catch |e| {
-            var err_note = try wasm.addErrorWithNotes(1);
-            try err_note.addMsg(wasm, "Failed parsing object: {s}", .{@errorName(e)});
-            try err_note.addNote(wasm, "while parsing object in archive {s}", .{path});
+            var err_note = try wasm.base.addErrorWithNotes(1);
+            try err_note.addMsg("Failed parsing object: {s}", .{@errorName(e)});
+            try err_note.addNote("while parsing object in archive {s}", .{path});
             return error.FlushFailure;
         };
         object.index = @enumFromInt(wasm.files.len);
@@ -778,9 +777,9 @@ fn resolveSymbolsInObject(wasm: *Wasm, file_index: File.Index) !void {
 
         if (symbol.isLocal()) {
             if (symbol.isUndefined()) {
-                var err = try wasm.addErrorWithNotes(1);
-                try err.addMsg(wasm, "Local symbols are not allowed to reference imports", .{});
-                try err.addNote(wasm, "symbol '{s}' defined in '{s}'", .{ sym_name, obj_file.path() });
+                var err = try wasm.base.addErrorWithNotes(1);
+                try err.addMsg("Local symbols are not allowed to reference imports", .{});
+                try err.addNote("symbol '{s}' defined in '{s}'", .{ sym_name, obj_file.path() });
             }
             try wasm.resolved_symbols.putNoClobber(gpa, location, {});
             continue;
@@ -815,10 +814,10 @@ fn resolveSymbolsInObject(wasm: *Wasm, file_index: File.Index) !void {
                     break :outer; // existing is weak, while new one isn't. Replace it.
                 }
                 // both are defined and weak, we have a symbol collision.
-                var err = try wasm.addErrorWithNotes(2);
-                try err.addMsg(wasm, "symbol '{s}' defined multiple times", .{sym_name});
-                try err.addNote(wasm, "first definition in '{s}'", .{existing_file_path});
-                try err.addNote(wasm, "next definition in '{s}'", .{obj_file.path()});
+                var err = try wasm.base.addErrorWithNotes(2);
+                try err.addMsg("symbol '{s}' defined multiple times", .{sym_name});
+                try err.addNote("first definition in '{s}'", .{existing_file_path});
+                try err.addNote("next definition in '{s}'", .{obj_file.path()});
             }
 
             try wasm.discarded.put(gpa, location, existing_loc);
@@ -826,10 +825,10 @@ fn resolveSymbolsInObject(wasm: *Wasm, file_index: File.Index) !void {
         }
 
         if (symbol.tag != existing_sym.tag) {
-            var err = try wasm.addErrorWithNotes(2);
-            try err.addMsg(wasm, "symbol '{s}' mismatching types '{s}' and '{s}'", .{ sym_name, @tagName(symbol.tag), @tagName(existing_sym.tag) });
-            try err.addNote(wasm, "first definition in '{s}'", .{existing_file_path});
-            try err.addNote(wasm, "next definition in '{s}'", .{obj_file.path()});
+            var err = try wasm.base.addErrorWithNotes(2);
+            try err.addMsg("symbol '{s}' mismatching types '{s}' and '{s}'", .{ sym_name, @tagName(symbol.tag), @tagName(existing_sym.tag) });
+            try err.addNote("first definition in '{s}'", .{existing_file_path});
+            try err.addNote("next definition in '{s}'", .{obj_file.path()});
         }
 
         if (existing_sym.isUndefined() and symbol.isUndefined()) {
@@ -846,14 +845,14 @@ fn resolveSymbolsInObject(wasm: *Wasm, file_index: File.Index) !void {
                 const imp = obj_file.import(sym_index);
                 const module_name = obj_file.string(imp.module_name);
                 if (!mem.eql(u8, existing_name, module_name)) {
-                    var err = try wasm.addErrorWithNotes(2);
-                    try err.addMsg(wasm, "symbol '{s}' module name mismatch. Expected '{s}', but found '{s}'", .{
+                    var err = try wasm.base.addErrorWithNotes(2);
+                    try err.addMsg("symbol '{s}' module name mismatch. Expected '{s}', but found '{s}'", .{
                         sym_name,
                         existing_name,
                         module_name,
                     });
-                    try err.addNote(wasm, "first definition in '{s}'", .{existing_file_path});
-                    try err.addNote(wasm, "next definition in '{s}'", .{obj_file.path()});
+                    try err.addNote("first definition in '{s}'", .{existing_file_path});
+                    try err.addNote("next definition in '{s}'", .{obj_file.path()});
                 }
             }
 
@@ -866,10 +865,10 @@ fn resolveSymbolsInObject(wasm: *Wasm, file_index: File.Index) !void {
             const existing_ty = wasm.getGlobalType(existing_loc);
             const new_ty = wasm.getGlobalType(location);
             if (existing_ty.mutable != new_ty.mutable or existing_ty.valtype != new_ty.valtype) {
-                var err = try wasm.addErrorWithNotes(2);
-                try err.addMsg(wasm, "symbol '{s}' mismatching global types", .{sym_name});
-                try err.addNote(wasm, "first definition in '{s}'", .{existing_file_path});
-                try err.addNote(wasm, "next definition in '{s}'", .{obj_file.path()});
+                var err = try wasm.base.addErrorWithNotes(2);
+                try err.addMsg("symbol '{s}' mismatching global types", .{sym_name});
+                try err.addNote("first definition in '{s}'", .{existing_file_path});
+                try err.addNote("next definition in '{s}'", .{obj_file.path()});
             }
         }
 
@@ -877,11 +876,11 @@ fn resolveSymbolsInObject(wasm: *Wasm, file_index: File.Index) !void {
             const existing_ty = wasm.getFunctionSignature(existing_loc);
             const new_ty = wasm.getFunctionSignature(location);
             if (!existing_ty.eql(new_ty)) {
-                var err = try wasm.addErrorWithNotes(3);
-                try err.addMsg(wasm, "symbol '{s}' mismatching function signatures.", .{sym_name});
-                try err.addNote(wasm, "expected signature {}, but found signature {}", .{ existing_ty, new_ty });
-                try err.addNote(wasm, "first definition in '{s}'", .{existing_file_path});
-                try err.addNote(wasm, "next definition in '{s}'", .{obj_file.path()});
+                var err = try wasm.base.addErrorWithNotes(3);
+                try err.addMsg("symbol '{s}' mismatching function signatures.", .{sym_name});
+                try err.addNote("expected signature {}, but found signature {}", .{ existing_ty, new_ty });
+                try err.addNote("first definition in '{s}'", .{existing_file_path});
+                try err.addNote("next definition in '{s}'", .{obj_file.path()});
             }
         }
 
@@ -929,9 +928,9 @@ fn resolveSymbolsInArchives(wasm: *Wasm) !void {
             // Parse object and and resolve symbols again before we check remaining
             // undefined symbols.
             var object = archive.parseObject(wasm, offset.items[0]) catch |e| {
-                var err_note = try wasm.addErrorWithNotes(1);
-                try err_note.addMsg(wasm, "Failed parsing object: {s}", .{@errorName(e)});
-                try err_note.addNote(wasm, "while parsing object in archive {s}", .{archive.name});
+                var err_note = try wasm.base.addErrorWithNotes(1);
+                try err_note.addMsg("Failed parsing object: {s}", .{@errorName(e)});
+                try err_note.addNote("while parsing object in archive {s}", .{archive.name});
                 return error.FlushFailure;
             };
             object.index = @enumFromInt(wasm.files.len);
@@ -1236,9 +1235,9 @@ fn validateFeatures(
             allowed[used_index] = is_enabled;
             emit_features_count.* += @intFromBool(is_enabled);
         } else if (is_enabled and !allowed[used_index]) {
-            var err = try wasm.addErrorWithNotes(1);
-            try err.addMsg(wasm, "feature '{}' not allowed, but used by linked object", .{@as(types.Feature.Tag, @enumFromInt(used_index))});
-            try err.addNote(wasm, "defined in '{s}'", .{wasm.files.items(.data)[used_set >> 1].object.path});
+            var err = try wasm.base.addErrorWithNotes(1);
+            try err.addMsg("feature '{}' not allowed, but used by linked object", .{@as(types.Feature.Tag, @enumFromInt(used_index))});
+            try err.addNote("defined in '{s}'", .{wasm.files.items(.data)[used_set >> 1].object.path});
             valid_feature_set = false;
         }
     }
@@ -1250,7 +1249,8 @@ fn validateFeatures(
     if (shared_memory) {
         const disallowed_feature = disallowed[@intFromEnum(types.Feature.Tag.shared_mem)];
         if (@as(u1, @truncate(disallowed_feature)) != 0) {
-            try wasm.addErrorWithoutNotes(
+            var err = try wasm.base.addErrorWithNotes(0);
+            try err.addMsg(
                 "shared-memory is disallowed by '{s}' because it wasn't compiled with 'atomics' and 'bulk-memory' features enabled",
                 .{wasm.files.items(.data)[disallowed_feature >> 1].object.path},
             );
@@ -1259,7 +1259,8 @@ fn validateFeatures(
 
         for ([_]types.Feature.Tag{ .atomics, .bulk_memory }) |feature| {
             if (!allowed[@intFromEnum(feature)]) {
-                try wasm.addErrorWithoutNotes("feature '{}' is not used but is required for shared-memory", .{feature});
+                var err = try wasm.base.addErrorWithNotes(0);
+                try err.addMsg("feature '{}' is not used but is required for shared-memory", .{feature});
             }
         }
     }
@@ -1267,7 +1268,8 @@ fn validateFeatures(
     if (has_tls) {
         for ([_]types.Feature.Tag{ .atomics, .bulk_memory }) |feature| {
             if (!allowed[@intFromEnum(feature)]) {
-                try wasm.addErrorWithoutNotes("feature '{}' is not used but is required for thread-local storage", .{feature});
+                var err = try wasm.base.addErrorWithNotes(0);
+                try err.addMsg("feature '{}' is not used but is required for thread-local storage", .{feature});
             }
         }
     }
@@ -1280,10 +1282,10 @@ fn validateFeatures(
             // from here a feature is always used
             const disallowed_feature = disallowed[@intFromEnum(feature.tag)];
             if (@as(u1, @truncate(disallowed_feature)) != 0) {
-                var err = try wasm.addErrorWithNotes(2);
-                try err.addMsg(wasm, "feature '{}' is disallowed, but used by linked object", .{feature.tag});
-                try err.addNote(wasm, "disallowed by '{s}'", .{wasm.files.items(.data)[disallowed_feature >> 1].object.path});
-                try err.addNote(wasm, "used in '{s}'", .{object.path});
+                var err = try wasm.base.addErrorWithNotes(2);
+                try err.addMsg("feature '{}' is disallowed, but used by linked object", .{feature.tag});
+                try err.addNote("disallowed by '{s}'", .{wasm.files.items(.data)[disallowed_feature >> 1].object.path});
+                try err.addNote("used in '{s}'", .{object.path});
                 valid_feature_set = false;
             }
 
@@ -1294,10 +1296,10 @@ fn validateFeatures(
         for (required, 0..) |required_feature, feature_index| {
             const is_required = @as(u1, @truncate(required_feature)) != 0;
             if (is_required and !object_used_features[feature_index]) {
-                var err = try wasm.addErrorWithNotes(2);
-                try err.addMsg(wasm, "feature '{}' is required but not used in linked object", .{@as(types.Feature.Tag, @enumFromInt(feature_index))});
-                try err.addNote(wasm, "required by '{s}'", .{wasm.files.items(.data)[required_feature >> 1].object.path});
-                try err.addNote(wasm, "missing in '{s}'", .{object.path});
+                var err = try wasm.base.addErrorWithNotes(2);
+                try err.addMsg("feature '{}' is required but not used in linked object", .{@as(types.Feature.Tag, @enumFromInt(feature_index))});
+                try err.addNote("required by '{s}'", .{wasm.files.items(.data)[required_feature >> 1].object.path});
+                try err.addNote("missing in '{s}'", .{object.path});
                 valid_feature_set = false;
             }
         }
@@ -1313,7 +1315,7 @@ fn validateFeatures(
 /// Creates synthetic linker-symbols, but only if they are being referenced from
 /// any object file. For instance, the `__heap_base` symbol will only be created,
 /// if one or multiple undefined references exist. When none exist, the symbol will
-/// not be created, ensuring we don't unneccesarily emit unreferenced symbols.
+/// not be created, ensuring we don't unnecessarily emit unreferenced symbols.
 fn resolveLazySymbols(wasm: *Wasm) !void {
     const comp = wasm.base.comp;
     const gpa = comp.gpa;
@@ -1375,9 +1377,9 @@ fn checkUndefinedSymbols(wasm: *const Wasm) !void {
             else
                 wasm.name;
             const symbol_name = undef.getName(wasm);
-            var err = try wasm.addErrorWithNotes(1);
-            try err.addMsg(wasm, "could not resolve undefined symbol '{s}'", .{symbol_name});
-            try err.addNote(wasm, "defined in '{s}'", .{file_name});
+            var err = try wasm.base.addErrorWithNotes(1);
+            try err.addMsg("could not resolve undefined symbol '{s}'", .{symbol_name});
+            try err.addNote("defined in '{s}'", .{file_name});
         }
     }
     if (found_undefined_symbols) {
@@ -1447,19 +1449,19 @@ pub fn updateFunc(wasm: *Wasm, pt: Zcu.PerThread, func_index: InternPool.Index, 
     try wasm.zigObjectPtr().?.updateFunc(wasm, pt, func_index, air, liveness);
 }
 
-// Generate code for the Decl, storing it in memory to be later written to
+// Generate code for the "Nav", storing it in memory to be later written to
 // the file on flush().
-pub fn updateDecl(wasm: *Wasm, pt: Zcu.PerThread, decl_index: InternPool.DeclIndex) !void {
+pub fn updateNav(wasm: *Wasm, pt: Zcu.PerThread, nav: InternPool.Nav.Index) !void {
     if (build_options.skip_non_native and builtin.object_format != .wasm) {
         @panic("Attempted to compile for object format that was disabled by build configuration");
     }
-    if (wasm.llvm_object) |llvm_object| return llvm_object.updateDecl(pt, decl_index);
-    try wasm.zigObjectPtr().?.updateDecl(wasm, pt, decl_index);
+    if (wasm.llvm_object) |llvm_object| return llvm_object.updateNav(pt, nav);
+    try wasm.zigObjectPtr().?.updateNav(wasm, pt, nav);
 }
 
-pub fn updateDeclLineNumber(wasm: *Wasm, pt: Zcu.PerThread, decl_index: InternPool.DeclIndex) !void {
+pub fn updateNavLineNumber(wasm: *Wasm, pt: Zcu.PerThread, nav: InternPool.Nav.Index) !void {
     if (wasm.llvm_object) |_| return;
-    try wasm.zigObjectPtr().?.updateDeclLineNumber(pt, decl_index);
+    try wasm.zigObjectPtr().?.updateNavLineNumber(pt, nav);
 }
 
 /// From a given symbol location, returns its `wasm.GlobalType`.
@@ -1501,13 +1503,6 @@ fn getFunctionSignature(wasm: *const Wasm, loc: SymbolLoc) std.wasm.Type {
     return wasm.func_types.items[wasm.functions.get(.{ .file = loc.file, .index = symbol.index }).?.func.type_index];
 }
 
-/// Lowers a constant typed value to a local symbol and atom.
-/// Returns the symbol index of the local
-/// The given `decl` is the parent decl whom owns the constant.
-pub fn lowerUnnamedConst(wasm: *Wasm, pt: Zcu.PerThread, val: Value, decl_index: InternPool.DeclIndex) !u32 {
-    return wasm.zigObjectPtr().?.lowerUnnamedConst(wasm, pt, val, decl_index);
-}
-
 /// Returns the symbol index from a symbol of which its flag is set global,
 /// such as an exported or imported symbol.
 /// If the symbol does not yet exist, creates a new one symbol instead
@@ -1517,29 +1512,29 @@ pub fn getGlobalSymbol(wasm: *Wasm, name: []const u8, lib_name: ?[]const u8) !Sy
     return wasm.zigObjectPtr().?.getGlobalSymbol(wasm.base.comp.gpa, name);
 }
 
-/// For a given decl, find the given symbol index's atom, and create a relocation for the type.
+/// For a given `Nav`, find the given symbol index's atom, and create a relocation for the type.
 /// Returns the given pointer address
-pub fn getDeclVAddr(
+pub fn getNavVAddr(
     wasm: *Wasm,
     pt: Zcu.PerThread,
-    decl_index: InternPool.DeclIndex,
+    nav: InternPool.Nav.Index,
     reloc_info: link.File.RelocInfo,
 ) !u64 {
-    return wasm.zigObjectPtr().?.getDeclVAddr(wasm, pt, decl_index, reloc_info);
+    return wasm.zigObjectPtr().?.getNavVAddr(wasm, pt, nav, reloc_info);
 }
 
-pub fn lowerAnonDecl(
+pub fn lowerUav(
     wasm: *Wasm,
     pt: Zcu.PerThread,
-    decl_val: InternPool.Index,
+    uav: InternPool.Index,
     explicit_alignment: Alignment,
     src_loc: Zcu.LazySrcLoc,
-) !codegen.Result {
-    return wasm.zigObjectPtr().?.lowerAnonDecl(wasm, pt, decl_val, explicit_alignment, src_loc);
+) !codegen.GenResult {
+    return wasm.zigObjectPtr().?.lowerUav(wasm, pt, uav, explicit_alignment, src_loc);
 }
 
-pub fn getAnonDeclVAddr(wasm: *Wasm, decl_val: InternPool.Index, reloc_info: link.File.RelocInfo) !u64 {
-    return wasm.zigObjectPtr().?.getAnonDeclVAddr(wasm, decl_val, reloc_info);
+pub fn getUavVAddr(wasm: *Wasm, uav: InternPool.Index, reloc_info: link.File.RelocInfo) !u64 {
+    return wasm.zigObjectPtr().?.getUavVAddr(wasm, uav, reloc_info);
 }
 
 pub fn deleteExport(
@@ -1756,7 +1751,8 @@ fn setupInitFunctions(wasm: *Wasm) !void {
                 break :ty object.func_types[func.type_index];
             };
             if (ty.params.len != 0) {
-                try wasm.addErrorWithoutNotes("constructor functions cannot take arguments: '{s}'", .{object.string_table.get(symbol.name)});
+                var err = try wasm.base.addErrorWithNotes(0);
+                try err.addMsg("constructor functions cannot take arguments: '{s}'", .{object.string_table.get(symbol.name)});
             }
             log.debug("appended init func '{s}'\n", .{object.string_table.get(symbol.name)});
             wasm.init_funcs.appendAssumeCapacity(.{
@@ -2139,7 +2135,8 @@ fn checkExportNames(wasm: *Wasm) !void {
 
         for (force_exp_names) |exp_name| {
             const loc = wasm.findGlobalSymbol(exp_name) orelse {
-                try wasm.addErrorWithoutNotes("could not export '{s}', symbol not found", .{exp_name});
+                var err = try wasm.base.addErrorWithNotes(0);
+                try err.addMsg("could not export '{s}', symbol not found", .{exp_name});
                 failed_exports = true;
                 continue;
             };
@@ -2202,13 +2199,15 @@ fn setupStart(wasm: *Wasm) !void {
     const entry_name = wasm.entry_name orelse return;
 
     const symbol_loc = wasm.findGlobalSymbol(entry_name) orelse {
-        try wasm.addErrorWithoutNotes("Entry symbol '{s}' missing, use '-fno-entry' to suppress", .{entry_name});
+        var err = try wasm.base.addErrorWithNotes(0);
+        try err.addMsg("Entry symbol '{s}' missing, use '-fno-entry' to suppress", .{entry_name});
         return error.FlushFailure;
     };
 
     const symbol = symbol_loc.getSymbol(wasm);
     if (symbol.tag != .function) {
-        try wasm.addErrorWithoutNotes("Entry symbol '{s}' is not a function", .{entry_name});
+        var err = try wasm.base.addErrorWithNotes(0);
+        try err.addMsg("Entry symbol '{s}' is not a function", .{entry_name});
         return error.FlushFailure;
     }
 
@@ -2313,13 +2312,16 @@ fn setupMemory(wasm: *Wasm) !void {
 
     if (wasm.initial_memory) |initial_memory| {
         if (!std.mem.isAlignedGeneric(u64, initial_memory, page_size)) {
-            try wasm.addErrorWithoutNotes("Initial memory must be {d}-byte aligned", .{page_size});
+            var err = try wasm.base.addErrorWithNotes(0);
+            try err.addMsg("Initial memory must be {d}-byte aligned", .{page_size});
         }
         if (memory_ptr > initial_memory) {
-            try wasm.addErrorWithoutNotes("Initial memory too small, must be at least {d} bytes", .{memory_ptr});
+            var err = try wasm.base.addErrorWithNotes(0);
+            try err.addMsg("Initial memory too small, must be at least {d} bytes", .{memory_ptr});
         }
         if (initial_memory > max_memory_allowed) {
-            try wasm.addErrorWithoutNotes("Initial memory exceeds maximum memory {d}", .{max_memory_allowed});
+            var err = try wasm.base.addErrorWithNotes(0);
+            try err.addMsg("Initial memory exceeds maximum memory {d}", .{max_memory_allowed});
         }
         memory_ptr = initial_memory;
     }
@@ -2336,13 +2338,16 @@ fn setupMemory(wasm: *Wasm) !void {
 
     if (wasm.max_memory) |max_memory| {
         if (!std.mem.isAlignedGeneric(u64, max_memory, page_size)) {
-            try wasm.addErrorWithoutNotes("Maximum memory must be {d}-byte aligned", .{page_size});
+            var err = try wasm.base.addErrorWithNotes(0);
+            try err.addMsg("Maximum memory must be {d}-byte aligned", .{page_size});
         }
         if (memory_ptr > max_memory) {
-            try wasm.addErrorWithoutNotes("Maxmimum memory too small, must be at least {d} bytes", .{memory_ptr});
+            var err = try wasm.base.addErrorWithNotes(0);
+            try err.addMsg("Maximum memory too small, must be at least {d} bytes", .{memory_ptr});
         }
         if (max_memory > max_memory_allowed) {
-            try wasm.addErrorWithoutNotes("Maximum memory exceeds maxmium amount {d}", .{max_memory_allowed});
+            var err = try wasm.base.addErrorWithNotes(0);
+            try err.addMsg("Maximum memory exceeds maximum amount {d}", .{max_memory_allowed});
         }
         wasm.memories.limits.max = @as(u32, @intCast(max_memory / page_size));
         wasm.memories.limits.setFlag(.WASM_LIMITS_FLAG_HAS_MAX);
@@ -2445,9 +2450,9 @@ pub fn getMatchingSegment(wasm: *Wasm, file_index: File.Index, symbol_index: Sym
                     break :blk index;
                 };
             } else {
-                var err = try wasm.addErrorWithNotes(1);
-                try err.addMsg(wasm, "found unknown section '{s}'", .{section_name});
-                try err.addNote(wasm, "defined in '{s}'", .{obj_file.path()});
+                var err = try wasm.base.addErrorWithNotes(1);
+                try err.addMsg("found unknown section '{s}'", .{section_name});
+                try err.addNote("defined in '{s}'", .{obj_file.path()});
                 return error.UnexpectedValue;
             }
         },
@@ -2563,23 +2568,23 @@ pub fn flushModule(wasm: *Wasm, arena: Allocator, tid: Zcu.PerThread.Id, prog_no
     if (wasm.zig_object_index != .null) {
         try wasm.resolveSymbolsInObject(wasm.zig_object_index);
     }
-    if (comp.link_errors.items.len > 0) return error.FlushFailure;
+    if (wasm.base.hasErrors()) return error.FlushFailure;
     for (wasm.objects.items) |object_index| {
         try wasm.resolveSymbolsInObject(object_index);
     }
-    if (comp.link_errors.items.len > 0) return error.FlushFailure;
+    if (wasm.base.hasErrors()) return error.FlushFailure;
 
     var emit_features_count: u32 = 0;
     var enabled_features: [@typeInfo(types.Feature.Tag).Enum.fields.len]bool = undefined;
     try wasm.validateFeatures(&enabled_features, &emit_features_count);
     try wasm.resolveSymbolsInArchives();
-    if (comp.link_errors.items.len > 0) return error.FlushFailure;
+    if (wasm.base.hasErrors()) return error.FlushFailure;
     try wasm.resolveLazySymbols();
     try wasm.checkUndefinedSymbols();
     try wasm.checkExportNames();
 
     try wasm.setupInitFunctions();
-    if (comp.link_errors.items.len > 0) return error.FlushFailure;
+    if (wasm.base.hasErrors()) return error.FlushFailure;
     try wasm.setupStart();
 
     try wasm.markReferences();
@@ -2588,7 +2593,7 @@ pub fn flushModule(wasm: *Wasm, arena: Allocator, tid: Zcu.PerThread.Id, prog_no
     try wasm.mergeTypes();
     try wasm.allocateAtoms();
     try wasm.setupMemory();
-    if (comp.link_errors.items.len > 0) return error.FlushFailure;
+    if (wasm.base.hasErrors()) return error.FlushFailure;
     wasm.allocateVirtualAddresses();
     wasm.mapFunctionTable();
     try wasm.initializeCallCtorsFunction();
@@ -2598,7 +2603,7 @@ pub fn flushModule(wasm: *Wasm, arena: Allocator, tid: Zcu.PerThread.Id, prog_no
     try wasm.setupStartSection();
     try wasm.setupExports();
     try wasm.writeToFile(enabled_features, emit_features_count, arena);
-    if (comp.link_errors.items.len > 0) return error.FlushFailure;
+    if (wasm.base.hasErrors()) return error.FlushFailure;
 }
 
 /// Writes the WebAssembly in-memory module to the file
@@ -2996,7 +3001,10 @@ fn writeToFile(
                 }) catch unreachable;
                 try emitBuildIdSection(&binary_bytes, str);
             },
-            else => |mode| try wasm.addErrorWithoutNotes("build-id '{s}' is not supported for WebAssembly", .{@tagName(mode)}),
+            else => |mode| {
+                var err = try wasm.base.addErrorWithNotes(0);
+                try err.addMsg("build-id '{s}' is not supported for WebAssembly", .{@tagName(mode)});
+            },
         }
 
         var debug_bytes = std.ArrayList(u8).init(gpa);
@@ -3325,6 +3333,8 @@ fn emitImport(wasm: *Wasm, writer: anytype, import: types.Import) !void {
 }
 
 fn linkWithLLD(wasm: *Wasm, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: std.Progress.Node) !void {
+    dev.check(.lld_linker);
+
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -3374,7 +3384,7 @@ fn linkWithLLD(wasm: *Wasm, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: 
         // We are about to obtain this lock, so here we give other processes a chance first.
         wasm.base.releaseLock();
 
-        comptime assert(Compilation.link_hash_implementation_version == 13);
+        comptime assert(Compilation.link_hash_implementation_version == 14);
 
         for (comp.objects) |obj| {
             _ = try man.addFile(obj.path, null);
@@ -3999,11 +4009,11 @@ pub fn putOrGetFuncType(wasm: *Wasm, func_type: std.wasm.Type) !u32 {
     return index;
 }
 
-/// For the given `decl_index`, stores the corresponding type representing the function signature.
+/// For the given `nav`, stores the corresponding type representing the function signature.
 /// Asserts declaration has an associated `Atom`.
 /// Returns the index into the list of types.
-pub fn storeDeclType(wasm: *Wasm, decl_index: InternPool.DeclIndex, func_type: std.wasm.Type) !u32 {
-    return wasm.zigObjectPtr().?.storeDeclType(wasm.base.comp.gpa, decl_index, func_type);
+pub fn storeNavType(wasm: *Wasm, nav: InternPool.Nav.Index, func_type: std.wasm.Type) !u32 {
+    return wasm.zigObjectPtr().?.storeDeclType(wasm.base.comp.gpa, nav, func_type);
 }
 
 /// Returns the symbol index of the error name table.
@@ -4017,8 +4027,8 @@ pub fn getErrorTableSymbol(wasm_file: *Wasm, pt: Zcu.PerThread) !u32 {
 /// For a given `InternPool.DeclIndex` returns its corresponding `Atom.Index`.
 /// When the index was not found, a new `Atom` will be created, and its index will be returned.
 /// The newly created Atom is empty with default fields as specified by `Atom.empty`.
-pub fn getOrCreateAtomForDecl(wasm_file: *Wasm, pt: Zcu.PerThread, decl_index: InternPool.DeclIndex) !Atom.Index {
-    return wasm_file.zigObjectPtr().?.getOrCreateAtomForDecl(wasm_file, pt, decl_index);
+pub fn getOrCreateAtomForNav(wasm_file: *Wasm, pt: Zcu.PerThread, nav: InternPool.Nav.Index) !Atom.Index {
+    return wasm_file.zigObjectPtr().?.getOrCreateAtomForNav(wasm_file, pt, nav);
 }
 
 /// Verifies all resolved symbols and checks whether itself needs to be marked alive,
@@ -4082,58 +4092,4 @@ fn defaultEntrySymbolName(wasi_exec_model: std.builtin.WasiExecModel) []const u8
         .reactor => "_initialize",
         .command => "_start",
     };
-}
-
-const ErrorWithNotes = struct {
-    /// Allocated index in comp.link_errors array.
-    index: usize,
-
-    /// Next available note slot.
-    note_slot: usize = 0,
-
-    pub fn addMsg(
-        err: ErrorWithNotes,
-        wasm_file: *const Wasm,
-        comptime format: []const u8,
-        args: anytype,
-    ) error{OutOfMemory}!void {
-        const comp = wasm_file.base.comp;
-        const gpa = comp.gpa;
-        const err_msg = &comp.link_errors.items[err.index];
-        err_msg.msg = try std.fmt.allocPrint(gpa, format, args);
-    }
-
-    pub fn addNote(
-        err: *ErrorWithNotes,
-        wasm_file: *const Wasm,
-        comptime format: []const u8,
-        args: anytype,
-    ) error{OutOfMemory}!void {
-        const comp = wasm_file.base.comp;
-        const gpa = comp.gpa;
-        const err_msg = &comp.link_errors.items[err.index];
-        err_msg.notes[err.note_slot] = .{ .msg = try std.fmt.allocPrint(gpa, format, args) };
-        err.note_slot += 1;
-    }
-};
-
-pub fn addErrorWithNotes(wasm: *const Wasm, note_count: usize) error{OutOfMemory}!ErrorWithNotes {
-    const comp = wasm.base.comp;
-    const gpa = comp.gpa;
-    try comp.link_errors.ensureUnusedCapacity(gpa, 1);
-    return wasm.addErrorWithNotesAssumeCapacity(note_count);
-}
-
-pub fn addErrorWithoutNotes(wasm: *const Wasm, comptime fmt: []const u8, args: anytype) !void {
-    const err = try wasm.addErrorWithNotes(0);
-    try err.addMsg(wasm, fmt, args);
-}
-
-fn addErrorWithNotesAssumeCapacity(wasm: *const Wasm, note_count: usize) error{OutOfMemory}!ErrorWithNotes {
-    const comp = wasm.base.comp;
-    const gpa = comp.gpa;
-    const index = comp.link_errors.items.len;
-    const err = comp.link_errors.addOneAssumeCapacity();
-    err.* = .{ .msg = undefined, .notes = try gpa.alloc(link.File.ErrorMsg, note_count) };
-    return .{ .index = index };
 }

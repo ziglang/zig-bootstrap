@@ -17,6 +17,14 @@ pub const page_size = switch (builtin.cpu.arch) {
         else => 4 * 1024,
     },
     .sparc64 => 8 * 1024,
+    .loongarch32, .loongarch64 => switch (builtin.os.tag) {
+        // Linux default KConfig value is 16KiB
+        .linux => 16 * 1024,
+        // FIXME:
+        // There is no other OS supported yet. Use the same value
+        // as Linux for now.
+        else => 16 * 1024,
+    },
     else => 4 * 1024,
 };
 
@@ -636,18 +644,20 @@ test lessThan {
     try testing.expect(lessThan(u8, "", "a"));
 }
 
-const backend_can_use_eql_bytes = switch (builtin.zig_backend) {
+const eqlBytes_allowed = switch (builtin.zig_backend) {
     // The SPIR-V backend does not support the optimized path yet.
     .stage2_spirv64 => false,
     // The RISC-V does not support vectors.
     .stage2_riscv64 => false,
-    else => true,
+    // The naive memory comparison implementation is more useful for fuzzers to
+    // find interesting inputs.
+    else => !builtin.fuzz,
 };
 
 /// Compares two slices and returns whether they are equal.
 pub fn eql(comptime T: type, a: []const T, b: []const T) bool {
     if (@sizeOf(T) == 0) return true;
-    if (!@inComptime() and std.meta.hasUniqueRepresentation(T) and backend_can_use_eql_bytes) return eqlBytes(sliceAsBytes(a), sliceAsBytes(b));
+    if (!@inComptime() and std.meta.hasUniqueRepresentation(T) and eqlBytes_allowed) return eqlBytes(sliceAsBytes(a), sliceAsBytes(b));
 
     if (a.len != b.len) return false;
     if (a.len == 0 or a.ptr == b.ptr) return true;
@@ -660,9 +670,7 @@ pub fn eql(comptime T: type, a: []const T, b: []const T) bool {
 
 /// std.mem.eql heavily optimized for slices of bytes.
 fn eqlBytes(a: []const u8, b: []const u8) bool {
-    if (!backend_can_use_eql_bytes) {
-        return eql(u8, a, b);
-    }
+    comptime assert(eqlBytes_allowed);
 
     if (a.len != b.len) return false;
     if (a.len == 0 or a.ptr == b.ptr) return true;
@@ -1594,7 +1602,10 @@ test containsAtLeast {
 /// T specifies the return type, which must be large enough to store
 /// the result.
 pub fn readVarInt(comptime ReturnType: type, bytes: []const u8, endian: Endian) ReturnType {
-    var result: ReturnType = 0;
+    const bits = @typeInfo(ReturnType).Int.bits;
+    const signedness = @typeInfo(ReturnType).Int.signedness;
+    const WorkType = std.meta.Int(signedness, @max(16, bits));
+    var result: WorkType = 0;
     switch (endian) {
         .big => {
             for (bytes) |b| {
@@ -1602,13 +1613,36 @@ pub fn readVarInt(comptime ReturnType: type, bytes: []const u8, endian: Endian) 
             }
         },
         .little => {
-            const ShiftType = math.Log2Int(ReturnType);
+            const ShiftType = math.Log2Int(WorkType);
             for (bytes, 0..) |b, index| {
-                result = result | (@as(ReturnType, b) << @as(ShiftType, @intCast(index * 8)));
+                result = result | (@as(WorkType, b) << @as(ShiftType, @intCast(index * 8)));
             }
         },
     }
-    return result;
+    return @as(ReturnType, @truncate(result));
+}
+
+test readVarInt {
+    try testing.expect(readVarInt(u0, &[_]u8{}, .big) == 0x0);
+    try testing.expect(readVarInt(u0, &[_]u8{}, .little) == 0x0);
+    try testing.expect(readVarInt(u8, &[_]u8{0x12}, .big) == 0x12);
+    try testing.expect(readVarInt(u8, &[_]u8{0xde}, .little) == 0xde);
+    try testing.expect(readVarInt(u16, &[_]u8{ 0x12, 0x34 }, .big) == 0x1234);
+    try testing.expect(readVarInt(u16, &[_]u8{ 0x12, 0x34 }, .little) == 0x3412);
+
+    try testing.expect(readVarInt(i8, &[_]u8{0xff}, .big) == -1);
+    try testing.expect(readVarInt(i8, &[_]u8{0xfe}, .little) == -2);
+    try testing.expect(readVarInt(i16, &[_]u8{ 0xff, 0xfd }, .big) == -3);
+    try testing.expect(readVarInt(i16, &[_]u8{ 0xfc, 0xff }, .little) == -4);
+
+    // Return type can be oversized (bytes.len * 8 < @typeInfo(ReturnType).Int.bits)
+    try testing.expect(readVarInt(u9, &[_]u8{0x12}, .little) == 0x12);
+    try testing.expect(readVarInt(u9, &[_]u8{0xde}, .big) == 0xde);
+    try testing.expect(readVarInt(u80, &[_]u8{ 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x24 }, .big) == 0x123456789abcdef024);
+    try testing.expect(readVarInt(u80, &[_]u8{ 0xec, 0x10, 0x32, 0x54, 0x76, 0x98, 0xba, 0xdc, 0xfe }, .little) == 0xfedcba9876543210ec);
+
+    try testing.expect(readVarInt(i9, &[_]u8{0xff}, .big) == 0xff);
+    try testing.expect(readVarInt(i9, &[_]u8{0xfe}, .little) == 0xfe);
 }
 
 /// Loads an integer from packed memory with provided bit_count, bit_offset, and signedness.
@@ -2021,6 +2055,10 @@ pub fn byteSwapAllFields(comptime S: type, ptr: *S) void {
                     .Enum => {
                         @field(ptr, f.name) = @enumFromInt(@byteSwap(@intFromEnum(@field(ptr, f.name))));
                     },
+                    .Bool => {},
+                    .Float => |float_info| {
+                        @field(ptr, f.name) = @bitCast(@byteSwap(@as(std.meta.Int(.unsigned, float_info.bits), @bitCast(@field(ptr, f.name)))));
+                    },
                     else => {
                         @field(ptr, f.name) = @byteSwap(@field(ptr, f.name));
                     },
@@ -2033,6 +2071,10 @@ pub fn byteSwapAllFields(comptime S: type, ptr: *S) void {
                     .Struct, .Array => byteSwapAllFields(@TypeOf(item.*), item),
                     .Enum => {
                         item.* = @enumFromInt(@byteSwap(@intFromEnum(item.*)));
+                    },
+                    .Bool => {},
+                    .Float => |float_info| {
+                        item.* = @bitCast(@byteSwap(@as(std.meta.Int(.unsigned, float_info.bits), @bitCast(item.*))));
                     },
                     else => {
                         item.* = @byteSwap(item.*);
@@ -2050,24 +2092,32 @@ test byteSwapAllFields {
         f1: u16,
         f2: u32,
         f3: [1]u8,
+        f4: bool,
+        f5: f32,
     };
     const K = extern struct {
         f0: u8,
         f1: T,
         f2: u16,
         f3: [1]u8,
+        f4: bool,
+        f5: f32,
     };
     var s = T{
         .f0 = 0x12,
         .f1 = 0x1234,
         .f2 = 0x12345678,
         .f3 = .{0x12},
+        .f4 = true,
+        .f5 = @as(f32, @bitCast(@as(u32, 0x4640e400))),
     };
     var k = K{
         .f0 = 0x12,
         .f1 = s,
         .f2 = 0x1234,
         .f3 = .{0x12},
+        .f4 = false,
+        .f5 = @as(f32, @bitCast(@as(u32, 0x45d42800))),
     };
     byteSwapAllFields(T, &s);
     byteSwapAllFields(K, &k);
@@ -2076,12 +2126,16 @@ test byteSwapAllFields {
         .f1 = 0x3412,
         .f2 = 0x78563412,
         .f3 = .{0x12},
+        .f4 = true,
+        .f5 = @as(f32, @bitCast(@as(u32, 0x00e44046))),
     }, s);
     try std.testing.expectEqual(K{
         .f0 = 0x12,
         .f1 = s,
         .f2 = 0x3412,
         .f3 = .{0x12},
+        .f4 = false,
+        .f5 = @as(f32, @bitCast(@as(u32, 0x0028d445))),
     }, k);
 }
 
@@ -3428,22 +3482,77 @@ pub fn swap(comptime T: type, a: *T, b: *T) void {
     b.* = tmp;
 }
 
+inline fn reverseVector(comptime N: usize, comptime T: type, a: []T) [N]T {
+    var res: [N]T = undefined;
+    inline for (0..N) |i| {
+        res[i] = a[N - i - 1];
+    }
+    return res;
+}
+
 /// In-place order reversal of a slice
 pub fn reverse(comptime T: type, items: []T) void {
     var i: usize = 0;
     const end = items.len / 2;
+    if (backend_supports_vectors and
+        !@inComptime() and
+        @bitSizeOf(T) > 0 and
+        std.math.isPowerOfTwo(@bitSizeOf(T)))
+    {
+        if (std.simd.suggestVectorLength(T)) |simd_size| {
+            if (simd_size <= end) {
+                const simd_end = end - (simd_size - 1);
+                while (i < simd_end) : (i += simd_size) {
+                    const left_slice = items[i .. i + simd_size];
+                    const right_slice = items[items.len - i - simd_size .. items.len - i];
+
+                    const left_shuffled: [simd_size]T = reverseVector(simd_size, T, left_slice);
+                    const right_shuffled: [simd_size]T = reverseVector(simd_size, T, right_slice);
+
+                    @memcpy(right_slice, &left_shuffled);
+                    @memcpy(left_slice, &right_shuffled);
+                }
+            }
+        }
+    }
+
     while (i < end) : (i += 1) {
         swap(T, &items[i], &items[items.len - i - 1]);
     }
 }
 
 test reverse {
-    var arr = [_]i32{ 5, 3, 1, 2, 4 };
-    reverse(i32, arr[0..]);
-
-    try testing.expect(eql(i32, &arr, &[_]i32{ 4, 2, 1, 3, 5 }));
+    {
+        var arr = [_]i32{ 5, 3, 1, 2, 4 };
+        reverse(i32, arr[0..]);
+        try testing.expectEqualSlices(i32, &arr, &.{ 4, 2, 1, 3, 5 });
+    }
+    {
+        var arr = [_]u0{};
+        reverse(u0, arr[0..]);
+        try testing.expectEqualSlices(u0, &arr, &.{});
+    }
+    {
+        var arr = [_]i64{ 19, 17, 15, 13, 11, 9, 7, 5, 3, 1, 2, 4, 6, 8, 10, 12, 14, 16, 18 };
+        reverse(i64, arr[0..]);
+        try testing.expectEqualSlices(i64, &arr, &.{ 18, 16, 14, 12, 10, 8, 6, 4, 2, 1, 3, 5, 7, 9, 11, 13, 15, 17, 19 });
+    }
+    {
+        var arr = [_][]const u8{ "a", "b", "c", "d" };
+        reverse([]const u8, arr[0..]);
+        try testing.expectEqualSlices([]const u8, &arr, &.{ "d", "c", "b", "a" });
+    }
+    {
+        const MyType = union(enum) {
+            a: [3]u8,
+            b: u24,
+            c,
+        };
+        var arr = [_]MyType{ .{ .a = .{ 0, 0, 0 } }, .{ .b = 0 }, .c };
+        reverse(MyType, arr[0..]);
+        try testing.expectEqualSlices(MyType, &arr, &([_]MyType{ .c, .{ .b = 0 }, .{ .a = .{ 0, 0, 0 } } }));
+    }
 }
-
 fn ReverseIterator(comptime T: type) type {
     const Pointer = blk: {
         switch (@typeInfo(T)) {
