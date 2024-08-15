@@ -10038,11 +10038,11 @@ fn finishFunc(
             else => "x86_64",
         },
         .Kernel => switch (arch) {
-            .nvptx, .nvptx64, .amdgcn, .spirv32, .spirv64 => null,
+            .nvptx, .nvptx64, .amdgcn, .spirv, .spirv32, .spirv64 => null,
             else => "nvptx, amdgcn and SPIR-V",
         },
         .Fragment, .Vertex => switch (arch) {
-            .spirv32, .spirv64 => null,
+            .spirv, .spirv32, .spirv64 => null,
             else => "SPIR-V",
         },
     })) |allowed_platform| {
@@ -26703,7 +26703,7 @@ fn zirWorkItem(
 
     switch (target.cpu.arch) {
         // TODO: Allow for other GPU targets.
-        .amdgcn, .spirv64, .spirv32 => {},
+        .amdgcn, .spirv, .spirv64, .spirv32, .nvptx, .nvptx64 => {},
         else => {
             return sema.fail(block, builtin_src, "builtin only available on GPU targets; targeted architecture is {s}", .{@tagName(target.cpu.arch)});
         },
@@ -30943,7 +30943,7 @@ fn coerceVarArgParam(
         .Array => return sema.fail(block, inst_src, "arrays must be passed by reference to variadic function", .{}),
         .Float => float: {
             const target = zcu.getTarget();
-            const double_bits = target.c_type_bit_size(.double);
+            const double_bits = target.cTypeBitSize(.double);
             const inst_bits = uncasted_ty.floatBits(target);
             if (inst_bits >= double_bits) break :float inst;
             switch (double_bits) {
@@ -30956,21 +30956,21 @@ fn coerceVarArgParam(
             if (!try sema.validateExternType(uncasted_ty, .param_ty)) break :int inst;
             const target = zcu.getTarget();
             const uncasted_info = uncasted_ty.intInfo(zcu);
-            if (uncasted_info.bits <= target.c_type_bit_size(switch (uncasted_info.signedness) {
+            if (uncasted_info.bits <= target.cTypeBitSize(switch (uncasted_info.signedness) {
                 .signed => .int,
                 .unsigned => .uint,
             })) break :int try sema.coerce(block, switch (uncasted_info.signedness) {
                 .signed => Type.c_int,
                 .unsigned => Type.c_uint,
             }, inst, inst_src);
-            if (uncasted_info.bits <= target.c_type_bit_size(switch (uncasted_info.signedness) {
+            if (uncasted_info.bits <= target.cTypeBitSize(switch (uncasted_info.signedness) {
                 .signed => .long,
                 .unsigned => .ulong,
             })) break :int try sema.coerce(block, switch (uncasted_info.signedness) {
                 .signed => Type.c_long,
                 .unsigned => Type.c_ulong,
             }, inst, inst_src);
-            if (uncasted_info.bits <= target.c_type_bit_size(switch (uncasted_info.signedness) {
+            if (uncasted_info.bits <= target.cTypeBitSize(switch (uncasted_info.signedness) {
                 .signed => .longlong,
                 .unsigned => .ulonglong,
             })) break :int try sema.coerce(block, switch (uncasted_info.signedness) {
@@ -37323,9 +37323,9 @@ pub fn analyzeAsAddressSpace(
     const target = pt.zcu.getTarget();
     const arch = target.cpu.arch;
 
-    const is_nv = arch == .nvptx or arch == .nvptx64;
+    const is_nv = arch.isNvptx();
     const is_amd = arch == .amdgcn;
-    const is_spirv = arch == .spirv32 or arch == .spirv64;
+    const is_spirv = arch.isSpirV();
     const is_gpu = is_nv or is_amd or is_spirv;
 
     const supported = switch (address_space) {

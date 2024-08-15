@@ -1130,6 +1130,10 @@ const LinuxThreadImpl = struct {
                       [len] "r" (self.mapped.len),
                     : "memory"
                 ),
+                // We set `sp` to the address of the current function as a workaround for a Linux
+                // kernel bug that caused syscalls to return EFAULT if the stack pointer is invalid.
+                // The bug was introduced in 46e12c07b3b9603c60fc1d421ff18618241cb081 and fixed in
+                // 7928eb0370d1133d0d8cd2f5ddfca19c309079d5.
                 .mips, .mipsel => asm volatile (
                     \\  move $sp, $25
                     \\  li $2, 4091 # SYS_munmap
@@ -1145,11 +1149,11 @@ const LinuxThreadImpl = struct {
                     : "memory"
                 ),
                 .mips64, .mips64el => asm volatile (
-                    \\  li $2, 4091 # SYS_munmap
+                    \\  li $2, 5011 # SYS_munmap
                     \\  move $4, %[ptr]
                     \\  move $5, %[len]
                     \\  syscall
-                    \\  li $2, 4001 # SYS_exit
+                    \\  li $2, 5058 # SYS_exit
                     \\  li $4, 0
                     \\  syscall
                     :
@@ -1159,8 +1163,8 @@ const LinuxThreadImpl = struct {
                 ),
                 .powerpc, .powerpcle, .powerpc64, .powerpc64le => asm volatile (
                     \\  li 0, 91 # SYS_munmap
-                    \\  mr %[ptr], 3
-                    \\  mr %[len], 4
+                    \\  mr 3, %[ptr]
+                    \\  mr 4, %[len]
                     \\  sc
                     \\  li 0, 1 # SYS_exit
                     \\  li 3, 0
@@ -1171,20 +1175,7 @@ const LinuxThreadImpl = struct {
                       [len] "r" (self.mapped.len),
                     : "memory"
                 ),
-                .riscv32 => asm volatile (
-                    \\  li a7, 215 # SYS_munmap
-                    \\  mv a0, %[ptr]
-                    \\  mv a1, %[len]
-                    \\  ecall
-                    \\  li a7, 93 # SYS_exit
-                    \\  mv a0, zero
-                    \\  ecall
-                    :
-                    : [ptr] "r" (@intFromPtr(self.mapped.ptr)),
-                      [len] "r" (self.mapped.len),
-                    : "memory"
-                ),
-                .riscv64 => asm volatile (
+                .riscv32, .riscv64 => asm volatile (
                     \\  li a7, 215 # SYS_munmap
                     \\  mv a0, %[ptr]
                     \\  mv a1, %[len]
