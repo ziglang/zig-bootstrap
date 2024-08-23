@@ -56,6 +56,8 @@ pub const sys_can_stack_trace = switch (builtin.cpu.arch) {
     // TODO: Make this work.
     .mips,
     .mipsel,
+    .mips64,
+    .mips64el,
     => false,
 
     // `@returnAddress()` in LLVM 10 gives
@@ -1359,6 +1361,9 @@ test "manage resources correctly" {
         // https://github.com/ziglang/zig/issues/13963
         return error.SkipZigTest;
     }
+
+    // self-hosted debug info is still too buggy
+    if (builtin.zig_backend != .stage2_llvm) return error.SkipZigTest;
 
     const writer = std.io.null_writer;
     var di = try SelfInfo.open(testing.allocator);

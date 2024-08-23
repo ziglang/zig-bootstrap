@@ -1380,7 +1380,8 @@ pub const Object = struct {
         } else {
             _ = try attributes.removeFnAttr(.sanitize_thread);
         }
-        if (owner_mod.fuzz and !func_analysis.disable_instrumentation) {
+        const is_naked = fn_info.cc == .Naked;
+        if (owner_mod.fuzz and !func_analysis.disable_instrumentation and !is_naked) {
             try attributes.addFnAttr(.optforfuzzing, &o.builder);
             _ = try attributes.removeFnAttr(.skipprofile);
             _ = try attributes.removeFnAttr(.nosanitize_coverage);
@@ -1664,6 +1665,7 @@ pub const Object = struct {
             .ret_ptr = ret_ptr,
             .args = args.items,
             .arg_index = 0,
+            .arg_inline_index = 0,
             .func_inst_table = .{},
             .blocks = .{},
             .sync_scope = if (owner_mod.single_threaded) .singlethread else .system,
@@ -1959,7 +1961,7 @@ pub const Object = struct {
                     );
                 }
 
-                const file = try o.getDebugFile(ty.typeDeclInstAllowGeneratedTag(zcu).?.resolveFull(ip).file);
+                const file = try o.getDebugFile(ty.typeDeclInstAllowGeneratedTag(zcu).?.resolveFile(ip));
                 const scope = if (ty.getParentNamespace(zcu).unwrap()) |parent_namespace|
                     try o.namespaceToDebugScope(parent_namespace)
                 else
@@ -2137,7 +2139,7 @@ pub const Object = struct {
                 const name = try o.allocTypeName(ty);
                 defer gpa.free(name);
 
-                const file = try o.getDebugFile(ty.typeDeclInstAllowGeneratedTag(zcu).?.resolveFull(ip).file);
+                const file = try o.getDebugFile(ty.typeDeclInstAllowGeneratedTag(zcu).?.resolveFile(ip));
                 const scope = if (ty.getParentNamespace(zcu).unwrap()) |parent_namespace|
                     try o.namespaceToDebugScope(parent_namespace)
                 else
@@ -2772,7 +2774,7 @@ pub const Object = struct {
     fn makeEmptyNamespaceDebugType(o: *Object, ty: Type) !Builder.Metadata {
         const zcu = o.pt.zcu;
         const ip = &zcu.intern_pool;
-        const file = try o.getDebugFile(ty.typeDeclInstAllowGeneratedTag(zcu).?.resolveFull(ip).file);
+        const file = try o.getDebugFile(ty.typeDeclInstAllowGeneratedTag(zcu).?.resolveFile(ip));
         const scope = if (ty.getParentNamespace(zcu).unwrap()) |parent_namespace|
             try o.namespaceToDebugScope(parent_namespace)
         else
@@ -2909,7 +2911,17 @@ pub const Object = struct {
             function_index.setAlignment(resolved.alignment.toLlvm(), &o.builder);
 
         // Function attributes that are independent of analysis results of the function body.
-        try o.addCommonFnAttributes(&attributes, owner_mod);
+        try o.addCommonFnAttributes(
+            &attributes,
+            owner_mod,
+            // Some backends don't respect the `naked` attribute in `TargetFrameLowering::hasFP()`,
+            // so for these backends, LLVM will happily emit code that accesses the stack through
+            // the frame pointer. This is nonsensical since what the `naked` attribute does is
+            // suppress generation of the prologue and epilogue, and the prologue is where the
+            // frame pointer normally gets set up. At time of writing, this is the case for at
+            // least x86 and RISC-V.
+            owner_mod.omit_frame_pointer or fn_info.cc == .Naked,
+        );
 
         if (fn_info.return_type == .noreturn_type) try attributes.addFnAttr(.noreturn, &o.builder);
 
@@ -2956,13 +2968,14 @@ pub const Object = struct {
         o: *Object,
         attributes: *Builder.FunctionAttributes.Wip,
         owner_mod: *Package.Module,
+        omit_frame_pointer: bool,
     ) Allocator.Error!void {
         const comp = o.pt.zcu.comp;
 
         if (!owner_mod.red_zone) {
             try attributes.addFnAttr(.noredzone, &o.builder);
         }
-        if (owner_mod.omit_frame_pointer) {
+        if (omit_frame_pointer) {
             try attributes.addFnAttr(.{ .string = .{
                 .kind = try o.builder.string("frame-pointer"),
                 .value = try o.builder.string("none"),
@@ -3183,8 +3196,6 @@ pub const Object = struct {
             .one_u8,
             .four_u8,
             .negative_one,
-            .calling_convention_c,
-            .calling_convention_inline,
             .void_value,
             .unreachable_value,
             .null_value,
@@ -4528,7 +4539,7 @@ pub const Object = struct {
 
         var attributes: Builder.FunctionAttributes.Wip = .{};
         defer attributes.deinit(&o.builder);
-        try o.addCommonFnAttributes(&attributes, zcu.root_mod);
+        try o.addCommonFnAttributes(&attributes, zcu.root_mod, zcu.root_mod.omit_frame_pointer);
 
         function_index.setLinkage(.internal, &o.builder);
         function_index.setCallConv(.fastcc, &o.builder);
@@ -4557,7 +4568,7 @@ pub const Object = struct {
 
         var attributes: Builder.FunctionAttributes.Wip = .{};
         defer attributes.deinit(&o.builder);
-        try o.addCommonFnAttributes(&attributes, zcu.root_mod);
+        try o.addCommonFnAttributes(&attributes, zcu.root_mod, zcu.root_mod.omit_frame_pointer);
 
         function_index.setLinkage(.internal, &o.builder);
         function_index.setCallConv(.fastcc, &o.builder);
@@ -4759,7 +4770,8 @@ pub const FuncGen = struct {
     /// it omits 0-bit types. If the function uses sret as the first parameter,
     /// this slice does not include it.
     args: []const Builder.Value,
-    arg_index: usize,
+    arg_index: u32,
+    arg_inline_index: u32,
 
     err_ret_trace: Builder.Value = .none,
 
@@ -5072,7 +5084,8 @@ pub const FuncGen = struct {
                 .dbg_stmt => try self.airDbgStmt(inst),
                 .dbg_inline_block => try self.airDbgInlineBlock(inst),
                 .dbg_var_ptr => try self.airDbgVarPtr(inst),
-                .dbg_var_val => try self.airDbgVarVal(inst),
+                .dbg_var_val => try self.airDbgVarVal(inst, false),
+                .dbg_arg_inline => try self.airDbgVarVal(inst, true),
 
                 .c_va_arg => try self.airCVaArg(inst),
                 .c_va_copy => try self.airCVaCopy(inst),
@@ -6667,6 +6680,7 @@ pub const FuncGen = struct {
     fn airDbgInlineBlock(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
         const ty_pl = self.air.instructions.items(.data)[@intFromEnum(inst)].ty_pl;
         const extra = self.air.extraData(Air.DbgInlineBlock, ty_pl.payload);
+        self.arg_inline_index = 0;
         return self.lowerBlock(inst, extra.data.func, @ptrCast(self.air.extra[extra.end..][0..extra.data.body_len]));
     }
 
@@ -6675,11 +6689,11 @@ pub const FuncGen = struct {
         const mod = o.pt.zcu;
         const pl_op = self.air.instructions.items(.data)[@intFromEnum(inst)].pl_op;
         const operand = try self.resolveInst(pl_op.operand);
-        const name = self.air.nullTerminatedString(pl_op.payload);
+        const name: Air.NullTerminatedString = @enumFromInt(pl_op.payload);
         const ptr_ty = self.typeOf(pl_op.operand);
 
         const debug_local_var = try o.builder.debugLocalVar(
-            try o.builder.metadataString(name),
+            try o.builder.metadataString(name.toSlice(self.air)),
             self.file,
             self.scope,
             self.prev_dbg_line,
@@ -6702,17 +6716,25 @@ pub const FuncGen = struct {
         return .none;
     }
 
-    fn airDbgVarVal(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+    fn airDbgVarVal(self: *FuncGen, inst: Air.Inst.Index, is_arg: bool) !Builder.Value {
         const o = self.ng.object;
         const pl_op = self.air.instructions.items(.data)[@intFromEnum(inst)].pl_op;
         const operand = try self.resolveInst(pl_op.operand);
         const operand_ty = self.typeOf(pl_op.operand);
-        const name = self.air.nullTerminatedString(pl_op.payload);
+        const name: Air.NullTerminatedString = @enumFromInt(pl_op.payload);
 
-        if (needDbgVarWorkaround(o)) return .none;
-
-        const debug_local_var = try o.builder.debugLocalVar(
-            try o.builder.metadataString(name),
+        const debug_local_var = if (is_arg) try o.builder.debugParameter(
+            try o.builder.metadataString(name.toSlice(self.air)),
+            self.file,
+            self.scope,
+            self.prev_dbg_line,
+            try o.lowerDebugType(operand_ty),
+            arg_no: {
+                self.arg_inline_index += 1;
+                break :arg_no self.arg_inline_index;
+            },
+        ) else try o.builder.debugLocalVar(
+            try o.builder.metadataString(name.toSlice(self.air)),
             self.file,
             self.scope,
             self.prev_dbg_line,
@@ -6734,7 +6756,10 @@ pub const FuncGen = struct {
                 },
                 "",
             );
-        } else if (owner_mod.optimize_mode == .Debug) {
+        } else if (owner_mod.optimize_mode == .Debug and !self.is_naked) {
+            // We avoid taking this path for naked functions because there's no guarantee that such
+            // functions even have a valid stack pointer, making the `alloca` + `store` unsafe.
+
             const alignment = operand_ty.abiAlignment(pt).toLlvm();
             const alloca = try self.buildAlloca(operand.typeOfWip(&self.wip), alignment);
             _ = try self.wip.store(.normal, operand, alloca, alignment);
@@ -8815,7 +8840,6 @@ pub const FuncGen = struct {
         if (self.is_naked) return arg_val;
 
         const inst_ty = self.typeOfIndex(inst);
-        if (needDbgVarWorkaround(o)) return arg_val;
 
         const name = self.air.instructions.items(.data)[@intFromEnum(inst)].arg.name;
         if (name == .none) return arg_val;
@@ -8825,12 +8849,12 @@ pub const FuncGen = struct {
         const lbrace_col = func.lbrace_column + 1;
 
         const debug_parameter = try o.builder.debugParameter(
-            try o.builder.metadataString(self.air.nullTerminatedString(@intFromEnum(name))),
+            try o.builder.metadataString(name.toSlice(self.air)),
             self.file,
             self.scope,
             lbrace_line,
             try o.lowerDebugType(inst_ty),
-            @intCast(self.arg_index),
+            self.arg_index,
         );
 
         const old_location = self.wip.debug_location;
@@ -9676,7 +9700,7 @@ pub const FuncGen = struct {
 
         var attributes: Builder.FunctionAttributes.Wip = .{};
         defer attributes.deinit(&o.builder);
-        try o.addCommonFnAttributes(&attributes, zcu.root_mod);
+        try o.addCommonFnAttributes(&attributes, zcu.root_mod, zcu.root_mod.omit_frame_pointer);
 
         function_index.setLinkage(.internal, &o.builder);
         function_index.setCallConv(.fastcc, &o.builder);
@@ -11776,7 +11800,9 @@ fn backendSupportsF16(target: std.Target) bool {
         .mips64el,
         .s390x,
         => false,
-        .aarch64 => std.Target.aarch64.featureSetHas(target.cpu.features, .fp_armv8),
+        .aarch64,
+        .aarch64_be,
+        => std.Target.aarch64.featureSetHas(target.cpu.features, .fp_armv8),
         else => true,
     };
 }
@@ -11787,9 +11813,18 @@ fn backendSupportsF16(target: std.Target) bool {
 fn backendSupportsF128(target: std.Target) bool {
     return switch (target.cpu.arch) {
         .amdgcn,
+        .mips64,
+        .mips64el,
         .sparc,
         => false,
-        .aarch64 => std.Target.aarch64.featureSetHas(target.cpu.features, .fp_armv8),
+        .powerpc,
+        .powerpcle,
+        .powerpc64,
+        .powerpc64le,
+        => target.os.tag != .aix,
+        .aarch64,
+        .aarch64_be,
+        => std.Target.aarch64.featureSetHas(target.cpu.features, .fp_armv8),
         else => true,
     };
 }
@@ -11819,16 +11854,6 @@ const struct_layout_version = 2;
 const optional_layout_version = 3;
 
 const lt_errors_fn_name = "__zig_lt_errors_len";
-
-/// Without this workaround, LLVM crashes with "unknown codeview register H1"
-/// https://github.com/llvm/llvm-project/issues/56484
-fn needDbgVarWorkaround(o: *Object) bool {
-    const target = o.pt.zcu.getTarget();
-    if (target.os.tag == .windows and target.cpu.arch == .aarch64) {
-        return true;
-    }
-    return false;
-}
 
 fn compilerRtIntBits(bits: u16) u16 {
     inline for (.{ 32, 64, 128 }) |b| {
