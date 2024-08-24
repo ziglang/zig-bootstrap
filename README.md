@@ -113,12 +113,12 @@ is more portable across Linux distributions.
 | `mips-linux-gnueabi`       | OK             |
 | `mips-linux-gnueabihf`     | OK             |
 | `mips-linux-musl`          | OK             |
-| `mips64-linux-gnuabi64`    | [#108](https://github.com/ziglang/zig-bootstrap/issues/108) |
+| `mips64-linux-gnuabi64`    | OK             |
 | `mips64-linux-gnuabin32`   | [#109](https://github.com/ziglang/zig-bootstrap/issues/109) |
-| `mips64-linux-musl`        | [#110](https://github.com/ziglang/zig-bootstrap/issues/110) |
-| `mips64el-linux-gnuabi64`  | [#106](https://github.com/ziglang/zig-bootstrap/issues/106) |
+| `mips64-linux-musl`        | OK             |
+| `mips64el-linux-gnuabi64`  | OK             |
 | `mips64el-linux-gnuabin32` | [#107](https://github.com/ziglang/zig-bootstrap/issues/107) |
-| `mips64el-linux-musl`      | [#3](https://github.com/ziglang/bootstrap/issues/3) |
+| `mips64el-linux-musl`      | OK             |
 | `mipsel-linux-gnueabi`     | OK             |
 | `mipsel-linux-gnueabihf`   | OK             |
 | `mipsel-linux-musl`        | OK             |
