@@ -15,6 +15,7 @@
 #include "lld/Common/Args.h"
 #include "lld/Common/CommonLinkerContext.h"
 #include "lld/Common/Reproduce.h"
+#include "llvm/BinaryFormat/Wasm.h"
 #include "llvm/Object/Binary.h"
 #include "llvm/Object/Wasm.h"
 #include "llvm/Support/Path.h"
@@ -81,6 +82,9 @@ InputFile *createObjectFile(MemoryBufferRef mb, StringRef archiveName,
     std::unique_ptr<Binary> bin =
         CHECK(createBinary(mb), mb.getBufferIdentifier());
     auto *obj = cast<WasmObjectFile>(bin.get());
+    if (obj->hasUnmodeledTypes())
+      fatal(toString(mb.getBufferIdentifier()) +
+            "file has unmodeled reference or GC types");
     if (obj->isSharedObject())
       return make<SharedFile>(mb);
     return make<ObjFile>(mb, archiveName, lazy);
@@ -171,7 +175,7 @@ uint64_t ObjFile::calcNewValue(const WasmRelocation &reloc, uint64_t tombstone,
   case R_WASM_MEMORY_ADDR_TLS_SLEB:
   case R_WASM_MEMORY_ADDR_TLS_SLEB64:
   case R_WASM_MEMORY_ADDR_LOCREL_I32: {
-    if (isa<UndefinedData>(sym) || sym->isUndefWeak())
+    if (isa<UndefinedData>(sym) || sym->isShared() || sym->isUndefWeak())
       return 0;
     auto D = cast<DefinedData>(sym);
     uint64_t value = D->getVA() + reloc.Addend;
@@ -319,20 +323,19 @@ void ObjFile::addLegacyIndirectFunctionTableIfNeeded(
     return;
   }
 
-  auto *info = make<WasmSymbolInfo>();
-  info->Name = tableImport->Field;
-  info->Kind = WASM_SYMBOL_TYPE_TABLE;
-  info->ImportModule = tableImport->Module;
-  info->ImportName = tableImport->Field;
-  info->Flags = WASM_SYMBOL_UNDEFINED;
-  info->Flags |= WASM_SYMBOL_NO_STRIP;
-  info->ElementIndex = 0;
-  LLVM_DEBUG(dbgs() << "Synthesizing symbol for table import: " << info->Name
+  WasmSymbolInfo info;
+  info.Name = tableImport->Field;
+  info.Kind = WASM_SYMBOL_TYPE_TABLE;
+  info.ImportModule = tableImport->Module;
+  info.ImportName = tableImport->Field;
+  info.Flags = WASM_SYMBOL_UNDEFINED | WASM_SYMBOL_NO_STRIP;
+  info.ElementIndex = 0;
+  LLVM_DEBUG(dbgs() << "Synthesizing symbol for table import: " << info.Name
                     << "\n");
   const WasmGlobalType *globalType = nullptr;
   const WasmSignature *signature = nullptr;
   auto *wasmSym =
-      make<WasmSymbol>(*info, globalType, &tableImport->Table, signature);
+      make<WasmSymbol>(info, globalType, &tableImport->Table, signature);
   Symbol *sym = createUndefined(*wasmSym, false);
   // We're only sure it's a TableSymbol if the createUndefined succeeded.
   if (errorCount())
@@ -385,7 +388,8 @@ static bool shouldMerge(const WasmSegment &seg) {
 }
 
 void ObjFile::parseLazy() {
-  LLVM_DEBUG(dbgs() << "ObjFile::parseLazy: " << toString(this) << "\n");
+  LLVM_DEBUG(dbgs() << "ObjFile::parseLazy: " << toString(this) << " "
+                    << wasmObj.get() << "\n");
   for (const SymbolRef &sym : wasmObj->symbols()) {
     const WasmSymbol &wasmSym = wasmObj->getWasmSymbol(sym.getRawDataRefImpl());
     if (!wasmSym.isDefined())
@@ -400,31 +404,72 @@ void ObjFile::parseLazy() {
 }
 
 ObjFile::ObjFile(MemoryBufferRef m, StringRef archiveName, bool lazy)
-    : InputFile(ObjectKind, m) {
+    : WasmFileBase(ObjectKind, m) {
   this->lazy = lazy;
   this->archiveName = std::string(archiveName);
+
+  // Currently we only do this check for regular object file, and not for shared
+  // object files.  This is because architecture detection for shared objects is
+  // currently based on a heuristic, which is fallable:
+  // https://github.com/llvm/llvm-project/issues/98778
+  checkArch(wasmObj->getArch());
 
   // If this isn't part of an archive, it's eagerly linked, so mark it live.
   if (archiveName.empty())
     markLive();
+}
 
+void SharedFile::parse() {
+  assert(wasmObj->isSharedObject());
+
+  for (const SymbolRef &sym : wasmObj->symbols()) {
+    const WasmSymbol &wasmSym = wasmObj->getWasmSymbol(sym.getRawDataRefImpl());
+    if (wasmSym.isDefined()) {
+      StringRef name = wasmSym.Info.Name;
+      // Certain shared library exports are known to be DSO-local so we
+      // don't want to add them to the symbol table.
+      // TODO(sbc): Instead of hardcoding these here perhaps we could add
+      // this as extra metadata in the `dylink` section.
+      if (name == "__wasm_apply_data_relocs" || name == "__wasm_call_ctors" ||
+          name.starts_with("__start_") || name.starts_with("__stop_"))
+        continue;
+      uint32_t flags = wasmSym.Info.Flags;
+      Symbol *s;
+      LLVM_DEBUG(dbgs() << "shared symbol: " << name << "\n");
+      switch (wasmSym.Info.Kind) {
+      case WASM_SYMBOL_TYPE_FUNCTION:
+        s = symtab->addSharedFunction(name, flags, this, wasmSym.Signature);
+        break;
+      case WASM_SYMBOL_TYPE_DATA:
+        s = symtab->addSharedData(name, flags, this);
+        break;
+      default:
+        continue;
+      }
+      symbols.push_back(s);
+    }
+  }
+}
+
+WasmFileBase::WasmFileBase(Kind k, MemoryBufferRef m) : InputFile(k, m) {
+  // Parse a memory buffer as a wasm file.
+  LLVM_DEBUG(dbgs() << "Reading object: " << toString(this) << "\n");
   std::unique_ptr<Binary> bin = CHECK(createBinary(mb), toString(this));
 
   auto *obj = dyn_cast<WasmObjectFile>(bin.get());
   if (!obj)
     fatal(toString(this) + ": not a wasm file");
-  if (!obj->isRelocatableObject())
-    fatal(toString(this) + ": not a relocatable wasm file");
 
   bin.release();
   wasmObj.reset(obj);
-
-  checkArch(obj->getArch());
 }
 
 void ObjFile::parse(bool ignoreComdats) {
   // Parse a memory buffer as a wasm file.
   LLVM_DEBUG(dbgs() << "ObjFile::parse: " << toString(this) << "\n");
+
+  if (!wasmObj->isRelocatableObject())
+    fatal(toString(this) + ": not a relocatable wasm file");
 
   // Build up a map of function indices to table indices for use when
   // verifying the existing table index relocations
