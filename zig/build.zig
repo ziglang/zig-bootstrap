@@ -647,6 +647,24 @@ fn addCompilerStep(b: *std.Build, options: AddCompilerStepOptions) *std.Build.St
         .strip = options.strip,
         .sanitize_thread = options.sanitize_thread,
         .single_threaded = options.single_threaded,
+        .code_model = switch (options.target.result.cpu.arch) {
+            // NB:
+            // For loongarch, LLVM supports only small, medium and large
+            // code model. If we don't explicitly specify the code model,
+            // the default value `small' will be used.
+            //
+            // Since zig binary itself is relatively large, using a `small'
+            // code model will cause
+            //
+            // relocation R_LARCH_B26 out of range
+            //
+            // error when linking a loongarch64 zig binary.
+            //
+            // Here we explicitly set code model to `medium' to avoid this
+            // error.
+            .loongarch64 => .medium,
+            else => .default,
+        },
     });
     exe.root_module.valgrind = options.valgrind;
     exe.stack_size = stack_size;
@@ -1081,6 +1099,8 @@ const clang_libs = [_][]const u8{
     "clangToolingCore",
     "clangExtractAPI",
     "clangSupport",
+    "clangInstallAPI",
+    "clangAST",
 };
 const lld_libs = [_][]const u8{
     "lldMinGW",
@@ -1102,6 +1122,7 @@ const llvm_libs = [_][]const u8{
     "LLVMTextAPIBinaryReader",
     "LLVMCoverage",
     "LLVMLineEditor",
+    "LLVMSandboxIR",
     "LLVMXCoreDisassembler",
     "LLVMXCoreCodeGen",
     "LLVMXCoreDesc",
@@ -1237,6 +1258,7 @@ const llvm_libs = [_][]const u8{
     "LLVMDWARFLinkerParallel",
     "LLVMDWARFLinkerClassic",
     "LLVMDWARFLinker",
+    "LLVMCodeGenData",
     "LLVMGlobalISel",
     "LLVMMIRParser",
     "LLVMAsmPrinter",

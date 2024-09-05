@@ -137,9 +137,9 @@ else()
     set(ZIG_SYSTEM_LIBCXX "stdc++" CACHE STRING "system libcxx name for build.zig")
 endif()
 
-find_package(llvm 18)
-find_package(clang 18)
-find_package(lld 18)
+find_package(llvm 19)
+find_package(clang 19)
+find_package(lld 19)
 
 if(ZIG_STATIC_ZLIB)
     if (MSVC)
@@ -600,6 +600,7 @@ set(ZIG_STAGE2_SOURCES
     src/link/Elf.zig
     src/link/Elf/Archive.zig
     src/link/Elf/Atom.zig
+    src/link/Elf/AtomList.zig
     src/link/Elf/LdScript.zig
     src/link/Elf/LinkerDefined.zig
     src/link/Elf/Object.zig

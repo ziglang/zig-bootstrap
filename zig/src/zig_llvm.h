@@ -155,10 +155,6 @@ enum ZigLLVM_CallingConv {
     ZigLLVM_MaxID = 1023,
 };
 
-ZIG_EXTERN_C void ZigLLVMSetModulePICLevel(LLVMModuleRef module, bool big);
-ZIG_EXTERN_C void ZigLLVMSetModulePIELevel(LLVMModuleRef module, bool large);
-ZIG_EXTERN_C void ZigLLVMSetModuleCodeModel(LLVMModuleRef module, LLVMCodeModel code_model);
-
 ZIG_EXTERN_C void ZigLLVMParseCommandLineOptions(size_t argc, const char *const *argv);
 
 // synchronize with llvm/include/ADT/Triple.h::ArchType
@@ -284,6 +280,7 @@ enum ZigLLVM_OSType {
     ZigLLVM_ELFIAMCU,
     ZigLLVM_TvOS,       // Apple tvOS
     ZigLLVM_WatchOS,    // Apple watchOS
+    ZigLLVM_BridgeOS,   // Apple bridgeOS
     ZigLLVM_DriverKit,  // Apple DriverKit
     ZigLLVM_XROS,       // Apple XROS
     ZigLLVM_Mesa3D,
@@ -344,9 +341,12 @@ enum ZigLLVM_EnvironmentType {
     ZigLLVM_Callable,
     ZigLLVM_Mesh,
     ZigLLVM_Amplification,
+    ZigLLVM_OpenCL,
     ZigLLVM_OpenHOS,
 
-    ZigLLVM_LastEnvironmentType = ZigLLVM_OpenHOS
+    ZigLLVM_PAuthTest,
+
+    ZigLLVM_LastEnvironmentType = ZigLLVM_PAuthTest
 };
 
 enum ZigLLVM_ObjectFormatType {
