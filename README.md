@@ -109,8 +109,8 @@ is more portable across Linux distributions.
 | `armeb-linux-gnueabihf`    | [#97](https://github.com/ziglang/zig-bootstrap/issues/97) |
 | `armeb-linux-musleabi`     | [#98](https://github.com/ziglang/zig-bootstrap/issues/98) |
 | `armeb-linux-musleabihf`   | [#99](https://github.com/ziglang/zig-bootstrap/issues/99) |
-| `loongarch64-linux-gnu`    | [#166](https://github.com/ziglang/zig-bootstrap/issues/166) |
-| `loongarch64-linux-musl`   | [#164](https://github.com/ziglang/zig-bootstrap/issues/164) |
+| `loongarch64-linux-gnu`    | OK             |
+| `loongarch64-linux-musl`   | OK             |
 | `mips-linux-gnueabi`       | OK             |
 | `mips-linux-gnueabihf`     | OK             |
 | `mips-linux-musl`          | OK             |
