@@ -51,6 +51,7 @@ pub const Feature = enum {
     ptr64,
     single_float,
     soft_float,
+    strict_align,
     sym32,
     use_indirect_jump_hazard,
     use_tcc_in_div,
@@ -65,7 +66,7 @@ pub const featureSetHasAny = CpuFeature.FeatureSetFns(Feature).featureSetHasAny;
 pub const featureSetHasAll = CpuFeature.FeatureSetFns(Feature).featureSetHasAll;
 
 pub const all_features = blk: {
-    const len = @typeInfo(Feature).Enum.fields.len;
+    const len = @typeInfo(Feature).@"enum".fields.len;
     std.debug.assert(len <= CpuFeature.Set.needed_bit_count);
     var result: [len]CpuFeature = undefined;
     result[@intFromEnum(Feature.abs2008)] = .{
@@ -356,6 +357,11 @@ pub const all_features = blk: {
         .description = "Does not support floating point instructions",
         .dependencies = featureSet(&[_]Feature{}),
     };
+    result[@intFromEnum(Feature.strict_align)] = .{
+        .llvm_name = "strict-align",
+        .description = "Disable unaligned load store for r6",
+        .dependencies = featureSet(&[_]Feature{}),
+    };
     result[@intFromEnum(Feature.sym32)] = .{
         .llvm_name = "sym32",
         .description = "Symbols are 32 bit on Mips64",
@@ -389,7 +395,7 @@ pub const all_features = blk: {
     const ti = @typeInfo(Feature);
     for (&result, 0..) |*elem, i| {
         elem.index = i;
-        elem.name = ti.Enum.fields[i].name;
+        elem.name = ti.@"enum".fields[i].name;
     }
     break :blk result;
 };

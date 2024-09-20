@@ -401,15 +401,15 @@ fn callFn(comptime f: anytype, args: anytype) switch (Impl) {
     const default_value = if (Impl == PosixThreadImpl) null else 0;
     const bad_fn_ret = "expected return type of startFn to be 'u8', 'noreturn', '!noreturn', 'void', or '!void'";
 
-    switch (@typeInfo(@typeInfo(@TypeOf(f)).Fn.return_type.?)) {
-        .NoReturn => {
+    switch (@typeInfo(@typeInfo(@TypeOf(f)).@"fn".return_type.?)) {
+        .noreturn => {
             @call(.auto, f, args);
         },
-        .Void => {
+        .void => {
             @call(.auto, f, args);
             return default_value;
         },
-        .Int => |info| {
+        .int => |info| {
             if (info.bits != 8) {
                 @compileError(bad_fn_ret);
             }
@@ -422,7 +422,7 @@ fn callFn(comptime f: anytype, args: anytype) switch (Impl) {
             // pthreads don't support exit status, ignore value
             return default_value;
         },
-        .ErrorUnion => |info| {
+        .error_union => |info| {
             switch (info.payload) {
                 void, noreturn => {
                     @call(.auto, f, args) catch |err| {
@@ -850,17 +850,17 @@ const WasiThreadImpl = struct {
             fn entry(ptr: usize) void {
                 const w: *@This() = @ptrFromInt(ptr);
                 const bad_fn_ret = "expected return type of startFn to be 'u8', 'noreturn', 'void', or '!void'";
-                switch (@typeInfo(@typeInfo(@TypeOf(f)).Fn.return_type.?)) {
-                    .NoReturn, .Void => {
+                switch (@typeInfo(@typeInfo(@TypeOf(f)).@"fn".return_type.?)) {
+                    .noreturn, .void => {
                         @call(.auto, f, w.args);
                     },
-                    .Int => |info| {
+                    .int => |info| {
                         if (info.bits != 8) {
                             @compileError(bad_fn_ret);
                         }
                         _ = @call(.auto, f, w.args); // WASI threads don't support exit status, ignore value
                     },
-                    .ErrorUnion => |info| {
+                    .error_union => |info| {
                         if (info.payload != void) {
                             @compileError(bad_fn_ret);
                         }
@@ -1221,12 +1221,12 @@ const LinuxThreadImpl = struct {
                     \\  ba 1b
                     \\  restore
                     \\ 2:
-                    \\  mov 73, %%g1 # SYS_munmap
+                    \\  mov 73, %%g1 // SYS_munmap
                     \\  mov %[ptr], %%o0
                     \\  mov %[len], %%o1
                     \\  t 0x3 # ST_FLUSH_WINDOWS
                     \\  t 0x10
-                    \\  mov 1, %%g1 # SYS_exit
+                    \\  mov 1, %%g1 // SYS_exit
                     \\  mov 0, %%o0
                     \\  t 0x10
                     :
@@ -1246,14 +1246,14 @@ const LinuxThreadImpl = struct {
                     \\  ba 1b
                     \\  restore
                     \\ 2:
-                    \\  mov 73, %%g1 # SYS_munmap
+                    \\  mov 73, %%g1 // SYS_munmap
                     \\  mov %[ptr], %%o0
                     \\  mov %[len], %%o1
                     \\  # Flush register window contents to prevent background
                     \\  # memory access before unmapping the stack.
                     \\  flushw
                     \\  t 0x6d
-                    \\  mov 1, %%g1 # SYS_exit
+                    \\  mov 1, %%g1 // SYS_exit
                     \\  mov 0, %%o0
                     \\  t 0x6d
                     :

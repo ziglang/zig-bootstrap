@@ -86,6 +86,7 @@ pub fn getExternalExecutor(
             .arm => Executor{ .qemu = "qemu-arm" },
             .armeb => Executor{ .qemu = "qemu-armeb" },
             .hexagon => Executor{ .qemu = "qemu-hexagon" },
+            .loongarch64 => Executor{ .qemu = "qemu-loongarch64" },
             .m68k => Executor{ .qemu = "qemu-m68k" },
             .mips => Executor{ .qemu = "qemu-mips" },
             .mipsel => Executor{ .qemu = "qemu-mipsel" },
@@ -383,6 +384,12 @@ pub fn resolveTargetQuery(query: Target.Query) DetectError!Target {
         query.cpu_features_add,
         query.cpu_features_sub,
     );
+
+    // https://github.com/llvm/llvm-project/issues/105978
+    if (result.cpu.arch.isArmOrThumb() and result.floatAbi() == .soft) {
+        result.cpu.features.removeFeature(@intFromEnum(Target.arm.Feature.vfp2));
+    }
+
     return result;
 }
 

@@ -218,12 +218,18 @@ no_builtin: bool = false,
 /// Managed by the build runner, not user build script.
 zig_process: ?*Step.ZigProcess,
 
-/// Enables deprecated coverage instrumentation that is only useful if you
-/// are using third party fuzzers that depend on it. Otherwise, slows down
-/// the instrumented binary with unnecessary function calls.
+/// Enables coverage instrumentation that is only useful if you are using third
+/// party fuzzers that depend on it. Otherwise, slows down the instrumented
+/// binary with unnecessary function calls.
 ///
-/// To enable fuzz testing instrumentation on a compilation, see the `fuzz`
-/// flag in `Module`.
+/// This kind of coverage instrumentation is used by AFLplusplus v4.21c,
+/// however, modern fuzzers - including Zig - have switched to using "inline
+/// 8-bit counters" or "inline bool flag" which incurs only a single
+/// instruction for coverage, along with "trace cmp" which instruments
+/// comparisons and reports the operands.
+///
+/// To instead enable fuzz testing instrumentation on a compilation using Zig's
+/// builtin fuzzer, see the `fuzz` flag in `Module`.
 sanitize_coverage_trace_pc_guard: ?bool = null,
 
 pub const ExpectedCompileErrors = union(enum) {
@@ -1064,8 +1070,8 @@ fn getZigArgs(compile: *Compile, fuzz: bool) ![][]const u8 {
         // Stores system libraries that have already been seen for at least one
         // module, along with any arguments that need to be passed to the
         // compiler for each module individually.
-        var seen_system_libs: std.StringHashMapUnmanaged([]const []const u8) = .{};
-        var frameworks: std.StringArrayHashMapUnmanaged(Module.LinkFrameworkOptions) = .{};
+        var seen_system_libs: std.StringHashMapUnmanaged([]const []const u8) = .empty;
+        var frameworks: std.StringArrayHashMapUnmanaged(Module.LinkFrameworkOptions) = .empty;
 
         var prev_has_cflags = false;
         var prev_has_rcflags = false;

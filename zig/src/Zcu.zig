@@ -43,9 +43,9 @@ const dev = @import("dev.zig");
 comptime {
     @setEvalBranchQuota(4000);
     for (
-        @typeInfo(Zir.Inst.Ref).Enum.fields,
-        @typeInfo(Air.Inst.Ref).Enum.fields,
-        @typeInfo(InternPool.Index).Enum.fields,
+        @typeInfo(Zir.Inst.Ref).@"enum".fields,
+        @typeInfo(Air.Inst.Ref).@"enum".fields,
+        @typeInfo(InternPool.Index).@"enum".fields,
     ) |zir_field, air_field, ip_field| {
         assert(mem.eql(u8, zir_field.name, ip_field.name));
         assert(mem.eql(u8, air_field.name, ip_field.name));
@@ -76,14 +76,14 @@ local_zir_cache: Compilation.Directory,
 
 /// This is where all `Export` values are stored. Not all values here are necessarily valid exports;
 /// to enumerate all exports, `single_exports` and `multi_exports` must be consulted.
-all_exports: std.ArrayListUnmanaged(Export) = .{},
+all_exports: std.ArrayListUnmanaged(Export) = .empty,
 /// This is a list of free indices in `all_exports`. These indices may be reused by exports from
 /// future semantic analysis.
-free_exports: std.ArrayListUnmanaged(u32) = .{},
+free_exports: std.ArrayListUnmanaged(u32) = .empty,
 /// Maps from an `AnalUnit` which performs a single export, to the index into `all_exports` of
 /// the export it performs. Note that the key is not the `Decl` being exported, but the `AnalUnit`
 /// whose analysis triggered the export.
-single_exports: std.AutoArrayHashMapUnmanaged(AnalUnit, u32) = .{},
+single_exports: std.AutoArrayHashMapUnmanaged(AnalUnit, u32) = .empty,
 /// Like `single_exports`, but for `AnalUnit`s which perform multiple exports.
 /// The exports are `all_exports.items[index..][0..len]`.
 multi_exports: std.AutoArrayHashMapUnmanaged(AnalUnit, extern struct {
@@ -104,29 +104,29 @@ multi_exports: std.AutoArrayHashMapUnmanaged(AnalUnit, extern struct {
 /// `Compilation.update` of the process for a given `Compilation`.
 ///
 /// Indexes correspond 1:1 to `files`.
-import_table: std.StringArrayHashMapUnmanaged(File.Index) = .{},
+import_table: std.StringArrayHashMapUnmanaged(File.Index) = .empty,
 
 /// The set of all the files which have been loaded with `@embedFile` in the Module.
 /// We keep track of this in order to iterate over it and check which files have been
 /// modified on the file system when an update is requested, as well as to cache
 /// `@embedFile` results.
 /// Keys are fully resolved file paths. This table owns the keys and values.
-embed_table: std.StringArrayHashMapUnmanaged(*EmbedFile) = .{},
+embed_table: std.StringArrayHashMapUnmanaged(*EmbedFile) = .empty,
 
 /// Stores all Type and Value objects.
 /// The idea is that this will be periodically garbage-collected, but such logic
 /// is not yet implemented.
-intern_pool: InternPool = .{},
+intern_pool: InternPool = .empty,
 
-analysis_in_progress: std.AutoArrayHashMapUnmanaged(AnalUnit, void) = .{},
+analysis_in_progress: std.AutoArrayHashMapUnmanaged(AnalUnit, void) = .empty,
 /// The ErrorMsg memory is owned by the `AnalUnit`, using Module's general purpose allocator.
-failed_analysis: std.AutoArrayHashMapUnmanaged(AnalUnit, *ErrorMsg) = .{},
+failed_analysis: std.AutoArrayHashMapUnmanaged(AnalUnit, *ErrorMsg) = .empty,
 /// This `AnalUnit` failed semantic analysis because it required analysis of another `AnalUnit` which itself failed.
-transitive_failed_analysis: std.AutoArrayHashMapUnmanaged(AnalUnit, void) = .{},
+transitive_failed_analysis: std.AutoArrayHashMapUnmanaged(AnalUnit, void) = .empty,
 /// This `Nav` succeeded analysis, but failed codegen.
 /// This may be a simple "value" `Nav`, or it may be a function.
 /// The ErrorMsg memory is owned by the `AnalUnit`, using Module's general purpose allocator.
-failed_codegen: std.AutoArrayHashMapUnmanaged(InternPool.Nav.Index, *ErrorMsg) = .{},
+failed_codegen: std.AutoArrayHashMapUnmanaged(InternPool.Nav.Index, *ErrorMsg) = .empty,
 /// Keep track of one `@compileLog` callsite per `AnalUnit`.
 /// The value is the source location of the `@compileLog` call, convertible to a `LazySrcLoc`.
 compile_log_sources: std.AutoArrayHashMapUnmanaged(AnalUnit, extern struct {
@@ -141,14 +141,14 @@ compile_log_sources: std.AutoArrayHashMapUnmanaged(AnalUnit, extern struct {
 }) = .{},
 /// Using a map here for consistency with the other fields here.
 /// The ErrorMsg memory is owned by the `File`, using Module's general purpose allocator.
-failed_files: std.AutoArrayHashMapUnmanaged(*File, ?*ErrorMsg) = .{},
+failed_files: std.AutoArrayHashMapUnmanaged(*File, ?*ErrorMsg) = .empty,
 /// The ErrorMsg memory is owned by the `EmbedFile`, using Module's general purpose allocator.
-failed_embed_files: std.AutoArrayHashMapUnmanaged(*EmbedFile, *ErrorMsg) = .{},
+failed_embed_files: std.AutoArrayHashMapUnmanaged(*EmbedFile, *ErrorMsg) = .empty,
 /// Key is index into `all_exports`.
-failed_exports: std.AutoArrayHashMapUnmanaged(u32, *ErrorMsg) = .{},
+failed_exports: std.AutoArrayHashMapUnmanaged(u32, *ErrorMsg) = .empty,
 /// If analysis failed due to a cimport error, the corresponding Clang errors
 /// are stored here.
-cimport_errors: std.AutoArrayHashMapUnmanaged(AnalUnit, std.zig.ErrorBundle) = .{},
+cimport_errors: std.AutoArrayHashMapUnmanaged(AnalUnit, std.zig.ErrorBundle) = .empty,
 
 /// Maximum amount of distinct error values, set by --error-limit
 error_limit: ErrorInt,
@@ -156,19 +156,19 @@ error_limit: ErrorInt,
 /// Value is the number of PO dependencies of this AnalUnit.
 /// This value will decrease as we perform semantic analysis to learn what is outdated.
 /// If any of these PO deps is outdated, this value will be moved to `outdated`.
-potentially_outdated: std.AutoArrayHashMapUnmanaged(AnalUnit, u32) = .{},
+potentially_outdated: std.AutoArrayHashMapUnmanaged(AnalUnit, u32) = .empty,
 /// Value is the number of PO dependencies of this AnalUnit.
 /// Once this value drops to 0, the AnalUnit is a candidate for re-analysis.
-outdated: std.AutoArrayHashMapUnmanaged(AnalUnit, u32) = .{},
+outdated: std.AutoArrayHashMapUnmanaged(AnalUnit, u32) = .empty,
 /// This contains all `AnalUnit`s in `outdated` whose PO dependency count is 0.
 /// Such `AnalUnit`s are ready for immediate re-analysis.
 /// See `findOutdatedToAnalyze` for details.
-outdated_ready: std.AutoArrayHashMapUnmanaged(AnalUnit, void) = .{},
+outdated_ready: std.AutoArrayHashMapUnmanaged(AnalUnit, void) = .empty,
 /// This contains a list of AnalUnit whose analysis or codegen failed, but the
 /// failure was something like running out of disk space, and trying again may
 /// succeed. On the next update, we will flush this list, marking all members of
 /// it as outdated.
-retryable_failures: std.ArrayListUnmanaged(AnalUnit) = .{},
+retryable_failures: std.ArrayListUnmanaged(AnalUnit) = .empty,
 
 /// These are the modules which we initially queue for analysis in `Compilation.update`.
 /// `resolveReferences` will use these as the root of its reachability traversal.
@@ -184,31 +184,31 @@ stage1_flags: packed struct {
     reserved: u2 = 0,
 } = .{},
 
-compile_log_text: std.ArrayListUnmanaged(u8) = .{},
+compile_log_text: std.ArrayListUnmanaged(u8) = .empty,
 
-test_functions: std.AutoArrayHashMapUnmanaged(InternPool.Nav.Index, void) = .{},
+test_functions: std.AutoArrayHashMapUnmanaged(InternPool.Nav.Index, void) = .empty,
 
-global_assembly: std.AutoArrayHashMapUnmanaged(InternPool.Cau.Index, []u8) = .{},
+global_assembly: std.AutoArrayHashMapUnmanaged(InternPool.Cau.Index, []u8) = .empty,
 
 /// Key is the `AnalUnit` *performing* the reference. This representation allows
 /// incremental updates to quickly delete references caused by a specific `AnalUnit`.
 /// Value is index into `all_references` of the first reference triggered by the unit.
 /// The `next` field on the `Reference` forms a linked list of all references
 /// triggered by the key `AnalUnit`.
-reference_table: std.AutoArrayHashMapUnmanaged(AnalUnit, u32) = .{},
-all_references: std.ArrayListUnmanaged(Reference) = .{},
+reference_table: std.AutoArrayHashMapUnmanaged(AnalUnit, u32) = .empty,
+all_references: std.ArrayListUnmanaged(Reference) = .empty,
 /// Freelist of indices in `all_references`.
-free_references: std.ArrayListUnmanaged(u32) = .{},
+free_references: std.ArrayListUnmanaged(u32) = .empty,
 
 /// Key is the `AnalUnit` *performing* the reference. This representation allows
 /// incremental updates to quickly delete references caused by a specific `AnalUnit`.
 /// Value is index into `all_type_reference` of the first reference triggered by the unit.
 /// The `next` field on the `TypeReference` forms a linked list of all type references
 /// triggered by the key `AnalUnit`.
-type_reference_table: std.AutoArrayHashMapUnmanaged(AnalUnit, u32) = .{},
-all_type_references: std.ArrayListUnmanaged(TypeReference) = .{},
+type_reference_table: std.AutoArrayHashMapUnmanaged(AnalUnit, u32) = .empty,
+all_type_references: std.ArrayListUnmanaged(TypeReference) = .empty,
 /// Freelist of indices in `all_type_references`.
-free_type_references: std.ArrayListUnmanaged(u32) = .{},
+free_type_references: std.ArrayListUnmanaged(u32) = .empty,
 
 panic_messages: [PanicId.len]InternPool.Nav.Index.Optional = .{.none} ** PanicId.len,
 /// The panic function body.
@@ -246,7 +246,7 @@ pub const PanicId = enum {
     memcpy_alias,
     noreturn_returned,
 
-    pub const len = @typeInfo(PanicId).Enum.fields.len;
+    pub const len = @typeInfo(PanicId).@"enum".fields.len;
 };
 
 pub const GlobalErrorSet = std.AutoArrayHashMapUnmanaged(InternPool.NullTerminatedString, void);
@@ -338,16 +338,16 @@ pub const Namespace = struct {
     /// Will be a struct, enum, union, or opaque.
     owner_type: InternPool.Index,
     /// Members of the namespace which are marked `pub`.
-    pub_decls: std.ArrayHashMapUnmanaged(InternPool.Nav.Index, void, NavNameContext, true) = .{},
+    pub_decls: std.ArrayHashMapUnmanaged(InternPool.Nav.Index, void, NavNameContext, true) = .empty,
     /// Members of the namespace which are *not* marked `pub`.
-    priv_decls: std.ArrayHashMapUnmanaged(InternPool.Nav.Index, void, NavNameContext, true) = .{},
+    priv_decls: std.ArrayHashMapUnmanaged(InternPool.Nav.Index, void, NavNameContext, true) = .empty,
     /// All `usingnamespace` declarations in this namespace which are marked `pub`.
-    pub_usingnamespace: std.ArrayListUnmanaged(InternPool.Nav.Index) = .{},
+    pub_usingnamespace: std.ArrayListUnmanaged(InternPool.Nav.Index) = .empty,
     /// All `usingnamespace` declarations in this namespace which are *not* marked `pub`.
-    priv_usingnamespace: std.ArrayListUnmanaged(InternPool.Nav.Index) = .{},
+    priv_usingnamespace: std.ArrayListUnmanaged(InternPool.Nav.Index) = .empty,
     /// All `comptime` and `test` declarations in this namespace. We store these purely so that
     /// incremental compilation can re-use the existing `Cau`s when a namespace changes.
-    other_decls: std.ArrayListUnmanaged(InternPool.Cau.Index) = .{},
+    other_decls: std.ArrayListUnmanaged(InternPool.Cau.Index) = .empty,
 
     pub const Index = InternPool.NamespaceIndex;
     pub const OptionalIndex = InternPool.OptionalNamespaceIndex;
@@ -451,7 +451,7 @@ pub const File = struct {
     /// Whether this file is a part of multiple packages. This is an error condition which will be reported after AstGen.
     multi_pkg: bool = false,
     /// List of references to this file, used for multi-package errors.
-    references: std.ArrayListUnmanaged(File.Reference) = .{},
+    references: std.ArrayListUnmanaged(File.Reference) = .empty,
 
     /// The most recent successful ZIR for this file, with no errors.
     /// This is only populated when a previously successful ZIR
@@ -2109,9 +2109,9 @@ pub const CompileError = error{
     ComptimeBreak,
 };
 
-pub fn init(mod: *Zcu, thread_count: usize) !void {
-    const gpa = mod.gpa;
-    try mod.intern_pool.init(gpa, thread_count);
+pub fn init(zcu: *Zcu, thread_count: usize) !void {
+    const gpa = zcu.gpa;
+    try zcu.intern_pool.init(gpa, thread_count);
 }
 
 pub fn deinit(zcu: *Zcu) void {
@@ -2204,8 +2204,8 @@ pub fn namespacePtr(zcu: *Zcu, index: Namespace.Index) *Namespace {
     return zcu.intern_pool.namespacePtr(index);
 }
 
-pub fn namespacePtrUnwrap(mod: *Zcu, index: Namespace.OptionalIndex) ?*Namespace {
-    return mod.namespacePtr(index.unwrap() orelse return null);
+pub fn namespacePtrUnwrap(zcu: *Zcu, index: Namespace.OptionalIndex) ?*Namespace {
+    return zcu.namespacePtr(index.unwrap() orelse return null);
 }
 
 // TODO https://github.com/ziglang/zig/issues/8643
@@ -2551,13 +2551,13 @@ pub fn mapOldZirToNew(
         old_inst: Zir.Inst.Index,
         new_inst: Zir.Inst.Index,
     };
-    var match_stack: std.ArrayListUnmanaged(MatchedZirDecl) = .{};
+    var match_stack: std.ArrayListUnmanaged(MatchedZirDecl) = .empty;
     defer match_stack.deinit(gpa);
 
     // Used as temporary buffers for namespace declaration instructions
-    var old_decls: std.ArrayListUnmanaged(Zir.Inst.Index) = .{};
+    var old_decls: std.ArrayListUnmanaged(Zir.Inst.Index) = .empty;
     defer old_decls.deinit(gpa);
-    var new_decls: std.ArrayListUnmanaged(Zir.Inst.Index) = .{};
+    var new_decls: std.ArrayListUnmanaged(Zir.Inst.Index) = .empty;
     defer new_decls.deinit(gpa);
 
     // Map the main struct inst (and anything in its fields)
@@ -2582,19 +2582,19 @@ pub fn mapOldZirToNew(
         try inst_map.put(gpa, match_item.old_inst, match_item.new_inst);
 
         // Maps decl name to `declaration` instruction.
-        var named_decls: std.StringHashMapUnmanaged(Zir.Inst.Index) = .{};
+        var named_decls: std.StringHashMapUnmanaged(Zir.Inst.Index) = .empty;
         defer named_decls.deinit(gpa);
         // Maps test name to `declaration` instruction.
-        var named_tests: std.StringHashMapUnmanaged(Zir.Inst.Index) = .{};
+        var named_tests: std.StringHashMapUnmanaged(Zir.Inst.Index) = .empty;
         defer named_tests.deinit(gpa);
         // All unnamed tests, in order, for a best-effort match.
-        var unnamed_tests: std.ArrayListUnmanaged(Zir.Inst.Index) = .{};
+        var unnamed_tests: std.ArrayListUnmanaged(Zir.Inst.Index) = .empty;
         defer unnamed_tests.deinit(gpa);
         // All comptime declarations, in order, for a best-effort match.
-        var comptime_decls: std.ArrayListUnmanaged(Zir.Inst.Index) = .{};
+        var comptime_decls: std.ArrayListUnmanaged(Zir.Inst.Index) = .empty;
         defer comptime_decls.deinit(gpa);
         // All usingnamespace declarations, in order, for a best-effort match.
-        var usingnamespace_decls: std.ArrayListUnmanaged(Zir.Inst.Index) = .{};
+        var usingnamespace_decls: std.ArrayListUnmanaged(Zir.Inst.Index) = .empty;
         defer usingnamespace_decls.deinit(gpa);
 
         {
@@ -2682,7 +2682,7 @@ pub fn mapOldZirToNew(
 ///
 /// The caller is responsible for ensuring the function decl itself is already
 /// analyzed, and for ensuring it can exist at runtime (see
-/// `sema.fnHasRuntimeBits`). This function does *not* guarantee that the body
+/// `Type.fnHasRuntimeBitsSema`). This function does *not* guarantee that the body
 /// will be analyzed when it returns: for that, see `ensureFuncBodyAnalyzed`.
 pub fn ensureFuncBodyAnalysisQueued(zcu: *Zcu, func_index: InternPool.Index) !void {
     const ip = &zcu.intern_pool;
@@ -2840,22 +2840,22 @@ pub fn addTypeReference(zcu: *Zcu, src_unit: AnalUnit, referenced_type: InternPo
     gop.value_ptr.* = @intCast(ref_idx);
 }
 
-pub fn errorSetBits(mod: *Zcu) u16 {
-    if (mod.error_limit == 0) return 0;
-    return @as(u16, std.math.log2_int(ErrorInt, mod.error_limit)) + 1;
+pub fn errorSetBits(zcu: *const Zcu) u16 {
+    if (zcu.error_limit == 0) return 0;
+    return @as(u16, std.math.log2_int(ErrorInt, zcu.error_limit)) + 1;
 }
 
 pub fn errNote(
-    mod: *Zcu,
+    zcu: *Zcu,
     src_loc: LazySrcLoc,
     parent: *ErrorMsg,
     comptime format: []const u8,
     args: anytype,
 ) error{OutOfMemory}!void {
-    const msg = try std.fmt.allocPrint(mod.gpa, format, args);
-    errdefer mod.gpa.free(msg);
+    const msg = try std.fmt.allocPrint(zcu.gpa, format, args);
+    errdefer zcu.gpa.free(msg);
 
-    parent.notes = try mod.gpa.realloc(parent.notes, parent.notes.len + 1);
+    parent.notes = try zcu.gpa.realloc(parent.notes, parent.notes.len + 1);
     parent.notes[parent.notes.len - 1] = .{
         .src_loc = src_loc,
         .msg = msg,
@@ -2876,14 +2876,14 @@ pub fn optimizeMode(zcu: *const Zcu) std.builtin.OptimizeMode {
     return zcu.root_mod.optimize_mode;
 }
 
-fn lockAndClearFileCompileError(mod: *Zcu, file: *File) void {
+fn lockAndClearFileCompileError(zcu: *Zcu, file: *File) void {
     switch (file.status) {
         .success_zir, .retryable_failure => {},
         .never_loaded, .parse_failure, .astgen_failure => {
-            mod.comp.mutex.lock();
-            defer mod.comp.mutex.unlock();
-            if (mod.failed_files.fetchSwapRemove(file)) |kv| {
-                if (kv.value) |msg| msg.destroy(mod.gpa); // Delete previous error message.
+            zcu.comp.mutex.lock();
+            defer zcu.comp.mutex.unlock();
+            if (zcu.failed_files.fetchSwapRemove(file)) |kv| {
+                if (kv.value) |msg| msg.destroy(zcu.gpa); // Delete previous error message.
             }
         },
     }
@@ -2923,10 +2923,23 @@ pub fn addGlobalAssembly(zcu: *Zcu, cau: InternPool.Cau.Index, source: []const u
 }
 
 pub const Feature = enum {
+    /// When this feature is enabled, Sema will emit calls to `std.builtin.panic`
+    /// for things like safety checks and unreachables. Otherwise traps will be emitted.
     panic_fn,
+    /// When this feature is enabled, Sema will emit calls to `std.builtin.panicUnwrapError`.
+    /// This error message requires more advanced formatting, hence it being seperate from `panic_fn`.
+    /// Otherwise traps will be emitted.
     panic_unwrap_error,
+    /// When this feature is enabled, Sema will emit calls to the more complex panic functions
+    /// that use formatting to add detail to error messages. Similar to `panic_unwrap_error`.
+    /// Otherwise traps will be emitted.
     safety_check_formatted,
+    /// When this feature is enabled, Sema will insert tracer functions for gathering a stack
+    /// trace for error returns.
     error_return_trace,
+    /// When this feature is enabled, Sema will emit the `is_named_enum_value` AIR instructions
+    /// and use it to check for corrupt switches. Backends currently need to implement their own
+    /// logic to determine whether an enum value is in the set of named values.
     is_named_enum_value,
     error_set_has_value,
     field_reordering,
@@ -2965,11 +2978,11 @@ pub const AtomicPtrAlignmentDiagnostics = struct {
 // TODO this function does not take into account CPU features, which can affect
 // this value. Audit this!
 pub fn atomicPtrAlignment(
-    mod: *Zcu,
+    zcu: *Zcu,
     ty: Type,
     diags: *AtomicPtrAlignmentDiagnostics,
 ) AtomicPtrAlignmentError!Alignment {
-    const target = mod.getTarget();
+    const target = zcu.getTarget();
     const max_atomic_bits: u16 = switch (target.cpu.arch) {
         .avr,
         .msp430,
@@ -3039,8 +3052,8 @@ pub fn atomicPtrAlignment(
         }
         return .none;
     }
-    if (ty.isAbiInt(mod)) {
-        const bit_count = ty.intInfo(mod).bits;
+    if (ty.isAbiInt(zcu)) {
+        const bit_count = ty.intInfo(zcu).bits;
         if (bit_count > max_atomic_bits) {
             diags.* = .{
                 .bits = bit_count,
@@ -3050,7 +3063,7 @@ pub fn atomicPtrAlignment(
         }
         return .none;
     }
-    if (ty.isPtrAtRuntime(mod)) return .none;
+    if (ty.isPtrAtRuntime(zcu)) return .none;
     return error.BadType;
 }
 
@@ -3058,45 +3071,45 @@ pub fn atomicPtrAlignment(
 /// * `@TypeOf(.{})`
 /// * A struct which has no fields (`struct {}`).
 /// * Not a struct.
-pub fn typeToStruct(mod: *Zcu, ty: Type) ?InternPool.LoadedStructType {
+pub fn typeToStruct(zcu: *Zcu, ty: Type) ?InternPool.LoadedStructType {
     if (ty.ip_index == .none) return null;
-    const ip = &mod.intern_pool;
+    const ip = &zcu.intern_pool;
     return switch (ip.indexToKey(ty.ip_index)) {
         .struct_type => ip.loadStructType(ty.ip_index),
         else => null,
     };
 }
 
-pub fn typeToPackedStruct(mod: *Zcu, ty: Type) ?InternPool.LoadedStructType {
-    const s = mod.typeToStruct(ty) orelse return null;
+pub fn typeToPackedStruct(zcu: *Zcu, ty: Type) ?InternPool.LoadedStructType {
+    const s = zcu.typeToStruct(ty) orelse return null;
     if (s.layout != .@"packed") return null;
     return s;
 }
 
-pub fn typeToUnion(mod: *Zcu, ty: Type) ?InternPool.LoadedUnionType {
+pub fn typeToUnion(zcu: *const Zcu, ty: Type) ?InternPool.LoadedUnionType {
     if (ty.ip_index == .none) return null;
-    const ip = &mod.intern_pool;
+    const ip = &zcu.intern_pool;
     return switch (ip.indexToKey(ty.ip_index)) {
         .union_type => ip.loadUnionType(ty.ip_index),
         else => null,
     };
 }
 
-pub fn typeToFunc(mod: *Zcu, ty: Type) ?InternPool.Key.FuncType {
+pub fn typeToFunc(zcu: *const Zcu, ty: Type) ?InternPool.Key.FuncType {
     if (ty.ip_index == .none) return null;
-    return mod.intern_pool.indexToFuncType(ty.toIntern());
+    return zcu.intern_pool.indexToFuncType(ty.toIntern());
 }
 
 pub fn iesFuncIndex(zcu: *const Zcu, ies_index: InternPool.Index) InternPool.Index {
     return zcu.intern_pool.iesFuncIndex(ies_index);
 }
 
-pub fn funcInfo(mod: *Zcu, func_index: InternPool.Index) InternPool.Key.Func {
-    return mod.intern_pool.indexToKey(func_index).func;
+pub fn funcInfo(zcu: *const Zcu, func_index: InternPool.Index) InternPool.Key.Func {
+    return zcu.intern_pool.indexToKey(func_index).func;
 }
 
-pub fn toEnum(mod: *Zcu, comptime E: type, val: Value) E {
-    return mod.intern_pool.toEnum(E, val.toIntern());
+pub fn toEnum(zcu: *const Zcu, comptime E: type, val: Value) E {
+    return zcu.intern_pool.toEnum(E, val.toIntern());
 }
 
 pub const UnionLayout = struct {
@@ -3121,8 +3134,8 @@ pub const UnionLayout = struct {
 };
 
 /// Returns the index of the active field, given the current tag value
-pub fn unionTagFieldIndex(mod: *Zcu, loaded_union: InternPool.LoadedUnionType, enum_tag: Value) ?u32 {
-    const ip = &mod.intern_pool;
+pub fn unionTagFieldIndex(zcu: *const Zcu, loaded_union: InternPool.LoadedUnionType, enum_tag: Value) ?u32 {
+    const ip = &zcu.intern_pool;
     if (enum_tag.toIntern() == .none) return null;
     assert(ip.typeOf(enum_tag.toIntern()) == loaded_union.enum_tag_ty);
     return loaded_union.loadTagType(ip).tagValueIndex(ip, enum_tag.toIntern());
@@ -3141,12 +3154,12 @@ pub fn resolveReferences(zcu: *Zcu) !std.AutoHashMapUnmanaged(AnalUnit, ?Resolve
     const comp = zcu.comp;
     const ip = &zcu.intern_pool;
 
-    var result: std.AutoHashMapUnmanaged(AnalUnit, ?ResolvedReference) = .{};
+    var result: std.AutoHashMapUnmanaged(AnalUnit, ?ResolvedReference) = .empty;
     errdefer result.deinit(gpa);
 
-    var checked_types: std.AutoArrayHashMapUnmanaged(InternPool.Index, void) = .{};
-    var type_queue: std.AutoArrayHashMapUnmanaged(InternPool.Index, ?ResolvedReference) = .{};
-    var unit_queue: std.AutoArrayHashMapUnmanaged(AnalUnit, ?ResolvedReference) = .{};
+    var checked_types: std.AutoArrayHashMapUnmanaged(InternPool.Index, void) = .empty;
+    var type_queue: std.AutoArrayHashMapUnmanaged(InternPool.Index, ?ResolvedReference) = .empty;
+    var unit_queue: std.AutoArrayHashMapUnmanaged(AnalUnit, ?ResolvedReference) = .empty;
     defer {
         checked_types.deinit(gpa);
         type_queue.deinit(gpa);
@@ -3348,7 +3361,7 @@ pub fn resolveReferences(zcu: *Zcu) !std.AutoHashMapUnmanaged(AnalUnit, ?Resolve
     return result;
 }
 
-pub fn fileByIndex(zcu: *Zcu, file_index: File.Index) *File {
+pub fn fileByIndex(zcu: *const Zcu, file_index: File.Index) *File {
     return zcu.intern_pool.filePtr(file_index);
 }
 

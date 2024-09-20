@@ -8,10 +8,10 @@ end with a fully operational Zig compiler for any target.
 This repository copies sources from upstream. Patches listed below. Use git
 to find and inspect the patch diffs.
 
- * LLVM, LLD, Clang 18.1.8
+ * LLVM, LLD, Clang 19.1.0
  * zlib 1.3.1
  * zstd 1.5.2
- * zig 0.14.0-dev.1294+df6907f60
+ * zig 0.14.0-dev.1622+2ac543388
 
 For other versions, check the git tags of this repository.
 
@@ -24,6 +24,7 @@ For other versions, check the git tags of this repository.
  * LLD: Added additional include directory to Zig's libunwind.
  * LLD: Respect `LLD_BUILD_TOOLS=OFF`
  * zlib: Delete the ability to build a shared library.
+ * [LLVM: Fix crash when FREEZE a half(f16) type on loongarch](https://github.com/llvm/llvm-project/pull/107791)
 
 ## Host System Dependencies
 

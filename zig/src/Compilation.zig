@@ -50,8 +50,7 @@ gpa: Allocator,
 /// be used for other things requiring the same lifetime as the `Compilation`.
 arena: Allocator,
 /// Not every Compilation compiles .zig code! For example you could do `zig build-exe foo.o`.
-/// TODO: rename to zcu: ?*Zcu
-module: ?*Zcu,
+zcu: ?*Zcu,
 /// Contains different state depending on whether the Compilation uses
 /// incremental or whole cache mode.
 cache_use: CacheUse,
@@ -96,7 +95,7 @@ native_system_include_paths: []const []const u8,
 /// Corresponds to `-u <symbol>` for ELF/MachO and `/include:<symbol>` for COFF/PE.
 force_undefined_symbols: std.StringArrayHashMapUnmanaged(void),
 
-c_object_table: std.AutoArrayHashMapUnmanaged(*CObject, void) = .{},
+c_object_table: std.AutoArrayHashMapUnmanaged(*CObject, void) = .empty,
 win32_resource_table: if (dev.env.supports(.win32_resource)) std.AutoArrayHashMapUnmanaged(*Win32Resource, void) else struct {
     pub fn keys(_: @This()) [0]void {
         return .{};
@@ -107,10 +106,10 @@ win32_resource_table: if (dev.env.supports(.win32_resource)) std.AutoArrayHashMa
     pub fn deinit(_: @This(), _: Allocator) void {}
 } = .{},
 
-link_errors: std.ArrayListUnmanaged(link.File.ErrorMsg) = .{},
+link_errors: std.ArrayListUnmanaged(link.File.ErrorMsg) = .empty,
 link_errors_mutex: std.Thread.Mutex = .{},
 link_error_flags: link.File.ErrorFlags = .{},
-lld_errors: std.ArrayListUnmanaged(LldError) = .{},
+lld_errors: std.ArrayListUnmanaged(LldError) = .empty,
 
 work_queues: [
     len: {
@@ -155,7 +154,7 @@ embed_file_work_queue: std.fifo.LinearFifo(*Zcu.EmbedFile, .Dynamic),
 
 /// The ErrorMsg memory is owned by the `CObject`, using Compilation's general purpose allocator.
 /// This data is accessed by multiple threads and is protected by `mutex`.
-failed_c_objects: std.AutoArrayHashMapUnmanaged(*CObject, *CObject.Diag.Bundle) = .{},
+failed_c_objects: std.AutoArrayHashMapUnmanaged(*CObject, *CObject.Diag.Bundle) = .empty,
 
 /// The ErrorBundle memory is owned by the `Win32Resource`, using Compilation's general purpose allocator.
 /// This data is accessed by multiple threads and is protected by `mutex`.
@@ -167,7 +166,7 @@ failed_win32_resources: if (dev.env.supports(.win32_resource)) std.AutoArrayHash
 } = .{},
 
 /// Miscellaneous things that can fail.
-misc_failures: std.AutoArrayHashMapUnmanaged(MiscTask, MiscError) = .{},
+misc_failures: std.AutoArrayHashMapUnmanaged(MiscTask, MiscError) = .empty,
 
 /// When this is `true` it means invoking clang as a sub-process is expected to inherit
 /// stdin, stdout, stderr, and if it returns non success, to forward the exit code.
@@ -249,7 +248,7 @@ wasi_emulated_libs: []const wasi_libc.CRTFile,
 /// For example `Scrt1.o` and `libc_nonshared.a`. These are populated after building libc from source,
 /// The set of needed CRT (C runtime) files differs depending on the target and compilation settings.
 /// The key is the basename, and the value is the absolute path to the completed build artifact.
-crt_files: std.StringHashMapUnmanaged(CRTFile) = .{},
+crt_files: std.StringHashMapUnmanaged(CRTFile) = .empty,
 
 /// How many lines of reference trace should be included per compile error.
 /// Null means only show snippet on first error.
@@ -385,7 +384,7 @@ const Job = union(enum) {
     /// The value is the index into `system_libs`.
     windows_import_lib: usize,
 
-    const Tag = @typeInfo(Job).Union.tag_type.?;
+    const Tag = @typeInfo(Job).@"union".tag_type.?;
     fn stage(tag: Tag) usize {
         return switch (tag) {
             // Prioritize functions so that codegen can get to work on them on a
@@ -528,8 +527,8 @@ pub const CObject = struct {
         }
 
         pub const Bundle = struct {
-            file_names: std.AutoArrayHashMapUnmanaged(u32, []const u8) = .{},
-            category_names: std.AutoArrayHashMapUnmanaged(u32, []const u8) = .{},
+            file_names: std.AutoArrayHashMapUnmanaged(u32, []const u8) = .empty,
+            category_names: std.AutoArrayHashMapUnmanaged(u32, []const u8) = .empty,
             diags: []Diag = &.{},
 
             pub fn destroy(bundle: *Bundle, gpa: Allocator) void {
@@ -562,8 +561,8 @@ pub const CObject = struct {
                     category: u32 = 0,
                     msg: []const u8 = &.{},
                     src_loc: SrcLoc = .{},
-                    src_ranges: std.ArrayListUnmanaged(SrcRange) = .{},
-                    sub_diags: std.ArrayListUnmanaged(Diag) = .{},
+                    src_ranges: std.ArrayListUnmanaged(SrcRange) = .empty,
+                    sub_diags: std.ArrayListUnmanaged(Diag) = .empty,
 
                     fn deinit(wip_diag: *@This(), allocator: Allocator) void {
                         allocator.free(wip_diag.msg);
@@ -581,19 +580,19 @@ pub const CObject = struct {
                 var bc = BitcodeReader.init(gpa, .{ .reader = reader.any() });
                 defer bc.deinit();
 
-                var file_names: std.AutoArrayHashMapUnmanaged(u32, []const u8) = .{};
+                var file_names: std.AutoArrayHashMapUnmanaged(u32, []const u8) = .empty;
                 errdefer {
                     for (file_names.values()) |file_name| gpa.free(file_name);
                     file_names.deinit(gpa);
                 }
 
-                var category_names: std.AutoArrayHashMapUnmanaged(u32, []const u8) = .{};
+                var category_names: std.AutoArrayHashMapUnmanaged(u32, []const u8) = .empty;
                 errdefer {
                     for (category_names.values()) |category_name| gpa.free(category_name);
                     category_names.deinit(gpa);
                 }
 
-                var stack: std.ArrayListUnmanaged(WipDiag) = .{};
+                var stack: std.ArrayListUnmanaged(WipDiag) = .empty;
                 defer {
                     for (stack.items) |*wip_diag| wip_diag.deinit(gpa);
                     stack.deinit(gpa);
@@ -912,7 +911,7 @@ pub const cache_helpers = struct {
     }
 
     pub fn addDebugFormat(hh: *Cache.HashHelper, x: Config.DebugFormat) void {
-        const tag: @typeInfo(Config.DebugFormat).Union.tag_type.? = x;
+        const tag: @typeInfo(Config.DebugFormat).@"union".tag_type.? = x;
         hh.add(tag);
         switch (x) {
             .strip, .code_view => {},
@@ -1068,7 +1067,7 @@ pub const CreateOptions = struct {
     cache_mode: CacheMode = .incremental,
     lib_dirs: []const []const u8 = &[0][]const u8{},
     rpath_list: []const []const u8 = &[0][]const u8{},
-    symbol_wrap_set: std.StringArrayHashMapUnmanaged(void) = .{},
+    symbol_wrap_set: std.StringArrayHashMapUnmanaged(void) = .empty,
     c_source_files: []const CSourceFile = &.{},
     rc_source_files: []const RcSourceFile = &.{},
     manifest_file: ?[]const u8 = null,
@@ -1156,7 +1155,7 @@ pub const CreateOptions = struct {
     skip_linker_dependencies: bool = false,
     hash_style: link.File.Elf.HashStyle = .both,
     entry: Entry = .default,
-    force_undefined_symbols: std.StringArrayHashMapUnmanaged(void) = .{},
+    force_undefined_symbols: std.StringArrayHashMapUnmanaged(void) = .empty,
     stack_size: ?u64 = null,
     image_base: ?u64 = null,
     version: ?std.SemanticVersion = null,
@@ -1211,7 +1210,7 @@ fn addModuleTableToCacheHash(
     main_mod: *Package.Module,
     hash_type: union(enum) { path_bytes, files: *Cache.Manifest },
 ) (error{OutOfMemory} || std.process.GetCwdError)!void {
-    var seen_table: std.AutoArrayHashMapUnmanaged(*Package.Module, void) = .{};
+    var seen_table: std.AutoArrayHashMapUnmanaged(*Package.Module, void) = .empty;
     defer seen_table.deinit(gpa);
 
     // root_mod and main_mod may be the same pointer. In fact they usually are.
@@ -1474,7 +1473,7 @@ pub fn create(gpa: Allocator, arena: Allocator, options: CreateOptions) !*Compil
         comp.* = .{
             .gpa = gpa,
             .arena = arena,
-            .module = opt_zcu,
+            .zcu = opt_zcu,
             .cache_use = undefined, // populated below
             .bin_file = null, // populated below
             .implib_emit = null, // handled below
@@ -1487,7 +1486,7 @@ pub fn create(gpa: Allocator, arena: Allocator, options: CreateOptions) !*Compil
             .emit_asm = options.emit_asm,
             .emit_llvm_ir = options.emit_llvm_ir,
             .emit_llvm_bc = options.emit_llvm_bc,
-            .work_queues = .{std.fifo.LinearFifo(Job, .Dynamic).init(gpa)} ** @typeInfo(std.meta.FieldType(Compilation, .work_queues)).Array.len,
+            .work_queues = .{std.fifo.LinearFifo(Job, .Dynamic).init(gpa)} ** @typeInfo(std.meta.FieldType(Compilation, .work_queues)).array.len,
             .codegen_work = if (InternPool.single_threaded) {} else .{
                 .mutex = .{},
                 .cond = .{},
@@ -1926,7 +1925,7 @@ pub fn create(gpa: Allocator, arena: Allocator, options: CreateOptions) !*Compil
 
 pub fn destroy(comp: *Compilation) void {
     if (comp.bin_file) |lf| lf.destroy();
-    if (comp.module) |zcu| zcu.deinit();
+    if (comp.zcu) |zcu| zcu.deinit();
     comp.cache_use.deinit();
     for (comp.work_queues) |work_queue| work_queue.deinit();
     if (!InternPool.single_threaded) comp.codegen_work.queue.deinit();
@@ -2198,7 +2197,7 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) !void {
         };
     }
 
-    if (comp.module) |zcu| {
+    if (comp.zcu) |zcu| {
         const pt: Zcu.PerThread = .{ .zcu = zcu, .tid = .main };
 
         zcu.compile_log_text.shrinkAndFree(gpa, 0);
@@ -2268,7 +2267,7 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) !void {
 
     try comp.performAllTheWork(main_progress_node);
 
-    if (comp.module) |zcu| {
+    if (comp.zcu) |zcu| {
         const pt: Zcu.PerThread = .{ .zcu = zcu, .tid = .main };
 
         if (build_options.enable_debug_extensions and comp.verbose_intern_pool) {
@@ -2447,7 +2446,7 @@ fn flush(
         };
     }
 
-    if (comp.module) |zcu| {
+    if (comp.zcu) |zcu| {
         try link.File.C.flushEmitH(zcu);
 
         if (zcu.llvm_object) |llvm_object| {
@@ -2558,7 +2557,7 @@ fn addNonIncrementalStuffToCacheManifest(
 
     comptime assert(link_hash_implementation_version == 14);
 
-    if (comp.module) |mod| {
+    if (comp.zcu) |mod| {
         try addModuleTableToCacheHash(gpa, arena, &man.hash, mod.root_mod, mod.main_mod, .{ .files = man });
 
         // Synchronize with other matching comments: ZigOnlyHashStuff
@@ -2692,7 +2691,7 @@ fn addNonIncrementalStuffToCacheManifest(
 }
 
 fn emitOthers(comp: *Compilation) void {
-    if (comp.config.output_mode != .Obj or comp.module != null or
+    if (comp.config.output_mode != .Obj or comp.zcu != null or
         comp.c_object_table.count() == 0)
     {
         return;
@@ -2951,7 +2950,7 @@ pub fn saveState(comp: *Compilation) !void {
     var pt_headers = std.ArrayList(Header.PerThread).init(gpa);
     defer pt_headers.deinit();
 
-    if (comp.module) |zcu| {
+    if (comp.zcu) |zcu| {
         const ip = &zcu.intern_pool;
         const header: Header = .{
             .intern_pool = .{
@@ -3092,7 +3091,7 @@ pub fn getAllErrorsAlloc(comp: *Compilation) !ErrorBundle {
     var all_references: ?std.AutoHashMapUnmanaged(InternPool.AnalUnit, ?Zcu.ResolvedReference) = null;
     defer if (all_references) |*a| a.deinit(gpa);
 
-    if (comp.module) |zcu| {
+    if (comp.zcu) |zcu| {
         const ip = &zcu.intern_pool;
 
         for (zcu.failed_files.keys(), zcu.failed_files.values()) |file, error_msg| {
@@ -3114,8 +3113,8 @@ pub fn getAllErrorsAlloc(comp: *Compilation) !ErrorBundle {
                 err: *?Error,
 
                 const Error = @typeInfo(
-                    @typeInfo(@TypeOf(Zcu.SrcLoc.span)).Fn.return_type.?,
-                ).ErrorUnion.error_set;
+                    @typeInfo(@TypeOf(Zcu.SrcLoc.span)).@"fn".return_type.?,
+                ).error_union.error_set;
 
                 pub fn lessThan(ctx: @This(), lhs_index: usize, rhs_index: usize) bool {
                     if (ctx.err.*) |_| return lhs_index < rhs_index;
@@ -3246,7 +3245,7 @@ pub fn getAllErrorsAlloc(comp: *Compilation) !ErrorBundle {
         }
     }
 
-    if (comp.module) |zcu| {
+    if (comp.zcu) |zcu| {
         if (bundle.root_list.items.len == 0 and zcu.compile_log_sources.count() != 0) {
             const values = zcu.compile_log_sources.values();
             // First one will be the error; subsequent ones will be notes.
@@ -3269,7 +3268,7 @@ pub fn getAllErrorsAlloc(comp: *Compilation) !ErrorBundle {
         }
     }
 
-    if (comp.module) |zcu| {
+    if (comp.zcu) |zcu| {
         if (comp.incremental and bundle.root_list.items.len == 0) {
             const should_have_error = for (zcu.transitive_failed_analysis.keys()) |failed_unit| {
                 if (all_references == null) {
@@ -3283,7 +3282,7 @@ pub fn getAllErrorsAlloc(comp: *Compilation) !ErrorBundle {
         }
     }
 
-    const compile_log_text = if (comp.module) |m| m.compile_log_text.items else "";
+    const compile_log_text = if (comp.zcu) |m| m.compile_log_text.items else "";
     return bundle.toOwnedBundle(compile_log_text);
 }
 
@@ -3363,7 +3362,7 @@ pub fn addModuleErrorMsg(
     const file_path = try err_src_loc.file_scope.fullPath(gpa);
     defer gpa.free(file_path);
 
-    var ref_traces: std.ArrayListUnmanaged(ErrorBundle.ReferenceTrace) = .{};
+    var ref_traces: std.ArrayListUnmanaged(ErrorBundle.ReferenceTrace) = .empty;
     defer ref_traces.deinit(gpa);
 
     if (module_err_msg.reference_trace_root.unwrap()) |rt_root| {
@@ -3371,7 +3370,7 @@ pub fn addModuleErrorMsg(
             all_references.* = try mod.resolveReferences();
         }
 
-        var seen: std.AutoHashMapUnmanaged(InternPool.AnalUnit, void) = .{};
+        var seen: std.AutoHashMapUnmanaged(InternPool.AnalUnit, void) = .empty;
         defer seen.deinit(gpa);
 
         const max_references = mod.comp.reference_trace orelse Sema.default_reference_trace_len;
@@ -3440,7 +3439,7 @@ pub fn addModuleErrorMsg(
 
     // De-duplicate error notes. The main use case in mind for this is
     // too many "note: called from here" notes when eval branch quota is reached.
-    var notes: std.ArrayHashMapUnmanaged(ErrorBundle.ErrorMessage, void, ErrorNoteHashContext, true) = .{};
+    var notes: std.ArrayHashMapUnmanaged(ErrorBundle.ErrorMessage, void, ErrorNoteHashContext, true) = .empty;
     defer notes.deinit(gpa);
 
     for (module_err_msg.notes) |module_note| {
@@ -3497,7 +3496,7 @@ pub fn performAllTheWork(
     comp: *Compilation,
     main_progress_node: std.Progress.Node,
 ) JobError!void {
-    defer if (comp.module) |mod| {
+    defer if (comp.zcu) |mod| {
         mod.sema_prog_node.end();
         mod.sema_prog_node = std.Progress.Node.none;
         mod.codegen_prog_node.end();
@@ -3543,10 +3542,9 @@ fn performAllTheWorkInner(
         //    in the `astgen_wait_group`.
         if (comp.job_queued_update_builtin_zig) b: {
             comp.job_queued_update_builtin_zig = false;
-            const zcu = comp.module orelse break :b;
-            _ = zcu;
+            if (comp.zcu == null) break :b;
             // TODO put all the modules in a flat array to make them easy to iterate.
-            var seen: std.AutoArrayHashMapUnmanaged(*Package.Module, void) = .{};
+            var seen: std.AutoArrayHashMapUnmanaged(*Package.Module, void) = .empty;
             defer seen.deinit(comp.gpa);
             try seen.put(comp.gpa, comp.root_mod, {});
             var i: usize = 0;
@@ -3563,7 +3561,7 @@ fn performAllTheWorkInner(
             }
         }
 
-        if (comp.module) |zcu| {
+        if (comp.zcu) |zcu| {
             {
                 // Worker threads may append to zcu.files and zcu.import_table
                 // so we must hold the lock while spawning those tasks, since
@@ -3606,7 +3604,7 @@ fn performAllTheWorkInner(
     if (comp.job_queued_compiler_rt_obj) work_queue_wait_group.spawnManager(buildRt, .{ comp, "compiler_rt.zig", .compiler_rt, .Obj, &comp.compiler_rt_obj, main_progress_node });
     if (comp.job_queued_fuzzer_lib) work_queue_wait_group.spawnManager(buildRt, .{ comp, "fuzzer.zig", .libfuzzer, .Lib, &comp.fuzzer_lib, main_progress_node });
 
-    if (comp.module) |zcu| {
+    if (comp.zcu) |zcu| {
         const pt: Zcu.PerThread = .{ .zcu = zcu, .tid = .main };
         if (comp.incremental) {
             const update_zir_refs_node = main_progress_node.start("Update ZIR References", 0);
@@ -3638,7 +3636,7 @@ fn performAllTheWorkInner(
             try processOneJob(@intFromEnum(Zcu.PerThread.Id.main), comp, job, main_progress_node);
             continue :work;
         };
-        if (comp.module) |zcu| {
+        if (comp.zcu) |zcu| {
             // If there's no work queued, check if there's anything outdated
             // which we need to work on, and queue it if so.
             if (try zcu.findOutdatedToAnalyze()) |outdated| {
@@ -3666,7 +3664,7 @@ pub fn queueJobs(comp: *Compilation, jobs: []const Job) !void {
 fn processOneJob(tid: usize, comp: *Compilation, job: Job, prog_node: std.Progress.Node) JobError!void {
     switch (job) {
         .codegen_nav => |nav_index| {
-            const zcu = comp.module.?;
+            const zcu = comp.zcu.?;
             const nav = zcu.intern_pool.getNav(nav_index);
             if (nav.analysis_owner.unwrap()) |cau| {
                 const unit = InternPool.AnalUnit.wrap(.{ .cau = cau });
@@ -3689,14 +3687,14 @@ fn processOneJob(tid: usize, comp: *Compilation, job: Job, prog_node: std.Progre
             const named_frame = tracy.namedFrame("analyze_func");
             defer named_frame.end();
 
-            const pt: Zcu.PerThread = .{ .zcu = comp.module.?, .tid = @enumFromInt(tid) };
+            const pt: Zcu.PerThread = .{ .zcu = comp.zcu.?, .tid = @enumFromInt(tid) };
             pt.ensureFuncBodyAnalyzed(func) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.AnalysisFail => return,
             };
         },
         .analyze_cau => |cau_index| {
-            const pt: Zcu.PerThread = .{ .zcu = comp.module.?, .tid = @enumFromInt(tid) };
+            const pt: Zcu.PerThread = .{ .zcu = comp.zcu.?, .tid = @enumFromInt(tid) };
             pt.ensureCauAnalyzed(cau_index) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.AnalysisFail => return,
@@ -3725,7 +3723,7 @@ fn processOneJob(tid: usize, comp: *Compilation, job: Job, prog_node: std.Progre
             const named_frame = tracy.namedFrame("resolve_type_fully");
             defer named_frame.end();
 
-            const pt: Zcu.PerThread = .{ .zcu = comp.module.?, .tid = @enumFromInt(tid) };
+            const pt: Zcu.PerThread = .{ .zcu = comp.zcu.?, .tid = @enumFromInt(tid) };
             Type.fromInterned(ty).resolveFully(pt) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.AnalysisFail => return,
@@ -3738,7 +3736,7 @@ fn processOneJob(tid: usize, comp: *Compilation, job: Job, prog_node: std.Progre
             if (true) @panic("TODO: update_line_number");
 
             const gpa = comp.gpa;
-            const pt: Zcu.PerThread = .{ .zcu = comp.module.?, .tid = @enumFromInt(tid) };
+            const pt: Zcu.PerThread = .{ .zcu = comp.zcu.?, .tid = @enumFromInt(tid) };
             const decl = pt.zcu.declPtr(decl_index);
             const lf = comp.bin_file.?;
             lf.updateDeclLineNumber(pt, decl_index) catch |err| {
@@ -3760,7 +3758,7 @@ fn processOneJob(tid: usize, comp: *Compilation, job: Job, prog_node: std.Progre
             const named_frame = tracy.namedFrame("analyze_mod");
             defer named_frame.end();
 
-            const pt: Zcu.PerThread = .{ .zcu = comp.module.?, .tid = @enumFromInt(tid) };
+            const pt: Zcu.PerThread = .{ .zcu = comp.zcu.?, .tid = @enumFromInt(tid) };
             pt.semaPkg(mod) catch |err| switch (err) {
                 error.OutOfMemory => return error.OutOfMemory,
                 error.AnalysisFail => return,
@@ -3924,7 +3922,7 @@ fn processOneJob(tid: usize, comp: *Compilation, job: Job, prog_node: std.Progre
 
 fn queueCodegenJob(comp: *Compilation, tid: usize, codegen_job: CodegenJob) !void {
     if (InternPool.single_threaded or
-        !comp.module.?.backendSupportsFeature(.separate_thread))
+        !comp.zcu.?.backendSupportsFeature(.separate_thread))
         return processOneCodegenJob(tid, comp, codegen_job);
 
     {
@@ -3963,14 +3961,14 @@ fn processOneCodegenJob(tid: usize, comp: *Compilation, codegen_job: CodegenJob)
             const named_frame = tracy.namedFrame("codegen_nav");
             defer named_frame.end();
 
-            const pt: Zcu.PerThread = .{ .zcu = comp.module.?, .tid = @enumFromInt(tid) };
+            const pt: Zcu.PerThread = .{ .zcu = comp.zcu.?, .tid = @enumFromInt(tid) };
             try pt.linkerUpdateNav(nav_index);
         },
         .func => |func| {
             const named_frame = tracy.namedFrame("codegen_func");
             defer named_frame.end();
 
-            const pt: Zcu.PerThread = .{ .zcu = comp.module.?, .tid = @enumFromInt(tid) };
+            const pt: Zcu.PerThread = .{ .zcu = comp.zcu.?, .tid = @enumFromInt(tid) };
             // This call takes ownership of `func.air`.
             try pt.linkerUpdateFunc(func.func, func.air);
         },
@@ -3978,7 +3976,7 @@ fn processOneCodegenJob(tid: usize, comp: *Compilation, codegen_job: CodegenJob)
             const named_frame = tracy.namedFrame("codegen_type");
             defer named_frame.end();
 
-            const pt: Zcu.PerThread = .{ .zcu = comp.module.?, .tid = @enumFromInt(tid) };
+            const pt: Zcu.PerThread = .{ .zcu = comp.zcu.?, .tid = @enumFromInt(tid) };
             try pt.linkerUpdateContainerType(ty);
         },
     }
@@ -3995,7 +3993,7 @@ fn workerDocsCopy(comp: *Compilation) void {
 }
 
 fn docsCopyFallible(comp: *Compilation) anyerror!void {
-    const zcu = comp.module orelse
+    const zcu = comp.zcu orelse
         return comp.lockAndSetMiscFailure(.docs_copy, "no Zig code to document", .{});
 
     const emit = comp.docs_emit.?;
@@ -4028,7 +4026,7 @@ fn docsCopyFallible(comp: *Compilation) anyerror!void {
     };
     defer tar_file.close();
 
-    var seen_table: std.AutoArrayHashMapUnmanaged(*Package.Module, []const u8) = .{};
+    var seen_table: std.AutoArrayHashMapUnmanaged(*Package.Module, []const u8) = .empty;
     defer seen_table.deinit(comp.gpa);
 
     try seen_table.put(comp.gpa, zcu.main_mod, comp.root_name);
@@ -4260,7 +4258,7 @@ fn workerAstGenFile(
     const child_prog_node = prog_node.start(file.sub_file_path, 0);
     defer child_prog_node.end();
 
-    const pt: Zcu.PerThread = .{ .zcu = comp.module.?, .tid = @enumFromInt(tid) };
+    const pt: Zcu.PerThread = .{ .zcu = comp.zcu.?, .tid = @enumFromInt(tid) };
     pt.astGenFile(file, path_digest) catch |err| switch (err) {
         error.AnalysisFail => return,
         else => {
@@ -4352,8 +4350,8 @@ fn workerCheckEmbedFile(comp: *Compilation, embed_file: *Zcu.EmbedFile) void {
 }
 
 fn detectEmbedFileUpdate(comp: *Compilation, embed_file: *Zcu.EmbedFile) !void {
-    const mod = comp.module.?;
-    const ip = &mod.intern_pool;
+    const zcu = comp.zcu.?;
+    const ip = &zcu.intern_pool;
     var file = try embed_file.owner.root.openFile(embed_file.sub_file_path.toSlice(ip), .{});
     defer file.close();
 
@@ -4665,10 +4663,10 @@ fn reportRetryableEmbedFileError(
     embed_file: *Zcu.EmbedFile,
     err: anyerror,
 ) error{OutOfMemory}!void {
-    const mod = comp.module.?;
-    const gpa = mod.gpa;
+    const zcu = comp.zcu.?;
+    const gpa = zcu.gpa;
     const src_loc = embed_file.src_loc;
-    const ip = &mod.intern_pool;
+    const ip = &zcu.intern_pool;
     const err_msg = try Zcu.ErrorMsg.create(gpa, src_loc, "unable to load '{}/{s}': {s}", .{
         embed_file.owner.root,
         embed_file.sub_file_path.toSlice(ip),
@@ -4680,7 +4678,7 @@ fn reportRetryableEmbedFileError(
     {
         comp.mutex.lock();
         defer comp.mutex.unlock();
-        try mod.failed_embed_files.putNoClobber(gpa, embed_file, err_msg);
+        try zcu.failed_embed_files.putNoClobber(gpa, embed_file, err_msg);
     }
 }
 
@@ -4730,7 +4728,7 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: std.Pr
     // Special case when doing build-obj for just one C file. When there are more than one object
     // file and building an object we need to link them together, but with just one it should go
     // directly to the output file.
-    const direct_o = comp.c_source_files.len == 1 and comp.module == null and
+    const direct_o = comp.c_source_files.len == 1 and comp.zcu == null and
         comp.config.output_mode == .Obj and comp.objects.len == 0;
     const o_basename_noext = if (direct_o)
         comp.root_name
@@ -5223,7 +5221,7 @@ fn spawnZigRc(
     argv: []const []const u8,
     child_progress_node: std.Progress.Node,
 ) !void {
-    var node_name: std.ArrayListUnmanaged(u8) = .{};
+    var node_name: std.ArrayListUnmanaged(u8) = .empty;
     defer node_name.deinit(arena);
 
     var child = std.process.Child.init(argv, arena);
@@ -5384,15 +5382,15 @@ pub fn addCCArgs(
             try argv.append("-D_LIBCPP_HAS_MUSL_LIBC");
         }
         try argv.append("-D_LIBCPP_DISABLE_VISIBILITY_ANNOTATIONS");
-        try argv.append("-D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS");
         try argv.append("-D_LIBCPP_HAS_NO_VENDOR_AVAILABILITY_ANNOTATIONS");
+        try argv.append("-D_LIBCXXABI_DISABLE_VISIBILITY_ANNOTATIONS");
 
         if (!comp.config.any_non_single_threaded) {
             try argv.append("-D_LIBCPP_HAS_NO_THREADS");
         }
 
         // See the comment in libcxx.zig for more details about this.
-        try argv.append("-D_LIBCPP_PSTL_CPU_BACKEND_SERIAL");
+        try argv.append("-D_LIBCPP_PSTL_BACKEND_SERIAL");
 
         try argv.append(try std.fmt.allocPrint(arena, "-D_LIBCPP_ABI_VERSION={d}", .{
             @intFromEnum(comp.libcxx_abi_version),
@@ -5486,6 +5484,9 @@ pub fn addCCArgs(
                 const is_enabled = target.cpu.features.isEnabled(index);
 
                 if (feature.llvm_name) |llvm_name| {
+                    // We communicate float ABI to Clang through the dedicated options further down.
+                    if (std.mem.eql(u8, llvm_name, "soft-float")) continue;
+
                     argv.appendSliceAssumeCapacity(&[_][]const u8{ "-Xclang", "-target-feature", "-Xclang" });
                     const plus_or_minus = "-+"[@intFromBool(is_enabled)];
                     const arg = try std.fmt.allocPrint(arena, "{c}{s}", .{ plus_or_minus, llvm_name });
@@ -5538,12 +5539,8 @@ pub fn addCCArgs(
                 else => {},
             }
 
-            if (target.cpu.arch.isThumb()) {
-                try argv.append("-mthumb");
-            }
-
             {
-                var san_arg: std.ArrayListUnmanaged(u8) = .{};
+                var san_arg: std.ArrayListUnmanaged(u8) = .empty;
                 const prefix = "-fsanitize=";
                 if (mod.sanitize_c) {
                     if (san_arg.items.len == 0) try san_arg.appendSlice(arena, prefix);
@@ -5638,10 +5635,6 @@ pub fn addCCArgs(
                 try argv.append("-Werror=date-time");
             }
 
-            if (target_util.supports_fpic(target) and mod.pic) {
-                try argv.append("-fPIC");
-            }
-
             if (mod.unwind_tables) {
                 try argv.append("-funwind-tables");
             } else {
@@ -5715,10 +5708,6 @@ pub fn addCCArgs(
                     if (target.cpu.model.llvm_name) |llvm_name| {
                         try argv.append(try std.fmt.allocPrint(arena, "-march={s}", .{llvm_name}));
                     }
-
-                    if (std.Target.mips.featureSetHas(target.cpu.features, .soft_float)) {
-                        try argv.append("-msoft-float");
-                    }
                 },
                 else => {
                     // TODO
@@ -5730,6 +5719,14 @@ pub fn addCCArgs(
                 }
             }
         },
+    }
+
+    if (target.cpu.arch.isThumb()) {
+        try argv.append("-mthumb");
+    }
+
+    if (target_util.supports_fpic(target) and mod.pic) {
+        try argv.append("-fPIC");
     }
 
     try argv.ensureUnusedCapacity(2);
@@ -5751,6 +5748,28 @@ pub fn addCCArgs(
 
     if (target_util.llvmMachineAbi(target)) |mabi| {
         try argv.append(try std.fmt.allocPrint(arena, "-mabi={s}", .{mabi}));
+    }
+
+    // We might want to support -mfloat-abi=softfp for Arm and CSKY here in the future.
+    if (target_util.clangSupportsFloatAbiArg(target)) {
+        const fabi = @tagName(target.floatAbi());
+
+        try argv.append(switch (target.cpu.arch) {
+            // For whatever reason, Clang doesn't support `-mfloat-abi` for s390x.
+            .s390x => try std.fmt.allocPrint(arena, "-m{s}-float", .{fabi}),
+            else => try std.fmt.allocPrint(arena, "-mfloat-abi={s}", .{fabi}),
+        });
+    }
+
+    if (target_util.clangSupportsNoImplicitFloatArg(target) and target.floatAbi() == .soft) {
+        try argv.append("-mno-implicit-float");
+    }
+
+    // https://github.com/llvm/llvm-project/issues/105972
+    if (target.cpu.arch.isPowerPC() and target.floatAbi() == .soft) {
+        try argv.append("-D__NO_FPRS__");
+        try argv.append("-D_SOFT_FLOAT");
+        try argv.append("-D_SOFT_DOUBLE");
     }
 
     if (out_dep_path) |p| {
@@ -5787,7 +5806,7 @@ fn failCObj(
     comptime format: []const u8,
     args: anytype,
 ) SemaError {
-    @setCold(true);
+    @branchHint(.cold);
     const diag_bundle = blk: {
         const diag_bundle = try comp.gpa.create(CObject.Diag.Bundle);
         diag_bundle.* = .{};
@@ -5811,7 +5830,7 @@ fn failCObjWithOwnedDiagBundle(
     c_object: *CObject,
     diag_bundle: *CObject.Diag.Bundle,
 ) SemaError {
-    @setCold(true);
+    @branchHint(.cold);
     assert(diag_bundle.diags.len > 0);
     {
         comp.mutex.lock();
@@ -5827,7 +5846,7 @@ fn failCObjWithOwnedDiagBundle(
 }
 
 fn failWin32Resource(comp: *Compilation, win32_resource: *Win32Resource, comptime format: []const u8, args: anytype) SemaError {
-    @setCold(true);
+    @branchHint(.cold);
     var bundle: ErrorBundle.Wip = undefined;
     try bundle.init(comp.gpa);
     errdefer bundle.deinit();
@@ -5854,7 +5873,7 @@ fn failWin32ResourceWithOwnedBundle(
     win32_resource: *Win32Resource,
     err_bundle: ErrorBundle,
 ) SemaError {
-    @setCold(true);
+    @branchHint(.cold);
     {
         comp.mutex.lock();
         defer comp.mutex.unlock();

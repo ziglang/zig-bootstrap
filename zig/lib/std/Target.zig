@@ -38,6 +38,7 @@ pub const Os = struct {
         netbsd,
         openbsd,
 
+        bridgeos,
         driverkit,
         ios,
         macos,
@@ -75,6 +76,7 @@ pub const Os = struct {
 
         pub inline fn isDarwin(tag: Tag) bool {
             return switch (tag) {
+                .bridgeos,
                 .driverkit,
                 .ios,
                 .macos,
@@ -122,6 +124,7 @@ pub const Os = struct {
         pub fn dynamicLibSuffix(tag: Tag) [:0]const u8 {
             return switch (tag) {
                 .windows, .uefi => ".dll",
+                .bridgeos,
                 .driverkit,
                 .ios,
                 .macos,
@@ -154,7 +157,7 @@ pub const Os = struct {
             };
         }
 
-        pub inline fn getVersionRangeTag(tag: Tag) @typeInfo(TaggedVersionRange).Union.tag_type.? {
+        pub inline fn getVersionRangeTag(tag: Tag) @typeInfo(TaggedVersionRange).@"union".tag_type.? {
             return switch (tag) {
                 .freestanding,
                 .fuchsia,
@@ -186,6 +189,7 @@ pub const Os = struct {
                 .other,
                 => .none,
 
+                .bridgeos,
                 .driverkit,
                 .freebsd,
                 .macos,
@@ -412,6 +416,7 @@ pub const Os = struct {
                 .plan9,
                 .illumos,
                 .serenity,
+                .bridgeos,
                 .other,
                 => .{ .none = {} },
 
@@ -573,6 +578,7 @@ pub const Os = struct {
             .freebsd,
             .aix,
             .netbsd,
+            .bridgeos,
             .driverkit,
             .macos,
             .ios,
@@ -721,6 +727,7 @@ pub const Abi = enum {
             .wasi,
             .emscripten,
             => .musl,
+            .bridgeos,
             .opencl,
             .opengl,
             .vulkan,
@@ -765,12 +772,13 @@ pub const Abi = enum {
 
     pub inline fn floatAbi(abi: Abi) FloatAbi {
         return switch (abi) {
-            .gnueabihf,
-            .eabihf,
-            .musleabihf,
-            => .hard,
-            .ohos => .soft,
-            else => .soft,
+            .eabi,
+            .gnueabi,
+            .musleabi,
+            .gnusf,
+            .ohos,
+            => .soft,
+            else => .hard,
         };
     }
 };
@@ -820,7 +828,7 @@ pub const ObjectFormat = enum {
     pub fn default(os_tag: Os.Tag, arch: Cpu.Arch) ObjectFormat {
         return switch (os_tag) {
             .aix => .xcoff,
-            .driverkit, .ios, .macos, .tvos, .visionos, .watchos => .macho,
+            .bridgeos, .driverkit, .ios, .macos, .tvos, .visionos, .watchos => .macho,
             .plan9 => .plan9,
             .uefi, .windows => .coff,
             .zos => .goff,
@@ -846,7 +854,7 @@ pub fn toElfMachine(target: Target) std.elf.EM {
         .avr => .AVR,
         .bpfel, .bpfeb => .BPF,
         .csky => .CSKY,
-        .hexagon => .HEXAGON,
+        .hexagon => .QDSP6,
         .kalimba => .CSR_KALIMBA,
         .lanai => .LANAI,
         .loongarch32, .loongarch64 => .LOONGARCH,
@@ -1458,7 +1466,7 @@ pub const Cpu = struct {
 
         fn allCpusFromDecls(comptime cpus: type) []const *const Cpu.Model {
             @setEvalBranchQuota(2000);
-            const decls = @typeInfo(cpus).Struct.decls;
+            const decls = @typeInfo(cpus).@"struct".decls;
             var array: [decls.len]*const Cpu.Model = undefined;
             for (decls, 0..) |decl, i| {
                 array[i] = &@field(cpus, decl.name);
@@ -1645,7 +1653,7 @@ pub const FloatAbi = enum {
     soft,
 };
 
-pub inline fn getFloatAbi(target: Target) FloatAbi {
+pub inline fn floatAbi(target: Target) FloatAbi {
     return target.abi.floatAbi();
 }
 
@@ -1815,6 +1823,7 @@ pub const DynamicLinker = struct {
                 => none,
             },
 
+            .bridgeos,
             .driverkit,
             .ios,
             .tvos,
@@ -2274,6 +2283,7 @@ pub fn cTypeBitSize(target: Target, c_type: CType) u16 {
             },
         },
 
+        .bridgeos,
         .driverkit,
         .ios,
         .macos,

@@ -55,6 +55,7 @@ pub fn testAll(b: *Build, build_opts: BuildOptions) *Step {
 
         // Exercise linker in ar mode
         elf_step.dependOn(testEmitStaticLib(b, .{ .target = musl_target }));
+        elf_step.dependOn(testEmitStaticLibZig(b, .{ .target = musl_target }));
 
         // Exercise linker with LLVM backend
         // musl tests
@@ -66,6 +67,7 @@ pub fn testAll(b: *Build, build_opts: BuildOptions) *Step {
         elf_step.dependOn(testEmptyObject(b, .{ .target = musl_target }));
         elf_step.dependOn(testEntryPoint(b, .{ .target = musl_target }));
         elf_step.dependOn(testGcSections(b, .{ .target = musl_target }));
+        elf_step.dependOn(testGcSectionsZig(b, .{ .target = musl_target }));
         elf_step.dependOn(testImageBase(b, .{ .target = musl_target }));
         elf_step.dependOn(testInitArrayOrder(b, .{ .target = musl_target }));
         elf_step.dependOn(testLargeAlignmentExe(b, .{ .target = musl_target }));
@@ -937,8 +939,8 @@ fn testEmitStaticLib(b: *Build, opts: Options) *Step {
         \\}
         \\export var strongBar: usize = 100;
         \\comptime {
-        \\    @export(weakFoo, .{ .name = "weakFoo", .linkage = .weak });
-        \\    @export(strongBar, .{ .name = "strongBarAlias", .linkage = .strong });
+        \\    @export(&weakFoo, .{ .name = "weakFoo", .linkage = .weak });
+        \\    @export(&strongBar, .{ .name = "strongBarAlias", .linkage = .strong });
         \\}
         ,
     });
@@ -2257,7 +2259,7 @@ fn testMismatchedCpuArchitectureError(b: *Build, opts: Options) *Step {
     exe.linkLibC();
 
     expectLinkErrors(exe, test_step, .{ .exact = &.{
-        "invalid cpu architecture: aarch64",
+        "invalid ELF machine type: AARCH64",
         "note: while parsing /?/a.o",
     } });
 
