@@ -96,15 +96,14 @@ is more portable across Linux distributions.
 |----------------------------|----------------|
 | `aarch64-linux-gnu`        | OK             |
 | `aarch64-linux-musl`       | OK             |
-| `aarch64-macos-none`       | OK             |
+| `aarch64-macos-none`       | [#194](https://github.com/ziglang/zig-bootstrap/issues/194) |
 | `aarch64-windows-gnu`      | OK             |
-| `aarch64_be-linux-gnu`     | [#90](https://github.com/ziglang/zig-bootstrap/issues/90) |
-| `aarch64_be-linux-musl`    | [#92](https://github.com/ziglang/zig-bootstrap/issues/92) |
+| `aarch64_be-linux-gnu`     | OK             |
+| `aarch64_be-linux-musl`    | OK             |
 | `arm-linux-gnueabi`        | [#101](https://github.com/ziglang/zig-bootstrap/issues/101) |
 | `arm-linux-gnueabihf`      | [#102](https://github.com/ziglang/zig-bootstrap/issues/102) |
 | `arm-linux-musleabi`       | [#103](https://github.com/ziglang/zig-bootstrap/issues/103) |
 | `arm-linux-musleabihf`     | [#183](https://github.com/ziglang/zig-bootstrap/issues/183) |
-| `arm-windows-gnu`          | [#105](https://github.com/ziglang/zig-bootstrap/issues/105) |
 | `armeb-linux-gnueabi`      | [#96](https://github.com/ziglang/zig-bootstrap/issues/96) |
 | `armeb-linux-gnueabihf`    | [#97](https://github.com/ziglang/zig-bootstrap/issues/97) |
 | `armeb-linux-musleabi`     | [#98](https://github.com/ziglang/zig-bootstrap/issues/98) |
@@ -113,26 +112,29 @@ is more portable across Linux distributions.
 | `loongarch64-linux-musl`   | OK             |
 | `mips-linux-gnueabi`       | OK             |
 | `mips-linux-gnueabihf`     | OK             |
-| `mips-linux-musl`          | OK             |
+| `mips-linux-musleabi`      | OK             |
+| `mips-linux-musleabihf`    | OK             |
 | `mips64-linux-gnuabi64`    | OK             |
 | `mips64-linux-gnuabin32`   | [#109](https://github.com/ziglang/zig-bootstrap/issues/109) |
-| `mips64-linux-musl`        | OK             |
+| `mips64-linux-musl`        | [#192](https://github.com/ziglang/zig-bootstrap/issues/192) |
 | `mips64el-linux-gnuabi64`  | OK             |
 | `mips64el-linux-gnuabin32` | [#107](https://github.com/ziglang/zig-bootstrap/issues/107) |
 | `mips64el-linux-musl`      | OK             |
 | `mipsel-linux-gnueabi`     | OK             |
 | `mipsel-linux-gnueabihf`   | OK             |
-| `mipsel-linux-musl`        | OK             |
-| `powerpc-linux-gnueabi`    | [#174](https://github.com/ziglang/zig-bootstrap/issues/174) |
-| `powerpc-linux-gnueabihf`  | [#173](https://github.com/ziglang/zig-bootstrap/issues/173) |
-| `powerpc-linux-musl`       | OK             |
+| `mipsel-linux-musleabi`    | OK             |
+| `mipsel-linux-musleabihf`  | OK             |
+| `powerpc-linux-gnueabi`    | OK             |
+| `powerpc-linux-gnueabihf`  | OK             |
+| `powerpc-linux-musleabi`   | OK             |
+| `powerpc-linux-musleabihf` | OK             |
 | `powerpc64-linux-gnu`      | [#113](https://github.com/ziglang/zig-bootstrap/issues/113) |
 | `powerpc64-linux-musl`     | OK             |
 | `powerpc64le-linux-gnu`    | OK             |
 | `powerpc64le-linux-musl`   | OK             |
-| `riscv32-linux-gnu`        | [#115](https://github.com/ziglang/zig-bootstrap/issues/115) |
+| `riscv32-linux-gnu`        | OK             |
 | `riscv32-linux-musl`       | OK             |
-| `riscv64-linux-gnu`        | [#115](https://github.com/ziglang/zig-bootstrap/issues/115) |
+| `riscv64-linux-gnu`        | OK             |
 | `riscv64-linux-musl`       | OK             |
 | `s390x-linux-gnu`          | [#116](https://github.com/ziglang/zig-bootstrap/issues/116) |
 | `s390x-linux-musl`         | [#52](https://github.com/ziglang/bootstrap/issues/52) |
@@ -140,6 +142,7 @@ is more portable across Linux distributions.
 | `sparc64-linux-gnu`        | [#172](https://github.com/ziglang/zig-bootstrap/issues/172) |
 | `thumb-linux-musleabi`     | [#176](https://github.com/ziglang/zig-bootstrap/issues/176) |
 | `thumb-linux-musleabihf`   | [#175](https://github.com/ziglang/zig-bootstrap/issues/175) |
+| `thumb-windows-gnu`        | [#105](https://github.com/ziglang/zig-bootstrap/issues/105) |
 | `thumbeb-linux-musleabi`   | [#180](https://github.com/ziglang/zig-bootstrap/issues/180) |
 | `thumbeb-linux-musleabihf` | [#179](https://github.com/ziglang/zig-bootstrap/issues/179) |
 | `x86-linux-gnu`            | OK             |
@@ -154,6 +157,7 @@ is more portable across Linux distributions.
 
 #### Other Notable Targets Known to Work
 
+ * `aarch64-macos-none` with mcpu value of `apple_a14`.
  * `arm-linux-musleabi` with mcpu value of `generic+v6kz`. This produces a
    build of Zig that runs on the RPi 1 and RPi Zero.
    - If you want to produce a build for this CPU exactly, use `arm1176jzf_s`.
