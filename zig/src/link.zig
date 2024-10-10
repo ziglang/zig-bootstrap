@@ -11,7 +11,7 @@ const wasi_libc = @import("wasi_libc.zig");
 const Air = @import("Air.zig");
 const Allocator = std.mem.Allocator;
 const Cache = std.Build.Cache;
-const Path = Cache.Path;
+const Path = std.Build.Cache.Path;
 const Compilation = @import("Compilation.zig");
 const LibCInstallation = std.zig.LibCInstallation;
 const Liveness = @import("Liveness.zig");
@@ -34,7 +34,7 @@ pub const SystemLib = struct {
     /// 1. Windows DLLs that zig ships such as advapi32.
     /// 2. extern "foo" fn declarations where we find out about libraries too late
     /// TODO: make this non-optional and resolve those two cases somehow.
-    path: ?[]const u8,
+    path: ?Path,
 };
 
 pub fn hashAddSystemLibs(
@@ -46,7 +46,7 @@ pub fn hashAddSystemLibs(
     for (hm.values()) |value| {
         man.hash.add(value.needed);
         man.hash.add(value.weak);
-        if (value.path) |p| _ = try man.addFile(p, null);
+        if (value.path) |p| _ = try man.addFilePath(p, null);
     }
 }
 
@@ -67,7 +67,6 @@ pub const File = struct {
     gc_sections: bool,
     print_gc_sections: bool,
     build_id: std.zig.BuildId,
-    rpath_list: []const []const u8,
     allow_shlib_undefined: bool,
     stack_size: u64,
 
@@ -534,7 +533,10 @@ pub const File = struct {
         FailedToEmit,
         FileSystem,
         FilesOpenedWithWrongFlags,
+        /// Indicates an error will be present in `Compilation.link_errors`.
         FlushFailure,
+        /// Indicates an error will be present in `Compilation.link_errors`.
+        LinkFailure,
         FunctionSignatureMismatch,
         GlobalTypeMismatch,
         HotSwapUnavailableOnHostOperatingSystem,
@@ -549,7 +551,7 @@ pub const File = struct {
         LLDCrashed,
         LLDReportedFailure,
         LLD_LinkingIsTODO_ForSpirV,
-        LibCInstallationMissingCRTDir,
+        LibCInstallationMissingCrtDir,
         LibCInstallationNotAvailable,
         LinkingWithoutZigSourceUnimplemented,
         MalformedArchive,
@@ -604,18 +606,15 @@ pub const File = struct {
         const comp = base.comp;
         if (comp.clang_preprocessor_mode == .yes or comp.clang_preprocessor_mode == .pch) {
             dev.check(.clang_command);
-            const gpa = comp.gpa;
             const emit = base.emit;
             // TODO: avoid extra link step when it's just 1 object file (the `zig cc -c` case)
             // Until then, we do `lld -r -o output.o input.o` even though the output is the same
             // as the input. For the preprocessing case (`zig cc -E -o foo`) we copy the file
             // to the final location. See also the corresponding TODO in Coff linking.
-            const full_out_path = try emit.root_dir.join(gpa, &[_][]const u8{emit.sub_path});
-            defer gpa.free(full_out_path);
             assert(comp.c_object_table.count() == 1);
             const the_key = comp.c_object_table.keys()[0];
             const cached_pp_file_path = the_key.status.success.object_path;
-            try fs.cwd().copyFile(cached_pp_file_path, fs.cwd(), full_out_path, .{});
+            try cached_pp_file_path.root_dir.handle.copyFile(cached_pp_file_path.sub_path, emit.root_dir.handle, emit.sub_path, .{});
             return;
         }
 
@@ -779,7 +778,7 @@ pub const File = struct {
 
         log.debug("zcu_obj_path={s}", .{if (zcu_obj_path) |s| s else "(null)"});
 
-        const compiler_rt_path: ?[]const u8 = if (comp.include_compiler_rt)
+        const compiler_rt_path: ?Path = if (comp.include_compiler_rt)
             comp.compiler_rt_obj.?.full_object_path
         else
             null;
@@ -804,18 +803,18 @@ pub const File = struct {
             base.releaseLock();
 
             for (objects) |obj| {
-                _ = try man.addFile(obj.path, null);
+                _ = try man.addFilePath(obj.path, null);
                 man.hash.add(obj.must_link);
                 man.hash.add(obj.loption);
             }
             for (comp.c_object_table.keys()) |key| {
-                _ = try man.addFile(key.status.success.object_path, null);
+                _ = try man.addFilePath(key.status.success.object_path, null);
             }
             for (comp.win32_resource_table.keys()) |key| {
                 _ = try man.addFile(key.status.success.res_path, null);
             }
             try man.addOptionalFile(zcu_obj_path);
-            try man.addOptionalFile(compiler_rt_path);
+            try man.addOptionalFilePath(compiler_rt_path);
 
             // We don't actually care whether it's a cache hit or miss; we just need the digest and the lock.
             _ = try man.hit();
@@ -849,10 +848,10 @@ pub const File = struct {
         defer object_files.deinit();
 
         for (objects) |obj| {
-            object_files.appendAssumeCapacity(try arena.dupeZ(u8, obj.path));
+            object_files.appendAssumeCapacity(try obj.path.toStringZ(arena));
         }
         for (comp.c_object_table.keys()) |key| {
-            object_files.appendAssumeCapacity(try arena.dupeZ(u8, key.status.success.object_path));
+            object_files.appendAssumeCapacity(try key.status.success.object_path.toStringZ(arena));
         }
         for (comp.win32_resource_table.keys()) |key| {
             object_files.appendAssumeCapacity(try arena.dupeZ(u8, key.status.success.res_path));
@@ -861,7 +860,7 @@ pub const File = struct {
             object_files.appendAssumeCapacity(try arena.dupeZ(u8, p));
         }
         if (compiler_rt_path) |p| {
-            object_files.appendAssumeCapacity(try arena.dupeZ(u8, p));
+            object_files.appendAssumeCapacity(try p.toStringZ(arena));
         }
 
         if (comp.verbose_link) {
@@ -932,7 +931,6 @@ pub const File = struct {
                 .xcoff => @panic("TODO implement xcoff object format"),
                 .hex => @panic("TODO implement hex object format"),
                 .raw => @panic("TODO implement raw object format"),
-                .dxcontainer => @panic("TODO implement dxcontainer object format"),
             };
         }
 

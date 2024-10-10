@@ -62,10 +62,6 @@ const llvm_targets = [_]LlvmTarget{
                 .desc = "Enable RW operand Context ID Register (EL2)",
             },
             .{
-                .llvm_name = "v8a",
-                .extra_deps = &.{"neon"},
-            },
-            .{
                 .llvm_name = "neoversee1",
                 .flatten = true,
             },
@@ -487,7 +483,6 @@ const llvm_targets = [_]LlvmTarget{
             .{
                 .llvm_name = "cortex-m85",
                 .omit_deps = &.{ "mve_fp", "pacbti", "fp_armv8d16" },
-                .extra_deps = &.{"trustzone"},
             },
             .{
                 .llvm_name = "cortex-x1c",
@@ -1436,6 +1431,24 @@ fn processOneTarget(job: Job) anyerror!void {
                         try deps.append(other_zig_name);
                     }
                 }
+                // This is used by AArch64.
+                if (kv.value_ptr.object.get("DefaultExts")) |exts_val| {
+                    for (exts_val.array.items) |ext| {
+                        const other_key = ext.object.get("def").?.string;
+                        const other_obj = &root_map.getPtr(other_key).?.object;
+                        const other_llvm_name = other_obj.get("Name").?.string;
+                        const other_zig_name = (try llvmFeatureNameToZigNameOmit(
+                            arena,
+                            llvm_target,
+                            other_llvm_name,
+                        )) orelse continue;
+                        for (omit_deps) |omit_dep| {
+                            if (mem.eql(u8, other_zig_name, omit_dep)) break;
+                        } else {
+                            try deps.append(other_zig_name);
+                        }
+                    }
+                }
                 for (extra_deps) |extra_dep| {
                     try deps.append(extra_dep);
                 }
@@ -1563,12 +1576,6 @@ fn processOneTarget(job: Job) anyerror!void {
 
     const zig_code_basename = try std.fmt.allocPrint(arena, "{s}.zig", .{llvm_target.zig_name});
 
-    if (all_features.items.len == 0) {
-        // We represent this with an empty file.
-        try target_dir.deleteTree(zig_code_basename);
-        return;
-    }
-
     var zig_code_file = try target_dir.createFile(zig_code_basename, .{});
     defer zig_code_file.close();
 
@@ -1583,11 +1590,12 @@ fn processOneTarget(job: Job) anyerror!void {
         \\const CpuModel = std.Target.Cpu.Model;
         \\
         \\pub const Feature = enum {
-        \\
     );
 
-    for (all_features.items) |feature| {
-        try w.print("    {p},\n", .{std.zig.fmtId(feature.zig_name)});
+    for (all_features.items, 0..) |feature, i| {
+        try w.print("\n    {p},", .{std.zig.fmtId(feature.zig_name)});
+
+        if (i == all_features.items.len - 1) try w.writeAll("\n");
     }
 
     try w.writeAll(

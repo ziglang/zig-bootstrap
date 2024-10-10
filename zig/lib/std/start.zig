@@ -271,8 +271,8 @@ fn _start() callconv(.Naked) noreturn {
             \\ b %[posixCallMainAndExit]
             ,
             .arc =>
-            // The `arc` tag currently means ARCv2, which has an unusually low stack alignment
-            // requirement. ARCv3 increases it from 4 to 16, but we don't support ARCv3 yet.
+            // The `arc` tag currently means ARC v1 and v2, which have an unusually low stack
+            // alignment requirement. ARC v3 increases it from 4 to 16, but we don't support v3 yet.
             \\ mov fp, 0
             \\ mov blink, 0
             \\ mov r0, sp
@@ -391,6 +391,7 @@ fn _start() callconv(.Naked) noreturn {
             \\ stdu 0, -32(1)
             \\ mtlr 0
             \\ b %[posixCallMainAndExit]
+            \\ nop
             ,
             .s390x =>
             // Set up the stack frame (register save area and cleared back-chain slot).
@@ -539,6 +540,7 @@ fn expandStackSize(phdrs: []elf.Phdr) void {
     for (phdrs) |*phdr| {
         switch (phdr.p_type) {
             elf.PT_GNU_STACK => {
+                if (phdr.p_memsz == 0) break;
                 assert(phdr.p_memsz % std.mem.page_size == 0);
 
                 // Silently fail if we are unable to get limits.

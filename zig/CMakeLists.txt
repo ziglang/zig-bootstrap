@@ -125,8 +125,8 @@ check_pie_supported(
   OUTPUT_VARIABLE ZIG_PIE_SUPPORTED_BY_CMAKE
   LANGUAGES C CXX
 )
-if(ZIG_PIE AND NOT ZIG_PIE_SUPPORTED_BY_CMAKE)
-  message(SEND_ERROR "ZIG_PIE was requested but CMake does not support it for \"zigcpp\" target")
+if(ZIG_PIE AND NOT CMAKE_CXX_LINK_PIE_SUPPORTED)
+  message(SEND_ERROR "ZIG_PIE was requested but CMake does not support it for \"zigcpp\" target: ${ZIG_PIE_SUPPORTED_BY_CMAKE}")
 endif()
 
 
@@ -894,9 +894,7 @@ set(BUILD_COMPILER_RT_ARGS
   --name compiler_rt
   -femit-bin="${ZIG_COMPILER_RT_C_SOURCE}"
   -target "${ZIG_HOST_TARGET_TRIPLE}"
-  --dep "build_options"
   "-Mroot=lib/compiler_rt.zig"
-  "-Mbuild_options=${ZIG_CONFIG_ZIG_OUT}"
 )
 
 add_custom_command(

@@ -581,6 +581,30 @@ const test_targets = blk: {
 
         .{
             .target = .{
+                .cpu_arch = .riscv32,
+                .os_tag = .linux,
+                .abi = .none,
+            },
+        },
+        .{
+            .target = .{
+                .cpu_arch = .riscv32,
+                .os_tag = .linux,
+                .abi = .musl,
+            },
+            .link_libc = true,
+        },
+        .{
+            .target = .{
+                .cpu_arch = .riscv32,
+                .os_tag = .linux,
+                .abi = .gnu,
+            },
+            .link_libc = true,
+        },
+
+        .{
+            .target = .{
                 .cpu_arch = .riscv64,
                 .os_tag = .linux,
                 .abi = .none,
@@ -610,6 +634,30 @@ const test_targets = blk: {
             }) catch @panic("OOM"),
             .use_llvm = false,
             .use_lld = false,
+        },
+
+        .{
+            .target = .{
+                .cpu_arch = .s390x,
+                .os_tag = .linux,
+                .abi = .none,
+            },
+        },
+        .{
+            .target = .{
+                .cpu_arch = .s390x,
+                .os_tag = .linux,
+                .abi = .musl,
+            },
+            .link_libc = true,
+        },
+        .{
+            .target = .{
+                .cpu_arch = .s390x,
+                .os_tag = .linux,
+                .abi = .gnu,
+            },
+            .link_libc = true,
         },
 
         .{
@@ -1460,4 +1508,32 @@ pub fn addDebuggerTests(b: *std.Build, options: DebuggerContext.Options) ?*Step 
         .test_name_suffix = "x86_64-linux-pic",
     });
     return step;
+}
+
+pub fn addIncrementalTests(b: *std.Build, test_step: *Step) !void {
+    const incr_check = b.addExecutable(.{
+        .name = "incr-check",
+        .root_source_file = b.path("tools/incr-check.zig"),
+        .target = b.graph.host,
+        .optimize = .Debug,
+    });
+
+    var dir = try b.build_root.handle.openDir("test/incremental", .{ .iterate = true });
+    defer dir.close();
+
+    var it = try dir.walk(b.graph.arena);
+    while (try it.next()) |entry| {
+        if (entry.kind != .file) continue;
+
+        const run = b.addRunArtifact(incr_check);
+        run.setName(b.fmt("incr-check '{s}'", .{entry.basename}));
+
+        run.addArg(b.graph.zig_exe);
+        run.addFileArg(b.path("test/incremental/").path(b, entry.path));
+        run.addArgs(&.{ "--zig-lib-dir", b.fmt("{}", .{b.graph.zig_lib_directory}) });
+
+        run.addCheck(.{ .expect_term = .{ .Exited = 0 } });
+
+        test_step.dependOn(&run.step);
+    }
 }

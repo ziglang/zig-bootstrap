@@ -1,36 +1,24 @@
-pub fn flushStaticLib(elf_file: *Elf, comp: *Compilation, module_obj_path: ?[]const u8) link.File.FlushError!void {
+pub fn flushStaticLib(elf_file: *Elf, comp: *Compilation, module_obj_path: ?Path) link.File.FlushError!void {
     const gpa = comp.gpa;
 
-    var positionals = std.ArrayList(Compilation.LinkObject).init(gpa);
-    defer positionals.deinit();
-
-    try positionals.ensureUnusedCapacity(comp.objects.len);
-    positionals.appendSliceAssumeCapacity(comp.objects);
+    for (comp.objects) |obj| {
+        switch (Compilation.classifyFileExt(obj.path.sub_path)) {
+            .object => try parseObjectStaticLibReportingFailure(elf_file, obj.path),
+            .static_library => try parseArchiveStaticLibReportingFailure(elf_file, obj.path),
+            else => try elf_file.addParseError(obj.path, "unrecognized file extension", .{}),
+        }
+    }
 
     for (comp.c_object_table.keys()) |key| {
-        try positionals.append(.{ .path = key.status.success.object_path });
+        try parseObjectStaticLibReportingFailure(elf_file, key.status.success.object_path);
     }
 
-    if (module_obj_path) |path| try positionals.append(.{ .path = path });
+    if (module_obj_path) |path| {
+        try parseObjectStaticLibReportingFailure(elf_file, path);
+    }
 
     if (comp.include_compiler_rt) {
-        try positionals.append(.{ .path = comp.compiler_rt_obj.?.full_object_path });
-    }
-
-    for (positionals.items) |obj| {
-        parsePositionalStaticLib(elf_file, obj.path) catch |err| switch (err) {
-            error.MalformedObject,
-            error.MalformedArchive,
-            error.InvalidMachineType,
-            error.MismatchedEflags,
-            => continue, // already reported
-            error.UnknownFileType => try elf_file.reportParseError(obj.path, "unknown file type for an object file", .{}),
-            else => |e| try elf_file.reportParseError(
-                obj.path,
-                "unexpected error: parsing input file failed with error {s}",
-                .{@errorName(e)},
-            ),
-        };
+        try parseObjectStaticLibReportingFailure(elf_file, comp.compiler_rt_obj.?.full_object_path);
     }
 
     if (elf_file.base.hasErrors()) return error.FlushFailure;
@@ -152,37 +140,23 @@ pub fn flushStaticLib(elf_file: *Elf, comp: *Compilation, module_obj_path: ?[]co
     if (elf_file.base.hasErrors()) return error.FlushFailure;
 }
 
-pub fn flushObject(elf_file: *Elf, comp: *Compilation, module_obj_path: ?[]const u8) link.File.FlushError!void {
-    const gpa = elf_file.base.comp.gpa;
-
-    var positionals = std.ArrayList(Compilation.LinkObject).init(gpa);
-    defer positionals.deinit();
-    try positionals.ensureUnusedCapacity(comp.objects.len);
-    positionals.appendSliceAssumeCapacity(comp.objects);
+pub fn flushObject(elf_file: *Elf, comp: *Compilation, module_obj_path: ?Path) link.File.FlushError!void {
+    for (comp.objects) |obj| {
+        if (obj.isObject()) {
+            try elf_file.parseObjectReportingFailure(obj.path);
+        } else {
+            try elf_file.parseLibraryReportingFailure(.{ .path = obj.path }, obj.must_link);
+        }
+    }
 
     // This is a set of object files emitted by clang in a single `build-exe` invocation.
     // For instance, the implicit `a.o` as compiled by `zig build-exe a.c` will end up
     // in this set.
     for (comp.c_object_table.keys()) |key| {
-        try positionals.append(.{ .path = key.status.success.object_path });
+        try elf_file.parseObjectReportingFailure(key.status.success.object_path);
     }
 
-    if (module_obj_path) |path| try positionals.append(.{ .path = path });
-
-    for (positionals.items) |obj| {
-        elf_file.parsePositional(obj.path, obj.must_link) catch |err| switch (err) {
-            error.MalformedObject,
-            error.MalformedArchive,
-            error.InvalidMachineType,
-            error.MismatchedEflags,
-            => continue, // already reported
-            else => |e| try elf_file.reportParseError(
-                obj.path,
-                "unexpected error: parsing input file failed with error {s}",
-                .{@errorName(e)},
-            ),
-        };
-    }
+    if (module_obj_path) |path| try elf_file.parseObjectReportingFailure(path);
 
     if (elf_file.base.hasErrors()) return error.FlushFailure;
 
@@ -224,24 +198,33 @@ pub fn flushObject(elf_file: *Elf, comp: *Compilation, module_obj_path: ?[]const
     if (elf_file.base.hasErrors()) return error.FlushFailure;
 }
 
-fn parsePositionalStaticLib(elf_file: *Elf, path: []const u8) Elf.ParseError!void {
-    if (try Object.isObject(path)) {
-        try parseObjectStaticLib(elf_file, path);
-    } else if (try Archive.isArchive(path)) {
-        try parseArchiveStaticLib(elf_file, path);
-    } else return error.UnknownFileType;
-    // TODO: should we check for LD script?
-    // Actually, should we even unpack an archive?
+fn parseObjectStaticLibReportingFailure(elf_file: *Elf, path: Path) error{OutOfMemory}!void {
+    parseObjectStaticLib(elf_file, path) catch |err| switch (err) {
+        error.LinkFailure => return,
+        error.OutOfMemory => return error.OutOfMemory,
+        else => |e| try elf_file.addParseError(path, "parsing object failed: {s}", .{@errorName(e)}),
+    };
 }
 
-fn parseObjectStaticLib(elf_file: *Elf, path: []const u8) Elf.ParseError!void {
+fn parseArchiveStaticLibReportingFailure(elf_file: *Elf, path: Path) error{OutOfMemory}!void {
+    parseArchiveStaticLib(elf_file, path) catch |err| switch (err) {
+        error.LinkFailure => return,
+        error.OutOfMemory => return error.OutOfMemory,
+        else => |e| try elf_file.addParseError(path, "parsing static library failed: {s}", .{@errorName(e)}),
+    };
+}
+
+fn parseObjectStaticLib(elf_file: *Elf, path: Path) Elf.ParseError!void {
     const gpa = elf_file.base.comp.gpa;
-    const handle = try std.fs.cwd().openFile(path, .{});
+    const handle = try path.root_dir.handle.openFile(path.sub_path, .{});
     const fh = try elf_file.addFileHandle(handle);
 
-    const index = @as(File.Index, @intCast(try elf_file.files.addOne(gpa)));
+    const index: File.Index = @intCast(try elf_file.files.addOne(gpa));
     elf_file.files.set(index, .{ .object = .{
-        .path = try gpa.dupe(u8, path),
+        .path = .{
+            .root_dir = path.root_dir,
+            .sub_path = try gpa.dupe(u8, path.sub_path),
+        },
         .file_handle = fh,
         .index = index,
     } });
@@ -251,9 +234,9 @@ fn parseObjectStaticLib(elf_file: *Elf, path: []const u8) Elf.ParseError!void {
     try object.parseAr(elf_file);
 }
 
-fn parseArchiveStaticLib(elf_file: *Elf, path: []const u8) Elf.ParseError!void {
+fn parseArchiveStaticLib(elf_file: *Elf, path: Path) Elf.ParseError!void {
     const gpa = elf_file.base.comp.gpa;
-    const handle = try std.fs.cwd().openFile(path, .{});
+    const handle = try path.root_dir.handle.openFile(path.sub_path, .{});
     const fh = try elf_file.addFileHandle(handle);
 
     var archive = Archive{};
@@ -315,7 +298,6 @@ fn initSections(elf_file: *Elf) !void {
                     elf.SHT_PROGBITS,
                 .flags = elf.SHF_ALLOC,
                 .addralign = elf_file.ptrWidthBytes(),
-                .offset = std.math.maxInt(u64),
             });
         }
         elf_file.eh_frame_rela_section_index = elf_file.sectionByName(".rela.eh_frame") orelse
@@ -344,7 +326,6 @@ fn initComdatGroups(elf_file: *Elf) !void {
                     .type = elf.SHT_GROUP,
                     .entsize = @sizeOf(u32),
                     .addralign = @alignOf(u32),
-                    .offset = std.math.maxInt(u64),
                 }),
                 .cg_ref = .{ .index = @intCast(cg_index), .file = index },
             };
@@ -355,9 +336,11 @@ fn initComdatGroups(elf_file: *Elf) !void {
 fn updateSectionSizes(elf_file: *Elf) !void {
     const slice = elf_file.sections.slice();
     for (slice.items(.atom_list_2)) |*atom_list| {
-        if (atom_list.atoms.items.len == 0) continue;
+        if (atom_list.atoms.keys().len == 0) continue;
+        if (!atom_list.dirty) continue;
         atom_list.updateSize(elf_file);
         try atom_list.allocate(elf_file);
+        atom_list.dirty = false;
     }
 
     for (slice.items(.shdr), 0..) |*shdr, shndx| {
@@ -412,24 +395,14 @@ fn allocateAllocSections(elf_file: *Elf) !void {
             shdr.sh_size = 0;
             const new_offset = try elf_file.findFreeSpace(needed_size, shdr.sh_addralign);
 
-            if (elf_file.zigObjectPtr()) |zo| blk: {
-                const existing_size = for ([_]?Symbol.Index{
-                    zo.text_index,
-                    zo.rodata_index,
-                    zo.data_relro_index,
-                    zo.data_index,
-                    zo.tdata_index,
-                    zo.eh_frame_index,
-                }) |maybe_sym_index| {
-                    const sect_sym_index = maybe_sym_index orelse continue;
-                    const sect_atom_ptr = zo.symbol(sect_sym_index).atom(elf_file).?;
-                    if (sect_atom_ptr.output_section_index == shndx) break sect_atom_ptr.size;
-                } else break :blk;
-                log.debug("moving {s} from 0x{x} to 0x{x}", .{
-                    elf_file.getShString(shdr.sh_name),
-                    shdr.sh_offset,
-                    new_offset,
-                });
+            log.debug("moving {s} from 0x{x} to 0x{x}", .{
+                elf_file.getShString(shdr.sh_name),
+                shdr.sh_offset,
+                new_offset,
+            });
+
+            if (shdr.sh_offset > 0) {
+                const existing_size = elf_file.sectionSize(@intCast(shndx));
                 const amt = try elf_file.base.file.?.copyRangeAll(
                     shdr.sh_offset,
                     elf_file.base.file.?,
@@ -454,7 +427,7 @@ fn writeAtoms(elf_file: *Elf) !void {
     const slice = elf_file.sections.slice();
     for (slice.items(.shdr), slice.items(.atom_list_2)) |shdr, atom_list| {
         if (shdr.sh_type == elf.SHT_NOBITS) continue;
-        if (atom_list.atoms.items.len == 0) continue;
+        if (atom_list.atoms.keys().len == 0) continue;
         try atom_list.writeRelocatable(&buffer, elf_file);
     }
 }
@@ -561,6 +534,7 @@ const log = std.log.scoped(.link);
 const math = std.math;
 const mem = std.mem;
 const state_log = std.log.scoped(.link_state);
+const Path = std.Build.Cache.Path;
 const std = @import("std");
 
 const Archive = @import("Archive.zig");
