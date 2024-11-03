@@ -2716,7 +2716,7 @@ fn addEnsureResult(gz: *GenZir, maybe_unused_result: Zir.Inst.Ref, statement: As
             .array_type_sentinel,
             .elem_type,
             .indexable_ptr_elem_type,
-            .vector_elem_type,
+            .vec_arr_elem_type,
             .vector_type,
             .indexable_ptr_len,
             .anyframe_type,
@@ -2901,7 +2901,6 @@ fn addEnsureResult(gz: *GenZir, maybe_unused_result: Zir.Inst.Ref, statement: As
             .extended => switch (gz.astgen.instructions.items(.data)[@intFromEnum(inst)].extended.opcode) {
                 .breakpoint,
                 .disable_instrumentation,
-                .fence,
                 .set_float_mode,
                 .set_align_stack,
                 .branch_hint,
@@ -3156,6 +3155,9 @@ fn deferStmt(
     const have_err_code = scope_tag == .defer_error and payload_token != 0;
     const sub_scope = if (!have_err_code) &defer_gen.base else blk: {
         const ident_name = try gz.astgen.identAsString(payload_token);
+        if (std.mem.eql(u8, tree.tokenSlice(payload_token), "_")) {
+            return gz.astgen.failTok(payload_token, "discard of error capture; omit it instead", .{});
+        }
         const remapped_err_code: Zir.Inst.Index = @enumFromInt(gz.astgen.instructions.len);
         opt_remapped_err_code = remapped_err_code.toOptional();
         try gz.astgen.instructions.append(gz.astgen.gpa, .{
@@ -9139,7 +9141,7 @@ fn minMax(
 ) InnerError!Zir.Inst.Ref {
     const astgen = gz.astgen;
     if (args.len < 2) {
-        return astgen.failNode(node, "expected at least 2 arguments, found 0", .{});
+        return astgen.failNode(node, "expected at least 2 arguments, found {}", .{args.len});
     }
     if (args.len == 2) {
         const tag: Zir.Inst.Tag = switch (op) {
@@ -9303,15 +9305,6 @@ fn builtinCall(
                 .rhs = options,
             });
             return rvalue(gz, ri, result, node);
-        },
-        .fence => {
-            const atomic_order_ty = try gz.addBuiltinValue(node, .atomic_order);
-            const order = try expr(gz, scope, .{ .rl = .{ .coerced_ty = atomic_order_ty } }, params[0]);
-            _ = try gz.addExtendedPayload(.fence, Zir.Inst.UnNode{
-                .node = gz.nodeIndexToRelative(node),
-                .operand = order,
-            });
-            return rvalue(gz, ri, .void_value, node);
         },
         .set_float_mode => {
             const float_mode_ty = try gz.addBuiltinValue(node, .float_mode);
@@ -9536,7 +9529,7 @@ fn builtinCall(
 
         .splat => {
             const result_type = try ri.rl.resultTypeForCast(gz, node, builtin_name);
-            const elem_type = try gz.addUnNode(.vector_elem_type, result_type, node);
+            const elem_type = try gz.addUnNode(.vec_arr_elem_type, result_type, node);
             const scalar = try expr(gz, scope, .{ .rl = .{ .ty = elem_type } }, params[0]);
             const result = try gz.addPlNode(.splat, node, Zir.Inst.Bin{
                 .lhs = result_type,

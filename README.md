@@ -11,7 +11,7 @@ to find and inspect the patch diffs.
  * LLVM, LLD, Clang 19.1.0
  * zlib 1.3.1
  * zstd 1.5.2
- * zig 0.14.0-dev.1622+2ac543388
+ * zig 0.14.0-dev.1876+41dbd0d0d
 
 For other versions, check the git tags of this repository.
 
@@ -102,16 +102,17 @@ is more portable across Linux distributions.
 | `aarch64_be-linux-musl`    | OK             |
 | `arm-linux-gnueabi`        | [#101](https://github.com/ziglang/zig-bootstrap/issues/101) |
 | `arm-linux-gnueabihf`      | [#102](https://github.com/ziglang/zig-bootstrap/issues/102) |
-| `arm-linux-musleabi`       | [#103](https://github.com/ziglang/zig-bootstrap/issues/103) |
-| `arm-linux-musleabihf`     | [#183](https://github.com/ziglang/zig-bootstrap/issues/183) |
+| `arm-linux-musleabi`       | OK             |
+| `arm-linux-musleabihf`     | OK             |
 | `armeb-linux-gnueabi`      | [#96](https://github.com/ziglang/zig-bootstrap/issues/96) |
 | `armeb-linux-gnueabihf`    | [#97](https://github.com/ziglang/zig-bootstrap/issues/97) |
-| `armeb-linux-musleabi`     | [#98](https://github.com/ziglang/zig-bootstrap/issues/98) |
-| `armeb-linux-musleabihf`   | [#99](https://github.com/ziglang/zig-bootstrap/issues/99) |
+| `armeb-linux-musleabi`     | OK             |
+| `armeb-linux-musleabihf`   | OK             |
 | `loongarch64-linux-gnu`    | OK             |
+| `loongarch64-linux-gnusf`  | OK             |
 | `loongarch64-linux-musl`   | OK             |
-| `mips-linux-gnueabi`       | OK             |
-| `mips-linux-gnueabihf`     | OK             |
+| `mips-linux-gnueabi`       | [#195](https://github.com/ziglang/zig-bootstrap/issues/195) |
+| `mips-linux-gnueabihf`     | [#196](https://github.com/ziglang/zig-bootstrap/issues/196) |
 | `mips-linux-musleabi`      | OK             |
 | `mips-linux-musleabihf`    | OK             |
 | `mips64-linux-gnuabi64`    | OK             |
@@ -136,15 +137,15 @@ is more portable across Linux distributions.
 | `riscv32-linux-musl`       | OK             |
 | `riscv64-linux-gnu`        | OK             |
 | `riscv64-linux-musl`       | OK             |
-| `s390x-linux-gnu`          | [#116](https://github.com/ziglang/zig-bootstrap/issues/116) |
-| `s390x-linux-musl`         | [#52](https://github.com/ziglang/bootstrap/issues/52) |
+| `s390x-linux-gnu`          | OK             |
+| `s390x-linux-musl`         | OK             |
 | `sparc-linux-gnu`          | [#117](https://github.com/ziglang/zig-bootstrap/issues/117) |
 | `sparc64-linux-gnu`        | [#172](https://github.com/ziglang/zig-bootstrap/issues/172) |
-| `thumb-linux-musleabi`     | [#176](https://github.com/ziglang/zig-bootstrap/issues/176) |
-| `thumb-linux-musleabihf`   | [#175](https://github.com/ziglang/zig-bootstrap/issues/175) |
-| `thumb-windows-gnu`        | [#105](https://github.com/ziglang/zig-bootstrap/issues/105) |
-| `thumbeb-linux-musleabi`   | [#180](https://github.com/ziglang/zig-bootstrap/issues/180) |
-| `thumbeb-linux-musleabihf` | [#179](https://github.com/ziglang/zig-bootstrap/issues/179) |
+| `thumb-linux-musleabi`     | OK             |
+| `thumb-linux-musleabihf`   | OK             |
+| `thumb-windows-gnu`        | OK             |
+| `thumbeb-linux-musleabi`   | OK             |
+| `thumbeb-linux-musleabihf` | OK             |
 | `x86-linux-gnu`            | OK             |
 | `x86-linux-musl`           | OK             |
 | `x86-windows-gnu`          | OK             |

@@ -1,13 +1,18 @@
-path: []const u8,
+path: Path,
 cpu_arch: ?std.Target.Cpu.Arch = null,
-args: std.ArrayListUnmanaged(Elf.SystemLib) = .empty,
+args: std.ArrayListUnmanaged(Arg) = .empty,
+
+pub const Arg = struct {
+    needed: bool = false,
+    path: []const u8,
+};
 
 pub fn deinit(scr: *LdScript, allocator: Allocator) void {
     scr.args.deinit(allocator);
 }
 
 pub const Error = error{
-    InvalidLdScript,
+    LinkFailure,
     UnexpectedToken,
     UnknownCpuArch,
     OutOfMemory,
@@ -32,12 +37,9 @@ pub fn parse(scr: *LdScript, data: []const u8, elf_file: *Elf) Error!void {
         try line_col.append(.{ .line = line, .column = column });
         switch (tok.id) {
             .invalid => {
-                try elf_file.reportParseError(scr.path, "invalid token in LD script: '{s}' ({d}:{d})", .{
-                    std.fmt.fmtSliceEscapeLower(tok.get(data)),
-                    line,
-                    column,
+                return elf_file.failParse(scr.path, "invalid token in LD script: '{s}' ({d}:{d})", .{
+                    std.fmt.fmtSliceEscapeLower(tok.get(data)), line, column,
                 });
-                return error.InvalidLdScript;
             },
             .new_line => {
                 line += 1;
@@ -50,7 +52,7 @@ pub fn parse(scr: *LdScript, data: []const u8, elf_file: *Elf) Error!void {
 
     var it = TokenIterator{ .tokens = tokens.items };
     var parser = Parser{ .source = data, .it = &it };
-    var args = std.ArrayList(Elf.SystemLib).init(gpa);
+    var args = std.ArrayList(Arg).init(gpa);
     scr.doParse(.{
         .parser = &parser,
         .args = &args,
@@ -59,13 +61,12 @@ pub fn parse(scr: *LdScript, data: []const u8, elf_file: *Elf) Error!void {
             const last_token_id = parser.it.pos - 1;
             const last_token = parser.it.get(last_token_id);
             const lcol = line_col.items[last_token_id];
-            try elf_file.reportParseError(scr.path, "unexpected token in LD script: {s}: '{s}' ({d}:{d})", .{
+            return elf_file.failParse(scr.path, "unexpected token in LD script: {s}: '{s}' ({d}:{d})", .{
                 @tagName(last_token.id),
                 last_token.get(data),
                 lcol.line,
                 lcol.column,
             });
-            return error.InvalidLdScript;
         },
         else => |e| return e,
     };
@@ -74,7 +75,7 @@ pub fn parse(scr: *LdScript, data: []const u8, elf_file: *Elf) Error!void {
 
 fn doParse(scr: *LdScript, ctx: struct {
     parser: *Parser,
-    args: *std.ArrayList(Elf.SystemLib),
+    args: *std.ArrayList(Arg),
 }) !void {
     while (true) {
         ctx.parser.skipAny(&.{ .comment, .new_line });
@@ -146,7 +147,7 @@ const Parser = struct {
         return error.UnknownCpuArch;
     }
 
-    fn group(p: *Parser, args: *std.ArrayList(Elf.SystemLib)) !void {
+    fn group(p: *Parser, args: *std.ArrayList(Arg)) !void {
         if (!p.skip(&.{.lparen})) return error.UnexpectedToken;
 
         while (true) {
@@ -166,7 +167,7 @@ const Parser = struct {
         _ = try p.require(.rparen);
     }
 
-    fn asNeeded(p: *Parser, args: *std.ArrayList(Elf.SystemLib)) !void {
+    fn asNeeded(p: *Parser, args: *std.ArrayList(Arg)) !void {
         if (!p.skip(&.{.lparen})) return error.UnexpectedToken;
 
         while (p.maybe(.literal)) |tok_id| {
@@ -243,7 +244,7 @@ const Token = struct {
 
     const Index = usize;
 
-    inline fn get(tok: Token, source: []const u8) []const u8 {
+    fn get(tok: Token, source: []const u8) []const u8 {
         return source[tok.start..tok.end];
     }
 };
@@ -403,11 +404,11 @@ const TokenIterator = struct {
         return it.tokens[it.pos];
     }
 
-    inline fn reset(it: *TokenIterator) void {
+    fn reset(it: *TokenIterator) void {
         it.pos = 0;
     }
 
-    inline fn seekTo(it: *TokenIterator, pos: Token.Index) void {
+    fn seekTo(it: *TokenIterator, pos: Token.Index) void {
         it.pos = pos;
     }
 
@@ -420,7 +421,7 @@ const TokenIterator = struct {
         }
     }
 
-    inline fn get(it: *TokenIterator, pos: Token.Index) Token {
+    fn get(it: *TokenIterator, pos: Token.Index) Token {
         assert(pos < it.tokens.len);
         return it.tokens[pos];
     }
@@ -430,6 +431,7 @@ const LdScript = @This();
 
 const std = @import("std");
 const assert = std.debug.assert;
+const Path = std.Build.Cache.Path;
 
 const Allocator = std.mem.Allocator;
 const Elf = @import("../Elf.zig");

@@ -1,4 +1,4 @@
-path: []const u8,
+path: Path,
 index: File.Index,
 
 header: ?elf.Elf64_Ehdr = null,
@@ -22,8 +22,8 @@ alive: bool,
 
 output_symtab_ctx: Elf.SymtabCtx = .{},
 
-pub fn isSharedObject(path: []const u8) !bool {
-    const file = try std.fs.cwd().openFile(path, .{});
+pub fn isSharedObject(path: Path) !bool {
+    const file = try path.root_dir.handle.openFile(path.sub_path, .{});
     defer file.close();
     const reader = file.reader();
     const header = reader.readStruct(elf.Elf64_Ehdr) catch return false;
@@ -34,7 +34,7 @@ pub fn isSharedObject(path: []const u8) !bool {
 }
 
 pub fn deinit(self: *SharedObject, allocator: Allocator) void {
-    allocator.free(self.path);
+    allocator.free(self.path.sub_path);
     self.shdrs.deinit(allocator);
     self.symtab.deinit(allocator);
     self.strtab.deinit(allocator);
@@ -58,24 +58,16 @@ pub fn parse(self: *SharedObject, elf_file: *Elf, handle: std.fs.File) !void {
 
     const em = elf_file.base.comp.root_mod.resolved_target.result.toElfMachine();
     if (em != self.header.?.e_machine) {
-        try elf_file.reportParseError2(
-            self.index,
-            "invalid ELF machine type: {s}",
-            .{@tagName(self.header.?.e_machine)},
-        );
-        return error.InvalidMachineType;
+        return elf_file.failFile(self.index, "invalid ELF machine type: {s}", .{
+            @tagName(self.header.?.e_machine),
+        });
     }
 
     const shoff = std.math.cast(usize, self.header.?.e_shoff) orelse return error.Overflow;
     const shnum = std.math.cast(usize, self.header.?.e_shnum) orelse return error.Overflow;
     const shsize = shnum * @sizeOf(elf.Elf64_Shdr);
     if (file_size < shoff or file_size < shoff + shsize) {
-        try elf_file.reportParseError2(
-            self.index,
-            "corrupted header: section header table extends past the end of file",
-            .{},
-        );
-        return error.MalformedObject;
+        return elf_file.failFile(self.index, "corrupted header: section header table extends past the end of file", .{});
     }
 
     const shdrs_buffer = try Elf.preadAllAlloc(gpa, handle, shoff, shsize);
@@ -90,8 +82,7 @@ pub fn parse(self: *SharedObject, elf_file: *Elf, handle: std.fs.File) !void {
     for (self.shdrs.items, 0..) |shdr, i| {
         if (shdr.sh_type != elf.SHT_NOBITS) {
             if (file_size < shdr.sh_offset or file_size < shdr.sh_offset + shdr.sh_size) {
-                try elf_file.reportParseError2(self.index, "corrupted section header", .{});
-                return error.MalformedObject;
+                return elf_file.failFile(self.index, "corrupted section header", .{});
             }
         }
         switch (shdr.sh_type) {
@@ -328,7 +319,7 @@ pub fn asFile(self: *SharedObject) File {
 
 fn verdefNum(self: *SharedObject) u32 {
     for (self.dynamic_table.items) |entry| switch (entry.d_tag) {
-        elf.DT_VERDEFNUM => return @as(u32, @intCast(entry.d_val)),
+        elf.DT_VERDEFNUM => return @intCast(entry.d_val),
         else => {},
     };
     return 0;
@@ -336,10 +327,10 @@ fn verdefNum(self: *SharedObject) u32 {
 
 pub fn soname(self: *SharedObject) []const u8 {
     for (self.dynamic_table.items) |entry| switch (entry.d_tag) {
-        elf.DT_SONAME => return self.getString(@as(u32, @intCast(entry.d_val))),
+        elf.DT_SONAME => return self.getString(@intCast(entry.d_val)),
         else => {},
     };
-    return std.fs.path.basename(self.path);
+    return std.fs.path.basename(self.path.sub_path);
 }
 
 pub fn initSymbolAliases(self: *SharedObject, elf_file: *Elf) !void {
@@ -517,6 +508,7 @@ const assert = std.debug.assert;
 const elf = std.elf;
 const log = std.log.scoped(.elf);
 const mem = std.mem;
+const Path = std.Build.Cache.Path;
 
 const Allocator = mem.Allocator;
 const Elf = @import("../Elf.zig");
