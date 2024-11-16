@@ -96,16 +96,16 @@ is more portable across Linux distributions.
 |----------------------------|----------------|
 | `aarch64-linux-gnu`        | OK             |
 | `aarch64-linux-musl`       | OK             |
-| `aarch64-macos-none`       | [#194](https://github.com/ziglang/zig-bootstrap/issues/194) |
+| `aarch64-macos-none`       | OK             |
 | `aarch64-windows-gnu`      | OK             |
 | `aarch64_be-linux-gnu`     | OK             |
 | `aarch64_be-linux-musl`    | OK             |
-| `arm-linux-gnueabi`        | [#101](https://github.com/ziglang/zig-bootstrap/issues/101) |
-| `arm-linux-gnueabihf`      | [#102](https://github.com/ziglang/zig-bootstrap/issues/102) |
+| `arm-linux-gnueabi`        | OK             |
+| `arm-linux-gnueabihf`      | OK             |
 | `arm-linux-musleabi`       | OK             |
 | `arm-linux-musleabihf`     | OK             |
-| `armeb-linux-gnueabi`      | [#96](https://github.com/ziglang/zig-bootstrap/issues/96) |
-| `armeb-linux-gnueabihf`    | [#97](https://github.com/ziglang/zig-bootstrap/issues/97) |
+| `armeb-linux-gnueabi`      | OK             |
+| `armeb-linux-gnueabihf`    | OK             |
 | `armeb-linux-musleabi`     | OK             |
 | `armeb-linux-musleabihf`   | OK             |
 | `loongarch64-linux-gnu`    | OK             |
@@ -158,7 +158,6 @@ is more portable across Linux distributions.
 
 #### Other Notable Targets Known to Work
 
- * `aarch64-macos-none` with mcpu value of `apple_a14`.
  * `arm-linux-musleabi` with mcpu value of `generic+v6kz`. This produces a
    build of Zig that runs on the RPi 1 and RPi Zero.
    - If you want to produce a build for this CPU exactly, use `arm1176jzf_s`.
