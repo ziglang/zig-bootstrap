@@ -1,3 +1,7 @@
+pub const Atom = @import("MachO/Atom.zig");
+pub const DebugSymbols = @import("MachO/DebugSymbols.zig");
+pub const Relocation = @import("MachO/Relocation.zig");
+
 base: link.File,
 
 rpath_list: []const []const u8,
@@ -100,7 +104,6 @@ debug_rnglists_sect_index: ?u8 = null,
 has_tlv: AtomicBool = AtomicBool.init(false),
 binds_to_weak: AtomicBool = AtomicBool.init(false),
 weak_defines: AtomicBool = AtomicBool.init(false),
-has_errors: AtomicBool = AtomicBool.init(false),
 
 /// Options
 /// SDK layout
@@ -115,8 +118,8 @@ headerpad_max_install_names: bool,
 dead_strip_dylibs: bool,
 /// Treatment of undefined symbols
 undefined_treatment: UndefinedTreatment,
-/// Resolved list of library search directories
-lib_dirs: []const []const u8,
+/// TODO: delete this, libraries need to be resolved by the frontend instead
+lib_directories: []const Directory,
 /// Resolved list of framework search directories
 framework_dirs: []const []const u8,
 /// List of input frameworks
@@ -214,7 +217,8 @@ pub fn createEmpty(
         .platform = Platform.fromTarget(target),
         .sdk_version = if (options.darwin_sdk_layout) |layout| inferSdkVersion(comp, layout) else null,
         .undefined_treatment = if (allow_shlib_undefined) .dynamic_lookup else .@"error",
-        .lib_dirs = options.lib_dirs,
+        // TODO delete this, directories must instead be resolved by the frontend
+        .lib_directories = options.lib_directories,
         .framework_dirs = options.framework_dirs,
         .force_load_objc = options.force_load_objc,
     };
@@ -347,6 +351,7 @@ pub fn flushModule(self: *MachO, arena: Allocator, tid: Zcu.PerThread.Id, prog_n
 
     const comp = self.base.comp;
     const gpa = comp.gpa;
+    const diags = &self.base.comp.link_diags;
 
     if (self.llvm_object) |llvm_object| {
         try self.base.emitLlvmObject(arena, llvm_object, prog_node);
@@ -371,53 +376,43 @@ pub fn flushModule(self: *MachO, arena: Allocator, tid: Zcu.PerThread.Id, prog_n
     if (self.base.isStaticLib()) return relocatable.flushStaticLib(self, comp, module_obj_path);
     if (self.base.isObject()) return relocatable.flushObject(self, comp, module_obj_path);
 
-    var positionals = std.ArrayList(Compilation.LinkObject).init(gpa);
+    var positionals = std.ArrayList(link.Input).init(gpa);
     defer positionals.deinit();
 
-    try positionals.ensureUnusedCapacity(comp.objects.len);
-    positionals.appendSliceAssumeCapacity(comp.objects);
+    try positionals.ensureUnusedCapacity(comp.link_inputs.len);
+
+    for (comp.link_inputs) |link_input| switch (link_input) {
+        .dso => continue, // handled below
+        .object, .archive => positionals.appendAssumeCapacity(link_input),
+        .dso_exact => @panic("TODO"),
+        .res => unreachable,
+    };
 
     // This is a set of object files emitted by clang in a single `build-exe` invocation.
     // For instance, the implicit `a.o` as compiled by `zig build-exe a.c` will end up
     // in this set.
     try positionals.ensureUnusedCapacity(comp.c_object_table.keys().len);
     for (comp.c_object_table.keys()) |key| {
-        positionals.appendAssumeCapacity(.{ .path = key.status.success.object_path });
+        positionals.appendAssumeCapacity(try link.openObjectInput(diags, key.status.success.object_path));
     }
 
-    if (module_obj_path) |path| try positionals.append(.{ .path = path });
+    if (module_obj_path) |path| try positionals.append(try link.openObjectInput(diags, path));
 
     if (comp.config.any_sanitize_thread) {
-        try positionals.append(.{ .path = comp.tsan_lib.?.full_object_path });
+        try positionals.append(try link.openObjectInput(diags, comp.tsan_lib.?.full_object_path));
     }
 
     if (comp.config.any_fuzz) {
-        try positionals.append(.{ .path = comp.fuzzer_lib.?.full_object_path });
+        try positionals.append(try link.openObjectInput(diags, comp.fuzzer_lib.?.full_object_path));
     }
 
-    for (positionals.items) |obj| {
-        self.classifyInputFile(obj.path, .{ .path = obj.path }, obj.must_link) catch |err| switch (err) {
-            error.UnknownFileType => try self.reportParseError(obj.path, "unknown file type for an input file", .{}),
-            else => |e| try self.reportParseError(
-                obj.path,
-                "unexpected error: reading input file failed with error {s}",
-                .{@errorName(e)},
-            ),
-        };
+    for (positionals.items) |link_input| {
+        self.classifyInputFile(link_input) catch |err|
+            diags.addParseError(link_input.path().?, "failed to read input file: {s}", .{@errorName(err)});
     }
 
     var system_libs = std.ArrayList(SystemLib).init(gpa);
     defer system_libs.deinit();
-
-    // libs
-    try system_libs.ensureUnusedCapacity(comp.system_libs.values().len);
-    for (comp.system_libs.values()) |info| {
-        system_libs.appendAssumeCapacity(.{
-            .needed = info.needed,
-            .weak = info.weak,
-            .path = info.path.?,
-        });
-    }
 
     // frameworks
     try system_libs.ensureUnusedCapacity(self.frameworks.len);
@@ -442,46 +437,51 @@ pub fn flushModule(self: *MachO, arena: Allocator, tid: Zcu.PerThread.Id, prog_n
         else => |e| return e, // TODO: convert into an error
     };
 
+    for (comp.link_inputs) |link_input| switch (link_input) {
+        .object, .archive, .dso_exact => continue,
+        .res => unreachable,
+        .dso => {
+            self.classifyInputFile(link_input) catch |err|
+                diags.addParseError(link_input.path().?, "failed to parse input file: {s}", .{@errorName(err)});
+        },
+    };
+
     for (system_libs.items) |lib| {
-        self.classifyInputFile(lib.path, lib, false) catch |err| switch (err) {
-            error.UnknownFileType => try self.reportParseError(lib.path, "unknown file type for an input file", .{}),
-            else => |e| try self.reportParseError(
-                lib.path,
-                "unexpected error: parsing input file failed with error {s}",
-                .{@errorName(e)},
-            ),
-        };
+        switch (Compilation.classifyFileExt(lib.path.sub_path)) {
+            .shared_library => {
+                const dso_input = try link.openDsoInput(diags, lib.path, lib.needed, lib.weak, lib.reexport);
+                self.classifyInputFile(dso_input) catch |err|
+                    diags.addParseError(lib.path, "failed to parse input file: {s}", .{@errorName(err)});
+            },
+            .static_library => {
+                const archive_input = try link.openArchiveInput(diags, lib.path, lib.must_link, lib.hidden);
+                self.classifyInputFile(archive_input) catch |err|
+                    diags.addParseError(lib.path, "failed to parse input file: {s}", .{@errorName(err)});
+            },
+            else => unreachable,
+        }
     }
 
     // Finally, link against compiler_rt.
-    const compiler_rt_path: ?Path = blk: {
-        if (comp.compiler_rt_lib) |x| break :blk x.full_object_path;
-        if (comp.compiler_rt_obj) |x| break :blk x.full_object_path;
-        break :blk null;
-    };
-    if (compiler_rt_path) |path| {
-        self.classifyInputFile(path, .{ .path = path }, false) catch |err| switch (err) {
-            error.UnknownFileType => try self.reportParseError(path, "unknown file type for an input file", .{}),
-            else => |e| try self.reportParseError(
-                path,
-                "unexpected error: parsing input file failed with error {s}",
-                .{@errorName(e)},
-            ),
-        };
+    if (comp.compiler_rt_lib) |crt_file| {
+        const path = crt_file.full_object_path;
+        self.classifyInputFile(try link.openArchiveInput(diags, path, false, false)) catch |err|
+            diags.addParseError(path, "failed to parse archive: {s}", .{@errorName(err)});
+    } else if (comp.compiler_rt_obj) |crt_file| {
+        const path = crt_file.full_object_path;
+        self.classifyInputFile(try link.openObjectInput(diags, path)) catch |err|
+            diags.addParseError(path, "failed to parse archive: {s}", .{@errorName(err)});
     }
 
     try self.parseInputFiles();
     self.parseDependentDylibs() catch |err| {
         switch (err) {
             error.MissingLibraryDependencies => {},
-            else => |e| try self.reportUnexpectedError(
-                "unexpected error while parsing dependent libraries: {s}",
-                .{@errorName(e)},
-            ),
+            else => |e| return diags.fail("failed to parse dependent libraries: {s}", .{@errorName(e)}),
         }
     };
 
-    if (self.base.hasErrors()) return error.FlushFailure;
+    if (diags.hasErrors()) return error.FlushFailure;
 
     {
         const index = @as(File.Index, @intCast(try self.files.addOne(gpa)));
@@ -502,10 +502,7 @@ pub fn flushModule(self: *MachO, arena: Allocator, tid: Zcu.PerThread.Id, prog_n
 
     self.checkDuplicates() catch |err| switch (err) {
         error.HasDuplicates => return error.FlushFailure,
-        else => |e| {
-            try self.reportUnexpectedError("unexpected error while checking for duplicate symbol definitions", .{});
-            return e;
-        },
+        else => |e| return diags.fail("failed to check for duplicate symbol definitions: {s}", .{@errorName(e)}),
     };
 
     self.markImportsAndExports();
@@ -520,10 +517,7 @@ pub fn flushModule(self: *MachO, arena: Allocator, tid: Zcu.PerThread.Id, prog_n
 
     self.scanRelocs() catch |err| switch (err) {
         error.HasUndefinedSymbols => return error.FlushFailure,
-        else => |e| {
-            try self.reportUnexpectedError("unexpected error while scanning relocations", .{});
-            return e;
-        },
+        else => |e| return diags.fail("failed to scan relocations: {s}", .{@errorName(e)}),
     };
 
     try self.initOutputSections();
@@ -623,9 +617,12 @@ fn dumpArgv(self: *MachO, comp: *Compilation) !void {
     }
 
     if (self.base.isRelocatable()) {
-        for (comp.objects) |obj| {
-            try argv.append(try obj.path.toString(arena));
-        }
+        for (comp.link_inputs) |link_input| switch (link_input) {
+            .object, .archive => |obj| try argv.append(try obj.path.toString(arena)),
+            .res => |res| try argv.append(try res.path.toString(arena)),
+            .dso => |dso| try argv.append(try dso.path.toString(arena)),
+            .dso_exact => |dso_exact| try argv.appendSlice(&.{ "-l", dso_exact.name }),
+        };
 
         for (comp.c_object_table.keys()) |key| {
             try argv.append(try key.status.success.object_path.toString(arena));
@@ -705,13 +702,15 @@ fn dumpArgv(self: *MachO, comp: *Compilation) !void {
             try argv.append("dynamic_lookup");
         }
 
-        for (comp.objects) |obj| {
-            // TODO: verify this
-            if (obj.must_link) {
-                try argv.append("-force_load");
-            }
-            try argv.append(try obj.path.toString(arena));
-        }
+        for (comp.link_inputs) |link_input| switch (link_input) {
+            .dso => continue, // handled below
+            .res => unreachable, // windows only
+            .object, .archive => |obj| {
+                if (obj.must_link) try argv.append("-force_load"); // TODO: verify this
+                try argv.append(try obj.path.toString(arena));
+            },
+            .dso_exact => |dso_exact| try argv.appendSlice(&.{ "-l", dso_exact.name }),
+        };
 
         for (comp.c_object_table.keys()) |key| {
             try argv.append(try key.status.success.object_path.toString(arena));
@@ -730,21 +729,25 @@ fn dumpArgv(self: *MachO, comp: *Compilation) !void {
             try argv.append(try comp.fuzzer_lib.?.full_object_path.toString(arena));
         }
 
-        for (self.lib_dirs) |lib_dir| {
-            const arg = try std.fmt.allocPrint(arena, "-L{s}", .{lib_dir});
+        for (self.lib_directories) |lib_directory| {
+            // TODO delete this, directories must instead be resolved by the frontend
+            const arg = try std.fmt.allocPrint(arena, "-L{s}", .{lib_directory.path orelse "."});
             try argv.append(arg);
         }
 
-        for (comp.system_libs.keys()) |l_name| {
-            const info = comp.system_libs.get(l_name).?;
-            const arg = if (info.needed)
-                try std.fmt.allocPrint(arena, "-needed-l{s}", .{l_name})
-            else if (info.weak)
-                try std.fmt.allocPrint(arena, "-weak-l{s}", .{l_name})
-            else
-                try std.fmt.allocPrint(arena, "-l{s}", .{l_name});
-            try argv.append(arg);
-        }
+        for (comp.link_inputs) |link_input| switch (link_input) {
+            .object, .archive, .dso_exact => continue, // handled above
+            .res => unreachable, // windows only
+            .dso => |dso| {
+                if (dso.needed) {
+                    try argv.appendSlice(&.{ "-needed-l", try dso.path.toString(arena) });
+                } else if (dso.weak) {
+                    try argv.appendSlice(&.{ "-weak-l", try dso.path.toString(arena) });
+                } else {
+                    try argv.appendSlice(&.{ "-l", try dso.path.toString(arena) });
+                }
+            },
+        };
 
         for (self.framework_dirs) |f_dir| {
             try argv.append("-F");
@@ -778,12 +781,15 @@ fn dumpArgv(self: *MachO, comp: *Compilation) !void {
     Compilation.dump_argv(argv.items);
 }
 
+/// TODO delete this, libsystem must be resolved when setting up the compilation pipeline
 pub fn resolveLibSystem(
     self: *MachO,
     arena: Allocator,
     comp: *Compilation,
     out_libs: anytype,
 ) !void {
+    const diags = &self.base.comp.link_diags;
+
     var test_path = std.ArrayList(u8).init(arena);
     var checked_paths = std.ArrayList([]const u8).init(arena);
 
@@ -799,11 +805,11 @@ pub fn resolveLibSystem(
             },
         };
 
-        for (self.lib_dirs) |dir| {
-            if (try accessLibPath(arena, &test_path, &checked_paths, dir, "System")) break :success;
+        for (self.lib_directories) |directory| {
+            if (try accessLibPath(arena, &test_path, &checked_paths, directory.path orelse ".", "System")) break :success;
         }
 
-        try self.reportMissingLibraryError(checked_paths.items, "unable to find libSystem system library", .{});
+        diags.addMissingLibraryError(checked_paths.items, "unable to find libSystem system library", .{});
         return error.MissingLibSystem;
     }
 
@@ -814,13 +820,14 @@ pub fn resolveLibSystem(
     });
 }
 
-pub fn classifyInputFile(self: *MachO, path: Path, lib: SystemLib, must_link: bool) !void {
+pub fn classifyInputFile(self: *MachO, input: link.Input) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    const path, const file = input.pathAndFile().?;
+    // TODO don't classify now, it's too late. The input file has already been classified
     log.debug("classifying input file {}", .{path});
 
-    const file = try path.root_dir.handle.openFile(path.sub_path, .{});
     const fh = try self.addFileHandle(file);
     var buffer: [Archive.SARMAG]u8 = undefined;
 
@@ -831,20 +838,21 @@ pub fn classifyInputFile(self: *MachO, path: Path, lib: SystemLib, must_link: bo
         if (h.magic != macho.MH_MAGIC_64) break :blk;
         switch (h.filetype) {
             macho.MH_OBJECT => try self.addObject(path, fh, offset),
-            macho.MH_DYLIB => _ = try self.addDylib(lib, true, fh, offset),
+            macho.MH_DYLIB => _ = try self.addDylib(.fromLinkInput(input), true, fh, offset),
             else => return error.UnknownFileType,
         }
         return;
     }
     if (readArMagic(file, offset, &buffer) catch null) |ar_magic| blk: {
         if (!mem.eql(u8, ar_magic, Archive.ARMAG)) break :blk;
-        try self.addArchive(lib, must_link, fh, fat_arch);
+        try self.addArchive(input.archive, fh, fat_arch);
         return;
     }
-    _ = try self.addTbd(lib, true, fh);
+    _ = try self.addTbd(.fromLinkInput(input), true, fh);
 }
 
 fn parseFatFile(self: *MachO, file: std.fs.File, path: Path) !?fat.Arch {
+    const diags = &self.base.comp.link_diags;
     const fat_h = fat.readFatHeader(file) catch return null;
     if (fat_h.magic != macho.FAT_MAGIC and fat_h.magic != macho.FAT_MAGIC_64) return null;
     var fat_archs_buffer: [2]fat.Arch = undefined;
@@ -853,10 +861,7 @@ fn parseFatFile(self: *MachO, file: std.fs.File, path: Path) !?fat.Arch {
     for (fat_archs) |arch| {
         if (arch.tag == cpu_arch) return arch;
     }
-    try self.reportParseError(path, "missing arch in universal file: expected {s}", .{
-        @tagName(cpu_arch),
-    });
-    return error.MissingCpuArch;
+    return diags.failParse(path, "missing arch in universal file: expected {s}", .{@tagName(cpu_arch)});
 }
 
 pub fn readMachHeader(file: std.fs.File, offset: usize) !macho.mach_header_64 {
@@ -901,22 +906,18 @@ pub fn parseInputFiles(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    const tp = self.base.comp.thread_pool;
-    var wg: WaitGroup = .{};
+    const diags = &self.base.comp.link_diags;
 
     {
-        wg.reset();
-        defer wg.wait();
-
         for (self.objects.items) |index| {
-            tp.spawnWg(&wg, parseInputFileWorker, .{ self, self.getFile(index).? });
+            parseInputFileWorker(self, self.getFile(index).?);
         }
         for (self.dylibs.items) |index| {
-            tp.spawnWg(&wg, parseInputFileWorker, .{ self, self.getFile(index).? });
+            parseInputFileWorker(self, self.getFile(index).?);
         }
     }
 
-    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailure;
+    if (diags.hasErrors()) return error.LinkFailure;
 }
 
 fn parseInputFileWorker(self: *MachO, file: File) void {
@@ -928,13 +929,13 @@ fn parseInputFileWorker(self: *MachO, file: File) void {
             error.InvalidMachineType,
             error.InvalidTarget,
             => {}, // already reported
+
             else => |e| self.reportParseError2(file.getIndex(), "unexpected error: parsing input file failed with error {s}", .{@errorName(e)}) catch {},
         }
-        _ = self.has_errors.swap(true, .seq_cst);
     };
 }
 
-fn addArchive(self: *MachO, lib: SystemLib, must_link: bool, handle: File.HandleIndex, fat_arch: ?fat.Arch) !void {
+fn addArchive(self: *MachO, lib: link.Input.Object, handle: File.HandleIndex, fat_arch: ?fat.Arch) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
@@ -949,7 +950,7 @@ fn addArchive(self: *MachO, lib: SystemLib, must_link: bool, handle: File.Handle
         self.files.set(index, .{ .object = unpacked });
         const object = &self.files.items(.data)[index].object;
         object.index = index;
-        object.alive = must_link or lib.needed; // TODO: or self.options.all_load;
+        object.alive = lib.must_link; // TODO: or self.options.all_load;
         object.hidden = lib.hidden;
         try self.objects.append(gpa, index);
     }
@@ -1024,6 +1025,7 @@ fn isHoisted(self: *MachO, install_name: []const u8) bool {
     return false;
 }
 
+/// TODO delete this, libraries must be instead resolved when instantiating the compilation pipeline
 fn accessLibPath(
     arena: Allocator,
     test_path: *std.ArrayList(u8),
@@ -1082,8 +1084,10 @@ fn parseDependentDylibs(self: *MachO) !void {
     if (self.dylibs.items.len == 0) return;
 
     const gpa = self.base.comp.gpa;
-    const lib_dirs = self.lib_dirs;
     const framework_dirs = self.framework_dirs;
+
+    // TODO delete this, directories must instead be resolved by the frontend
+    const lib_directories = self.lib_directories;
 
     var arena_alloc = std.heap.ArenaAllocator.init(gpa);
     defer arena_alloc.deinit();
@@ -1125,9 +1129,9 @@ fn parseDependentDylibs(self: *MachO) !void {
 
                     // Library
                     const lib_name = eatPrefix(stem, "lib") orelse stem;
-                    for (lib_dirs) |dir| {
+                    for (lib_directories) |lib_directory| {
                         test_path.clearRetainingCapacity();
-                        if (try accessLibPath(arena, &test_path, &checked_paths, dir, lib_name)) break :full_path test_path.items;
+                        if (try accessLibPath(arena, &test_path, &checked_paths, lib_directory.path orelse ".", lib_name)) break :full_path test_path.items;
                     }
                 }
 
@@ -1295,19 +1299,16 @@ fn markLive(self: *MachO) void {
 }
 
 fn convertTentativeDefsAndResolveSpecialSymbols(self: *MachO) !void {
-    const tp = self.base.comp.thread_pool;
-    var wg: WaitGroup = .{};
+    const diags = &self.base.comp.link_diags;
     {
-        wg.reset();
-        defer wg.wait();
         for (self.objects.items) |index| {
-            tp.spawnWg(&wg, convertTentativeDefinitionsWorker, .{ self, self.getFile(index).?.object });
+            convertTentativeDefinitionsWorker(self, self.getFile(index).?.object);
         }
         if (self.getInternalObject()) |obj| {
-            tp.spawnWg(&wg, resolveSpecialSymbolsWorker, .{ self, obj });
+            resolveSpecialSymbolsWorker(self, obj);
         }
     }
-    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailure;
+    if (diags.hasErrors()) return error.LinkFailure;
 }
 
 fn convertTentativeDefinitionsWorker(self: *MachO, object: *Object) void {
@@ -1319,26 +1320,19 @@ fn convertTentativeDefinitionsWorker(self: *MachO, object: *Object) void {
             "unexpected error occurred while converting tentative symbols into defined symbols: {s}",
             .{@errorName(err)},
         ) catch {};
-        _ = self.has_errors.swap(true, .seq_cst);
     };
 }
 
 fn resolveSpecialSymbolsWorker(self: *MachO, obj: *InternalObject) void {
     const tracy = trace(@src());
     defer tracy.end();
-    obj.resolveBoundarySymbols(self) catch |err| {
-        self.reportUnexpectedError("unexpected error occurred while resolving boundary symbols: {s}", .{
-            @errorName(err),
-        }) catch {};
-        _ = self.has_errors.swap(true, .seq_cst);
-        return;
-    };
-    obj.resolveObjcMsgSendSymbols(self) catch |err| {
-        self.reportUnexpectedError("unexpected error occurred while resolving ObjC msgsend stubs: {s}", .{
-            @errorName(err),
-        }) catch {};
-        _ = self.has_errors.swap(true, .seq_cst);
-    };
+
+    const diags = &self.base.comp.link_diags;
+
+    obj.resolveBoundarySymbols(self) catch |err|
+        return diags.addError("failed to resolve boundary symbols: {s}", .{@errorName(err)});
+    obj.resolveObjcMsgSendSymbols(self) catch |err|
+        return diags.addError("failed to resolve ObjC msgsend stubs: {s}", .{@errorName(err)});
 }
 
 pub fn dedupLiterals(self: *MachO) !void {
@@ -1359,19 +1353,15 @@ pub fn dedupLiterals(self: *MachO) !void {
         try object.resolveLiterals(&lp, self);
     }
 
-    const tp = self.base.comp.thread_pool;
-    var wg: WaitGroup = .{};
     {
-        wg.reset();
-        defer wg.wait();
         if (self.getZigObject()) |zo| {
-            tp.spawnWg(&wg, File.dedupLiterals, .{ zo.asFile(), lp, self });
+            File.dedupLiterals(zo.asFile(), lp, self);
         }
         for (self.objects.items) |index| {
-            tp.spawnWg(&wg, File.dedupLiterals, .{ self.getFile(index).?, lp, self });
+            File.dedupLiterals(self.getFile(index).?, lp, self);
         }
         if (self.getInternalObject()) |object| {
-            tp.spawnWg(&wg, File.dedupLiterals, .{ object.asFile(), lp, self });
+            File.dedupLiterals(object.asFile(), lp, self);
         }
     }
 }
@@ -1389,23 +1379,21 @@ fn checkDuplicates(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    const tp = self.base.comp.thread_pool;
-    var wg: WaitGroup = .{};
+    const diags = &self.base.comp.link_diags;
+
     {
-        wg.reset();
-        defer wg.wait();
         if (self.getZigObject()) |zo| {
-            tp.spawnWg(&wg, checkDuplicatesWorker, .{ self, zo.asFile() });
+            checkDuplicatesWorker(self, zo.asFile());
         }
         for (self.objects.items) |index| {
-            tp.spawnWg(&wg, checkDuplicatesWorker, .{ self, self.getFile(index).? });
+            checkDuplicatesWorker(self, self.getFile(index).?);
         }
         if (self.getInternalObject()) |obj| {
-            tp.spawnWg(&wg, checkDuplicatesWorker, .{ self, obj.asFile() });
+            checkDuplicatesWorker(self, obj.asFile());
         }
     }
 
-    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailure;
+    if (diags.hasErrors()) return error.LinkFailure;
 
     try self.reportDuplicates();
 }
@@ -1417,7 +1405,6 @@ fn checkDuplicatesWorker(self: *MachO, file: File) void {
         self.reportParseError2(file.getIndex(), "failed to check for duplicate definitions: {s}", .{
             @errorName(err),
         }) catch {};
-        _ = self.has_errors.swap(true, .seq_cst);
     };
 }
 
@@ -1459,25 +1446,21 @@ fn scanRelocs(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
-    const tp = self.base.comp.thread_pool;
-    var wg: WaitGroup = .{};
+    const diags = &self.base.comp.link_diags;
 
     {
-        wg.reset();
-        defer wg.wait();
-
         if (self.getZigObject()) |zo| {
-            tp.spawnWg(&wg, scanRelocsWorker, .{ self, zo.asFile() });
+            scanRelocsWorker(self, zo.asFile());
         }
         for (self.objects.items) |index| {
-            tp.spawnWg(&wg, scanRelocsWorker, .{ self, self.getFile(index).? });
+            scanRelocsWorker(self, self.getFile(index).?);
         }
         if (self.getInternalObject()) |obj| {
-            tp.spawnWg(&wg, scanRelocsWorker, .{ self, obj.asFile() });
+            scanRelocsWorker(self, obj.asFile());
         }
     }
 
-    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailure;
+    if (diags.hasErrors()) return error.LinkFailure;
 
     if (self.getInternalObject()) |obj| {
         try obj.checkUndefs(self);
@@ -1503,7 +1486,6 @@ fn scanRelocsWorker(self: *MachO, file: File) void {
         self.reportParseError2(file.getIndex(), "failed to scan relocations: {s}", .{
             @errorName(err),
         }) catch {};
-        _ = self.has_errors.swap(true, .seq_cst);
     };
 }
 
@@ -1527,6 +1509,7 @@ fn reportUndefs(self: *MachO) !void {
     if (self.undefs.keys().len == 0) return; // Nothing to do
 
     const gpa = self.base.comp.gpa;
+    const diags = &self.base.comp.link_diags;
     const max_notes = 4;
 
     // We will sort by name, and then by file to ensure deterministic output.
@@ -1558,7 +1541,7 @@ fn reportUndefs(self: *MachO) !void {
             break :nnotes @min(nnotes, max_notes) + @intFromBool(nnotes > max_notes);
         };
 
-        var err = try self.base.addErrorWithNotes(nnotes);
+        var err = try diags.addErrorWithNotes(nnotes);
         try err.addMsg("undefined symbol: {s}", .{undef_sym.getName(self)});
 
         switch (notes) {
@@ -1908,6 +1891,7 @@ fn calcSectionSizes(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
 
+    const diags = &self.base.comp.link_diags;
     const cpu_arch = self.getTarget().cpu.arch;
 
     if (self.data_sect_index) |idx| {
@@ -1916,42 +1900,38 @@ fn calcSectionSizes(self: *MachO) !void {
         header.@"align" = 3;
     }
 
-    const tp = self.base.comp.thread_pool;
-    var wg: WaitGroup = .{};
     {
-        wg.reset();
-        defer wg.wait();
         const slice = self.sections.slice();
         for (slice.items(.header), slice.items(.atoms), 0..) |header, atoms, i| {
             if (atoms.items.len == 0) continue;
             if (self.requiresThunks() and header.isCode()) continue;
-            tp.spawnWg(&wg, calcSectionSizeWorker, .{ self, @as(u8, @intCast(i)) });
+            calcSectionSizeWorker(self, @as(u8, @intCast(i)));
         }
 
         if (self.requiresThunks()) {
             for (slice.items(.header), slice.items(.atoms), 0..) |header, atoms, i| {
                 if (!header.isCode()) continue;
                 if (atoms.items.len == 0) continue;
-                tp.spawnWg(&wg, createThunksWorker, .{ self, @as(u8, @intCast(i)) });
+                createThunksWorker(self, @as(u8, @intCast(i)));
             }
         }
 
         // At this point, we can also calculate most of the symtab and data-in-code linkedit section sizes
         if (self.getZigObject()) |zo| {
-            tp.spawnWg(&wg, File.calcSymtabSize, .{ zo.asFile(), self });
+            File.calcSymtabSize(zo.asFile(), self);
         }
         for (self.objects.items) |index| {
-            tp.spawnWg(&wg, File.calcSymtabSize, .{ self.getFile(index).?, self });
+            File.calcSymtabSize(self.getFile(index).?, self);
         }
         for (self.dylibs.items) |index| {
-            tp.spawnWg(&wg, File.calcSymtabSize, .{ self.getFile(index).?, self });
+            File.calcSymtabSize(self.getFile(index).?, self);
         }
         if (self.getInternalObject()) |obj| {
-            tp.spawnWg(&wg, File.calcSymtabSize, .{ obj.asFile(), self });
+            File.calcSymtabSize(obj.asFile(), self);
         }
     }
 
-    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailure;
+    if (diags.hasErrors()) return error.LinkFailure;
 
     try self.calcSymtabSize();
 
@@ -2003,6 +1983,9 @@ fn calcSectionSizes(self: *MachO) !void {
 fn calcSectionSizeWorker(self: *MachO, sect_id: u8) void {
     const tracy = trace(@src());
     defer tracy.end();
+
+    const diags = &self.base.comp.link_diags;
+
     const doWork = struct {
         fn doWork(macho_file: *MachO, header: *macho.section_64, atoms: []const Ref) !void {
             for (atoms) |ref| {
@@ -2020,32 +2003,29 @@ fn calcSectionSizeWorker(self: *MachO, sect_id: u8) void {
     const header = &slice.items(.header)[sect_id];
     const atoms = slice.items(.atoms)[sect_id].items;
     doWork(self, header, atoms) catch |err| {
-        self.reportUnexpectedError("failed to calculate size of section '{s},{s}': {s}", .{
-            header.segName(),
-            header.sectName(),
-            @errorName(err),
-        }) catch {};
-        _ = self.has_errors.swap(true, .seq_cst);
+        try diags.addError("failed to calculate size of section '{s},{s}': {s}", .{
+            header.segName(), header.sectName(), @errorName(err),
+        });
     };
 }
 
 fn createThunksWorker(self: *MachO, sect_id: u8) void {
     const tracy = trace(@src());
     defer tracy.end();
+    const diags = &self.base.comp.link_diags;
     self.createThunks(sect_id) catch |err| {
         const header = self.sections.items(.header)[sect_id];
-        self.reportUnexpectedError("failed to create thunks and calculate size of section '{s},{s}': {s}", .{
-            header.segName(),
-            header.sectName(),
-            @errorName(err),
-        }) catch {};
-        _ = self.has_errors.swap(true, .seq_cst);
+        diags.addError("failed to create thunks and calculate size of section '{s},{s}': {s}", .{
+            header.segName(), header.sectName(), @errorName(err),
+        });
     };
 }
 
 fn generateUnwindInfo(self: *MachO) !void {
     const tracy = trace(@src());
     defer tracy.end();
+
+    const diags = &self.base.comp.link_diags;
 
     if (self.eh_frame_sect_index) |index| {
         const sect = &self.sections.items(.header)[index];
@@ -2055,10 +2035,7 @@ fn generateUnwindInfo(self: *MachO) !void {
     if (self.unwind_info_sect_index) |index| {
         const sect = &self.sections.items(.header)[index];
         self.unwind_info.generate(self) catch |err| switch (err) {
-            error.TooManyPersonalities => return self.reportUnexpectedError(
-                "too many personalities in unwind info",
-                .{},
-            ),
+            error.TooManyPersonalities => return diags.fail("too many personalities in unwind info", .{}),
             else => |e| return e,
         };
         sect.size = self.unwind_info.calcSize();
@@ -2427,29 +2404,25 @@ fn writeSectionsAndUpdateLinkeditSizes(self: *MachO) !void {
     defer tracy.end();
 
     const gpa = self.base.comp.gpa;
+    const diags = &self.base.comp.link_diags;
 
     const cmd = self.symtab_cmd;
     try self.symtab.resize(gpa, cmd.nsyms);
     try self.strtab.resize(gpa, cmd.strsize);
     self.strtab.items[0] = 0;
 
-    const tp = self.base.comp.thread_pool;
-    var wg: WaitGroup = .{};
     {
-        wg.reset();
-        defer wg.wait();
-
         for (self.objects.items) |index| {
-            tp.spawnWg(&wg, writeAtomsWorker, .{ self, self.getFile(index).? });
+            writeAtomsWorker(self, self.getFile(index).?);
         }
         if (self.getZigObject()) |zo| {
-            tp.spawnWg(&wg, writeAtomsWorker, .{ self, zo.asFile() });
+            writeAtomsWorker(self, zo.asFile());
         }
         if (self.getInternalObject()) |obj| {
-            tp.spawnWg(&wg, writeAtomsWorker, .{ self, obj.asFile() });
+            writeAtomsWorker(self, obj.asFile());
         }
         for (self.thunks.items) |thunk| {
-            tp.spawnWg(&wg, writeThunkWorker, .{ self, thunk });
+            writeThunkWorker(self, thunk);
         }
 
         const slice = self.sections.slice();
@@ -2464,38 +2437,38 @@ fn writeSectionsAndUpdateLinkeditSizes(self: *MachO) !void {
         }) |maybe_sect_id| {
             if (maybe_sect_id) |sect_id| {
                 const out = slice.items(.out)[sect_id].items;
-                tp.spawnWg(&wg, writeSyntheticSectionWorker, .{ self, sect_id, out });
+                writeSyntheticSectionWorker(self, sect_id, out);
             }
         }
 
         if (self.la_symbol_ptr_sect_index) |_| {
-            tp.spawnWg(&wg, updateLazyBindSizeWorker, .{self});
+            updateLazyBindSizeWorker(self);
         }
 
-        tp.spawnWg(&wg, updateLinkeditSizeWorker, .{ self, .rebase });
-        tp.spawnWg(&wg, updateLinkeditSizeWorker, .{ self, .bind });
-        tp.spawnWg(&wg, updateLinkeditSizeWorker, .{ self, .weak_bind });
-        tp.spawnWg(&wg, updateLinkeditSizeWorker, .{ self, .export_trie });
-        tp.spawnWg(&wg, updateLinkeditSizeWorker, .{ self, .data_in_code });
+        updateLinkeditSizeWorker(self, .rebase);
+        updateLinkeditSizeWorker(self, .bind);
+        updateLinkeditSizeWorker(self, .weak_bind);
+        updateLinkeditSizeWorker(self, .export_trie);
+        updateLinkeditSizeWorker(self, .data_in_code);
 
         if (self.getZigObject()) |zo| {
-            tp.spawnWg(&wg, File.writeSymtab, .{ zo.asFile(), self, self });
+            File.writeSymtab(zo.asFile(), self, self);
         }
         for (self.objects.items) |index| {
-            tp.spawnWg(&wg, File.writeSymtab, .{ self.getFile(index).?, self, self });
+            File.writeSymtab(self.getFile(index).?, self, self);
         }
         for (self.dylibs.items) |index| {
-            tp.spawnWg(&wg, File.writeSymtab, .{ self.getFile(index).?, self, self });
+            File.writeSymtab(self.getFile(index).?, self, self);
         }
         if (self.getInternalObject()) |obj| {
-            tp.spawnWg(&wg, File.writeSymtab, .{ obj.asFile(), self, self });
+            File.writeSymtab(obj.asFile(), self, self);
         }
         if (self.requiresThunks()) for (self.thunks.items) |th| {
-            tp.spawnWg(&wg, Thunk.writeSymtab, .{ th, self, self });
+            Thunk.writeSymtab(th, self, self);
         };
     }
 
-    if (self.has_errors.swap(false, .seq_cst)) return error.FlushFailure;
+    if (diags.hasErrors()) return error.LinkFailure;
 }
 
 fn writeAtomsWorker(self: *MachO, file: File) void {
@@ -2505,13 +2478,15 @@ fn writeAtomsWorker(self: *MachO, file: File) void {
         self.reportParseError2(file.getIndex(), "failed to resolve relocations and write atoms: {s}", .{
             @errorName(err),
         }) catch {};
-        _ = self.has_errors.swap(true, .seq_cst);
     };
 }
 
 fn writeThunkWorker(self: *MachO, thunk: Thunk) void {
     const tracy = trace(@src());
     defer tracy.end();
+
+    const diags = &self.base.comp.link_diags;
+
     const doWork = struct {
         fn doWork(th: Thunk, buffer: []u8, macho_file: *MachO) !void {
             const off = math.cast(usize, th.value) orelse return error.Overflow;
@@ -2522,14 +2497,15 @@ fn writeThunkWorker(self: *MachO, thunk: Thunk) void {
     }.doWork;
     const out = self.sections.items(.out)[thunk.out_n_sect].items;
     doWork(thunk, out, self) catch |err| {
-        self.reportUnexpectedError("failed to write contents of thunk: {s}", .{@errorName(err)}) catch {};
-        _ = self.has_errors.swap(true, .seq_cst);
+        diags.addError("failed to write contents of thunk: {s}", .{@errorName(err)});
     };
 }
 
 fn writeSyntheticSectionWorker(self: *MachO, sect_id: u8, out: []u8) void {
     const tracy = trace(@src());
     defer tracy.end();
+
+    const diags = &self.base.comp.link_diags;
 
     const Tag = enum {
         eh_frame,
@@ -2575,18 +2551,18 @@ fn writeSyntheticSectionWorker(self: *MachO, sect_id: u8, out: []u8) void {
         unreachable;
     };
     doWork(self, tag, out) catch |err| {
-        self.reportUnexpectedError("could not write section '{s},{s}': {s}", .{
-            header.segName(),
-            header.sectName(),
-            @errorName(err),
-        }) catch {};
-        _ = self.has_errors.swap(true, .seq_cst);
+        diags.addError("could not write section '{s},{s}': {s}", .{
+            header.segName(), header.sectName(), @errorName(err),
+        });
     };
 }
 
 fn updateLazyBindSizeWorker(self: *MachO) void {
     const tracy = trace(@src());
     defer tracy.end();
+
+    const diags = &self.base.comp.link_diags;
+
     const doWork = struct {
         fn doWork(macho_file: *MachO) !void {
             try macho_file.lazy_bind_section.updateSize(macho_file);
@@ -2596,12 +2572,8 @@ fn updateLazyBindSizeWorker(self: *MachO) void {
             try macho_file.stubs_helper.write(macho_file, stream.writer());
         }
     }.doWork;
-    doWork(self) catch |err| {
-        self.reportUnexpectedError("could not calculate size of lazy binding section: {s}", .{
-            @errorName(err),
-        }) catch {};
-        _ = self.has_errors.swap(true, .seq_cst);
-    };
+    doWork(self) catch |err|
+        diags.addError("could not calculate size of lazy binding section: {s}", .{@errorName(err)});
 }
 
 pub fn updateLinkeditSizeWorker(self: *MachO, tag: enum {
@@ -2611,6 +2583,7 @@ pub fn updateLinkeditSizeWorker(self: *MachO, tag: enum {
     export_trie,
     data_in_code,
 }) void {
+    const diags = &self.base.comp.link_diags;
     const res = switch (tag) {
         .rebase => self.rebase_section.updateSize(self),
         .bind => self.bind_section.updateSize(self),
@@ -2618,13 +2591,8 @@ pub fn updateLinkeditSizeWorker(self: *MachO, tag: enum {
         .export_trie => self.export_trie.updateSize(self),
         .data_in_code => self.data_in_code.updateSize(self),
     };
-    res catch |err| {
-        self.reportUnexpectedError("could not calculate size of {s} section: {s}", .{
-            @tagName(tag),
-            @errorName(err),
-        }) catch {};
-        _ = self.has_errors.swap(true, .seq_cst);
-    };
+    res catch |err|
+        diags.addError("could not calculate size of {s} section: {s}", .{ @tagName(tag), @errorName(err) });
 }
 
 fn writeSectionsToFile(self: *MachO) !void {
@@ -3432,6 +3400,7 @@ pub fn growSection(self: *MachO, sect_index: u8, needed_size: u64) !void {
 }
 
 fn growSectionNonRelocatable(self: *MachO, sect_index: u8, needed_size: u64) !void {
+    const diags = &self.base.comp.link_diags;
     const sect = &self.sections.items(.header)[sect_index];
 
     const seg_id = self.sections.items(.segment_id)[sect_index];
@@ -3467,7 +3436,7 @@ fn growSectionNonRelocatable(self: *MachO, sect_index: u8, needed_size: u64) !vo
 
     const mem_capacity = self.allocatedSizeVirtual(seg.vmaddr);
     if (needed_size > mem_capacity) {
-        var err = try self.base.addErrorWithNotes(2);
+        var err = try diags.addErrorWithNotes(2);
         try err.addMsg("fatal linker error: cannot expand segment seg({d})({s}) in virtual memory", .{
             seg_id,
             seg.segName(),
@@ -3766,39 +3735,16 @@ pub fn eatPrefix(path: []const u8, prefix: []const u8) ?[]const u8 {
     return null;
 }
 
-pub fn reportParseError(
-    self: *MachO,
-    path: Path,
-    comptime format: []const u8,
-    args: anytype,
-) error{OutOfMemory}!void {
-    var err = try self.base.addErrorWithNotes(1);
-    try err.addMsg(format, args);
-    try err.addNote("while parsing {}", .{path});
-}
-
 pub fn reportParseError2(
     self: *MachO,
     file_index: File.Index,
     comptime format: []const u8,
     args: anytype,
 ) error{OutOfMemory}!void {
-    var err = try self.base.addErrorWithNotes(1);
+    const diags = &self.base.comp.link_diags;
+    var err = try diags.addErrorWithNotes(1);
     try err.addMsg(format, args);
     try err.addNote("while parsing {}", .{self.getFile(file_index).?.fmtPath()});
-}
-
-fn reportMissingLibraryError(
-    self: *MachO,
-    checked_paths: []const []const u8,
-    comptime format: []const u8,
-    args: anytype,
-) error{OutOfMemory}!void {
-    var err = try self.base.addErrorWithNotes(checked_paths.len);
-    try err.addMsg(format, args);
-    for (checked_paths) |path| {
-        try err.addNote("tried {s}", .{path});
-    }
 }
 
 fn reportMissingDependencyError(
@@ -3809,7 +3755,8 @@ fn reportMissingDependencyError(
     comptime format: []const u8,
     args: anytype,
 ) error{OutOfMemory}!void {
-    var err = try self.base.addErrorWithNotes(2 + checked_paths.len);
+    const diags = &self.base.comp.link_diags;
+    var err = try diags.addErrorWithNotes(2 + checked_paths.len);
     try err.addMsg(format, args);
     try err.addNote("while resolving {s}", .{path});
     try err.addNote("a dependency of {}", .{self.getFile(parent).?.fmtPath()});
@@ -3825,16 +3772,11 @@ fn reportDependencyError(
     comptime format: []const u8,
     args: anytype,
 ) error{OutOfMemory}!void {
-    var err = try self.base.addErrorWithNotes(2);
+    const diags = &self.base.comp.link_diags;
+    var err = try diags.addErrorWithNotes(2);
     try err.addMsg(format, args);
     try err.addNote("while parsing {s}", .{path});
     try err.addNote("a dependency of {}", .{self.getFile(parent).?.fmtPath()});
-}
-
-pub fn reportUnexpectedError(self: *MachO, comptime format: []const u8, args: anytype) error{OutOfMemory}!void {
-    var err = try self.base.addErrorWithNotes(1);
-    try err.addMsg(format, args);
-    try err.addNote("please report this as a linker bug on https://github.com/ziglang/zig/issues/new/choose", .{});
 }
 
 fn reportDuplicates(self: *MachO) error{ HasDuplicates, OutOfMemory }!void {
@@ -3844,6 +3786,7 @@ fn reportDuplicates(self: *MachO) error{ HasDuplicates, OutOfMemory }!void {
     if (self.dupes.keys().len == 0) return; // Nothing to do
 
     const gpa = self.base.comp.gpa;
+    const diags = &self.base.comp.link_diags;
     const max_notes = 3;
 
     // We will sort by name, and then by file to ensure deterministic output.
@@ -3861,7 +3804,7 @@ fn reportDuplicates(self: *MachO) error{ HasDuplicates, OutOfMemory }!void {
         const notes = self.dupes.get(key).?;
         const nnotes = @min(notes.items.len, max_notes) + @intFromBool(notes.items.len > max_notes);
 
-        var err = try self.base.addErrorWithNotes(nnotes + 1);
+        var err = try diags.addErrorWithNotes(nnotes + 1);
         try err.addMsg("duplicate symbol definition: {s}", .{sym.getName(self)});
         try err.addNote("defined by {}", .{sym.getFile(self).?.fmtPath()});
 
@@ -4458,6 +4401,24 @@ const SystemLib = struct {
     hidden: bool = false,
     reexport: bool = false,
     must_link: bool = false,
+
+    fn fromLinkInput(link_input: link.Input) SystemLib {
+        return switch (link_input) {
+            .dso_exact => unreachable,
+            .res => unreachable,
+            .object, .archive => |obj| .{
+                .path = obj.path,
+                .must_link = obj.must_link,
+                .hidden = obj.hidden,
+            },
+            .dso => |dso| .{
+                .path = dso.path,
+                .needed = dso.needed,
+                .weak = dso.weak,
+                .reexport = dso.reexport,
+            },
+        };
+    }
 };
 
 pub const SdkLayout = std.zig.LibCDirs.DarwinSdkLayout;
@@ -5395,17 +5356,16 @@ const Air = @import("../Air.zig");
 const Alignment = Atom.Alignment;
 const Allocator = mem.Allocator;
 const Archive = @import("MachO/Archive.zig");
-pub const Atom = @import("MachO/Atom.zig");
 const AtomicBool = std.atomic.Value(bool);
 const Bind = bind.Bind;
 const Cache = std.Build.Cache;
-const Path = Cache.Path;
 const CodeSignature = @import("MachO/CodeSignature.zig");
 const Compilation = @import("../Compilation.zig");
 const DataInCode = synthetic.DataInCode;
-pub const DebugSymbols = @import("MachO/DebugSymbols.zig");
+const Directory = Cache.Directory;
 const Dylib = @import("MachO/Dylib.zig");
 const ExportTrie = @import("MachO/dyld_info/Trie.zig");
+const Path = Cache.Path;
 const File = @import("MachO/file.zig").File;
 const GotSection = synthetic.GotSection;
 const Hash = std.hash.Wyhash;
@@ -5421,7 +5381,6 @@ const Md5 = std.crypto.hash.Md5;
 const Zcu = @import("../Zcu.zig");
 const InternPool = @import("../InternPool.zig");
 const Rebase = @import("MachO/dyld_info/Rebase.zig");
-pub const Relocation = @import("MachO/Relocation.zig");
 const StringTable = @import("StringTable.zig");
 const StubsSection = synthetic.StubsSection;
 const StubsHelperSection = synthetic.StubsHelperSection;
@@ -5430,7 +5389,6 @@ const Thunk = @import("MachO/Thunk.zig");
 const TlvPtrSection = synthetic.TlvPtrSection;
 const Value = @import("../Value.zig");
 const UnwindInfo = @import("MachO/UnwindInfo.zig");
-const WaitGroup = std.Thread.WaitGroup;
 const WeakBind = bind.WeakBind;
 const ZigObject = @import("MachO/ZigObject.zig");
 const dev = @import("../dev.zig");

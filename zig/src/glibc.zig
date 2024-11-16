@@ -6,12 +6,14 @@ const fs = std.fs;
 const path = fs.path;
 const assert = std.debug.assert;
 const Version = std.SemanticVersion;
+const Path = std.Build.Cache.Path;
 
 const Compilation = @import("Compilation.zig");
 const build_options = @import("build_options");
 const trace = @import("tracy.zig").trace;
 const Cache = std.Build.Cache;
 const Module = @import("Package/Module.zig");
+const link = @import("link.zig");
 
 pub const Lib = struct {
     name: []const u8,
@@ -219,7 +221,7 @@ pub fn buildCrtFile(comp: *Compilation, crt_file: CrtFile, prog_node: std.Progre
                     .owner = comp.root_mod,
                 },
             };
-            return comp.build_crt_file("crti", .Obj, .@"glibc crti.o", prog_node, &files);
+            return comp.build_crt_file("crti", .Obj, .@"glibc crti.o", prog_node, &files, .{});
         },
         .crtn_o => {
             var args = std.ArrayList([]const u8).init(arena);
@@ -240,7 +242,7 @@ pub fn buildCrtFile(comp: *Compilation, crt_file: CrtFile, prog_node: std.Progre
                     .owner = undefined,
                 },
             };
-            return comp.build_crt_file("crtn", .Obj, .@"glibc crtn.o", prog_node, &files);
+            return comp.build_crt_file("crtn", .Obj, .@"glibc crtn.o", prog_node, &files, .{});
         },
         .scrt1_o => {
             const start_o: Compilation.CSourceFile = blk: {
@@ -293,7 +295,7 @@ pub fn buildCrtFile(comp: *Compilation, crt_file: CrtFile, prog_node: std.Progre
             };
             var files = [_]Compilation.CSourceFile{ start_o, abi_note_o, init_o };
             const basename = if (comp.config.output_mode == .Exe and !comp.config.pie) "crt1" else "Scrt1";
-            return comp.build_crt_file(basename, .Obj, .@"glibc Scrt1.o", prog_node, &files);
+            return comp.build_crt_file(basename, .Obj, .@"glibc Scrt1.o", prog_node, &files, .{});
         },
         .libc_nonshared_a => {
             const s = path.sep_str;
@@ -371,7 +373,6 @@ pub fn buildCrtFile(comp: *Compilation, crt_file: CrtFile, prog_node: std.Progre
                     "-fmerge-all-constants",
                     "-frounding-math",
                     "-Wno-unsupported-floating-point-opt", // For targets that don't support -frounding-math.
-                    "-fno-stack-protector",
                     "-fno-common",
                     "-fmath-errno",
                     "-ftls-model=initial-exec",
@@ -411,7 +412,7 @@ pub fn buildCrtFile(comp: *Compilation, crt_file: CrtFile, prog_node: std.Progre
                 files_index += 1;
             }
             const files = files_buf[0..files_index];
-            return comp.build_crt_file("c_nonshared", .Lib, .@"glibc libc_nonshared.a", prog_node, files);
+            return comp.build_crt_file("c_nonshared", .Lib, .@"glibc libc_nonshared.a", prog_node, files, .{});
         },
     }
 }
@@ -438,7 +439,7 @@ fn start_asm_path(comp: *Compilation, arena: Allocator, basename: []const u8) ![
                 try result.appendSlice("sparc" ++ s ++ "sparc32");
             }
         }
-    } else if (arch.isARM()) {
+    } else if (arch.isArm()) {
         try result.appendSlice("arm");
     } else if (arch.isMIPS()) {
         if (!mem.eql(u8, basename, "crti.S") and !mem.eql(u8, basename, "crtn.S")) {
@@ -602,7 +603,7 @@ fn add_include_dirs_arch(
             try args.append("-I");
             try args.append(try path.join(arena, &[_][]const u8{ dir, "x86" }));
         }
-    } else if (arch.isARM()) {
+    } else if (arch.isArm()) {
         if (opt_nptl) |nptl| {
             try args.append("-I");
             try args.append(try path.join(arena, &[_][]const u8{ dir, "arm", nptl }));
@@ -717,11 +718,11 @@ fn lib_path(comp: *Compilation, arena: Allocator, sub_path: []const u8) ![]const
 
 pub const BuiltSharedObjects = struct {
     lock: Cache.Lock,
-    dir_path: []u8,
+    dir_path: Path,
 
     pub fn deinit(self: *BuiltSharedObjects, gpa: Allocator) void {
         self.lock.release();
-        gpa.free(self.dir_path);
+        gpa.free(self.dir_path.sub_path);
         self.* = undefined;
     }
 };
@@ -742,7 +743,9 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) !voi
         return error.ZigCompilerNotBuiltWithLLVMExtensions;
     }
 
-    var arena_allocator = std.heap.ArenaAllocator.init(comp.gpa);
+    const gpa = comp.gpa;
+
+    var arena_allocator = std.heap.ArenaAllocator.init(gpa);
     defer arena_allocator.deinit();
     const arena = arena_allocator.allocator();
 
@@ -751,7 +754,7 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) !voi
 
     // Use the global cache directory.
     var cache: Cache = .{
-        .gpa = comp.gpa,
+        .gpa = gpa,
         .manifest_dir = try comp.global_cache_directory.handle.makeOpenPath("h", .{}),
     };
     cache.addPrefix(.{ .path = null, .handle = fs.cwd() });
@@ -772,12 +775,13 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) !voi
     if (try man.hit()) {
         const digest = man.final();
 
-        assert(comp.glibc_so_files == null);
-        comp.glibc_so_files = BuiltSharedObjects{
+        return queueSharedObjects(comp, .{
             .lock = man.toOwnedLock(),
-            .dir_path = try comp.global_cache_directory.join(comp.gpa, &.{ "o", &digest }),
-        };
-        return;
+            .dir_path = .{
+                .root_dir = comp.global_cache_directory,
+                .sub_path = try gpa.dupe(u8, "o" ++ fs.path.sep_str ++ digest),
+            },
+        });
     }
 
     const digest = man.final();
@@ -790,8 +794,8 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) !voi
     defer o_directory.handle.close();
 
     const abilists_contents = man.files.keys()[abilists_index].contents.?;
-    const metadata = try loadMetaData(comp.gpa, abilists_contents);
-    defer metadata.destroy(comp.gpa);
+    const metadata = try loadMetaData(gpa, abilists_contents);
+    defer metadata.destroy(gpa);
 
     const target_targ_index = for (metadata.all_targets, 0..) |targ, i| {
         if (targ.arch == target.cpu.arch and
@@ -835,7 +839,7 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) !voi
         map_contents.deinit(); // The most recent allocation of an arena can be freed :)
     }
 
-    var stubs_asm = std.ArrayList(u8).init(comp.gpa);
+    var stubs_asm = std.ArrayList(u8).init(gpa);
     defer stubs_asm.deinit();
 
     for (libs, 0..) |lib, lib_i| {
@@ -935,10 +939,11 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) !voi
                 var ver_buf_i: u8 = 0;
                 while (ver_buf_i < versions_len) : (ver_buf_i += 1) {
                     // Example:
+                    // .balign 4
                     // .globl _Exit_2_2_5
                     // .type _Exit_2_2_5, %function;
                     // .symver _Exit_2_2_5, _Exit@@GLIBC_2.2.5
-                    // _Exit_2_2_5:
+                    // _Exit_2_2_5: .long 0
                     const ver_index = versions_buffer[ver_buf_i];
                     const ver = metadata.all_versions[ver_index];
 
@@ -957,12 +962,14 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) !voi
                                 .{ sym_name, ver.major, ver.minor },
                             );
                         try stubs_asm.writer().print(
+                            \\.balign {d}
                             \\.globl {s}
                             \\.type {s}, %function;
                             \\.symver {s}, {s}{s}GLIBC_{d}.{d}
-                            \\{s}:
+                            \\{s}: {s} 0
                             \\
                         , .{
+                            target.ptrBitWidth() / 8,
                             sym_plus_ver,
                             sym_plus_ver,
                             sym_plus_ver,
@@ -971,6 +978,7 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) !voi
                             ver.major,
                             ver.minor,
                             sym_plus_ver,
+                            wordDirective(target),
                         });
                     } else {
                         const sym_plus_ver = if (want_default)
@@ -982,12 +990,14 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) !voi
                                 .{ sym_name, ver.major, ver.minor, ver.patch },
                             );
                         try stubs_asm.writer().print(
+                            \\.balign {d}
                             \\.globl {s}
                             \\.type {s}, %function;
                             \\.symver {s}, {s}{s}GLIBC_{d}.{d}.{d}
-                            \\{s}:
+                            \\{s}: {s} 0
                             \\
                         , .{
+                            target.ptrBitWidth() / 8,
                             sym_plus_ver,
                             sym_plus_ver,
                             sym_plus_ver,
@@ -997,13 +1007,14 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) !voi
                             ver.minor,
                             ver.patch,
                             sym_plus_ver,
+                            wordDirective(target),
                         });
                     }
                 }
             }
         }
 
-        try stubs_asm.appendSlice(".data\n");
+        try stubs_asm.appendSlice(".rodata\n");
 
         // For some targets, the real `libc.so.6` will contain a weak reference to `_IO_stdin_used`,
         // making the linker put the symbol in the dynamic symbol table. We likewise need to emit a
@@ -1024,11 +1035,17 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) !voi
         // a strong reference.
         if (std.mem.eql(u8, lib.name, "c")) {
             try stubs_asm.writer().print(
+                \\.balign {d}
                 \\.globl _IO_stdin_used
                 \\{s} _IO_stdin_used
                 \\
-            , .{wordDirective(target)});
+            , .{
+                target.ptrBitWidth() / 8,
+                wordDirective(target),
+            });
         }
+
+        try stubs_asm.appendSlice(".data\n");
 
         const obj_inclusions_len = try inc_reader.readInt(u16, .little);
 
@@ -1099,11 +1116,12 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) !voi
                 var ver_buf_i: u8 = 0;
                 while (ver_buf_i < versions_len) : (ver_buf_i += 1) {
                     // Example:
+                    // .balign 4
                     // .globl environ_2_2_5
                     // .type environ_2_2_5, %object;
                     // .size environ_2_2_5, 4;
                     // .symver environ_2_2_5, environ@@GLIBC_2.2.5
-                    // environ_2_2_5:
+                    // environ_2_2_5: .fill 4, 1, 0
                     const ver_index = versions_buffer[ver_buf_i];
                     const ver = metadata.all_versions[ver_index];
 
@@ -1122,13 +1140,15 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) !voi
                                 .{ sym_name, ver.major, ver.minor },
                             );
                         try stubs_asm.writer().print(
+                            \\.balign {d}
                             \\.globl {s}
                             \\.type {s}, %object;
                             \\.size {s}, {d};
                             \\.symver {s}, {s}{s}GLIBC_{d}.{d}
-                            \\{s}:
+                            \\{s}: .fill {d}, 1, 0
                             \\
                         , .{
+                            target.ptrBitWidth() / 8,
                             sym_plus_ver,
                             sym_plus_ver,
                             sym_plus_ver,
@@ -1139,6 +1159,7 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) !voi
                             ver.major,
                             ver.minor,
                             sym_plus_ver,
+                            size,
                         });
                     } else {
                         const sym_plus_ver = if (want_default)
@@ -1150,13 +1171,15 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) !voi
                                 .{ sym_name, ver.major, ver.minor, ver.patch },
                             );
                         try stubs_asm.writer().print(
+                            \\.balign {d}
                             \\.globl {s}
                             \\.type {s}, %object;
                             \\.size {s}, {d};
                             \\.symver {s}, {s}{s}GLIBC_{d}.{d}.{d}
-                            \\{s}:
+                            \\{s}: .fill {d}, 1, 0
                             \\
                         , .{
+                            target.ptrBitWidth() / 8,
                             sym_plus_ver,
                             sym_plus_ver,
                             sym_plus_ver,
@@ -1168,6 +1191,7 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) !voi
                             ver.minor,
                             ver.patch,
                             sym_plus_ver,
+                            size,
                         });
                     }
                 }
@@ -1177,7 +1201,6 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) !voi
         var lib_name_buf: [32]u8 = undefined; // Larger than each of the names "c", "pthread", etc.
         const asm_file_basename = std.fmt.bufPrint(&lib_name_buf, "{s}.s", .{lib.name}) catch unreachable;
         try o_directory.handle.writeFile(.{ .sub_path = asm_file_basename, .data = stubs_asm.items });
-
         try buildSharedLib(comp, arena, comp.global_cache_directory, o_directory, asm_file_basename, lib, prog_node);
     }
 
@@ -1185,14 +1208,45 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) !voi
         log.warn("failed to write cache manifest for glibc stubs: {s}", .{@errorName(err)});
     };
 
-    assert(comp.glibc_so_files == null);
-    comp.glibc_so_files = BuiltSharedObjects{
+    return queueSharedObjects(comp, .{
         .lock = man.toOwnedLock(),
-        .dir_path = try comp.global_cache_directory.join(comp.gpa, &.{ "o", &digest }),
-    };
+        .dir_path = .{
+            .root_dir = comp.global_cache_directory,
+            .sub_path = try gpa.dupe(u8, "o" ++ fs.path.sep_str ++ digest),
+        },
+    });
 }
 
-// zig fmt: on
+fn queueSharedObjects(comp: *Compilation, so_files: BuiltSharedObjects) void {
+    const target_version = comp.getTarget().os.version_range.linux.glibc;
+
+    assert(comp.glibc_so_files == null);
+    comp.glibc_so_files = so_files;
+
+    var task_buffer: [libs.len]link.Task = undefined;
+    var task_buffer_i: usize = 0;
+
+    {
+        comp.mutex.lock(); // protect comp.arena
+        defer comp.mutex.unlock();
+
+        for (libs) |lib| {
+            if (lib.removed_in) |rem_in| {
+                if (target_version.order(rem_in) != .lt) continue;
+            }
+            const so_path: Path = .{
+                .root_dir = so_files.dir_path.root_dir,
+                .sub_path = std.fmt.allocPrint(comp.arena, "{s}{c}lib{s}.so.{d}", .{
+                    so_files.dir_path.sub_path, fs.path.sep, lib.name, lib.sover,
+                }) catch return comp.setAllocFailure(),
+            };
+            task_buffer[task_buffer_i] = .{ .load_dso = so_path };
+            task_buffer_i += 1;
+        }
+    }
+
+    comp.queueLinkTasks(task_buffer[0..task_buffer_i]);
+}
 
 fn buildSharedLib(
     comp: *Compilation,
@@ -1302,5 +1356,12 @@ pub fn needsCrtiCrtn(target: std.Target) bool {
         .riscv32, .riscv64 => false,
         .loongarch64 => false,
         else => true,
+    };
+}
+
+pub fn needsCrt0(output_mode: std.builtin.OutputMode) ?CrtFile {
+    return switch (output_mode) {
+        .Obj, .Lib => null,
+        .Exe => .scrt1_o,
     };
 }
