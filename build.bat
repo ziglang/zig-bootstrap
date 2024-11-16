@@ -35,7 +35,7 @@ if "%VSCMD_ARG_HOST_ARCH%"=="x86" set OUTDIR=out-win-x86
 
 set ROOTDIR=%~dp0
 set "ROOTDIR_CMAKE=%ROOTDIR:\=/%"
-set ZIG_VERSION="0.14.0-dev.1876+41dbd0d0d"
+set ZIG_VERSION="0.14.0-dev.2246+bfcf18c5a"
 set JOBS_ARG=
 
 pushd %ROOTDIR%

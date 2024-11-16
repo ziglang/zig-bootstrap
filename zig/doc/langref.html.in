@@ -2190,6 +2190,7 @@ or
         <li>An {#link|enum#} field uses exactly the bit width of its integer tag type.</li>
         <li>A {#link|packed union#} field uses exactly the bit width of the union field with
         the largest bit width.</li>
+        <li>Packed structs support equality operators.</li>
       </ul>
       <p>
       This means that a {#syntax#}packed struct{#endsyntax#} can participate
@@ -2239,6 +2240,12 @@ or
       It's also possible to set alignment of struct fields:
       </p>
       {#code|test_aligned_struct_fields.zig#}
+
+      <p>
+      Equating packed structs results in a comparison of the backing integer, 
+      and only works for the `==` and `!=` operators.
+      </p>
+      {#code|test_packed_struct_equality.zig#}
 
       <p>
       Using packed structs with {#link|volatile#} is problematic, and may be a compile error in the future.
@@ -4616,7 +4623,7 @@ fn cmpxchgWeakButNotAtomic(comptime T: type, ptr: *T, expected_value: T, new_val
       {#header_close#}
 
       {#header_open|@compileLog#}
-      <pre>{#syntax#}@compileLog(args: ...) void{#endsyntax#}</pre>
+      <pre>{#syntax#}@compileLog(...) void{#endsyntax#}</pre>
       <p>
       This function prints the arguments passed to it at compile-time.
       </p>
@@ -4872,6 +4879,13 @@ fn cmpxchgWeakButNotAtomic(comptime T: type, ptr: *T, expected_value: T, new_val
       </p>
       {#header_close#}
 
+      {#header_open|@FieldType#}
+      <pre>{#syntax#}@FieldType(comptime Type: type, comptime field_name: []const u8) type{#endsyntax#}</pre>
+      <p>
+      Given a type and the name of one of its fields, returns the type of that field.
+      </p>
+      {#header_close#}
+
       {#header_open|@floatCast#}
       <pre>{#syntax#}@floatCast(value: anytype) anytype{#endsyntax#}</pre>
       <p>
@@ -5054,12 +5068,12 @@ fn cmpxchgWeakButNotAtomic(comptime T: type, ptr: *T, expected_value: T, new_val
       {#header_close#}
 
       {#header_open|@max#}
-      <pre>{#syntax#}@max(a: T, b: T) T{#endsyntax#}</pre>
+      <pre>{#syntax#}@max(...) T{#endsyntax#}</pre>
       <p>
-      Returns the maximum value of {#syntax#}a{#endsyntax#} and {#syntax#}b{#endsyntax#}. This builtin accepts integers, floats, and vectors of either. In the latter case, the operation is performed element wise.
+      Takes two or more arguments and returns the biggest value included (the maximum). This builtin accepts integers, floats, and vectors of either. In the latter case, the operation is performed element wise.
       </p>
       <p>
-      NaNs are handled as follows: if one of the operands of a (pairwise) operation is NaN, the other operand is returned. If both operands are NaN, NaN is returned.
+      NaNs are handled as follows: return the biggest non-NaN value included. If all operands are NaN, return NaN.
       </p>
       {#see_also|@min|Vectors#}
       {#header_close#}
@@ -5093,12 +5107,12 @@ fn cmpxchgWeakButNotAtomic(comptime T: type, ptr: *T, expected_value: T, new_val
       {#header_close#}
 
       {#header_open|@min#}
-      <pre>{#syntax#}@min(a: T, b: T) T{#endsyntax#}</pre>
+      <pre>{#syntax#}@min(...) T{#endsyntax#}</pre>
       <p>
-      Returns the minimum value of {#syntax#}a{#endsyntax#} and {#syntax#}b{#endsyntax#}. This builtin accepts integers, floats, and vectors of either. In the latter case, the operation is performed element wise.
+      Takes two or more arguments and returns the smallest value included (the minimum). This builtin accepts integers, floats, and vectors of either. In the latter case, the operation is performed element wise.
       </p>
       <p>
-      NaNs are handled as follows: if one of the operands of a (pairwise) operation is NaN, the other operand is returned. If both operands are NaN, NaN is returned.
+      NaNs are handled as follows: return the smallest non-NaN value included. If all operands are NaN, return NaN.
       </p>
       {#see_also|@max|Vectors#}
       {#header_close#}
@@ -5279,13 +5293,6 @@ fn cmpxchgWeakButNotAtomic(comptime T: type, ptr: *T, expected_value: T, new_val
       Selects values element-wise from {#syntax#}a{#endsyntax#} or {#syntax#}b{#endsyntax#} based on {#syntax#}pred{#endsyntax#}. If {#syntax#}pred[i]{#endsyntax#} is {#syntax#}true{#endsyntax#}, the corresponding element in the result will be {#syntax#}a[i]{#endsyntax#} and otherwise {#syntax#}b[i]{#endsyntax#}.
       </p>
       {#see_also|Vectors#}
-      {#header_close#}
-
-      {#header_open|@setAlignStack#}
-      <pre>{#syntax#}@setAlignStack(comptime alignment: u29) void{#endsyntax#}</pre>
-      <p>
-      Ensures that a function will have a stack alignment of at least {#syntax#}alignment{#endsyntax#} bytes.
-      </p>
       {#header_close#}
 
       {#header_open|@setEvalBranchQuota#}
@@ -5781,7 +5788,7 @@ fn cmpxchgWeakButNotAtomic(comptime T: type, ptr: *T, expected_value: T, new_val
       {#header_open|@TypeOf#}
       <pre>{#syntax#}@TypeOf(...) type{#endsyntax#}</pre>
       <p>
-      {#syntax#}@TypeOf{#endsyntax#} is a special builtin function that takes any (nonzero) number of expressions
+      {#syntax#}@TypeOf{#endsyntax#} is a special builtin function that takes any (non-zero) number of expressions
       as parameters and returns the type of the result, using {#link|Peer Type Resolution#}.
       </p>
       <p>

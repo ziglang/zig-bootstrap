@@ -1602,6 +1602,7 @@ test containsAtLeast {
 /// T specifies the return type, which must be large enough to store
 /// the result.
 pub fn readVarInt(comptime ReturnType: type, bytes: []const u8, endian: Endian) ReturnType {
+    assert(@typeInfo(ReturnType).int.bits >= bytes.len * 8);
     const bits = @typeInfo(ReturnType).int.bits;
     const signedness = @typeInfo(ReturnType).int.signedness;
     const WorkType = std.meta.Int(signedness, @max(16, bits));
@@ -3964,7 +3965,9 @@ fn CopyPtrAttrs(
 }
 
 fn AsBytesReturnType(comptime P: type) type {
-    const size = @sizeOf(std.meta.Child(P));
+    const pointer = @typeInfo(P).pointer;
+    assert(pointer.size == .One);
+    const size = @sizeOf(pointer.child);
     return CopyPtrAttrs(P, .One, [size]u8);
 }
 

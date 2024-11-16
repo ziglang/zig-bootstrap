@@ -366,7 +366,7 @@ fn gen(self: *Self) !void {
     const pt = self.pt;
     const zcu = pt.zcu;
     const cc = self.fn_type.fnCallingConvention(zcu);
-    if (cc != .Naked) {
+    if (cc != .naked) {
         // TODO Finish function prologue and epilogue for sparc64.
 
         // save %sp, stack_reserved_area, %sp
@@ -3114,7 +3114,7 @@ fn binOpImmediate(
         const reg = try self.register_manager.allocReg(track_inst, gp);
 
         if (track_inst) |inst| {
-            const mcv = .{ .register = reg };
+            const mcv: MCValue = .{ .register = reg };
             log.debug("binOpRegister move lhs %{d} to register: {} -> {}", .{ inst, lhs, mcv });
             branch.inst_table.putAssumeCapacity(inst, mcv);
 
@@ -3252,7 +3252,7 @@ fn binOpRegister(
 
         const reg = try self.register_manager.allocReg(track_inst, gp);
         if (track_inst) |inst| {
-            const mcv = .{ .register = reg };
+            const mcv: MCValue = .{ .register = reg };
             log.debug("binOpRegister move lhs %{d} to register: {} -> {}", .{ inst, lhs, mcv });
             branch.inst_table.putAssumeCapacity(inst, mcv);
 
@@ -3276,7 +3276,7 @@ fn binOpRegister(
 
         const reg = try self.register_manager.allocReg(track_inst, gp);
         if (track_inst) |inst| {
-            const mcv = .{ .register = reg };
+            const mcv: MCValue = .{ .register = reg };
             log.debug("binOpRegister move rhs %{d} to register: {} -> {}", .{ inst, rhs, mcv });
             branch.inst_table.putAssumeCapacity(inst, mcv);
 
@@ -3650,7 +3650,6 @@ fn genLoad(self: *Self, value_reg: Register, addr_reg: Register, comptime off_ty
     assert(off_type == Register or off_type == i13);
 
     const is_imm = (off_type == i13);
-    const rs2_or_imm = if (is_imm) .{ .imm = off } else .{ .rs2 = off };
 
     switch (abi_size) {
         1, 2, 4, 8 => {
@@ -3669,7 +3668,7 @@ fn genLoad(self: *Self, value_reg: Register, addr_reg: Register, comptime off_ty
                         .is_imm = is_imm,
                         .rd = value_reg,
                         .rs1 = addr_reg,
-                        .rs2_or_imm = rs2_or_imm,
+                        .rs2_or_imm = if (is_imm) .{ .imm = off } else .{ .rs2 = off },
                     },
                 },
             });
@@ -4037,7 +4036,6 @@ fn genStore(self: *Self, value_reg: Register, addr_reg: Register, comptime off_t
     assert(off_type == Register or off_type == i13);
 
     const is_imm = (off_type == i13);
-    const rs2_or_imm = if (is_imm) .{ .imm = off } else .{ .rs2 = off };
 
     switch (abi_size) {
         1, 2, 4, 8 => {
@@ -4056,7 +4054,7 @@ fn genStore(self: *Self, value_reg: Register, addr_reg: Register, comptime off_t
                         .is_imm = is_imm,
                         .rd = value_reg,
                         .rs1 = addr_reg,
-                        .rs2_or_imm = rs2_or_imm,
+                        .rs2_or_imm = if (is_imm) .{ .imm = off } else .{ .rs2 = off },
                     },
                 },
             });
@@ -4441,14 +4439,14 @@ fn resolveCallingConventionValues(self: *Self, fn_ty: Type, role: RegisterView) 
     const ret_ty = fn_ty.fnReturnType(zcu);
 
     switch (cc) {
-        .Naked => {
+        .naked => {
             assert(result.args.len == 0);
             result.return_value = .{ .unreach = {} };
             result.stack_byte_count = 0;
             result.stack_align = .@"1";
             return result;
         },
-        .Unspecified, .C => {
+        .auto, .sparc64_sysv => {
             // SPARC Compliance Definition 2.4.1, Chapter 3
             // Low-Level System Information (64-bit psABI) - Function Calling Sequence
 

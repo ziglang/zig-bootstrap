@@ -264,7 +264,7 @@ pub fn deinit(self: *ZigObject, allocator: Allocator) void {
     }
 }
 
-pub fn flushModule(self: *ZigObject, elf_file: *Elf, tid: Zcu.PerThread.Id) !void {
+pub fn flush(self: *ZigObject, elf_file: *Elf, tid: Zcu.PerThread.Id) !void {
     // Handle any lazy symbols that were emitted by incremental compilation.
     if (self.lazy_syms.getPtr(.anyerror_type)) |metadata| {
         const pt: Zcu.PerThread = .{ .zcu = elf_file.base.comp.zcu.?, .tid = tid };
@@ -623,7 +623,7 @@ pub fn claimUnresolved(self: *ZigObject, elf_file: *Elf) void {
         global.ref = .{ .index = 0, .file = 0 };
         global.esym_index = @intCast(index);
         global.file_index = self.index;
-        global.version_index = if (is_import) elf.VER_NDX_LOCAL else elf_file.default_sym_version;
+        global.version_index = if (is_import) .LOCAL else elf_file.default_sym_version;
         global.flags.import = is_import;
 
         const idx = self.symbols_resolver.items[i];
@@ -689,8 +689,9 @@ pub fn markImportsExports(self: *ZigObject, elf_file: *Elf) void {
         const ref = self.resolveSymbol(@intCast(i | global_symbol_bit), elf_file);
         const sym = elf_file.symbol(ref) orelse continue;
         const file = sym.file(elf_file).?;
-        if (sym.version_index == elf.VER_NDX_LOCAL) continue;
-        const vis = @as(elf.STV, @enumFromInt(sym.elfSym(elf_file).st_other));
+        // https://github.com/ziglang/zig/issues/21678
+        if (@as(u16, @bitCast(sym.version_index)) == @as(u16, @bitCast(elf.Versym.LOCAL))) continue;
+        const vis: elf.STV = @enumFromInt(sym.elfSym(elf_file).st_other);
         if (vis == .HIDDEN) continue;
         if (file == .shared_object and !sym.isAbs(elf_file)) {
             sym.flags.import = true;
@@ -791,7 +792,7 @@ pub fn initRelaSections(self: *ZigObject, elf_file: *Elf) !void {
     for (self.atoms_indexes.items) |atom_index| {
         const atom_ptr = self.atom(atom_index) orelse continue;
         if (!atom_ptr.alive) continue;
-        if (atom_ptr.output_section_index == elf_file.eh_frame_section_index) continue;
+        if (atom_ptr.output_section_index == elf_file.section_indexes.eh_frame) continue;
         const rela_shndx = atom_ptr.relocsShndx() orelse continue;
         // TODO this check will become obsolete when we rework our relocs mechanism at the ZigObject level
         if (self.relocs.items[rela_shndx].items.len == 0) continue;
@@ -812,7 +813,7 @@ pub fn addAtomsToRelaSections(self: *ZigObject, elf_file: *Elf) !void {
     for (self.atoms_indexes.items) |atom_index| {
         const atom_ptr = self.atom(atom_index) orelse continue;
         if (!atom_ptr.alive) continue;
-        if (atom_ptr.output_section_index == elf_file.eh_frame_section_index) continue;
+        if (atom_ptr.output_section_index == elf_file.section_indexes.eh_frame) continue;
         const rela_shndx = atom_ptr.relocsShndx() orelse continue;
         // TODO this check will become obsolete when we rework our relocs mechanism at the ZigObject level
         if (self.relocs.items[rela_shndx].items.len == 0) continue;
@@ -826,7 +827,7 @@ pub fn addAtomsToRelaSections(self: *ZigObject, elf_file: *Elf) !void {
         const out_rela_shndx = elf_file.sectionByName(rela_sect_name).?;
         const out_rela_shdr = &elf_file.sections.items(.shdr)[out_rela_shndx];
         out_rela_shdr.sh_info = out_shndx;
-        out_rela_shdr.sh_link = elf_file.symtab_section_index.?;
+        out_rela_shdr.sh_link = elf_file.section_indexes.symtab.?;
         const atom_list = &elf_file.sections.items(.atom_list)[out_rela_shndx];
         try atom_list.append(gpa, .{ .index = atom_index, .file = self.index });
     }
@@ -927,7 +928,7 @@ pub fn getNavVAddr(
             nav.name.toSlice(ip),
             @"extern".lib_name.toSlice(ip),
         ),
-        else => try self.getOrCreateMetadataForNav(elf_file, nav_index),
+        else => try self.getOrCreateMetadataForNav(zcu, nav_index),
     };
     const this_sym = self.symbol(this_sym_index);
     const vaddr = this_sym.address(.{}, elf_file);
@@ -1101,21 +1102,15 @@ pub fn freeNav(self: *ZigObject, elf_file: *Elf, nav_index: InternPool.Nav.Index
     }
 }
 
-pub fn getOrCreateMetadataForNav(
-    self: *ZigObject,
-    elf_file: *Elf,
-    nav_index: InternPool.Nav.Index,
-) !Symbol.Index {
-    const gpa = elf_file.base.comp.gpa;
+pub fn getOrCreateMetadataForNav(self: *ZigObject, zcu: *Zcu, nav_index: InternPool.Nav.Index) !Symbol.Index {
+    const gpa = zcu.gpa;
     const gop = try self.navs.getOrPut(gpa, nav_index);
     if (!gop.found_existing) {
-        const any_non_single_threaded = elf_file.base.comp.config.any_non_single_threaded;
         const symbol_index = try self.newSymbolWithAtom(gpa, 0);
-        const zcu = elf_file.base.comp.zcu.?;
         const nav_val = Value.fromInterned(zcu.intern_pool.getNav(nav_index).status.resolved.val);
         const sym = self.symbol(symbol_index);
         if (nav_val.getVariable(zcu)) |variable| {
-            if (variable.is_threadlocal and any_non_single_threaded) {
+            if (variable.is_threadlocal and zcu.comp.config.any_non_single_threaded) {
                 sym.flags.is_tls = true;
             }
         }
@@ -1276,9 +1271,11 @@ fn updateNavCode(
 
     log.debug("updateNavCode {}({d})", .{ nav.fqn.fmt(ip), nav_index });
 
-    const required_alignment = pt.navAlignment(nav_index).max(
-        target_util.minFunctionAlignment(zcu.navFileScope(nav_index).mod.resolved_target.result),
-    );
+    const target = zcu.navFileScope(nav_index).mod.resolved_target.result;
+    const required_alignment = switch (pt.navAlignment(nav_index)) {
+        .none => target_util.defaultFunctionAlignment(target),
+        else => |a| a.maxStrict(target_util.minFunctionAlignment(target)),
+    };
 
     const sym = self.symbol(sym_index);
     const esym = &self.symtab.items(.elf_sym)[sym.esym_index];
@@ -1424,8 +1421,8 @@ pub fn updateFunc(
 
     log.debug("updateFunc {}({d})", .{ ip.getNav(func.owner_nav).fqn.fmt(ip), func.owner_nav });
 
-    const sym_index = try self.getOrCreateMetadataForNav(elf_file, func.owner_nav);
-    self.symbol(sym_index).atom(elf_file).?.freeRelocs(self);
+    const sym_index = try self.getOrCreateMetadataForNav(zcu, func.owner_nav);
+    self.atom(self.symbol(sym_index).ref.index).?.freeRelocs(self);
 
     var code_buffer = std.ArrayList(u8).init(gpa);
     defer code_buffer.deinit();
@@ -1459,12 +1456,12 @@ pub fn updateFunc(
         ip.getNav(func.owner_nav).fqn.fmt(ip),
     });
     const old_rva, const old_alignment = blk: {
-        const atom_ptr = self.symbol(sym_index).atom(elf_file).?;
+        const atom_ptr = self.atom(self.symbol(sym_index).ref.index).?;
         break :blk .{ atom_ptr.value, atom_ptr.alignment };
     };
     try self.updateNavCode(elf_file, pt, func.owner_nav, sym_index, shndx, code, elf.STT_FUNC);
     const new_rva, const new_alignment = blk: {
-        const atom_ptr = self.symbol(sym_index).atom(elf_file).?;
+        const atom_ptr = self.atom(self.symbol(sym_index).ref.index).?;
         break :blk .{ atom_ptr.value, atom_ptr.alignment };
     };
 
@@ -1476,7 +1473,7 @@ pub fn updateFunc(
             .{
                 .index = sym_index,
                 .addr = @intCast(sym.address(.{}, elf_file)),
-                .size = sym.atom(elf_file).?.size,
+                .size = self.atom(sym.ref.index).?.size,
             },
             wip_nav,
         );
@@ -1499,7 +1496,7 @@ pub fn updateFunc(
             });
             defer gpa.free(name);
             const osec = if (self.text_index) |sect_sym_index|
-                self.symbol(sect_sym_index).atom(elf_file).?.output_section_index
+                self.atom(self.symbol(sect_sym_index).ref.index).?.output_section_index
             else osec: {
                 const osec = try elf_file.addSection(.{
                     .name = try elf_file.insertShString(".text"),
@@ -1564,7 +1561,7 @@ pub fn updateNav(
     };
 
     if (nav_init != .none and Value.fromInterned(nav_init).typeOf(zcu).hasRuntimeBits(zcu)) {
-        const sym_index = try self.getOrCreateMetadataForNav(elf_file, nav_index);
+        const sym_index = try self.getOrCreateMetadataForNav(zcu, nav_index);
         self.symbol(sym_index).atom(elf_file).?.freeRelocs(self);
 
         var code_buffer = std.ArrayList(u8).init(zcu.gpa);
@@ -1788,7 +1785,7 @@ pub fn updateExports(
     const gpa = elf_file.base.comp.gpa;
     const metadata = switch (exported) {
         .nav => |nav| blk: {
-            _ = try self.getOrCreateMetadataForNav(elf_file, nav);
+            _ = try self.getOrCreateMetadataForNav(zcu, nav);
             break :blk self.navs.getPtr(nav).?;
         },
         .uav => |uav| self.uavs.getPtr(uav) orelse blk: {
@@ -2027,7 +2024,7 @@ pub fn allocateAtom(self: *ZigObject, atom_ptr: *Atom, requires_padding: bool, e
     log.debug("  prev {?}, next {?}", .{ atom_ptr.prev_atom_ref, atom_ptr.next_atom_ref });
 }
 
-pub fn resetShdrIndexes(self: *ZigObject, backlinks: anytype) void {
+pub fn resetShdrIndexes(self: *ZigObject, backlinks: []const u32) void {
     for (self.atoms_indexes.items) |atom_index| {
         const atom_ptr = self.atom(atom_index) orelse continue;
         atom_ptr.output_section_index = backlinks[atom_ptr.output_section_index];

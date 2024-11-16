@@ -195,7 +195,7 @@ pub fn buildLibCXX(comp: *Compilation, prog_node: std.Progress.Node) BuildError!
             .valgrind = false,
             .optimize_mode = optimize_mode,
             .structured_cfg = comp.root_mod.structured_cfg,
-            .pic = comp.root_mod.pic,
+            .pic = if (target_util.supports_fpic(target)) true else null,
         },
         .global = config,
         .cc_argv = &.{},
@@ -278,9 +278,6 @@ pub fn buildLibCXX(comp: *Compilation, prog_node: std.Progress.Node) BuildError!
             try cflags.append("-faligned-allocation");
         }
 
-        if (target_util.supports_fpic(target)) {
-            try cflags.append("-fPIC");
-        }
         try cflags.append("-nostdinc++");
         try cflags.append("-std=c++23");
         try cflags.append("-Wno-user-defined-literals");
@@ -355,7 +352,9 @@ pub fn buildLibCXX(comp: *Compilation, prog_node: std.Progress.Node) BuildError!
     };
 
     assert(comp.libcxx_static_lib == null);
-    comp.libcxx_static_lib = try sub_compilation.toCrtFile();
+    const crt_file = try sub_compilation.toCrtFile();
+    comp.libcxx_static_lib = crt_file;
+    comp.queueLinkTaskMode(crt_file.full_object_path, output_mode);
 }
 
 pub fn buildLibCXXABI(comp: *Compilation, prog_node: std.Progress.Node) BuildError!void {
@@ -584,7 +583,9 @@ pub fn buildLibCXXABI(comp: *Compilation, prog_node: std.Progress.Node) BuildErr
     };
 
     assert(comp.libcxxabi_static_lib == null);
-    comp.libcxxabi_static_lib = try sub_compilation.toCrtFile();
+    const crt_file = try sub_compilation.toCrtFile();
+    comp.libcxxabi_static_lib = crt_file;
+    comp.queueLinkTaskMode(crt_file.full_object_path, output_mode);
 }
 
 pub fn hardeningModeFlag(optimize_mode: std.builtin.OptimizeMode) []const u8 {
