@@ -117,10 +117,10 @@ is more portable across Linux distributions.
 | `mips-linux-musleabihf`    | OK             |
 | `mips64-linux-gnuabi64`    | OK             |
 | `mips64-linux-gnuabin32`   | [#109](https://github.com/ziglang/zig-bootstrap/issues/109) |
-| `mips64-linux-musl`        | [#192](https://github.com/ziglang/zig-bootstrap/issues/192) |
+| `mips64-linux-muslabi64`   | [#192](https://github.com/ziglang/zig-bootstrap/issues/192) |
 | `mips64el-linux-gnuabi64`  | OK             |
 | `mips64el-linux-gnuabin32` | [#107](https://github.com/ziglang/zig-bootstrap/issues/107) |
-| `mips64el-linux-musl`      | OK             |
+| `mips64el-linux-muslabi64` | OK             |
 | `mipsel-linux-gnueabi`     | OK             |
 | `mipsel-linux-gnueabihf`   | OK             |
 | `mipsel-linux-musleabi`    | OK             |
