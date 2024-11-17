@@ -111,13 +111,13 @@ is more portable across Linux distributions.
 | `loongarch64-linux-gnu`     | OK             |
 | `loongarch64-linux-gnusf`   | OK             |
 | `loongarch64-linux-musl`    | OK             |
-| `mips-linux-gnueabi`        | [#195](https://github.com/ziglang/zig-bootstrap/issues/195) |
-| `mips-linux-gnueabihf`      | [#196](https://github.com/ziglang/zig-bootstrap/issues/196) |
+| `mips-linux-gnueabi`        | OK             |
+| `mips-linux-gnueabihf`      | OK             |
 | `mips-linux-musleabi`       | OK             |
 | `mips-linux-musleabihf`     | OK             |
 | `mips64-linux-gnuabi64`     | OK             |
 | `mips64-linux-gnuabin32`    | [#109](https://github.com/ziglang/zig-bootstrap/issues/109) |
-| `mips64-linux-muslabi64`    | [#192](https://github.com/ziglang/zig-bootstrap/issues/192) |
+| `mips64-linux-muslabi64`    | OK             |
 | `mips64-linux-muslabin32`   | [#200](https://github.com/ziglang/zig-bootstrap/issues/200) |
 | `mips64el-linux-gnuabi64`   | OK             |
 | `mips64el-linux-gnuabin32`  | [#107](https://github.com/ziglang/zig-bootstrap/issues/107) |
