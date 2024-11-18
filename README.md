@@ -153,9 +153,9 @@ is more portable across Linux distributions.
 | `x86-windows-gnu`           | OK             |
 | `x86_64-freebsd-gnu`        | [#45](https://github.com/ziglang/bootstrap/issues/45) |
 | `x86_64-linux-gnu`          | OK             |
-| `x86_64-linux-gnux32`       | [#20](https://github.com/ziglang/bootstrap/issues/20) |
+| `x86_64-linux-gnux32`       | OK             |
 | `x86_64-linux-musl`         | OK             |
-| `x86_64-linux-muslx32`      | [#199](https://github.com/ziglang/zig-bootstrap/issues/199) |
+| `x86_64-linux-muslx32`      | OK             |
 | `x86_64-macos-none`         | OK             |
 | `x86_64-windows-gnu`        | OK             |
 
