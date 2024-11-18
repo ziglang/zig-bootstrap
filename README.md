@@ -157,6 +157,7 @@ is more portable across Linux distributions.
 | `x86_64-linux-musl`         | OK             |
 | `x86_64-linux-muslx32`      | OK             |
 | `x86_64-macos-none`         | OK             |
+| `x86_64-netbsd-none`        | [#71](https://github.com/ziglang/zig-bootstrap/issues/71) |
 | `x86_64-windows-gnu`        | OK             |
 
 #### Other Notable Targets Known to Work
