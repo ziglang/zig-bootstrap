@@ -151,7 +151,7 @@ is more portable across Linux distributions.
 | `x86-linux-gnu`             | OK             |
 | `x86-linux-musl`            | OK             |
 | `x86-windows-gnu`           | OK             |
-| `x86_64-freebsd-gnu`        | [#45](https://github.com/ziglang/bootstrap/issues/45) |
+| `x86_64-freebsd-none`       | [#45](https://github.com/ziglang/bootstrap/issues/45) |
 | `x86_64-linux-gnu`          | OK             |
 | `x86_64-linux-gnux32`       | OK             |
 | `x86_64-linux-musl`         | OK             |
