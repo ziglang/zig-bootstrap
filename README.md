@@ -135,9 +135,9 @@ is more portable across Linux distributions.
 | `powerpc64-linux-musl`      | OK             |
 | `powerpc64le-linux-gnu`     | OK             |
 | `powerpc64le-linux-musl`    | OK             |
-| `riscv32-linux-gnu`         | OK             |
+| `riscv32-linux-gnu`         | [#205](https://github.com/ziglang/zig-bootstrap/issues/205) |
 | `riscv32-linux-musl`        | OK             |
-| `riscv64-linux-gnu`         | OK             |
+| `riscv64-linux-gnu`         | [#205](https://github.com/ziglang/zig-bootstrap/issues/205) |
 | `riscv64-linux-musl`        | OK             |
 | `s390x-linux-gnu`           | OK             |
 | `s390x-linux-musl`          | OK             |
