@@ -177,10 +177,7 @@ createTargetCodeGenInfo(CodeGenModule &CGM) {
     else if (ABIStr == "aapcs16")
       Kind = ARMABIKind::AAPCS16_VFP;
     else if (CodeGenOpts.FloatABI == "hard" ||
-             (CodeGenOpts.FloatABI != "soft" &&
-              (Triple.getEnvironment() == llvm::Triple::GNUEABIHF ||
-               Triple.getEnvironment() == llvm::Triple::MuslEABIHF ||
-               Triple.getEnvironment() == llvm::Triple::EABIHF)))
+             (CodeGenOpts.FloatABI != "soft" && Triple.isHardFloatABI()))
       Kind = ARMABIKind::AAPCS_VFP;
 
     return createARMTargetCodeGenInfo(CGM, Kind);
@@ -343,10 +340,11 @@ CodeGenModule::CodeGenModule(ASTContext &C,
     : Context(C), LangOpts(C.getLangOpts()), FS(FS), HeaderSearchOpts(HSO),
       PreprocessorOpts(PPO), CodeGenOpts(CGO), TheModule(M), Diags(diags),
       Target(C.getTargetInfo()), ABI(createCXXABI(*this)),
-      VMContext(M.getContext()), Types(*this), VTables(*this),
+      VMContext(M.getContext()), VTables(*this),
       SanitizerMD(new SanitizerMetadata(*this)) {
 
   // Initialize the type cache.
+  Types.reset(new CodeGenTypes(*this));
   llvm::LLVMContext &LLVMContext = M.getContext();
   VoidTy = llvm::Type::getVoidTy(LLVMContext);
   Int8Ty = llvm::Type::getInt8Ty(LLVMContext);
@@ -405,7 +403,7 @@ CodeGenModule::CodeGenModule(ASTContext &C,
   if (LangOpts.Sanitize.has(SanitizerKind::Thread) ||
       (!CodeGenOpts.RelaxedAliasing && CodeGenOpts.OptimizationLevel > 0))
     TBAA.reset(new CodeGenTBAA(Context, getTypes(), TheModule, CodeGenOpts,
-                               getLangOpts(), getCXXABI().getMangleContext()));
+                               getLangOpts()));
 
   // If debug info or coverage generation is enabled, create the CGDebugInfo
   // object.
@@ -1136,6 +1134,11 @@ void CodeGenModule::Release() {
                               CodeGenOpts.SanitizeCfiCanonicalJumpTables);
   }
 
+  if (CodeGenOpts.SanitizeCfiICallNormalizeIntegers) {
+    getModule().addModuleFlag(llvm::Module::Override, "cfi-normalize-integers",
+                              1);
+  }
+
   if (LangOpts.Sanitize.has(SanitizerKind::KCFI)) {
     getModule().addModuleFlag(llvm::Module::Override, "kcfi", 1);
     // KCFI assumes patchable-function-prefix is the same for all indirectly
@@ -1452,12 +1455,12 @@ void CodeGenModule::EmitBackendOptionsMetadata(
 
 void CodeGenModule::UpdateCompletedType(const TagDecl *TD) {
   // Make sure that this type is translated.
-  Types.UpdateCompletedType(TD);
+  getTypes().UpdateCompletedType(TD);
 }
 
 void CodeGenModule::RefreshTypeCacheForClass(const CXXRecordDecl *RD) {
   // Make sure that this type is translated.
-  Types.RefreshTypeCacheForClass(RD);
+  getTypes().RefreshTypeCacheForClass(RD);
 }
 
 llvm::MDNode *CodeGenModule::getTBAATypeInfo(QualType QTy) {
@@ -5376,6 +5379,10 @@ void CodeGenModule::maybeSetTrivialComdat(const Decl &D,
   GO.setComdat(TheModule.getOrInsertComdat(GO.getName()));
 }
 
+const ABIInfo &CodeGenModule::getABIInfo() {
+  return getTargetCodeGenInfo().getABIInfo();
+}
+
 /// Pass IsTentative as true if you want to create a tentative definition.
 void CodeGenModule::EmitGlobalVarDefinition(const VarDecl *D,
                                             bool IsTentative) {
@@ -7073,8 +7080,8 @@ void CodeGenModule::EmitTopLevelDecl(Decl *D) {
     // For C++ standard modules we are done - we will call the module
     // initializer for imported modules, and that will likewise call those for
     // any imports it has.
-    if (CXX20ModuleInits && Import->getImportedOwningModule() &&
-        !Import->getImportedOwningModule()->isModuleMapModule())
+    if (CXX20ModuleInits && Import->getImportedModule() &&
+        Import->getImportedModule()->isNamedModule())
       break;
 
     // For clang C++ module map modules the initializers for sub-modules are
@@ -7783,8 +7790,6 @@ void CodeGenModule::moveLazyEmissionStates(CodeGenModule *NewBuilder) {
   NewBuilder->Manglings = std::move(Manglings);
 
   NewBuilder->WeakRefReferences = std::move(WeakRefReferences);
-
-  NewBuilder->TBAA = std::move(TBAA);
 
   NewBuilder->ABI->MangleCtx = std::move(ABI->MangleCtx);
 }

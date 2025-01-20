@@ -332,8 +332,6 @@ private:
   bool isEligibleForTailCallOptimization(
       CCState &CCInfo, CallLoweringInfo &CLI, MachineFunction &MF,
       const SmallVectorImpl<CCValAssign> &ArgLocs) const;
-
-  bool softPromoteHalfType() const override { return true; }
 };
 
 } // end namespace llvm
