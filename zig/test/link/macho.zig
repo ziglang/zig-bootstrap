@@ -62,6 +62,7 @@ pub fn testAll(b: *Build, build_opts: BuildOptions) *Step {
     macho_step.dependOn(testTlsLargeTbss(b, .{ .target = default_target }));
     macho_step.dependOn(testTlsZig(b, .{ .target = default_target }));
     macho_step.dependOn(testUndefinedFlag(b, .{ .target = default_target }));
+    macho_step.dependOn(testDiscardLocalSymbols(b, .{ .target = default_target }));
     macho_step.dependOn(testUnresolvedError(b, .{ .target = default_target }));
     macho_step.dependOn(testUnresolvedError2(b, .{ .target = default_target }));
     macho_step.dependOn(testUnwindInfo(b, .{ .target = default_target }));
@@ -937,9 +938,13 @@ fn testLinksection(b: *Build, opts: Options) *Step {
     const obj = addObject(b, opts, .{ .name = "main", .zig_source_bytes = 
     \\export var test_global: u32 linksection("__DATA,__TestGlobal") = undefined;
     \\export fn testFn() linksection("__TEXT,__TestFn") callconv(.C) void {
-    \\    testGenericFn("A");
+    \\    TestGenericFn("A").f();
     \\}
-    \\fn testGenericFn(comptime suffix: []const u8) linksection("__TEXT,__TestGenFn" ++ suffix) void {}
+    \\fn TestGenericFn(comptime suffix: []const u8) type {
+    \\    return struct {
+    \\        fn f() linksection("__TEXT,__TestGenFn" ++ suffix) void {}
+    \\    };
+    \\}
     });
 
     const check = obj.checkObject();
@@ -950,7 +955,7 @@ fn testLinksection(b: *Build, opts: Options) *Step {
 
     if (opts.optimize == .Debug) {
         check.checkInSymtab();
-        check.checkContains("(__TEXT,__TestGenFnA) _main.testGenericFn__anon_");
+        check.checkContains("(__TEXT,__TestGenFnA) _main.TestGenericFn(");
     }
 
     test_step.dependOn(&check.step);
@@ -2493,6 +2498,51 @@ fn testTwoLevelNamespace(b: *Build, opts: Options) *Step {
             \\
         );
         test_step.dependOn(&run.step);
+    }
+
+    return test_step;
+}
+
+fn testDiscardLocalSymbols(b: *Build, opts: Options) *Step {
+    const test_step = addTestStep(b, "discard-local-symbols", opts);
+
+    const obj = addObject(b, opts, .{ .name = "a", .c_source_bytes = "static int foo = 42;" });
+
+    const lib = addStaticLibrary(b, opts, .{ .name = "a" });
+    lib.addObject(obj);
+
+    const main_o = addObject(b, opts, .{ .name = "main", .c_source_bytes = "int main() { return 0; }" });
+
+    {
+        const exe = addExecutable(b, opts, .{ .name = "main3" });
+        exe.addObject(main_o);
+        exe.addObject(obj);
+        exe.discard_local_symbols = true;
+
+        const run = addRunArtifact(exe);
+        run.expectExitCode(0);
+        test_step.dependOn(&run.step);
+
+        const check = exe.checkObject();
+        check.checkInSymtab();
+        check.checkNotPresent("_foo");
+        test_step.dependOn(&check.step);
+    }
+
+    {
+        const exe = addExecutable(b, opts, .{ .name = "main4" });
+        exe.addObject(main_o);
+        exe.linkLibrary(lib);
+        exe.discard_local_symbols = true;
+
+        const run = addRunArtifact(exe);
+        run.expectExitCode(0);
+        test_step.dependOn(&run.step);
+
+        const check = exe.checkObject();
+        check.checkInSymtab();
+        check.checkNotPresent("_foo");
+        test_step.dependOn(&check.step);
     }
 
     return test_step;

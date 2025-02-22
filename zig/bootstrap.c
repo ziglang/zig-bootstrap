@@ -123,7 +123,7 @@ int main(int argc, char **argv) {
         if (f == NULL)
             panic("unable to open config.zig for writing");
 
-        const char *zig_version = "0.14.0-dev.2257+e6d2e1641";
+        const char *zig_version = "0.14.0-dev.3299+31f353cd9";
 
         int written = fprintf(f,
             "pub const have_llvm = false;\n"
@@ -139,8 +139,9 @@ int main(int argc, char **argv) {
             "pub const enable_tracy = false;\n"
             "pub const value_tracing = false;\n"
             "pub const skip_non_native = false;\n"
-            "pub const force_gpa = false;\n"
+            "pub const debug_gpa = false;\n"
             "pub const dev = .core;\n"
+            "pub const value_interpret_mode = .direct;\n"
         , zig_version);
         if (written < 100)
             panic("unable to write to config.zig file");

@@ -114,7 +114,7 @@ pub const BuildError = error{
     ZigCompilerNotBuiltWithLLVMExtensions,
 };
 
-pub fn buildLibCXX(comp: *Compilation, prog_node: std.Progress.Node) BuildError!void {
+pub fn buildLibCxx(comp: *Compilation, prog_node: std.Progress.Node) BuildError!void {
     if (!build_options.have_llvm) {
         return error.ZigCompilerNotBuiltWithLLVMExtensions;
     }
@@ -196,6 +196,7 @@ pub fn buildLibCXX(comp: *Compilation, prog_node: std.Progress.Node) BuildError!
             .optimize_mode = optimize_mode,
             .structured_cfg = comp.root_mod.structured_cfg,
             .pic = if (target_util.supports_fpic(target)) true else null,
+            .code_model = comp.root_mod.code_model,
         },
         .global = config,
         .cc_argv = &.{},
@@ -262,7 +263,7 @@ pub fn buildLibCXX(comp: *Compilation, prog_node: std.Progress.Node) BuildError!
 
         if (target.isGnuLibC()) {
             // glibc 2.16 introduced aligned_alloc
-            if (target.os.version_range.linux.glibc.order(.{ .major = 2, .minor = 16, .patch = 0 }) == .lt) {
+            if (target.os.versionRange().gnuLibCVersion().?.order(.{ .major = 2, .minor = 16, .patch = 0 }) == .lt) {
                 try cflags.append("-D_LIBCPP_HAS_NO_LIBRARY_ALIGNED_ALLOCATION");
             }
         }
@@ -357,7 +358,7 @@ pub fn buildLibCXX(comp: *Compilation, prog_node: std.Progress.Node) BuildError!
     comp.queueLinkTaskMode(crt_file.full_object_path, output_mode);
 }
 
-pub fn buildLibCXXABI(comp: *Compilation, prog_node: std.Progress.Node) BuildError!void {
+pub fn buildLibCxxAbi(comp: *Compilation, prog_node: std.Progress.Node) BuildError!void {
     if (!build_options.have_llvm) {
         return error.ZigCompilerNotBuiltWithLLVMExtensions;
     }
@@ -397,7 +398,10 @@ pub fn buildLibCXXABI(comp: *Compilation, prog_node: std.Progress.Node) BuildErr
 
     const optimize_mode = comp.compilerRtOptMode();
     const strip = comp.compilerRtStrip();
-    const unwind_tables = true;
+    // See the `-fno-exceptions` logic for WASI.
+    // The old 32-bit x86 variant of SEH doesn't use tables.
+    const unwind_tables: std.builtin.UnwindTables =
+        if (target.os.tag == .wasi or (target.cpu.arch == .x86 and target.os.tag == .windows)) .none else .@"async";
 
     const config = Compilation.Config.resolve(.{
         .output_mode = output_mode,
@@ -409,7 +413,7 @@ pub fn buildLibCXXABI(comp: *Compilation, prog_node: std.Progress.Node) BuildErr
         .root_optimize_mode = optimize_mode,
         .root_strip = strip,
         .link_libc = true,
-        .any_unwind_tables = unwind_tables,
+        .any_unwind_tables = unwind_tables != .none,
         .lto = comp.config.lto,
         .any_sanitize_thread = comp.config.any_sanitize_thread,
     }) catch |err| {
@@ -442,6 +446,7 @@ pub fn buildLibCXXABI(comp: *Compilation, prog_node: std.Progress.Node) BuildErr
             .structured_cfg = comp.root_mod.structured_cfg,
             .unwind_tables = unwind_tables,
             .pic = comp.root_mod.pic,
+            .code_model = comp.root_mod.code_model,
         },
         .global = config,
         .cc_argv = &.{},
@@ -477,7 +482,7 @@ pub fn buildLibCXXABI(comp: *Compilation, prog_node: std.Progress.Node) BuildErr
             }
             try cflags.append("-D_LIBCXXABI_HAS_NO_THREADS");
         } else if (target.abi.isGnu()) {
-            if (target.os.tag != .linux or !(target.os.version_range.linux.glibc.order(.{ .major = 2, .minor = 18, .patch = 0 }) == .lt))
+            if (target.os.tag != .linux or !(target.os.versionRange().gnuLibCVersion().?.order(.{ .major = 2, .minor = 18, .patch = 0 }) == .lt))
                 try cflags.append("-DHAVE___CXA_THREAD_ATEXIT_IMPL");
         }
 
@@ -500,7 +505,7 @@ pub fn buildLibCXXABI(comp: *Compilation, prog_node: std.Progress.Node) BuildErr
 
         if (target.isGnuLibC()) {
             // glibc 2.16 introduced aligned_alloc
-            if (target.os.version_range.linux.glibc.order(.{ .major = 2, .minor = 16, .patch = 0 }) == .lt) {
+            if (target.os.versionRange().gnuLibCVersion().?.order(.{ .major = 2, .minor = 16, .patch = 0 }) == .lt) {
                 try cflags.append("-D_LIBCPP_HAS_NO_LIBRARY_ALIGNED_ALLOCATION");
             }
         }

@@ -30,6 +30,10 @@ pub const Env = enum {
     /// - `zig build-* -fno-llvm -fno-lld -target riscv64-linux`
     @"riscv64-linux",
 
+    /// - sema
+    /// - `zig build-* -fno-llvm -fno-lld -target wasm32-* --listen=-`
+    wasm,
+
     pub inline fn supports(comptime dev_env: Env, comptime feature: Feature) bool {
         return switch (dev_env) {
             .full => true,
@@ -81,6 +85,7 @@ pub const Env = enum {
                 => true,
                 .cc_command,
                 .translate_c_command,
+                .fmt_command,
                 .jit_command,
                 .fetch_command,
                 .init_command,
@@ -130,6 +135,7 @@ pub const Env = enum {
                 else => Env.ast_gen.supports(feature),
             },
             .@"x86_64-linux" => switch (feature) {
+                .build_command,
                 .stdio_listen,
                 .incremental,
                 .x86_64_backend,
@@ -140,6 +146,14 @@ pub const Env = enum {
             .@"riscv64-linux" => switch (feature) {
                 .riscv64_backend,
                 .elf_linker,
+                => true,
+                else => Env.sema.supports(feature),
+            },
+            .wasm => switch (feature) {
+                .stdio_listen,
+                .incremental,
+                .wasm_backend,
+                .wasm_linker,
                 => true,
                 else => Env.sema.supports(feature),
             },
@@ -168,6 +182,7 @@ pub const Feature = enum {
     clang_command,
     cc_command,
     translate_c_command,
+    fmt_command,
     jit_command,
     fetch_command,
     init_command,
