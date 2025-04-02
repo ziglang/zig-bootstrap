@@ -38,7 +38,7 @@ project(zig
 )
 
 set(ZIG_VERSION_MAJOR 0)
-set(ZIG_VERSION_MINOR 14)
+set(ZIG_VERSION_MINOR 15)
 set(ZIG_VERSION_PATCH 0)
 set(ZIG_VERSION "" CACHE STRING "Override Zig version string. Default is to find out with git.")
 
@@ -132,9 +132,9 @@ else()
     set(ZIG_SYSTEM_LIBCXX "stdc++" CACHE STRING "system libcxx name for build.zig")
 endif()
 
-find_package(llvm 19)
-find_package(clang 19)
-find_package(lld 19)
+find_package(llvm 20)
+find_package(clang 20)
+find_package(lld 20)
 
 if(ZIG_STATIC_ZLIB)
     if (MSVC)
@@ -500,6 +500,11 @@ set(ZIG_STAGE2_SOURCES
     lib/std/zig/system/NativePaths.zig
     lib/std/zig/system/x86.zig
     lib/std/zig/tokenizer.zig
+    lib/std/zig/llvm.zig
+    lib/std/zig/llvm/BitcodeReader.zig
+    lib/std/zig/llvm/Builder.zig
+    lib/std/zig/llvm/bitcode_writer.zig
+    lib/std/zig/llvm/ir.zig
     src/Air.zig
     src/Builtin.zig
     src/Compilation.zig
@@ -559,7 +564,7 @@ set(ZIG_STAGE2_SOURCES
     src/arch/x86_64/abi.zig
     src/arch/x86_64/bits.zig
     src/arch/x86_64/encoder.zig
-    src/arch/x86_64/encodings.zig
+    src/arch/x86_64/encodings.zon
     src/clang.zig
     src/clang_options.zig
     src/clang_options_data.zig
@@ -567,11 +572,7 @@ set(ZIG_STAGE2_SOURCES
     src/codegen/c.zig
     src/codegen/c/Type.zig
     src/codegen/llvm.zig
-    src/codegen/llvm/BitcodeReader.zig
-    src/codegen/llvm/Builder.zig
     src/codegen/llvm/bindings.zig
-    src/codegen/llvm/bitcode_writer.zig
-    src/codegen/llvm/ir.zig
     src/codegen/spirv.zig
     src/codegen/spirv/Assembler.zig
     src/codegen/spirv/Module.zig

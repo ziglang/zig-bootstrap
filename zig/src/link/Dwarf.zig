@@ -23,12 +23,11 @@ debug_str: StringSection,
 pub const UpdateError = error{
     ReinterpretDeclRef,
     Unimplemented,
-    OutOfMemory,
     EndOfStream,
-    Overflow,
     Underflow,
     UnexpectedEndOfFile,
 } ||
+    codegen.GenerateSymbolError ||
     std.fs.File.OpenError ||
     std.fs.File.SetEndPosError ||
     std.fs.File.CopyRangeError ||
@@ -1995,30 +1994,30 @@ pub const WipNav = struct {
             errdefer _ = if (!decl_gop.found_existing) dwarf.decls.pop();
             const was_generic_decl = decl_gop.found_existing and
                 switch (try dwarf.debug_info.declAbbrevCode(wip_nav.unit, decl_gop.value_ptr.*)) {
-                .null,
-                .decl_alias,
-                .decl_empty_enum,
-                .decl_enum,
-                .decl_namespace_struct,
-                .decl_struct,
-                .decl_packed_struct,
-                .decl_union,
-                .decl_var,
-                .decl_const,
-                .decl_const_runtime_bits,
-                .decl_const_comptime_state,
-                .decl_const_runtime_bits_comptime_state,
-                .decl_empty_func,
-                .decl_func,
-                .decl_empty_func_generic,
-                .decl_func_generic,
-                => false,
-                .generic_decl_var,
-                .generic_decl_const,
-                .generic_decl_func,
-                => true,
-                else => unreachable,
-            };
+                    .null,
+                    .decl_alias,
+                    .decl_empty_enum,
+                    .decl_enum,
+                    .decl_namespace_struct,
+                    .decl_struct,
+                    .decl_packed_struct,
+                    .decl_union,
+                    .decl_var,
+                    .decl_const,
+                    .decl_const_runtime_bits,
+                    .decl_const_comptime_state,
+                    .decl_const_runtime_bits_comptime_state,
+                    .decl_nullary_func,
+                    .decl_func,
+                    .decl_nullary_func_generic,
+                    .decl_func_generic,
+                    => false,
+                    .generic_decl_var,
+                    .generic_decl_const,
+                    .generic_decl_func,
+                    => true,
+                    else => unreachable,
+                };
             if (parent_type.getCaptures(zcu).len == 0) {
                 if (was_generic_decl) try dwarf.freeCommonEntry(wip_nav.unit, decl_gop.value_ptr.*);
                 decl_gop.value_ptr.* = orig_entry;
@@ -2626,8 +2625,8 @@ pub fn finishWipNavFunc(
                 abbrev_code_buf,
                 try dwarf.refAbbrevCode(switch (abbrev_code) {
                     else => unreachable,
-                    .decl_func => .decl_empty_func,
-                    .decl_instance_func => .decl_instance_empty_func,
+                    .decl_func => .decl_nullary_func,
+                    .decl_instance_func => .decl_instance_nullary_func,
                 }),
             );
         }
@@ -3012,29 +3011,34 @@ fn updateComptimeNavInner(dwarf: *Dwarf, pt: Zcu.PerThread, nav_index: InternPoo
             if (nav_gop.found_existing) switch (try dwarf.debug_info.declAbbrevCode(wip_nav.unit, nav_gop.value_ptr.*)) {
                 .null => {},
                 else => unreachable,
-                .decl_empty_func, .decl_func, .decl_instance_empty_func, .decl_instance_func => return,
-                .decl_empty_func_generic,
+                .decl_nullary_func, .decl_func, .decl_instance_nullary_func, .decl_instance_func => return,
+                .decl_nullary_func_generic,
                 .decl_func_generic,
-                .decl_instance_empty_func_generic,
+                .decl_instance_nullary_func_generic,
                 .decl_instance_func_generic,
                 => dwarf.debug_info.section.getUnit(wip_nav.unit).getEntry(nav_gop.value_ptr.*).clear(),
             } else nav_gop.value_ptr.* = try dwarf.addCommonEntry(wip_nav.unit);
             wip_nav.entry = nav_gop.value_ptr.*;
 
             const func_type = ip.indexToKey(func.ty).func_type;
+            const is_nullary = !func_type.is_var_args and for (0..func_type.param_types.len) |param_index| {
+                if (!func_type.paramIsComptime(std.math.cast(u5, param_index) orelse break false)) break false;
+            } else true;
             const diw = wip_nav.debug_info.writer(dwarf.gpa);
-            try wip_nav.declCommon(if (func_type.param_types.len > 0 or func_type.is_var_args) .{
+            try wip_nav.declCommon(if (is_nullary) .{
+                .decl = .decl_nullary_func_generic,
+                .generic_decl = .generic_decl_func,
+                .decl_instance = .decl_instance_nullary_func_generic,
+            } else .{
                 .decl = .decl_func_generic,
                 .generic_decl = .generic_decl_func,
                 .decl_instance = .decl_instance_func_generic,
-            } else .{
-                .decl = .decl_empty_func_generic,
-                .generic_decl = .generic_decl_func,
-                .decl_instance = .decl_instance_empty_func_generic,
             }, &nav, inst_info.file, &decl);
             try wip_nav.refType(.fromInterned(func_type.return_type));
-            if (func_type.param_types.len > 0 or func_type.is_var_args) {
+            if (!is_nullary) {
                 for (0..func_type.param_types.len) |param_index| {
+                    if (std.math.cast(u5, param_index)) |small_param_index|
+                        if (func_type.paramIsComptime(small_param_index)) continue;
                     try wip_nav.abbrevCode(.func_type_param);
                     try wip_nav.refType(.fromInterned(func_type.param_types.get(ip)[param_index]));
                 }
@@ -3248,75 +3252,72 @@ fn updateLazyType(
         },
         .opt_type => |opt_child_type_index| {
             const opt_child_type: Type = .fromInterned(opt_child_type_index);
+            const opt_repr = optRepr(opt_child_type, zcu);
             try wip_nav.abbrevCode(.generated_union_type);
             try wip_nav.strp(name);
             try uleb128(diw, ty.abiSize(zcu));
             try uleb128(diw, ty.abiAlignment(zcu).toByteUnits().?);
-            if (opt_child_type.isNoReturn(zcu)) {
-                try wip_nav.abbrevCode(.generated_field);
-                try wip_nav.strp("null");
-                try wip_nav.refType(.null);
-                try uleb128(diw, 0);
-            } else {
-                try wip_nav.abbrevCode(.tagged_union);
-                try wip_nav.infoSectionOffset(
-                    .debug_info,
-                    wip_nav.unit,
-                    wip_nav.entry,
-                    @intCast(wip_nav.debug_info.items.len + dwarf.sectionOffsetBytes()),
-                );
-                {
+            switch (opt_repr) {
+                .opv_null => {
                     try wip_nav.abbrevCode(.generated_field);
-                    try wip_nav.strp("has_value");
-                    const repr: enum { unpacked, error_set, pointer } = switch (opt_child_type_index) {
-                        .anyerror_type => .error_set,
-                        else => switch (ip.indexToKey(opt_child_type_index)) {
-                            else => .unpacked,
-                            .error_set_type, .inferred_error_set_type => .error_set,
-                            .ptr_type => |ptr_type| if (ptr_type.flags.is_allowzero) .unpacked else .pointer,
-                        },
-                    };
-                    switch (repr) {
-                        .unpacked => {
-                            try wip_nav.refType(.bool);
-                            try uleb128(diw, if (opt_child_type.hasRuntimeBits(zcu))
-                                opt_child_type.abiSize(zcu)
-                            else
-                                0);
-                        },
-                        .error_set => {
-                            try wip_nav.refType(.fromInterned(try pt.intern(.{ .int_type = .{
-                                .signedness = .unsigned,
-                                .bits = zcu.errorSetBits(),
-                            } })));
-                            try uleb128(diw, 0);
-                        },
-                        .pointer => {
-                            try wip_nav.refType(.usize);
-                            try uleb128(diw, 0);
-                        },
-                    }
-
-                    try wip_nav.abbrevCode(.unsigned_tagged_union_field);
+                    try wip_nav.strp("null");
+                    try wip_nav.refType(.null);
                     try uleb128(diw, 0);
+                },
+                .unpacked, .error_set, .pointer => {
+                    try wip_nav.abbrevCode(.tagged_union);
+                    try wip_nav.infoSectionOffset(
+                        .debug_info,
+                        wip_nav.unit,
+                        wip_nav.entry,
+                        @intCast(wip_nav.debug_info.items.len + dwarf.sectionOffsetBytes()),
+                    );
                     {
                         try wip_nav.abbrevCode(.generated_field);
-                        try wip_nav.strp("null");
-                        try wip_nav.refType(.null);
-                        try uleb128(diw, 0);
-                    }
-                    try uleb128(diw, @intFromEnum(AbbrevCode.null));
+                        try wip_nav.strp("has_value");
+                        switch (opt_repr) {
+                            .opv_null => unreachable,
+                            .unpacked => {
+                                try wip_nav.refType(.bool);
+                                try uleb128(diw, if (opt_child_type.hasRuntimeBits(zcu))
+                                    opt_child_type.abiSize(zcu)
+                                else
+                                    0);
+                            },
+                            .error_set => {
+                                try wip_nav.refType(.fromInterned(try pt.intern(.{ .int_type = .{
+                                    .signedness = .unsigned,
+                                    .bits = zcu.errorSetBits(),
+                                } })));
+                                try uleb128(diw, 0);
+                            },
+                            .pointer => {
+                                try wip_nav.refType(.usize);
+                                try uleb128(diw, 0);
+                            },
+                        }
 
-                    try wip_nav.abbrevCode(.tagged_union_default_field);
-                    {
-                        try wip_nav.abbrevCode(.generated_field);
-                        try wip_nav.strp("?");
-                        try wip_nav.refType(opt_child_type);
+                        try wip_nav.abbrevCode(.unsigned_tagged_union_field);
                         try uleb128(diw, 0);
+                        {
+                            try wip_nav.abbrevCode(.generated_field);
+                            try wip_nav.strp("null");
+                            try wip_nav.refType(.null);
+                            try uleb128(diw, 0);
+                        }
+                        try uleb128(diw, @intFromEnum(AbbrevCode.null));
+
+                        try wip_nav.abbrevCode(.tagged_union_default_field);
+                        {
+                            try wip_nav.abbrevCode(.generated_field);
+                            try wip_nav.strp("?");
+                            try wip_nav.refType(opt_child_type);
+                            try uleb128(diw, 0);
+                        }
+                        try uleb128(diw, @intFromEnum(AbbrevCode.null));
                     }
                     try uleb128(diw, @intFromEnum(AbbrevCode.null));
-                }
-                try uleb128(diw, @intFromEnum(AbbrevCode.null));
+                },
             }
             try uleb128(diw, @intFromEnum(AbbrevCode.null));
         },
@@ -3571,12 +3572,14 @@ fn updateLazyType(
             };
             try diw.writeByte(@intFromEnum(cc));
             try wip_nav.refType(.fromInterned(func_type.return_type));
-            for (0..func_type.param_types.len) |param_index| {
-                try wip_nav.abbrevCode(.func_type_param);
-                try wip_nav.refType(.fromInterned(func_type.param_types.get(ip)[param_index]));
+            if (!is_nullary) {
+                for (0..func_type.param_types.len) |param_index| {
+                    try wip_nav.abbrevCode(.func_type_param);
+                    try wip_nav.refType(.fromInterned(func_type.param_types.get(ip)[param_index]));
+                }
+                if (func_type.is_var_args) try wip_nav.abbrevCode(.is_var_args);
+                try uleb128(diw, @intFromEnum(AbbrevCode.null));
             }
-            if (func_type.is_var_args) try wip_nav.abbrevCode(.is_var_args);
-            if (!is_nullary) try uleb128(diw, @intFromEnum(AbbrevCode.null));
         },
         .error_set_type => |error_set_type| {
             try wip_nav.abbrevCode(if (error_set_type.names.len == 0) .generated_empty_enum_type else .generated_enum_type);
@@ -3850,22 +3853,31 @@ fn updateLazyValue(
             try uleb128(diw, @intFromEnum(AbbrevCode.null));
         },
         .opt => |opt| {
-            const child_type: Type = .fromInterned(ip.indexToKey(opt.ty).opt_type);
+            const opt_child_type: Type = .fromInterned(ip.indexToKey(opt.ty).opt_type);
             try wip_nav.abbrevCode(.aggregate_comptime_value);
             try wip_nav.refType(.fromInterned(opt.ty));
             {
                 try wip_nav.abbrevCode(.comptime_value_field_runtime_bits);
                 try wip_nav.strp("has_value");
-                if (Type.fromInterned(opt.ty).optionalReprIsPayload(zcu)) {
-                    try wip_nav.blockValue(src_loc, .fromInterned(opt.val));
-                } else {
-                    try uleb128(diw, 1);
-                    try diw.writeByte(@intFromBool(opt.val != .none));
+                switch (optRepr(opt_child_type, zcu)) {
+                    .opv_null => try uleb128(diw, 0),
+                    .unpacked => try wip_nav.blockValue(src_loc, .makeBool(opt.val != .none)),
+                    .error_set => try wip_nav.blockValue(src_loc, .fromInterned(value_index)),
+                    .pointer => if (opt_child_type.comptimeOnly(zcu)) {
+                        var buf: [8]u8 = undefined;
+                        const bytes = buf[0..@divExact(zcu.getTarget().ptrBitWidth(), 8)];
+                        dwarf.writeInt(bytes, switch (opt.val) {
+                            .none => 0,
+                            else => opt_child_type.ptrAlignment(zcu).toByteUnits().?,
+                        });
+                        try uleb128(diw, bytes.len);
+                        try diw.writeAll(bytes);
+                    } else try wip_nav.blockValue(src_loc, .fromInterned(value_index)),
                 }
             }
             if (opt.val != .none) child_field: {
-                const has_runtime_bits = child_type.hasRuntimeBits(zcu);
-                const has_comptime_state = child_type.comptimeOnly(zcu) and try child_type.onePossibleValue(pt) == null;
+                const has_runtime_bits = opt_child_type.hasRuntimeBits(zcu);
+                const has_comptime_state = opt_child_type.comptimeOnly(zcu) and try opt_child_type.onePossibleValue(pt) == null;
                 try wip_nav.abbrevCode(if (has_comptime_state)
                     .comptime_value_field_comptime_state
                 else if (has_runtime_bits)
@@ -3993,6 +4005,23 @@ fn updateLazyValue(
         .memoized_call => unreachable, // not a value
     }
     try dwarf.debug_info.section.replaceEntry(wip_nav.unit, wip_nav.entry, dwarf, wip_nav.debug_info.items);
+}
+
+fn optRepr(opt_child_type: Type, zcu: *const Zcu) enum {
+    unpacked,
+    opv_null,
+    error_set,
+    pointer,
+} {
+    if (opt_child_type.isNoReturn(zcu)) return .opv_null;
+    return switch (opt_child_type.toIntern()) {
+        .anyerror_type => .error_set,
+        else => switch (zcu.intern_pool.indexToKey(opt_child_type.toIntern())) {
+            else => .unpacked,
+            .error_set_type, .inferred_error_set_type => .error_set,
+            .ptr_type => |ptr_type| if (ptr_type.flags.is_allowzero) .unpacked else .pointer,
+        },
+    };
 }
 
 pub fn updateContainerType(dwarf: *Dwarf, pt: Zcu.PerThread, type_index: InternPool.Index) UpdateError!void {
@@ -4764,9 +4793,9 @@ const AbbrevCode = enum {
     decl_const_runtime_bits,
     decl_const_comptime_state,
     decl_const_runtime_bits_comptime_state,
-    decl_empty_func,
+    decl_nullary_func,
     decl_func,
-    decl_empty_func_generic,
+    decl_nullary_func_generic,
     decl_func_generic,
     generic_decl_var,
     generic_decl_const,
@@ -4783,9 +4812,9 @@ const AbbrevCode = enum {
     decl_instance_const_runtime_bits,
     decl_instance_const_comptime_state,
     decl_instance_const_runtime_bits_comptime_state,
-    decl_instance_empty_func,
+    decl_instance_nullary_func,
     decl_instance_func,
-    decl_instance_empty_func_generic,
+    decl_instance_nullary_func_generic,
     decl_instance_func_generic,
     // the rest are unrestricted other than empty variants must not be longer
     // than the non-empty variant, and so should appear first
@@ -4996,7 +5025,7 @@ const AbbrevCode = enum {
                 .{ .ZIG_comptime_value, .ref_addr },
             },
         },
-        .decl_empty_func = .{
+        .decl_nullary_func = .{
             .tag = .subprogram,
             .attrs = decl_abbrev_common_attrs ++ .{
                 .{ .linkage_name, .strp },
@@ -5021,7 +5050,7 @@ const AbbrevCode = enum {
                 .{ .noreturn, .flag },
             },
         },
-        .decl_empty_func_generic = .{
+        .decl_nullary_func_generic = .{
             .tag = .subprogram,
             .attrs = decl_abbrev_common_attrs ++ .{
                 .{ .type, .ref_addr },
@@ -5144,7 +5173,7 @@ const AbbrevCode = enum {
                 .{ .ZIG_comptime_value, .ref_addr },
             },
         },
-        .decl_instance_empty_func = .{
+        .decl_instance_nullary_func = .{
             .tag = .subprogram,
             .attrs = decl_instance_abbrev_common_attrs ++ .{
                 .{ .linkage_name, .strp },
@@ -5169,7 +5198,7 @@ const AbbrevCode = enum {
                 .{ .noreturn, .flag },
             },
         },
-        .decl_instance_empty_func_generic = .{
+        .decl_instance_nullary_func_generic = .{
             .tag = .subprogram,
             .attrs = decl_instance_abbrev_common_attrs ++ .{
                 .{ .type, .ref_addr },

@@ -4573,6 +4573,10 @@ pub const Index = enum(u32) {
 
     vector_16_i8_type,
     vector_32_i8_type,
+    vector_1_u8_type,
+    vector_2_u8_type,
+    vector_4_u8_type,
+    vector_8_u8_type,
     vector_16_u8_type,
     vector_32_u8_type,
     vector_8_i16_type,
@@ -5089,6 +5093,14 @@ pub const static_keys = [_]Key{
     .{ .vector_type = .{ .len = 16, .child = .i8_type } },
     // @Vector(32, i8)
     .{ .vector_type = .{ .len = 32, .child = .i8_type } },
+    // @Vector(1, u8)
+    .{ .vector_type = .{ .len = 1, .child = .u8_type } },
+    // @Vector(2, u8)
+    .{ .vector_type = .{ .len = 2, .child = .u8_type } },
+    // @Vector(4, u8)
+    .{ .vector_type = .{ .len = 4, .child = .u8_type } },
+    // @Vector(8, u8)
+    .{ .vector_type = .{ .len = 8, .child = .u8_type } },
     // @Vector(16, u8)
     .{ .vector_type = .{ .len = 16, .child = .u8_type } },
     // @Vector(32, u8)
@@ -6045,8 +6057,9 @@ pub const FuncAnalysis = packed struct(u32) {
     /// True if this function has an inferred error set.
     inferred_error_set: bool,
     disable_instrumentation: bool,
+    disable_intrinsics: bool,
 
-    _: u24 = 0,
+    _: u23 = 0,
 };
 
 pub const Bytes = struct {
@@ -6260,7 +6273,7 @@ pub const Alignment = enum(u6) {
         return n + 1;
     }
 
-    const LlvmBuilderAlignment = @import("codegen/llvm/Builder.zig").Alignment;
+    const LlvmBuilderAlignment = std.zig.llvm.Builder.Alignment;
 
     pub fn toLlvm(this: @This()) LlvmBuilderAlignment {
         return @enumFromInt(@intFromEnum(this));
@@ -9077,6 +9090,7 @@ pub fn getFuncDecl(
             .has_error_trace = false,
             .inferred_error_set = false,
             .disable_instrumentation = false,
+            .disable_intrinsics = false,
         },
         .owner_nav = key.owner_nav,
         .ty = key.ty,
@@ -9186,6 +9200,7 @@ pub fn getFuncDeclIes(
             .has_error_trace = false,
             .inferred_error_set = true,
             .disable_instrumentation = false,
+            .disable_intrinsics = false,
         },
         .owner_nav = key.owner_nav,
         .ty = func_ty,
@@ -9382,6 +9397,7 @@ pub fn getFuncInstance(
             .has_error_trace = false,
             .inferred_error_set = false,
             .disable_instrumentation = false,
+            .disable_intrinsics = false,
         },
         // This is populated after we create the Nav below. It is not read
         // by equality or hashing functions.
@@ -9439,7 +9455,7 @@ pub fn getFuncInstanceIes(
     try items.ensureUnusedCapacity(4);
 
     const generic_owner = unwrapCoercedFunc(ip, arg.generic_owner);
-    const generic_owner_ty = ip.indexToKey(ip.funcDeclInfo(arg.generic_owner).ty).func_type;
+    const generic_owner_ty = ip.indexToKey(ip.funcDeclInfo(generic_owner).ty).func_type;
 
     // The strategy here is to add the function decl unconditionally, then to
     // ask if it already exists, and if so, revert the lengths of the mutated
@@ -9480,6 +9496,7 @@ pub fn getFuncInstanceIes(
             .has_error_trace = false,
             .inferred_error_set = true,
             .disable_instrumentation = false,
+            .disable_intrinsics = false,
         },
         // This is populated after we create the Nav below. It is not read
         // by equality or hashing functions.
@@ -11761,6 +11778,10 @@ pub fn typeOf(ip: *const InternPool, index: Index) Index {
         .slice_const_u8_sentinel_0_type,
         .vector_16_i8_type,
         .vector_32_i8_type,
+        .vector_1_u8_type,
+        .vector_2_u8_type,
+        .vector_4_u8_type,
+        .vector_8_u8_type,
         .vector_16_u8_type,
         .vector_32_u8_type,
         .vector_8_i16_type,
@@ -12101,6 +12122,10 @@ pub fn zigTypeTag(ip: *const InternPool, index: Index) std.builtin.TypeId {
 
         .vector_16_i8_type,
         .vector_32_i8_type,
+        .vector_1_u8_type,
+        .vector_2_u8_type,
+        .vector_4_u8_type,
+        .vector_8_u8_type,
         .vector_16_u8_type,
         .vector_32_u8_type,
         .vector_8_i16_type,
@@ -12310,6 +12335,18 @@ pub fn funcSetDisableInstrumentation(ip: *InternPool, func: Index) void {
     const analysis_ptr = ip.funcAnalysisPtr(func);
     var analysis = analysis_ptr.*;
     analysis.disable_instrumentation = true;
+    @atomicStore(FuncAnalysis, analysis_ptr, analysis, .release);
+}
+
+pub fn funcSetDisableIntrinsics(ip: *InternPool, func: Index) void {
+    const unwrapped_func = func.unwrap(ip);
+    const extra_mutex = &ip.getLocal(unwrapped_func.tid).mutate.extra.mutex;
+    extra_mutex.lock();
+    defer extra_mutex.unlock();
+
+    const analysis_ptr = ip.funcAnalysisPtr(func);
+    var analysis = analysis_ptr.*;
+    analysis.disable_intrinsics = true;
     @atomicStore(FuncAnalysis, analysis_ptr, analysis, .release);
 }
 
