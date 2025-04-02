@@ -240,6 +240,8 @@ BasicBlock::~BasicBlock() {
 
 void BasicBlock::setParent(Function *parent) {
   // Set Parent=parent, updating instruction symtab entries as appropriate.
+  if (Parent != parent)
+    Number = parent ? parent->NextBlockNum++ : -1u;
   InstList.setSymTabObject(&Parent, parent);
 }
 
@@ -369,19 +371,31 @@ const Instruction* BasicBlock::getFirstNonPHI() const {
   return nullptr;
 }
 
-BasicBlock::const_iterator BasicBlock::getFirstNonPHIIt() const {
-  const Instruction *I = getFirstNonPHI();
-  if (!I)
-    return end();
-  BasicBlock::const_iterator It = I->getIterator();
-  // Set the head-inclusive bit to indicate that this iterator includes
-  // any debug-info at the start of the block. This is a no-op unless the
-  // appropriate CMake flag is set.
-  It.setHeadBit(true);
-  return It;
+Instruction *BasicBlock::getFirstNonPHI() {
+  for (Instruction &I : *this)
+    if (!isa<PHINode>(I))
+      return &I;
+  return nullptr;
 }
 
-const Instruction *BasicBlock::getFirstNonPHIOrDbg(bool SkipPseudoOp) const {
+BasicBlock::const_iterator BasicBlock::getFirstNonPHIIt() const {
+  for (const Instruction &I : *this) {
+    if (isa<PHINode>(I))
+      continue;
+
+    BasicBlock::const_iterator It = I.getIterator();
+    // Set the head-inclusive bit to indicate that this iterator includes
+    // any debug-info at the start of the block. This is a no-op unless the
+    // appropriate CMake flag is set.
+    It.setHeadBit(true);
+    return It;
+  }
+
+  return end();
+}
+
+BasicBlock::const_iterator
+BasicBlock::getFirstNonPHIOrDbg(bool SkipPseudoOp) const {
   for (const Instruction &I : *this) {
     if (isa<PHINode>(I) || isa<DbgInfoIntrinsic>(I))
       continue;
@@ -389,12 +403,16 @@ const Instruction *BasicBlock::getFirstNonPHIOrDbg(bool SkipPseudoOp) const {
     if (SkipPseudoOp && isa<PseudoProbeInst>(I))
       continue;
 
-    return &I;
+    BasicBlock::const_iterator It = I.getIterator();
+    // This position comes after any debug records, the head bit should remain
+    // unset.
+    assert(!It.getHeadBit());
+    return It;
   }
-  return nullptr;
+  return end();
 }
 
-const Instruction *
+BasicBlock::const_iterator
 BasicBlock::getFirstNonPHIOrDbgOrLifetime(bool SkipPseudoOp) const {
   for (const Instruction &I : *this) {
     if (isa<PHINode>(I) || isa<DbgInfoIntrinsic>(I))
@@ -406,17 +424,21 @@ BasicBlock::getFirstNonPHIOrDbgOrLifetime(bool SkipPseudoOp) const {
     if (SkipPseudoOp && isa<PseudoProbeInst>(I))
       continue;
 
-    return &I;
+    BasicBlock::const_iterator It = I.getIterator();
+    // This position comes after any debug records, the head bit should remain
+    // unset.
+    assert(!It.getHeadBit());
+
+    return It;
   }
-  return nullptr;
+  return end();
 }
 
 BasicBlock::const_iterator BasicBlock::getFirstInsertionPt() const {
-  const Instruction *FirstNonPHI = getFirstNonPHI();
-  if (!FirstNonPHI)
+  const_iterator InsertPt = getFirstNonPHIIt();
+  if (InsertPt == end())
     return end();
 
-  const_iterator InsertPt = FirstNonPHI->getIterator();
   if (InsertPt->isEHPad()) ++InsertPt;
   // Set the head-inclusive bit to indicate that this iterator includes
   // any debug-info at the start of the block. This is a no-op unless the
@@ -426,11 +448,10 @@ BasicBlock::const_iterator BasicBlock::getFirstInsertionPt() const {
 }
 
 BasicBlock::const_iterator BasicBlock::getFirstNonPHIOrDbgOrAlloca() const {
-  const Instruction *FirstNonPHI = getFirstNonPHI();
-  if (!FirstNonPHI)
+  const_iterator InsertPt = getFirstNonPHIIt();
+  if (InsertPt == end())
     return end();
 
-  const_iterator InsertPt = FirstNonPHI->getIterator();
   if (InsertPt->isEHPad())
     ++InsertPt;
 
@@ -446,6 +467,9 @@ BasicBlock::const_iterator BasicBlock::getFirstNonPHIOrDbgOrAlloca() const {
       ++InsertPt;
     }
   }
+
+  // Signal that this comes after any debug records.
+  InsertPt.setHeadBit(false);
   return InsertPt;
 }
 
@@ -541,7 +565,7 @@ void BasicBlock::removePredecessor(BasicBlock *Pred,
 }
 
 bool BasicBlock::canSplitPredecessors() const {
-  const Instruction *FirstNonPHI = getFirstNonPHI();
+  const_iterator FirstNonPHI = getFirstNonPHIIt();
   if (isa<LandingPadInst>(FirstNonPHI))
     return true;
   // This is perhaps a little conservative because constructs like
@@ -626,9 +650,7 @@ BasicBlock *BasicBlock::splitBasicBlockBefore(iterator I, const Twine &BBName) {
   // to reflect that the incoming branches will be from the New block and not
   // from predecessors of the 'this' block.
   // Save predecessors to separate vector before modifying them.
-  SmallVector<BasicBlock *, 4> Predecessors;
-  for (BasicBlock *Pred : predecessors(this))
-    Predecessors.push_back(Pred);
+  SmallVector<BasicBlock *, 4> Predecessors(predecessors(this));
   for (BasicBlock *Pred : Predecessors) {
     Instruction *TI = Pred->getTerminator();
     TI->replaceSuccessorWith(this, New);
@@ -675,11 +697,11 @@ void BasicBlock::replaceSuccessorsPhiUsesWith(BasicBlock *New) {
 }
 
 bool BasicBlock::isLandingPad() const {
-  return isa<LandingPadInst>(getFirstNonPHI());
+  return isa<LandingPadInst>(getFirstNonPHIIt());
 }
 
 const LandingPadInst *BasicBlock::getLandingPadInst() const {
-  return dyn_cast<LandingPadInst>(getFirstNonPHI());
+  return dyn_cast<LandingPadInst>(getFirstNonPHIIt());
 }
 
 std::optional<uint64_t> BasicBlock::getIrrLoopHeaderWeight() const {
@@ -798,8 +820,6 @@ void BasicBlock::spliceDebugInfoEmptyBlock(BasicBlock::iterator Dest,
     return;
 
   createMarker(Dest)->absorbDebugValues(*First->DebugMarker, InsertAtHead);
-
-  return;
 }
 
 void BasicBlock::spliceDebugInfo(BasicBlock::iterator Dest, BasicBlock *Src,

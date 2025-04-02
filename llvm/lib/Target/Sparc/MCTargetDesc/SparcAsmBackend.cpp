@@ -132,7 +132,7 @@ namespace {
   class SparcAsmBackend : public MCAsmBackend {
   protected:
     bool Is64Bit;
-    bool HasV9;
+    bool IsV8Plus;
 
   public:
     SparcAsmBackend(const MCSubtargetInfo &STI)
@@ -140,7 +140,7 @@ namespace {
                            ? llvm::endianness::little
                            : llvm::endianness::big),
           Is64Bit(STI.getTargetTriple().isArch64Bit()),
-          HasV9(STI.hasFeature(Sparc::FeatureV9)) {}
+          IsV8Plus(STI.hasFeature(Sparc::FeatureV8Plus)) {}
 
     unsigned getNumFixupKinds() const override {
       return Sparc::NumTargetFixupKinds;
@@ -273,7 +273,7 @@ namespace {
     }
 
     bool shouldForceRelocation(const MCAssembler &Asm, const MCFixup &Fixup,
-                               const MCValue &Target,
+                               const MCValue &Target, const uint64_t,
                                const MCSubtargetInfo *STI) override {
       if (Fixup.getKind() >= FirstLiteralRelocationKind)
         return true;
@@ -359,7 +359,7 @@ namespace {
     std::unique_ptr<MCObjectTargetWriter>
     createObjectTargetWriter() const override {
       uint8_t OSABI = MCELFObjectTargetWriter::getOSABI(OSType);
-      return createSparcELFObjectWriter(Is64Bit, HasV9, OSABI);
+      return createSparcELFObjectWriter(Is64Bit, IsV8Plus, OSABI);
     }
   };
 

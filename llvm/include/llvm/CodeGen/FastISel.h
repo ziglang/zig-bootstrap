@@ -277,9 +277,6 @@ public:
   /// truncating or sign-extending the given getelementptr index value.
   Register getRegForGEPIndex(MVT PtrVT, const Value *Idx);
 
-  /// Retained for ABI compatibility in release branch.
-  Register getRegForGEPIndex(const Value *Idx);
-
   /// We're checking to see if we can fold \p LI into \p FoldInst. Note
   /// that we could have a sequence where multiple LLVM IR instructions are
   /// folded into the same machineinstr.  For example we could have:

@@ -46,7 +46,7 @@ using namespace llvm::dwarf;
 
 TinyPtrVector<DbgDeclareInst *> llvm::findDbgDeclares(Value *V) {
   // This function is hot. Check whether the value has any metadata to avoid a
-  // DenseMap lookup.
+  // DenseMap lookup. This check is a bitfield datamember lookup.
   if (!V->isUsedByMetadata())
     return {};
   auto *L = LocalAsMetadata::getIfExists(V);
@@ -65,7 +65,7 @@ TinyPtrVector<DbgDeclareInst *> llvm::findDbgDeclares(Value *V) {
 }
 TinyPtrVector<DbgVariableRecord *> llvm::findDVRDeclares(Value *V) {
   // This function is hot. Check whether the value has any metadata to avoid a
-  // DenseMap lookup.
+  // DenseMap lookup. This check is a bitfield datamember lookup.
   if (!V->isUsedByMetadata())
     return {};
   auto *L = LocalAsMetadata::getIfExists(V);
@@ -78,6 +78,23 @@ TinyPtrVector<DbgVariableRecord *> llvm::findDVRDeclares(Value *V) {
       Declares.push_back(DVR);
 
   return Declares;
+}
+
+TinyPtrVector<DbgVariableRecord *> llvm::findDVRValues(Value *V) {
+  // This function is hot. Check whether the value has any metadata to avoid a
+  // DenseMap lookup. This check is a bitfield datamember lookup.
+  if (!V->isUsedByMetadata())
+    return {};
+  auto *L = LocalAsMetadata::getIfExists(V);
+  if (!L)
+    return {};
+
+  TinyPtrVector<DbgVariableRecord *> Values;
+  for (DbgVariableRecord *DVR : L->getAllDbgVariableRecordUsers())
+    if (DVR->isValueOfVariable())
+      Values.push_back(DVR);
+
+  return Values;
 }
 
 template <typename IntrinsicT, bool DbgAssignAndValuesOnly>
@@ -1415,10 +1432,11 @@ LLVMDIBuilderCreateObjCProperty(LLVMDIBuilderRef Builder,
                   PropertyAttributes, unwrapDI<DIType>(Ty)));
 }
 
-LLVMMetadataRef
-LLVMDIBuilderCreateObjectPointerType(LLVMDIBuilderRef Builder,
-                                     LLVMMetadataRef Type) {
-  return wrap(unwrap(Builder)->createObjectPointerType(unwrapDI<DIType>(Type)));
+LLVMMetadataRef LLVMDIBuilderCreateObjectPointerType(LLVMDIBuilderRef Builder,
+                                                     LLVMMetadataRef Type,
+                                                     LLVMBool Implicit) {
+  return wrap(unwrap(Builder)->createObjectPointerType(unwrapDI<DIType>(Type),
+                                                       Implicit));
 }
 
 LLVMMetadataRef
@@ -1668,7 +1686,8 @@ LLVMDbgRecordRef LLVMDIBuilderInsertDeclareRecordBefore(
   DbgInstPtr DbgInst = unwrap(Builder)->insertDeclare(
       unwrap(Storage), unwrap<DILocalVariable>(VarInfo),
       unwrap<DIExpression>(Expr), unwrap<DILocation>(DL),
-      unwrap<Instruction>(Instr));
+      Instr ? InsertPosition(unwrap<Instruction>(Instr)->getIterator())
+            : nullptr);
   // This assert will fail if the module is in the old debug info format.
   // This function should only be called if the module is in the new
   // debug info format.
@@ -1700,7 +1719,9 @@ LLVMDbgRecordRef LLVMDIBuilderInsertDbgValueRecordBefore(
     LLVMMetadataRef Expr, LLVMMetadataRef DebugLoc, LLVMValueRef Instr) {
   DbgInstPtr DbgInst = unwrap(Builder)->insertDbgValueIntrinsic(
       unwrap(Val), unwrap<DILocalVariable>(VarInfo), unwrap<DIExpression>(Expr),
-      unwrap<DILocation>(DebugLoc), unwrap<Instruction>(Instr));
+      unwrap<DILocation>(DebugLoc),
+      Instr ? InsertPosition(unwrap<Instruction>(Instr)->getIterator())
+            : nullptr);
   // This assert will fail if the module is in the old debug info format.
   // This function should only be called if the module is in the new
   // debug info format.
@@ -1716,7 +1737,8 @@ LLVMDbgRecordRef LLVMDIBuilderInsertDbgValueRecordAtEnd(
     LLVMMetadataRef Expr, LLVMMetadataRef DebugLoc, LLVMBasicBlockRef Block) {
   DbgInstPtr DbgInst = unwrap(Builder)->insertDbgValueIntrinsic(
       unwrap(Val), unwrap<DILocalVariable>(VarInfo), unwrap<DIExpression>(Expr),
-      unwrap<DILocation>(DebugLoc), unwrap(Block));
+      unwrap<DILocation>(DebugLoc),
+      Block ? InsertPosition(unwrap(Block)->end()) : nullptr);
   // This assert will fail if the module is in the old debug info format.
   // This function should only be called if the module is in the new
   // debug info format.
@@ -1780,6 +1802,52 @@ void LLVMInstructionSetDebugLoc(LLVMValueRef Inst, LLVMMetadataRef Loc) {
     unwrap<Instruction>(Inst)->setDebugLoc(DebugLoc(unwrap<MDNode>(Loc)));
   else
     unwrap<Instruction>(Inst)->setDebugLoc(DebugLoc());
+}
+
+LLVMMetadataRef LLVMDIBuilderCreateLabel(LLVMDIBuilderRef Builder,
+                                         LLVMMetadataRef Context,
+                                         const char *Name, size_t NameLen,
+                                         LLVMMetadataRef File, unsigned LineNo,
+                                         LLVMBool AlwaysPreserve) {
+  return wrap(unwrap(Builder)->createLabel(
+      unwrapDI<DIScope>(Context), StringRef(Name, NameLen),
+      unwrapDI<DIFile>(File), LineNo, AlwaysPreserve));
+}
+
+LLVMDbgRecordRef LLVMDIBuilderInsertLabelBefore(LLVMDIBuilderRef Builder,
+                                                LLVMMetadataRef LabelInfo,
+                                                LLVMMetadataRef Location,
+                                                LLVMValueRef InsertBefore) {
+  DbgInstPtr DbgInst = unwrap(Builder)->insertLabel(
+      unwrapDI<DILabel>(LabelInfo), unwrapDI<DILocation>(Location),
+      InsertBefore
+          ? InsertPosition(unwrap<Instruction>(InsertBefore)->getIterator())
+          : nullptr);
+  // This assert will fail if the module is in the old debug info format.
+  // This function should only be called if the module is in the new
+  // debug info format.
+  // See https://llvm.org/docs/RemoveDIsDebugInfo.html#c-api-changes,
+  // LLVMIsNewDbgInfoFormat, and LLVMSetIsNewDbgInfoFormat for more info.
+  assert(isa<DbgRecord *>(DbgInst) &&
+         "Function unexpectedly in old debug info format");
+  return wrap(cast<DbgRecord *>(DbgInst));
+}
+
+LLVMDbgRecordRef LLVMDIBuilderInsertLabelAtEnd(LLVMDIBuilderRef Builder,
+                                               LLVMMetadataRef LabelInfo,
+                                               LLVMMetadataRef Location,
+                                               LLVMBasicBlockRef InsertAtEnd) {
+  DbgInstPtr DbgInst = unwrap(Builder)->insertLabel(
+      unwrapDI<DILabel>(LabelInfo), unwrapDI<DILocation>(Location),
+      InsertAtEnd ? InsertPosition(unwrap(InsertAtEnd)->end()) : nullptr);
+  // This assert will fail if the module is in the old debug info format.
+  // This function should only be called if the module is in the new
+  // debug info format.
+  // See https://llvm.org/docs/RemoveDIsDebugInfo.html#c-api-changes,
+  // LLVMIsNewDbgInfoFormat, and LLVMSetIsNewDbgInfoFormat for more info.
+  assert(isa<DbgRecord *>(DbgInst) &&
+         "Function unexpectedly in old debug info format");
+  return wrap(cast<DbgRecord *>(DbgInst));
 }
 
 LLVMMetadataKind LLVMGetMetadataKind(LLVMMetadataRef Metadata) {
@@ -2022,16 +2090,14 @@ static void emitDbgAssign(AssignmentInfo Info, Value *Val, Value *Dest,
     StoreToWholeVariable = FragStartBit <= VarStartBit && FragEndBit >= *Size;
   }
 
-  DIExpression *Expr =
-      DIExpression::get(StoreLikeInst.getContext(), std::nullopt);
+  DIExpression *Expr = DIExpression::get(StoreLikeInst.getContext(), {});
   if (!StoreToWholeVariable) {
     auto R = DIExpression::createFragmentExpression(Expr, FragStartBit,
                                                     FragEndBit - FragStartBit);
     assert(R.has_value() && "failed to create fragment expression");
     Expr = *R;
   }
-  DIExpression *AddrExpr =
-      DIExpression::get(StoreLikeInst.getContext(), std::nullopt);
+  DIExpression *AddrExpr = DIExpression::get(StoreLikeInst.getContext(), {});
   if (StoreLikeInst.getParent()->IsNewDbgInfoFormat) {
     auto *Assign = DbgVariableRecord::createLinkedDVRAssign(
         &StoreLikeInst, Val, VarRec.Var, Expr, Dest, AddrExpr, VarRec.DL);
@@ -2043,10 +2109,10 @@ static void emitDbgAssign(AssignmentInfo Info, Value *Val, Value *Dest,
                                     AddrExpr, VarRec.DL);
   (void)Assign;
   LLVM_DEBUG(if (!Assign.isNull()) {
-    if (Assign.is<DbgRecord *>())
-      errs() << " > INSERT: " << *Assign.get<DbgRecord *>() << "\n";
+    if (const auto *Record = dyn_cast<DbgRecord *>(Assign))
+      errs() << " > INSERT: " << *Record << "\n";
     else
-      errs() << " > INSERT: " << *Assign.get<Instruction *>() << "\n";
+      errs() << " > INSERT: " << *cast<Instruction *>(Assign) << "\n";
   });
 }
 

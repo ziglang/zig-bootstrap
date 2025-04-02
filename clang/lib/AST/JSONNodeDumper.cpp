@@ -737,6 +737,9 @@ void JSONNodeDumper::VisitVectorType(const VectorType *VT) {
     JOS.attribute("vectorKind", "fixed-length rvv data vector");
     break;
   case VectorKind::RVVFixedLengthMask:
+  case VectorKind::RVVFixedLengthMask_1:
+  case VectorKind::RVVFixedLengthMask_2:
+  case VectorKind::RVVFixedLengthMask_4:
     JOS.attribute("vectorKind", "fixed-length rvv mask vector");
     break;
   }
@@ -1000,6 +1003,11 @@ void JSONNodeDumper::VisitRecordDecl(const RecordDecl *RD) {
 void JSONNodeDumper::VisitCXXRecordDecl(const CXXRecordDecl *RD) {
   VisitRecordDecl(RD);
 
+  if (const auto *CTSD = dyn_cast<ClassTemplateSpecializationDecl>(RD)) {
+    if (CTSD->hasMatchedPackOnParmToNonPackOnArg())
+      JOS.attribute("strict-pack-match", true);
+  }
+
   // All other information requires a complete definition.
   if (!RD->isCompleteDefinition())
     return;
@@ -1087,6 +1095,7 @@ void JSONNodeDumper::VisitAccessSpecDecl(const AccessSpecDecl *ASD) {
 void JSONNodeDumper::VisitFriendDecl(const FriendDecl *FD) {
   if (const TypeSourceInfo *T = FD->getFriendType())
     JOS.attribute("type", createQualType(T->getType()));
+  attributeOnlyIfTrue("isPackExpansion", FD->isPackExpansion());
 }
 
 void JSONNodeDumper::VisitObjCIvarDecl(const ObjCIvarDecl *D) {
@@ -1350,6 +1359,9 @@ void JSONNodeDumper::VisitSYCLUniqueStableNameExpr(
                 createQualType(E->getTypeSourceInfo()->getType()));
 }
 
+void JSONNodeDumper::VisitOpenACCAsteriskSizeExpr(
+    const OpenACCAsteriskSizeExpr *E) {}
+
 void JSONNodeDumper::VisitPredefinedExpr(const PredefinedExpr *PE) {
   JOS.attribute("name", PredefinedExpr::getIdentKindName(PE->getIdentKind()));
 }
@@ -1530,9 +1542,9 @@ void JSONNodeDumper::VisitExprWithCleanups(const ExprWithCleanups *EWC) {
   if (EWC->getNumObjects()) {
     JOS.attributeArray("cleanups", [this, EWC] {
       for (const ExprWithCleanups::CleanupObject &CO : EWC->getObjects())
-        if (auto *BD = CO.dyn_cast<BlockDecl *>()) {
+        if (auto *BD = dyn_cast<BlockDecl *>(CO)) {
           JOS.value(createBareDeclRef(BD));
-        } else if (auto *CLE = CO.dyn_cast<CompoundLiteralExpr *>()) {
+        } else if (auto *CLE = dyn_cast<CompoundLiteralExpr *>(CO)) {
           llvm::json::Object Obj;
           Obj["id"] = createPointerRepresentation(CLE);
           Obj["kind"] = CLE->getStmtClassName();

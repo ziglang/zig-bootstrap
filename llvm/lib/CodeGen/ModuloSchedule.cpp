@@ -397,8 +397,9 @@ void ModuloScheduleExpander::generateExistingPhis(
     // The Phi value from the loop body typically is defined in the loop, but
     // not always. So, we need to check if the value is defined in the loop.
     unsigned PhiOp2 = LoopVal;
-    if (VRMap[LastStageNum].count(LoopVal))
-      PhiOp2 = VRMap[LastStageNum][LoopVal];
+    if (auto It = VRMap[LastStageNum].find(LoopVal);
+        It != VRMap[LastStageNum].end())
+      PhiOp2 = It->second;
 
     int StageScheduled = Schedule.getStage(&*BBI);
     int LoopValStage = Schedule.getStage(MRI.getVRegDef(LoopVal));
@@ -742,7 +743,7 @@ void ModuloScheduleExpander::removeDeadInstructions(MachineBasicBlock *KernelBB,
       bool SawStore = false;
       // Check if it's safe to remove the instruction due to side effects.
       // We can, and want to, remove Phis here.
-      if (!MI->isSafeToMove(nullptr, SawStore) && !MI->isPHI()) {
+      if (!MI->isSafeToMove(SawStore) && !MI->isPHI()) {
         ++MI;
         continue;
       }
@@ -899,7 +900,7 @@ void ModuloScheduleExpander::addBranches(MachineBasicBlock &PreheaderBB,
         LastEpi->eraseFromParent();
       }
       if (LastPro == KernelBB) {
-        LoopInfo->disposed();
+        LoopInfo->disposed(&LIS);
         NewKernel = nullptr;
       }
       LastPro->clear();
@@ -1055,8 +1056,8 @@ void ModuloScheduleExpander::updateInstruction(MachineInstr *NewMI,
         // Make an adjustment to get the last definition.
         StageNum -= StageDiff;
       }
-      if (VRMap[StageNum].count(reg))
-        MO.setReg(VRMap[StageNum][reg]);
+      if (auto It = VRMap[StageNum].find(reg); It != VRMap[StageNum].end())
+        MO.setReg(It->second);
     }
   }
 }
@@ -1710,8 +1711,8 @@ void PeelingModuloScheduleExpander::moveStageBetweenBlocks(
     for (MachineOperand &MO : I->uses()) {
       if (!MO.isReg())
         continue;
-      if (Remaps.count(MO.getReg()))
-        MO.setReg(Remaps[MO.getReg()]);
+      if (auto It = Remaps.find(MO.getReg()); It != Remaps.end())
+        MO.setReg(It->second);
       else {
         // If we are using a phi from the source block we need to add a new phi
         // pointing to the old one.
@@ -2667,8 +2668,8 @@ void ModuloScheduleExpanderMVE::calcNumUnroll() {
 void ModuloScheduleExpanderMVE::updateInstrDef(MachineInstr *NewMI,
                                                ValueMapTy &VRMap,
                                                bool LastDef) {
-  for (MachineOperand &MO : NewMI->operands()) {
-    if (!MO.isReg() || !MO.getReg().isVirtual() || !MO.isDef())
+  for (MachineOperand &MO : NewMI->all_defs()) {
+    if (!MO.getReg().isVirtual())
       continue;
     Register Reg = MO.getReg();
     const TargetRegisterClass *RC = MRI.getRegClass(Reg);
@@ -2693,8 +2694,7 @@ void ModuloScheduleExpanderMVE::expand() {
 /// Check if ModuloScheduleExpanderMVE can be applied to L
 bool ModuloScheduleExpanderMVE::canApply(MachineLoop &L) {
   if (!L.getExitBlock()) {
-    LLVM_DEBUG(
-        dbgs() << "Can not apply MVE expander: No single exit block.\n";);
+    LLVM_DEBUG(dbgs() << "Can not apply MVE expander: No single exit block.\n");
     return false;
   }
 
@@ -2711,9 +2711,8 @@ bool ModuloScheduleExpanderMVE::canApply(MachineLoop &L) {
       if (MO.isReg())
         for (MachineInstr &Ref : MRI.use_instructions(MO.getReg()))
           if (Ref.getParent() != BB || Ref.isPHI()) {
-            LLVM_DEBUG(dbgs()
-                           << "Can not apply MVE expander: A phi result is "
-                              "referenced outside of the loop or by phi.\n";);
+            LLVM_DEBUG(dbgs() << "Can not apply MVE expander: A phi result is "
+                                 "referenced outside of the loop or by phi.\n");
             return false;
           }
 
@@ -2726,12 +2725,12 @@ bool ModuloScheduleExpanderMVE::canApply(MachineLoop &L) {
         MRI.getVRegDef(LoopVal)->getParent() != BB) {
       LLVM_DEBUG(
           dbgs() << "Can not apply MVE expander: A phi source value coming "
-                    "from the loop is not defined in the loop.\n";);
+                    "from the loop is not defined in the loop.\n");
       return false;
     }
     if (UsedByPhi.count(LoopVal)) {
       LLVM_DEBUG(dbgs() << "Can not apply MVE expander: A value defined in the "
-                           "loop is referenced by two or more phis.\n";);
+                           "loop is referenced by two or more phis.\n");
       return false;
     }
     UsedByPhi.insert(LoopVal);

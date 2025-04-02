@@ -2036,6 +2036,10 @@ Demangler::demanglePrimitiveType(std::string_view &MangledName) {
       return Arena.alloc<PrimitiveTypeNode>(PrimitiveKind::Char16);
     case 'U':
       return Arena.alloc<PrimitiveTypeNode>(PrimitiveKind::Char32);
+    case 'P':
+      return Arena.alloc<PrimitiveTypeNode>(PrimitiveKind::Auto);
+    case 'T':
+      return Arena.alloc<PrimitiveTypeNode>(PrimitiveKind::DecltypeAuto);
     }
     break;
   }

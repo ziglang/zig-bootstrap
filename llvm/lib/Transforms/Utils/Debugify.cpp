@@ -115,8 +115,7 @@ bool llvm::applyDebugifyMetadata(
       continue;
 
     bool InsertedDbgVal = false;
-    auto SPType =
-        DIB.createSubroutineType(DIB.getOrCreateTypeArray(std::nullopt));
+    auto SPType = DIB.createSubroutineType(DIB.getOrCreateTypeArray({}));
     DISubprogram::DISPFlags SPFlags =
         DISubprogram::SPFlagDefinition | DISubprogram::SPFlagOptimized;
     if (F.hasPrivateLinkage() || F.hasInternalLinkage())
@@ -128,7 +127,7 @@ bool llvm::applyDebugifyMetadata(
     // Helper that inserts a dbg.value before \p InsertBefore, copying the
     // location (and possibly the type, if it's non-void) from \p TemplateInst.
     auto insertDbgVal = [&](Instruction &TemplateInst,
-                            Instruction *InsertBefore) {
+                            BasicBlock::iterator InsertPt) {
       std::string Name = utostr(NextVar++);
       Value *V = &TemplateInst;
       if (TemplateInst.getType()->isVoidTy())
@@ -138,7 +137,7 @@ bool llvm::applyDebugifyMetadata(
                                              getCachedDIType(V->getType()),
                                              /*AlwaysPreserve=*/true);
       DIB.insertDbgValueIntrinsic(V, LocalVar, DIB.createExpression(), Loc,
-                                  InsertBefore);
+                                  InsertPt);
     };
 
     for (BasicBlock &BB : F) {
@@ -162,7 +161,9 @@ bool llvm::applyDebugifyMetadata(
       // are made.
       BasicBlock::iterator InsertPt = BB.getFirstInsertionPt();
       assert(InsertPt != BB.end() && "Expected to find an insertion point");
-      Instruction *InsertBefore = &*InsertPt;
+
+      // Insert after existing debug values to preserve order.
+      InsertPt.setHeadBit(false);
 
       // Attach debug values.
       for (Instruction *I = &*BB.begin(); I != LastInst; I = I->getNextNode()) {
@@ -173,9 +174,9 @@ bool llvm::applyDebugifyMetadata(
         // Phis and EH pads must be grouped at the beginning of the block.
         // Only advance the insertion point when we finish visiting these.
         if (!isa<PHINode>(I) && !I->isEHPad())
-          InsertBefore = I->getNextNode();
+          InsertPt = std::next(I->getIterator());
 
-        insertDbgVal(*I, InsertBefore);
+        insertDbgVal(*I, InsertPt);
         InsertedDbgVal = true;
       }
     }
@@ -186,7 +187,7 @@ bool llvm::applyDebugifyMetadata(
     // those tests, and this helps with that.)
     if (DebugifyLevel == Level::LocationsAndVariables && !InsertedDbgVal) {
       auto *Term = findTerminatingInstruction(F.getEntryBlock());
-      insertDbgVal(*Term, Term);
+      insertDbgVal(*Term, Term->getIterator());
     }
     if (ApplyToMF)
       ApplyToMF(DIB, F);

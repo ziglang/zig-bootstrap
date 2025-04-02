@@ -29,7 +29,6 @@ using namespace llvm;
 static void appendToGlobalArray(StringRef ArrayName, Module &M, Function *F,
                                 int Priority, Constant *Data) {
   IRBuilder<> IRB(M.getContext());
-  FunctionType *FnTy = FunctionType::get(IRB.getVoidTy(), false);
 
   // Get the current set of static global constructors and add the new ctor
   // to the list.
@@ -45,9 +44,9 @@ static void appendToGlobalArray(StringRef ArrayName, Module &M, Function *F,
     }
     GVCtor->eraseFromParent();
   } else {
-    EltTy = StructType::get(IRB.getInt32Ty(),
-                            PointerType::get(FnTy, F->getAddressSpace()),
-                            IRB.getPtrTy());
+    EltTy = StructType::get(
+        IRB.getInt32Ty(),
+        PointerType::get(M.getContext(), F->getAddressSpace()), IRB.getPtrTy());
   }
 
   // Build a 3 field global_ctor entry.  We don't take a comdat key.
@@ -77,6 +76,50 @@ void llvm::appendToGlobalCtors(Module &M, Function *F, int Priority, Constant *D
 
 void llvm::appendToGlobalDtors(Module &M, Function *F, int Priority, Constant *Data) {
   appendToGlobalArray("llvm.global_dtors", M, F, Priority, Data);
+}
+
+static void transformGlobalArray(StringRef ArrayName, Module &M,
+                                 const GlobalCtorTransformFn &Fn) {
+  GlobalVariable *GVCtor = M.getNamedGlobal(ArrayName);
+  if (!GVCtor)
+    return;
+
+  IRBuilder<> IRB(M.getContext());
+  SmallVector<Constant *, 16> CurrentCtors;
+  bool Changed = false;
+  StructType *EltTy =
+      cast<StructType>(GVCtor->getValueType()->getArrayElementType());
+  if (Constant *Init = GVCtor->getInitializer()) {
+    CurrentCtors.reserve(Init->getNumOperands());
+    for (Value *OP : Init->operands()) {
+      Constant *C = cast<Constant>(OP);
+      Constant *NewC = Fn(C);
+      Changed |= (!NewC || NewC != C);
+      if (NewC)
+        CurrentCtors.push_back(NewC);
+    }
+  }
+  if (!Changed)
+    return;
+
+  GVCtor->eraseFromParent();
+
+  // Create a new initializer.
+  ArrayType *AT = ArrayType::get(EltTy, CurrentCtors.size());
+  Constant *NewInit = ConstantArray::get(AT, CurrentCtors);
+
+  // Create the new global variable and replace all uses of
+  // the old global variable with the new one.
+  (void)new GlobalVariable(M, NewInit->getType(), false,
+                           GlobalValue::AppendingLinkage, NewInit, ArrayName);
+}
+
+void llvm::transformGlobalCtors(Module &M, const GlobalCtorTransformFn &Fn) {
+  transformGlobalArray("llvm.global_ctors", M, Fn);
+}
+
+void llvm::transformGlobalDtors(Module &M, const GlobalCtorTransformFn &Fn) {
+  transformGlobalArray("llvm.global_dtors", M, Fn);
 }
 
 static void collectUsedGlobals(GlobalVariable *GV,
@@ -224,7 +267,7 @@ std::pair<Function *, FunctionCallee> llvm::createSanitizerCtorAndInitFunctions(
         BasicBlock::Create(M.getContext(), "callfunc", Ctor, RetBB);
     auto *InitFn = cast<Function>(InitFunction.getCallee());
     auto *InitFnPtr =
-        PointerType::get(InitFn->getType(), InitFn->getAddressSpace());
+        PointerType::get(M.getContext(), InitFn->getAddressSpace());
     IRB.SetInsertPoint(EntryBB);
     Value *InitNotNull =
         IRB.CreateICmpNE(InitFn, ConstantPointerNull::get(InitFnPtr));

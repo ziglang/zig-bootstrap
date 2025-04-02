@@ -46,6 +46,7 @@ class LiveIntervals;
 class LiveVariables;
 class MachineLoop;
 class MachineMemOperand;
+class MachineModuleInfo;
 class MachineRegisterInfo;
 class MCAsmInfo;
 class MCInst;
@@ -135,6 +136,10 @@ public:
                                          const TargetRegisterInfo *TRI,
                                          const MachineFunction &MF) const;
 
+  /// Returns true if MI is an instruction we are unable to reason about
+  /// (like a call or something with unmodeled side effects).
+  virtual bool isGlobalMemoryObject(const MachineInstr *MI) const;
+
   /// Return true if the instruction is trivially rematerializable, meaning it
   /// has no side effects and requires no operands that aren't always available.
   /// This means the only allowed uses are constants and unallocatable physical
@@ -156,6 +161,12 @@ public:
   virtual bool isSafeToSink(MachineInstr &MI, MachineBasicBlock *SuccToSinkTo,
                             MachineCycleInfo *CI) const {
     return true;
+  }
+
+  /// For a "cheap" instruction which doesn't enable additional sinking,
+  /// should MachineSink break a critical edge to sink it anyways?
+  virtual bool shouldBreakCriticalEdgeToSink(MachineInstr &MI) const {
+    return false;
   }
 
 protected:
@@ -799,7 +810,7 @@ public:
     ///
     /// Once this function is called, no other functions on this object are
     /// valid; the loop has been removed.
-    virtual void disposed() = 0;
+    virtual void disposed(LiveIntervals *LIS = nullptr) {}
 
     /// Return true if the target can expand pipelined schedule with modulo
     /// variable expansion.
@@ -1017,10 +1028,16 @@ public:
   /// The source and destination registers may overlap, which may require a
   /// careful implementation when multiple copy instructions are required for
   /// large registers. See for example the ARM target.
+  ///
+  /// If RenamableDest is true, the copy instruction's destination operand is
+  /// marked renamable.
+  /// If RenamableSrc is true, the copy instruction's source operand is
+  /// marked renamable.
   virtual void copyPhysReg(MachineBasicBlock &MBB,
                            MachineBasicBlock::iterator MI, const DebugLoc &DL,
-                           MCRegister DestReg, MCRegister SrcReg,
-                           bool KillSrc) const {
+                           MCRegister DestReg, MCRegister SrcReg, bool KillSrc,
+                           bool RenamableDest = false,
+                           bool RenamableSrc = false) const {
     llvm_unreachable("Target didn't implement TargetInstrInfo::copyPhysReg!");
   }
 
@@ -1125,13 +1142,14 @@ public:
   /// register, \p VReg is the register being assigned. This additional register
   /// argument is needed for certain targets when invoked from RegAllocFast to
   /// map the spilled physical register to its virtual register. A null register
-  /// can be passed elsewhere.
-  virtual void storeRegToStackSlot(MachineBasicBlock &MBB,
-                                   MachineBasicBlock::iterator MI,
-                                   Register SrcReg, bool isKill, int FrameIndex,
-                                   const TargetRegisterClass *RC,
-                                   const TargetRegisterInfo *TRI,
-                                   Register VReg) const {
+  /// can be passed elsewhere. The \p Flags is used to set appropriate machine
+  /// flags on the spill instruction e.g. FrameSetup flag on a callee saved
+  /// register spill instruction, part of prologue, during the frame lowering.
+  virtual void storeRegToStackSlot(
+      MachineBasicBlock &MBB, MachineBasicBlock::iterator MI, Register SrcReg,
+      bool isKill, int FrameIndex, const TargetRegisterClass *RC,
+      const TargetRegisterInfo *TRI, Register VReg,
+      MachineInstr::MIFlag Flags = MachineInstr::NoFlags) const {
     llvm_unreachable("Target didn't implement "
                      "TargetInstrInfo::storeRegToStackSlot!");
   }
@@ -1143,13 +1161,14 @@ public:
   /// register, \p VReg is the register being assigned. This additional register
   /// argument is needed for certain targets when invoked from RegAllocFast to
   /// map the loaded physical register to its virtual register. A null register
-  /// can be passed elsewhere.
-  virtual void loadRegFromStackSlot(MachineBasicBlock &MBB,
-                                    MachineBasicBlock::iterator MI,
-                                    Register DestReg, int FrameIndex,
-                                    const TargetRegisterClass *RC,
-                                    const TargetRegisterInfo *TRI,
-                                    Register VReg) const {
+  /// can be passed elsewhere. The \p Flags is used to set appropriate machine
+  /// flags on the spill instruction e.g. FrameDestroy flag on a callee saved
+  /// register reload instruction, part of epilogue, during the frame lowering.
+  virtual void loadRegFromStackSlot(
+      MachineBasicBlock &MBB, MachineBasicBlock::iterator MI, Register DestReg,
+      int FrameIndex, const TargetRegisterClass *RC,
+      const TargetRegisterInfo *TRI, Register VReg,
+      MachineInstr::MIFlag Flags = MachineInstr::NoFlags) const {
     llvm_unreachable("Target didn't implement "
                      "TargetInstrInfo::loadRegFromStackSlot!");
   }
@@ -2000,7 +2019,7 @@ public:
   /// defined by this method.
   virtual ArrayRef<std::pair<int, const char *>>
   getSerializableTargetIndices() const {
-    return std::nullopt;
+    return {};
   }
 
   /// Decompose the machine operand's target flags into two values - the direct
@@ -2017,7 +2036,7 @@ public:
   /// defined by this method.
   virtual ArrayRef<std::pair<unsigned, const char *>>
   getSerializableDirectMachineOperandTargetFlags() const {
-    return std::nullopt;
+    return {};
   }
 
   /// Return an array that contains the bitmask target flag values and their
@@ -2027,7 +2046,7 @@ public:
   /// defined by this method.
   virtual ArrayRef<std::pair<unsigned, const char *>>
   getSerializableBitmaskMachineOperandTargetFlags() const {
-    return std::nullopt;
+    return {};
   }
 
   /// Return an array that contains the MMO target flag values and their
@@ -2037,7 +2056,7 @@ public:
   /// defined by this method.
   virtual ArrayRef<std::pair<MachineMemOperand::Flags, const char *>>
   getSerializableMachineMemOperandTargetFlags() const {
-    return std::nullopt;
+    return {};
   }
 
   /// Determines whether \p Inst is a tail call instruction. Override this
@@ -2087,9 +2106,13 @@ public:
 
   /// Returns a \p outliner::OutlinedFunction struct containing target-specific
   /// information for a set of outlining candidates. Returns std::nullopt if the
-  /// candidates are not suitable for outlining.
-  virtual std::optional<outliner::OutlinedFunction> getOutliningCandidateInfo(
-      std::vector<outliner::Candidate> &RepeatedSequenceLocs) const {
+  /// candidates are not suitable for outlining. \p MinRepeats is the minimum
+  /// number of times the instruction sequence must be repeated.
+  virtual std::optional<std::unique_ptr<outliner::OutlinedFunction>>
+  getOutliningCandidateInfo(
+      const MachineModuleInfo &MMI,
+      std::vector<outliner::Candidate> &RepeatedSequenceLocs,
+      unsigned MinRepeats) const {
     llvm_unreachable(
         "Target didn't implement TargetInstrInfo::getOutliningCandidateInfo!");
   }
@@ -2103,7 +2126,8 @@ public:
 protected:
   /// Target-dependent implementation for getOutliningTypeImpl.
   virtual outliner::InstrType
-  getOutliningTypeImpl(MachineBasicBlock::iterator &MIT, unsigned Flags) const {
+  getOutliningTypeImpl(const MachineModuleInfo &MMI,
+                       MachineBasicBlock::iterator &MIT, unsigned Flags) const {
     llvm_unreachable(
         "Target didn't implement TargetInstrInfo::getOutliningTypeImpl!");
   }
@@ -2111,8 +2135,9 @@ protected:
 public:
   /// Returns how or if \p MIT should be outlined. \p Flags is the
   /// target-specific information returned by isMBBSafeToOutlineFrom.
-  outliner::InstrType
-  getOutliningType(MachineBasicBlock::iterator &MIT, unsigned Flags) const;
+  outliner::InstrType getOutliningType(const MachineModuleInfo &MMI,
+                                       MachineBasicBlock::iterator &MIT,
+                                       unsigned Flags) const;
 
   /// Optional target hook that returns true if \p MBB is safe to outline from,
   /// and returns any target-specific information in \p Flags.
@@ -2265,15 +2290,6 @@ public:
     llvm_unreachable("unknown number of operands necessary");
   }
 
-  /// Gets the opcode for the Pseudo Instruction used to initialize
-  /// the undef value. If no Instruction is available, this will
-  /// fail compilation.
-  virtual unsigned getUndefInitOpcode(unsigned RegClassID) const {
-    (void)RegClassID;
-
-    llvm_unreachable("Unexpected register class.");
-  }
-
 private:
   mutable std::unique_ptr<MIRFormatter> Formatter;
   unsigned CallFrameSetupOpcode, CallFrameDestroyOpcode;
@@ -2283,29 +2299,29 @@ private:
 
 /// Provide DenseMapInfo for TargetInstrInfo::RegSubRegPair.
 template <> struct DenseMapInfo<TargetInstrInfo::RegSubRegPair> {
-  using RegInfo = DenseMapInfo<unsigned>;
+  using RegInfo = DenseMapInfo<Register>;
+  using SubRegInfo = DenseMapInfo<unsigned>;
 
   static inline TargetInstrInfo::RegSubRegPair getEmptyKey() {
     return TargetInstrInfo::RegSubRegPair(RegInfo::getEmptyKey(),
-                                          RegInfo::getEmptyKey());
+                                          SubRegInfo::getEmptyKey());
   }
 
   static inline TargetInstrInfo::RegSubRegPair getTombstoneKey() {
     return TargetInstrInfo::RegSubRegPair(RegInfo::getTombstoneKey(),
-                                          RegInfo::getTombstoneKey());
+                                          SubRegInfo::getTombstoneKey());
   }
 
   /// Reuse getHashValue implementation from
   /// std::pair<unsigned, unsigned>.
   static unsigned getHashValue(const TargetInstrInfo::RegSubRegPair &Val) {
-    std::pair<unsigned, unsigned> PairVal = std::make_pair(Val.Reg, Val.SubReg);
-    return DenseMapInfo<std::pair<unsigned, unsigned>>::getHashValue(PairVal);
+    return DenseMapInfo<std::pair<Register, unsigned>>::getHashValue(
+        std::make_pair(Val.Reg, Val.SubReg));
   }
 
   static bool isEqual(const TargetInstrInfo::RegSubRegPair &LHS,
                       const TargetInstrInfo::RegSubRegPair &RHS) {
-    return RegInfo::isEqual(LHS.Reg, RHS.Reg) &&
-           RegInfo::isEqual(LHS.SubReg, RHS.SubReg);
+    return LHS == RHS;
   }
 };
 

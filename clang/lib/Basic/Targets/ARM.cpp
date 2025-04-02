@@ -228,6 +228,8 @@ StringRef ARMTargetInfo::getCPUAttr() const {
     return "9_4A";
   case llvm::ARM::ArchKind::ARMV9_5A:
     return "9_5A";
+  case llvm::ARM::ArchKind::ARMV9_6A:
+    return "9_6A";
   case llvm::ARM::ArchKind::ARMV8MBaseline:
     return "8M_BASE";
   case llvm::ARM::ArchKind::ARMV8MMainline:
@@ -403,6 +405,7 @@ bool ARMTargetInfo::isBranchProtectionSupportedArch(StringRef Arch) const {
 
 bool ARMTargetInfo::validateBranchProtection(StringRef Spec, StringRef Arch,
                                              BranchProtectionInfo &BPI,
+                                             const LangOptions &LO,
                                              StringRef &Err) const {
   llvm::ARM::ParsedBranchProtection PBP;
   if (!llvm::ARM::parseBranchProtection(Spec, PBP, Err))
@@ -615,7 +618,8 @@ bool ARMTargetInfo::handleTargetFeatures(std::vector<std::string> &Features,
   case 6:
     if (ArchProfile == llvm::ARM::ProfileKind::M)
       LDREX = 0;
-    else if (ArchKind == llvm::ARM::ArchKind::ARMV6K)
+    else if (ArchKind == llvm::ARM::ArchKind::ARMV6K ||
+             ArchKind == llvm::ARM::ArchKind::ARMV6KZ)
       LDREX = LDREX_D | LDREX_W | LDREX_H | LDREX_B;
     else
       LDREX = LDREX_W;
@@ -893,6 +897,7 @@ void ARMTargetInfo::getTargetDefines(const LangOptions &Opts,
   case llvm::ARM::ArchKind::ARMV9_3A:
   case llvm::ARM::ArchKind::ARMV9_4A:
   case llvm::ARM::ArchKind::ARMV9_5A:
+  case llvm::ARM::ArchKind::ARMV9_6A:
     // Filter __arm_cdp, __arm_ldcl, __arm_stcl in arm_acle.h
     FeatureCoprocBF = FEATURE_COPROC_B1 | FEATURE_COPROC_B3;
     break;
@@ -1062,6 +1067,7 @@ void ARMTargetInfo::getTargetDefines(const LangOptions &Opts,
   case llvm::ARM::ArchKind::ARMV9_3A:
   case llvm::ARM::ArchKind::ARMV9_4A:
   case llvm::ARM::ArchKind::ARMV9_5A:
+  case llvm::ARM::ArchKind::ARMV9_6A:
     getTargetDefinesARMV83A(Opts, Builder);
     break;
   }
@@ -1475,6 +1481,16 @@ void CygwinARMTargetInfo::getTargetDefines(const LangOptions &Opts,
     Builder.defineMacro("_GNU_SOURCE");
 }
 
+AppleMachOARMTargetInfo::AppleMachOARMTargetInfo(const llvm::Triple &Triple,
+                                                 const TargetOptions &Opts)
+    : AppleMachOTargetInfo<ARMleTargetInfo>(Triple, Opts) {}
+
+void AppleMachOARMTargetInfo::getOSDefines(const LangOptions &Opts,
+                                           const llvm::Triple &Triple,
+                                           MacroBuilder &Builder) const {
+  getAppleMachODefines(Builder, Opts, Triple);
+}
+
 DarwinARMTargetInfo::DarwinARMTargetInfo(const llvm::Triple &Triple,
                                          const TargetOptions &Opts)
     : DarwinTargetInfo<ARMleTargetInfo>(Triple, Opts) {
@@ -1493,20 +1509,4 @@ void DarwinARMTargetInfo::getOSDefines(const LangOptions &Opts,
                                        const llvm::Triple &Triple,
                                        MacroBuilder &Builder) const {
   getDarwinDefines(Builder, Opts, Triple, PlatformName, PlatformMinVersion);
-}
-
-RenderScript32TargetInfo::RenderScript32TargetInfo(const llvm::Triple &Triple,
-                                                   const TargetOptions &Opts)
-    : ARMleTargetInfo(llvm::Triple("armv7", Triple.getVendorName(),
-                                   Triple.getOSName(),
-                                   Triple.getEnvironmentName()),
-                      Opts) {
-  IsRenderScriptTarget = true;
-  LongWidth = LongAlign = 64;
-}
-
-void RenderScript32TargetInfo::getTargetDefines(const LangOptions &Opts,
-                                                MacroBuilder &Builder) const {
-  Builder.defineMacro("__RENDERSCRIPT__");
-  ARMleTargetInfo::getTargetDefines(Opts, Builder);
 }

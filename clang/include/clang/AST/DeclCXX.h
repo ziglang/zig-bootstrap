@@ -256,6 +256,7 @@ public:
 
 /// Represents a C++ struct/union/class.
 class CXXRecordDecl : public RecordDecl {
+  friend class ASTDeclMerger;
   friend class ASTDeclReader;
   friend class ASTDeclWriter;
   friend class ASTNodeImporter;
@@ -889,6 +890,13 @@ public:
             needsOverloadResolutionForDestructor()) &&
            "destructor should not be deleted");
     data().DefaultedDestructorIsDeleted = true;
+    // C++23 [dcl.constexpr]p3.2:
+    //   if the function is a constructor or destructor, its class does not have
+    //   any virtual base classes.
+    // C++20 [dcl.constexpr]p5:
+    //   The definition of a constexpr destructor whose function-body is
+    //   not = delete shall additionally satisfy...
+    data().DefaultedDestructorIsConstexpr = data().NumVBases == 0;
   }
 
   /// Determine whether this class should get an implicit move
@@ -1188,10 +1196,6 @@ public:
   ///
   /// \note This does NOT include a check for union-ness.
   bool isEmpty() const { return data().Empty; }
-  /// Marks this record as empty. This is used by DWARFASTParserClang
-  /// when parsing records with empty fields having [[no_unique_address]]
-  /// attribute
-  void markEmpty() { data().Empty = true; }
 
   void setInitMethod(bool Val) { data().HasInitMethod = Val; }
   bool hasInitMethod() const { return data().HasInitMethod; }
@@ -1549,6 +1553,10 @@ public:
   /// Returns true if the class destructor, or any implicitly invoked
   /// destructors are marked noreturn.
   bool isAnyDestructorNoReturn() const { return data().IsAnyDestructorNoReturn; }
+
+  /// Returns true if the class contains HLSL intangible type, either as
+  /// a field or in base class.
+  bool isHLSLIntangible() const { return data().IsHLSLIntangible; }
 
   /// If the class is a local class [class.local], returns
   /// the enclosing function declaration.
@@ -1959,15 +1967,29 @@ public:
 class CXXDeductionGuideDecl : public FunctionDecl {
   void anchor() override;
 
+public:
+  // Represents the relationship between this deduction guide and the
+  // deduction guide that it was generated from (or lack thereof).
+  // See the SourceDeductionGuide member for more details.
+  enum class SourceDeductionGuideKind : uint8_t {
+    None,
+    Alias,
+  };
+
 private:
   CXXDeductionGuideDecl(ASTContext &C, DeclContext *DC, SourceLocation StartLoc,
                         ExplicitSpecifier ES,
                         const DeclarationNameInfo &NameInfo, QualType T,
                         TypeSourceInfo *TInfo, SourceLocation EndLocation,
-                        CXXConstructorDecl *Ctor, DeductionCandidate Kind)
+                        CXXConstructorDecl *Ctor, DeductionCandidate Kind,
+                        Expr *TrailingRequiresClause,
+                        const CXXDeductionGuideDecl *GeneratedFrom,
+                        SourceDeductionGuideKind SourceKind)
       : FunctionDecl(CXXDeductionGuide, C, DC, StartLoc, NameInfo, T, TInfo,
-                     SC_None, false, false, ConstexprSpecKind::Unspecified),
-        Ctor(Ctor), ExplicitSpec(ES) {
+                     SC_None, false, false, ConstexprSpecKind::Unspecified,
+                     TrailingRequiresClause),
+        Ctor(Ctor), ExplicitSpec(ES),
+        SourceDeductionGuide(GeneratedFrom, SourceKind) {
     if (EndLocation.isValid())
       setRangeEnd(EndLocation);
     setDeductionCandidateKind(Kind);
@@ -1975,6 +1997,12 @@ private:
 
   CXXConstructorDecl *Ctor;
   ExplicitSpecifier ExplicitSpec;
+  // The deduction guide, if any, that this deduction guide was generated from,
+  // in the case of alias template deduction. The SourceDeductionGuideKind
+  // member indicates which of these sources applies, or is None otherwise.
+  llvm::PointerIntPair<const CXXDeductionGuideDecl *, 2,
+                       SourceDeductionGuideKind>
+      SourceDeductionGuide;
   void setExplicitSpecifier(ExplicitSpecifier ES) { ExplicitSpec = ES; }
 
 public:
@@ -1986,7 +2014,10 @@ public:
          ExplicitSpecifier ES, const DeclarationNameInfo &NameInfo, QualType T,
          TypeSourceInfo *TInfo, SourceLocation EndLocation,
          CXXConstructorDecl *Ctor = nullptr,
-         DeductionCandidate Kind = DeductionCandidate::Normal);
+         DeductionCandidate Kind = DeductionCandidate::Normal,
+         Expr *TrailingRequiresClause = nullptr,
+         const CXXDeductionGuideDecl *SourceDG = nullptr,
+         SourceDeductionGuideKind SK = SourceDeductionGuideKind::None);
 
   static CXXDeductionGuideDecl *CreateDeserialized(ASTContext &C,
                                                    GlobalDeclID ID);
@@ -2005,6 +2036,25 @@ public:
   /// Get the constructor from which this deduction guide was generated, if
   /// this is an implicit deduction guide.
   CXXConstructorDecl *getCorrespondingConstructor() const { return Ctor; }
+
+  /// Get the deduction guide from which this deduction guide was generated,
+  /// if it was generated as part of alias template deduction or from an
+  /// inherited constructor.
+  const CXXDeductionGuideDecl *getSourceDeductionGuide() const {
+    return SourceDeductionGuide.getPointer();
+  }
+
+  void setSourceDeductionGuide(CXXDeductionGuideDecl *DG) {
+    SourceDeductionGuide.setPointer(DG);
+  }
+
+  SourceDeductionGuideKind getSourceDeductionGuideKind() const {
+    return SourceDeductionGuide.getInt();
+  }
+
+  void setSourceDeductionGuideKind(SourceDeductionGuideKind SK) {
+    SourceDeductionGuide.setInt(SK);
+  }
 
   void setDeductionCandidateKind(DeductionCandidate K) {
     FunctionDeclBits.DeductionCandidateKind = static_cast<unsigned char>(K);
@@ -2377,19 +2427,19 @@ public:
 
   /// Determine whether this initializer is initializing a base class.
   bool isBaseInitializer() const {
-    return Initializee.is<TypeSourceInfo*>() && !IsDelegating;
+    return isa<TypeSourceInfo *>(Initializee) && !IsDelegating;
   }
 
   /// Determine whether this initializer is initializing a non-static
   /// data member.
-  bool isMemberInitializer() const { return Initializee.is<FieldDecl*>(); }
+  bool isMemberInitializer() const { return isa<FieldDecl *>(Initializee); }
 
   bool isAnyMemberInitializer() const {
     return isMemberInitializer() || isIndirectMemberInitializer();
   }
 
   bool isIndirectMemberInitializer() const {
-    return Initializee.is<IndirectFieldDecl*>();
+    return isa<IndirectFieldDecl *>(Initializee);
   }
 
   /// Determine whether this initializer is an implicit initializer
@@ -2405,7 +2455,7 @@ public:
   /// Determine whether this initializer is creating a delegating
   /// constructor.
   bool isDelegatingInitializer() const {
-    return Initializee.is<TypeSourceInfo*>() && IsDelegating;
+    return isa<TypeSourceInfo *>(Initializee) && IsDelegating;
   }
 
   /// Determine whether this initializer is a pack expansion.
@@ -2446,21 +2496,21 @@ public:
   /// non-static data member being initialized. Otherwise, returns null.
   FieldDecl *getMember() const {
     if (isMemberInitializer())
-      return Initializee.get<FieldDecl*>();
+      return cast<FieldDecl *>(Initializee);
     return nullptr;
   }
 
   FieldDecl *getAnyMember() const {
     if (isMemberInitializer())
-      return Initializee.get<FieldDecl*>();
+      return cast<FieldDecl *>(Initializee);
     if (isIndirectMemberInitializer())
-      return Initializee.get<IndirectFieldDecl*>()->getAnonField();
+      return cast<IndirectFieldDecl *>(Initializee)->getAnonField();
     return nullptr;
   }
 
   IndirectFieldDecl *getIndirectMember() const {
     if (isIndirectMemberInitializer())
-      return Initializee.get<IndirectFieldDecl*>();
+      return cast<IndirectFieldDecl *>(Initializee);
     return nullptr;
   }
 
@@ -2843,6 +2893,11 @@ public:
   Expr *getOperatorDeleteThisArg() const {
     return getCanonicalDecl()->OperatorDeleteThisArg;
   }
+
+  /// Will this destructor ever be called when considering which deallocation
+  /// function is associated with the destructor? Can optionally be passed an
+  /// 'operator delete' function declaration to test against specifically.
+  bool isCalledByDelete(const FunctionDecl *OpDel = nullptr) const;
 
   CXXDestructorDecl *getCanonicalDecl() override {
     return cast<CXXDestructorDecl>(FunctionDecl::getCanonicalDecl());

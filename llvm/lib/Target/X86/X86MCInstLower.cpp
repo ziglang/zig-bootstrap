@@ -42,10 +42,8 @@
 #include "llvm/MC/MCInst.h"
 #include "llvm/MC/MCInstBuilder.h"
 #include "llvm/MC/MCSection.h"
-#include "llvm/MC/MCSectionELF.h"
 #include "llvm/MC/MCStreamer.h"
 #include "llvm/MC/MCSymbol.h"
-#include "llvm/MC/MCSymbolELF.h"
 #include "llvm/MC/TargetRegistry.h"
 #include "llvm/Target/TargetLoweringObjectFile.h"
 #include "llvm/Target/TargetMachine.h"
@@ -1537,7 +1535,6 @@ static std::string getShuffleComment(const MachineInstr *MI, unsigned SrcOp1Idx,
   printDstRegisterName(CS, MI, SrcOp1Idx);
   CS << " = ";
   printShuffleMask(CS, Src1Name, Src2Name, Mask);
-  CS.flush();
 
   return Comment;
 }
@@ -1709,7 +1706,7 @@ static void printZeroExtend(const MachineInstr *MI, MCStreamer &OutStreamer,
 
 void X86AsmPrinter::EmitSEHInstruction(const MachineInstr *MI) {
   assert(MF->hasWinCFI() && "SEH_ instruction in function without WinCFI?");
-  assert((getSubtarget().isOSWindows() || TM.getTargetTriple().isUEFI()) &&
+  assert(getSubtarget().isOSWindowsOrUEFI() &&
          "SEH_ instruction Windows and UEFI only");
 
   // Use the .cv_fpo directives if we're emitting CodeView on 32-bit x86.
@@ -2051,21 +2048,21 @@ static void addConstantComments(const MachineInstr *MI,
   case X86::VBROADCASTF128rm:
   case X86::VBROADCASTI128rm:
   MASK_AVX512_CASE(X86::VBROADCASTF32X4Z256rm)
-  MASK_AVX512_CASE(X86::VBROADCASTF64X2Z128rm)
+  MASK_AVX512_CASE(X86::VBROADCASTF64X2Z256rm)
   MASK_AVX512_CASE(X86::VBROADCASTI32X4Z256rm)
-  MASK_AVX512_CASE(X86::VBROADCASTI64X2Z128rm)
+  MASK_AVX512_CASE(X86::VBROADCASTI64X2Z256rm)
     printBroadcast(MI, OutStreamer, 2, 128);
     break;
-  MASK_AVX512_CASE(X86::VBROADCASTF32X4rm)
-  MASK_AVX512_CASE(X86::VBROADCASTF64X2rm)
-  MASK_AVX512_CASE(X86::VBROADCASTI32X4rm)
-  MASK_AVX512_CASE(X86::VBROADCASTI64X2rm)
+  MASK_AVX512_CASE(X86::VBROADCASTF32X4Zrm)
+  MASK_AVX512_CASE(X86::VBROADCASTF64X2Zrm)
+  MASK_AVX512_CASE(X86::VBROADCASTI32X4Zrm)
+  MASK_AVX512_CASE(X86::VBROADCASTI64X2Zrm)
     printBroadcast(MI, OutStreamer, 4, 128);
     break;
-  MASK_AVX512_CASE(X86::VBROADCASTF32X8rm)
-  MASK_AVX512_CASE(X86::VBROADCASTF64X4rm)
-  MASK_AVX512_CASE(X86::VBROADCASTI32X8rm)
-  MASK_AVX512_CASE(X86::VBROADCASTI64X4rm)
+  MASK_AVX512_CASE(X86::VBROADCASTF32X8Zrm)
+  MASK_AVX512_CASE(X86::VBROADCASTF64X4Zrm)
+  MASK_AVX512_CASE(X86::VBROADCASTI32X8Zrm)
+  MASK_AVX512_CASE(X86::VBROADCASTI64X4Zrm)
     printBroadcast(MI, OutStreamer, 2, 256);
     break;
 

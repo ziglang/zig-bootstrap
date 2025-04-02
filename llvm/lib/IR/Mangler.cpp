@@ -315,11 +315,13 @@ std::optional<std::string> llvm::getArm64ECMangledFunctionName(StringRef Name) {
 
 std::optional<std::string>
 llvm::getArm64ECDemangledFunctionName(StringRef Name) {
+  // For non-C++ names, drop the "#" prefix.
   if (Name[0] == '#')
     return std::optional<std::string>(Name.substr(1));
   if (Name[0] != '?')
     return std::nullopt;
 
+  // Drop the ARM64EC "$$h" tag.
   std::pair<StringRef, StringRef> Pair = Name.split("$$h");
   if (Pair.second.empty())
     return std::nullopt;
