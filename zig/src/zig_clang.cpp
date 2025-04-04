@@ -329,6 +329,7 @@ void ZigClang_detect_enum_TypeClass(clang::Type::TypeClass ty) {
         case clang::Type::TemplateSpecialization:
         case clang::Type::Auto:
         case clang::Type::DeducedTemplateSpecialization:
+        case clang::Type::HLSLAttributedResource:
         case clang::Type::InjectedClassName:
         case clang::Type::DependentName:
         case clang::Type::DependentTemplateSpecialization:
@@ -432,6 +433,7 @@ void ZigClang_detect_enum_StmtClass(clang::Stmt::StmtClass x) {
         case clang::Stmt::PackExpansionExprClass:
         case clang::Stmt::UnresolvedMemberExprClass:
         case clang::Stmt::UnresolvedLookupExprClass:
+        case clang::Stmt::OpenACCAsteriskSizeExprClass:
         case clang::Stmt::OpaqueValueExprClass:
         case clang::Stmt::OffsetOfExprClass:
         case clang::Stmt::ObjCSubscriptRefExprClass:
@@ -462,6 +464,7 @@ void ZigClang_detect_enum_StmtClass(clang::Stmt::StmtClass x) {
         case clang::Stmt::InitListExprClass:
         case clang::Stmt::ImplicitValueInitExprClass:
         case clang::Stmt::ImaginaryLiteralClass:
+        case clang::Stmt::HLSLOutArgExprClass:
         case clang::Stmt::GenericSelectionExprClass:
         case clang::Stmt::GNUNullExprClass:
         case clang::Stmt::FunctionParmPackExprClass:
@@ -539,13 +542,24 @@ void ZigClang_detect_enum_StmtClass(clang::Stmt::StmtClass x) {
         case clang::Stmt::SwitchStmtClass:
         case clang::Stmt::DefaultStmtClass:
         case clang::Stmt::CaseStmtClass:
+        case clang::Stmt::SYCLKernelCallStmtClass:
         case clang::Stmt::SEHTryStmtClass:
         case clang::Stmt::SEHLeaveStmtClass:
         case clang::Stmt::SEHFinallyStmtClass:
         case clang::Stmt::SEHExceptStmtClass:
         case clang::Stmt::ReturnStmtClass:
+        case clang::Stmt::OpenACCWaitConstructClass:
+        case clang::Stmt::OpenACCUpdateConstructClass:
+        case clang::Stmt::OpenACCShutdownConstructClass:
+        case clang::Stmt::OpenACCSetConstructClass:
+        case clang::Stmt::OpenACCInitConstructClass:
+        case clang::Stmt::OpenACCExitDataConstructClass:
+        case clang::Stmt::OpenACCEnterDataConstructClass:
         case clang::Stmt::OpenACCLoopConstructClass:
+        case clang::Stmt::OpenACCHostDataConstructClass:
+        case clang::Stmt::OpenACCDataConstructClass:
         case clang::Stmt::OpenACCComputeConstructClass:
+        case clang::Stmt::OpenACCCombinedConstructClass:
         case clang::Stmt::ObjCForCollectionStmtClass:
         case clang::Stmt::ObjCAutoreleasePoolStmtClass:
         case clang::Stmt::ObjCAtTryStmtClass:
@@ -627,6 +641,7 @@ void ZigClang_detect_enum_StmtClass(clang::Stmt::StmtClass x) {
         case clang::Stmt::OMPCancelDirectiveClass:
         case clang::Stmt::OMPBarrierDirectiveClass:
         case clang::Stmt::OMPAtomicDirectiveClass:
+        case clang::Stmt::OMPAssumeDirectiveClass:
         case clang::Stmt::OMPCanonicalLoopClass:
         case clang::Stmt::NullStmtClass:
         case clang::Stmt::MSDependentExistsStmtClass:
@@ -947,6 +962,7 @@ void ZigClang_detect_enum_DeclKind(clang::Decl::Kind x) {
     switch (x) {
         case clang::Decl::TranslationUnit:
         case clang::Decl::RequiresExprBody:
+        case clang::Decl::OutlinedFunction:
         case clang::Decl::LinkageSpec:
         case clang::Decl::ExternCContext:
         case clang::Decl::Export:
@@ -1185,6 +1201,7 @@ void ZigClang_detect_enum_BuiltinTypeKind(clang::BuiltinType::Kind x) {
         case clang::BuiltinType::SveFloat32:
         case clang::BuiltinType::SveFloat64:
         case clang::BuiltinType::SveBFloat16:
+        case clang::BuiltinType::SveMFloat8:
         case clang::BuiltinType::SveInt8x2:
         case clang::BuiltinType::SveInt16x2:
         case clang::BuiltinType::SveInt32x2:
@@ -1197,6 +1214,7 @@ void ZigClang_detect_enum_BuiltinTypeKind(clang::BuiltinType::Kind x) {
         case clang::BuiltinType::SveFloat32x2:
         case clang::BuiltinType::SveFloat64x2:
         case clang::BuiltinType::SveBFloat16x2:
+        case clang::BuiltinType::SveMFloat8x2:
         case clang::BuiltinType::SveInt8x3:
         case clang::BuiltinType::SveInt16x3:
         case clang::BuiltinType::SveInt32x3:
@@ -1209,6 +1227,7 @@ void ZigClang_detect_enum_BuiltinTypeKind(clang::BuiltinType::Kind x) {
         case clang::BuiltinType::SveFloat32x3:
         case clang::BuiltinType::SveFloat64x3:
         case clang::BuiltinType::SveBFloat16x3:
+        case clang::BuiltinType::SveMFloat8x3:
         case clang::BuiltinType::SveInt8x4:
         case clang::BuiltinType::SveInt16x4:
         case clang::BuiltinType::SveInt32x4:
@@ -1221,10 +1240,12 @@ void ZigClang_detect_enum_BuiltinTypeKind(clang::BuiltinType::Kind x) {
         case clang::BuiltinType::SveFloat32x4:
         case clang::BuiltinType::SveFloat64x4:
         case clang::BuiltinType::SveBFloat16x4:
+        case clang::BuiltinType::SveMFloat8x4:
         case clang::BuiltinType::SveBool:
         case clang::BuiltinType::SveBoolx2:
         case clang::BuiltinType::SveBoolx4:
         case clang::BuiltinType::SveCount:
+        case clang::BuiltinType::MFloat8:
         case clang::BuiltinType::VectorQuad:
         case clang::BuiltinType::VectorPair:
         case clang::BuiltinType::RvvInt8mf8:
@@ -1552,6 +1573,8 @@ void ZigClang_detect_enum_BuiltinTypeKind(clang::BuiltinType::Kind x) {
         case clang::BuiltinType::RvvBFloat16m4x2:
         case clang::BuiltinType::WasmExternRef:
         case clang::BuiltinType::AMDGPUBufferRsrc:
+        case clang::BuiltinType::AMDGPUNamedWorkgroupBarrier:
+        case clang::BuiltinType::HLSLResource:
         case clang::BuiltinType::Void:
         case clang::BuiltinType::Bool:
         case clang::BuiltinType::Char_U:
