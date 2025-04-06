@@ -120,7 +120,7 @@ is more portable across Linux distributions.
 | `mips64-linux-muslabi64`    | OK             |
 | `mips64-linux-muslabin32`   | OK             |
 | `mips64el-linux-gnuabi64`   | OK             |
-| `mips64el-linux-gnuabin32`  | OK             |
+| `mips64el-linux-gnuabin32`  | [#214](https://github.com/ziglang/zig-bootstrap/issues/214) |
 | `mips64el-linux-muslabi64`  | OK             |
 | `mips64el-linux-muslabin32` | OK             |
 | `mipsel-linux-gnueabi`      | OK             |
