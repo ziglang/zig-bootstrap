@@ -1,4 +1,4 @@
-# bootstrap-zig
+# zig-bootstrap
 
 The purpose of this project is to start with minimum system dependencies and
 end with a fully operational Zig compiler for any target.
