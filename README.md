@@ -20,9 +20,11 @@ For other versions, check the git tags of this repository.
  * all: Deleted unused files.
  * LLVM: Support .lib extension for static zstd.
  * LLVM: Portable handling of .def linker flag
+ * Clang: Ignore the examples directory
  * Clang: Disable building of libclang-cpp.so.
  * LLD: Added additional include directory to Zig's libunwind.
  * LLD: Respect `LLD_BUILD_TOOLS=OFF`
+ * LLD: Skip building docs
  * zlib: Delete the ability to build a shared library.
 
 ## Host System Dependencies
