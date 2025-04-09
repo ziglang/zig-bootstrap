@@ -31,6 +31,7 @@ For other versions, check the git tags of this repository.
 
  * C++ compiler capable of building LLVM, Clang, and LLD from source (GCC 5.1+
    or Clang)
+     * On some systems, static libstdc++/libc++ may need to be installed
  * CMake 3.19 or later
  * make, ninja, or any other build system supported by CMake
  * POSIX system (bash, mkdir, cd)
