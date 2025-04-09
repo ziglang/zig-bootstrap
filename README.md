@@ -24,7 +24,6 @@ For other versions, check the git tags of this repository.
  * LLD: Added additional include directory to Zig's libunwind.
  * LLD: Respect `LLD_BUILD_TOOLS=OFF`
  * zlib: Delete the ability to build a shared library.
- * [LLVM: Fix crash when FREEZE a half(f16) type on loongarch](https://github.com/llvm/llvm-project/pull/107791)
 
 ## Host System Dependencies
 
