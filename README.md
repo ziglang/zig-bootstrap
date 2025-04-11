@@ -110,6 +110,7 @@ is more portable across Linux distributions.
 | `armeb-linux-gnueabihf`     | OK             |
 | `armeb-linux-musleabi`      | OK             |
 | `armeb-linux-musleabihf`    | OK             |
+| `hexagon-linux-musl`        | [#215](https://github.com/ziglang/zig-bootstrap/issues/215) |
 | `loongarch64-linux-gnu`     | OK             |
 | `loongarch64-linux-gnusf`   | OK             |
 | `loongarch64-linux-musl`    | OK             |
