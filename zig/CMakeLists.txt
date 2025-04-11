@@ -444,7 +444,6 @@ set(ZIG_STAGE2_SOURCES
     lib/std/json.zig
     lib/std/json/stringify.zig
     lib/std/leb128.zig
-    lib/std/linked_list.zig
     lib/std/log.zig
     lib/std/macho.zig
     lib/std/math.zig
@@ -698,6 +697,13 @@ add_library(zigcpp STATIC ${ZIG_CPP_SOURCES})
 # and with "exe_cflags" in build.zig
 target_compile_features(zigcpp PRIVATE cxx_std_17)
 set_target_properties(zigcpp PROPERTIES POSITION_INDEPENDENT_CODE ${ZIG_PIE})
+
+if(LLVM_LINK_MODE STREQUAL "static")
+  target_compile_definitions(zigcpp PRIVATE
+    LLVM_BUILD_STATIC
+    CLANG_BUILD_STATIC
+  )
+endif()
 
 if(NOT MSVC)
   if(MINGW)
