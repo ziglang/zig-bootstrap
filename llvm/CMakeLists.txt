@@ -988,7 +988,6 @@ if(NOT LLVM_INDIVIDUAL_TEST_COVERAGE)
 endif()
 
 if (LLVM_BUILD_STATIC)
-  set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static")
   # Remove shared library suffixes from use in find_library
   foreach (shared_lib_suffix ${CMAKE_SHARED_LIBRARY_SUFFIX} ${CMAKE_IMPORT_LIBRARY_SUFFIX})
     list(FIND CMAKE_FIND_LIBRARY_SUFFIXES ${shared_lib_suffix} shared_lib_suffix_idx)
