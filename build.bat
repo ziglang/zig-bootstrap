@@ -25,6 +25,7 @@ set TARGET_OS_CMAKE=
 FOR /F "tokens=2,3 delims=-" %%i IN ("%TARGET%") DO (
   IF "%%i"=="macos" set "TARGET_OS_CMAKE=Darwin"
   IF "%%i"=="freebsd" set "TARGET_OS_CMAKE=FreeBSD"
+  IF "%%i"=="netbsd" set "TARGET_OS_CMAKE=NetBSD"
   IF "%%i"=="windows" set "TARGET_OS_CMAKE=Windows"
   IF "%%i"=="linux" set "TARGET_OS_CMAKE=Linux"
   set TARGET_ABI=%%j
