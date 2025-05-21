@@ -46,7 +46,7 @@ For other versions, check the git tags of this repository.
 
 All parameters are required:
 
- * `<arch>-<os>-<abi>`: Replace with one of the Supported Triples below, or use
+ * `<arch>-<os>-<abi>`: Replace with one of the Supported Targets below, or use
    `native` for the `<arch>` value (e.g. `native-linux-gnu`) to use the native
    architecture.
  * `<mcpu>`: Replace with a `-mcpu` parameter of Zig. `baseline` is recommended
@@ -62,7 +62,7 @@ significantly affect how long it takes to build:
    systems (such as make) which do not default to parallel builds. This option
    is irrelevant when using Ninja.
 
-When it succeeds, output can be found in `out/zig-<triple>-<cpu>/`.
+When it succeeds, output can be found in `out/zig-<target>-<cpu>/`.
 
 ## Windows Build Instructions
 
@@ -80,7 +80,7 @@ build.bat <arch>-<os>-<abi> <mcpu>
 
 To build for x86 Windows, run the script within the `x86 Native Tools Command Prompt for VS 2019`.
 
-### Supported Triples
+### Supported Targets
 
 If you try a "not tested" one and find a problem please file an issue,
 and a pull request linking to the issue in the table.
@@ -95,77 +95,119 @@ Note: Generally, for Linux targets, we prefer the musl libc builds over the
 glibc builds here, because musl builds end up producing a static binary, which
 is more portable across Linux distributions.
 
-| triple                      | support status |
-|-----------------------------|----------------|
-| `aarch64-linux-gnu`         | OK             |
-| `aarch64-linux-musl`        | OK             |
-| `aarch64-macos-none`        | OK             |
-| `aarch64-windows-gnu`       | OK             |
-| `aarch64_be-linux-gnu`      | OK             |
-| `aarch64_be-linux-musl`     | OK             |
-| `arm-linux-gnueabi`         | OK             |
-| `arm-linux-gnueabihf`       | OK             |
-| `arm-linux-musleabi`        | OK             |
-| `arm-linux-musleabihf`      | OK             |
-| `armeb-linux-gnueabi`       | OK             |
-| `armeb-linux-gnueabihf`     | OK             |
-| `armeb-linux-musleabi`      | OK             |
-| `armeb-linux-musleabihf`    | OK             |
+#### FreeBSD
+
+**Note:** You currently need to use `freebsd.14.0` or later, not just `freebsd`.
+
+| Target                     | Status |
+|----------------------------|--------|
+| `aarch64-freebsd-none`     | OK     |
+| `arm-freebsd-eabihf`       | [#235](https://github.com/ziglang/zig-bootstrap/issues/235) |
+| `powerpc64-freebsd-none`   | OK     |
+| `powerpc64le-freebsd-none` | OK     |
+| `riscv64-freebsd-none`     | OK     |
+| `x86_64-freebsd-none`      | OK     |
+
+#### Linux
+
+| Target                      | Status |
+|-----------------------------|--------|
+| `aarch64-linux-gnu`         | OK     |
+| `aarch64-linux-musl`        | OK     |
+| `aarch64_be-linux-gnu`      | OK     |
+| `aarch64_be-linux-musl`     | OK     |
+| `arm-linux-gnueabi`         | OK     |
+| `arm-linux-gnueabihf`       | OK     |
+| `arm-linux-musleabi`        | OK     |
+| `arm-linux-musleabihf`      | OK     |
+| `armeb-linux-gnueabi`       | OK     |
+| `armeb-linux-gnueabihf`     | OK     |
+| `armeb-linux-musleabi`      | OK     |
+| `armeb-linux-musleabihf`    | OK     |
 | `hexagon-linux-musl`        | [#215](https://github.com/ziglang/zig-bootstrap/issues/215) |
-| `loongarch64-linux-gnu`     | OK             |
-| `loongarch64-linux-gnusf`   | OK             |
-| `loongarch64-linux-musl`    | OK             |
-| `mips-linux-gnueabi`        | OK             |
-| `mips-linux-gnueabihf`      | OK             |
-| `mips-linux-musleabi`       | OK             |
-| `mips-linux-musleabihf`     | OK             |
-| `mips64-linux-gnuabi64`     | OK             |
-| `mips64-linux-gnuabin32`    | OK             |
-| `mips64-linux-muslabi64`    | OK             |
-| `mips64-linux-muslabin32`   | OK             |
-| `mips64el-linux-gnuabi64`   | OK             |
+| `loongarch64-linux-gnu`     | OK     |
+| `loongarch64-linux-gnusf`   | OK     |
+| `loongarch64-linux-musl`    | OK     |
+| `mips-linux-gnueabi`        | OK     |
+| `mips-linux-gnueabihf`      | OK     |
+| `mips-linux-musleabi`       | OK     |
+| `mips-linux-musleabihf`     | OK     |
+| `mips64-linux-gnuabi64`     | OK     |
+| `mips64-linux-gnuabin32`    | OK     |
+| `mips64-linux-muslabi64`    | OK     |
+| `mips64-linux-muslabin32`   | OK     |
+| `mips64el-linux-gnuabi64`   | OK     |
 | `mips64el-linux-gnuabin32`  | [#214](https://github.com/ziglang/zig-bootstrap/issues/214) |
-| `mips64el-linux-muslabi64`  | OK             |
-| `mips64el-linux-muslabin32` | OK             |
-| `mipsel-linux-gnueabi`      | OK             |
-| `mipsel-linux-gnueabihf`    | OK             |
-| `mipsel-linux-musleabi`     | OK             |
-| `mipsel-linux-musleabihf`   | OK             |
-| `powerpc-linux-gnueabi`     | OK             |
-| `powerpc-linux-gnueabihf`   | OK             |
-| `powerpc-linux-musleabi`    | OK             |
-| `powerpc-linux-musleabihf`  | OK             |
+| `mips64el-linux-muslabi64`  | OK     |
+| `mips64el-linux-muslabin32` | OK     |
+| `mipsel-linux-gnueabi`      | OK     |
+| `mipsel-linux-gnueabihf`    | OK     |
+| `mipsel-linux-musleabi`     | OK     |
+| `mipsel-linux-musleabihf`   | OK     |
+| `powerpc-linux-gnueabi`     | OK     |
+| `powerpc-linux-gnueabihf`   | OK     |
+| `powerpc-linux-musleabi`    | OK     |
+| `powerpc-linux-musleabihf`  | OK     |
 | `powerpc64-linux-gnu`       | [#113](https://github.com/ziglang/zig-bootstrap/issues/113) |
-| `powerpc64-linux-musl`      | OK             |
-| `powerpc64le-linux-gnu`     | OK             |
-| `powerpc64le-linux-musl`    | OK             |
-| `riscv32-linux-gnu`         | OK             |
-| `riscv32-linux-musl`        | OK             |
-| `riscv64-linux-gnu`         | OK             |
-| `riscv64-linux-musl`        | OK             |
-| `s390x-linux-gnu`           | OK             |
-| `s390x-linux-musl`          | OK             |
+| `powerpc64-linux-musl`      | OK     |
+| `powerpc64le-linux-gnu`     | OK     |
+| `powerpc64le-linux-musl`    | OK     |
+| `riscv32-linux-gnu`         | OK     |
+| `riscv32-linux-musl`        | OK     |
+| `riscv64-linux-gnu`         | OK     |
+| `riscv64-linux-musl`        | OK     |
+| `s390x-linux-gnu`           | OK     |
+| `s390x-linux-musl`          | OK     |
 | `sparc-linux-gnu`           | [#117](https://github.com/ziglang/zig-bootstrap/issues/117) |
 | `sparc64-linux-gnu`         | [#172](https://github.com/ziglang/zig-bootstrap/issues/172) |
-| `thumb-linux-musleabi`      | OK             |
-| `thumb-linux-musleabihf`    | OK             |
-| `thumb-windows-gnu`         | OK             |
-| `thumbeb-linux-musleabi`    | OK             |
-| `thumbeb-linux-musleabihf`  | OK             |
-| `x86-linux-gnu`             | OK             |
-| `x86-linux-musl`            | OK             |
-| `x86-windows-gnu`           | OK             |
-| `x86_64-freebsd-none`       | [#45](https://github.com/ziglang/bootstrap/issues/45) |
-| `x86_64-linux-gnu`          | OK             |
-| `x86_64-linux-gnux32`       | OK             |
-| `x86_64-linux-musl`         | OK             |
-| `x86_64-linux-muslx32`      | OK             |
-| `x86_64-macos-none`         | OK             |
-| `x86_64-netbsd-none`        | [#71](https://github.com/ziglang/zig-bootstrap/issues/71) |
-| `x86_64-windows-gnu`        | OK             |
+| `thumb-linux-musleabi`      | OK     |
+| `thumb-linux-musleabihf`    | OK     |
+| `thumbeb-linux-musleabi`    | OK     |
+| `thumbeb-linux-musleabihf`  | OK     |
+| `x86-linux-gnu`             | OK     |
+| `x86-linux-musl`            | OK     |
+| `x86_64-linux-gnu`          | OK     |
+| `x86_64-linux-gnux32`       | OK     |
+| `x86_64-linux-musl`         | OK     |
+| `x86_64-linux-muslx32`      | OK     |
 
-#### Other Notable Targets Known to Work
+#### macOS
 
- * `arm-linux-musleabi` with mcpu value of `generic+v6kz`. This produces a
-   build of Zig that runs on the RPi 1 and RPi Zero.
-   - If you want to produce a build for this CPU exactly, use `arm1176jzf_s`.
+| Target               | Status |
+|----------------------|--------|
+| `aarch64-macos-none` | OK     |
+| `x86_64-macos-none`  | OK     |
+
+#### NetBSD
+
+**Note:** You currently need to use `netbsd.10.1` or later, not just `netbsd`.
+
+| Target                   | Status |
+|--------------------------|--------|
+| `aarch64-netbsd-none`    | [#218](https://github.com/ziglang/zig-bootstrap/issues/218) |
+| `aarch64_be-netbsd-none` | [#219](https://github.com/ziglang/zig-bootstrap/issues/219) |
+| `arm-netbsd-eabi`        | [#220](https://github.com/ziglang/zig-bootstrap/issues/220) |
+| `arm-netbsd-eabihf`      | [#221](https://github.com/ziglang/zig-bootstrap/issues/221) |
+| `armeb-netbsd-eabi`      | [#222](https://github.com/ziglang/zig-bootstrap/issues/222) |
+| `armeb-netbsd-eabihf`    | [#223](https://github.com/ziglang/zig-bootstrap/issues/223) |
+| `mips-netbsd-eabi`       | [#224](https://github.com/ziglang/zig-bootstrap/issues/224) |
+| `mips-netbsd-eabihf`     | [#225](https://github.com/ziglang/zig-bootstrap/issues/225) |
+| `mipsel-netbsd-eabi`     | [#226](https://github.com/ziglang/zig-bootstrap/issues/226) |
+| `mipsel-netbsd-eabihf`   | [#227](https://github.com/ziglang/zig-bootstrap/issues/227) |
+| `powerpc-netbsd-eabi`    | [#228](https://github.com/ziglang/zig-bootstrap/issues/228) |
+| `powerpc-netbsd-eabihf`  | [#229](https://github.com/ziglang/zig-bootstrap/issues/229) |
+| `riscv32-netbsd-none`    | [#233](https://github.com/ziglang/zig-bootstrap/issues/233) |
+| `riscv64-netbsd-none`    | [#234](https://github.com/ziglang/zig-bootstrap/issues/234) |
+| `sparc-netbsd-none`      | [#230](https://github.com/ziglang/zig-bootstrap/issues/230) |
+| `sparc64-netbsd-none`    | [#231](https://github.com/ziglang/zig-bootstrap/issues/231) |
+| `x86-netbsd-none`        | [#232](https://github.com/ziglang/zig-bootstrap/issues/232) |
+| `x86_64-netbsd-none`     | [#71](https://github.com/ziglang/zig-bootstrap/issues/71) |
+
+#### Windows
+
+| Target                | Status |
+|-----------------------|--------|
+| `aarch64-windows-gnu` | OK     |
+| `thumb-windows-gnu`   | OK     |
+| `x86-windows-gnu`     | OK     |
+| `x86_64-windows-gnu`  | OK     |
