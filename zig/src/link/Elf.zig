@@ -1596,8 +1596,8 @@ fn linkWithLLD(self: *Elf, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: s
         man.hash.addListOfBytes(self.rpath_table.keys());
         if (output_mode == .Exe) {
             man.hash.add(self.base.stack_size);
-            man.hash.add(self.base.build_id);
         }
+        man.hash.add(self.base.build_id);
         man.hash.addListOfBytes(self.symbol_wrap_set.keys());
         man.hash.add(comp.skip_linker_dependencies);
         man.hash.add(self.z_nodelete);
@@ -1663,7 +1663,18 @@ fn linkWithLLD(self: *Elf, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: s
     // copy when generating relocatables. Normally, we would expect `lld -r` to work.
     // However, because LLD wants to resolve BPF relocations which it shouldn't, it fails
     // before even generating the relocatable.
-    if (output_mode == .Obj and (comp.config.lto != .none or target.cpu.arch.isBpf())) {
+    //
+    // For m68k, we go through this path because LLD doesn't support it yet, but LLVM can
+    // produce usable object files.
+    if (output_mode == .Obj and
+        (comp.config.lto != .none or
+            target.cpu.arch.isBpf() or
+            target.cpu.arch == .lanai or
+            target.cpu.arch == .m68k or
+            target.cpu.arch.isSPARC() or
+            target.cpu.arch == .ve or
+            target.cpu.arch == .xcore))
+    {
         // In this case we must do a simple file copy
         // here. TODO: think carefully about how we can avoid this redundant operation when doing
         // build-obj. See also the corresponding TODO in linkAsArchive.
@@ -1753,20 +1764,14 @@ fn linkWithLLD(self: *Elf, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: s
             });
         }
 
-        if (is_exe_or_dyn_lib) {
-            switch (self.base.build_id) {
-                .none => {},
-                .fast, .uuid, .sha1, .md5 => {
-                    try argv.append(try std.fmt.allocPrint(arena, "--build-id={s}", .{
-                        @tagName(self.base.build_id),
-                    }));
-                },
-                .hexstring => |hs| {
-                    try argv.append(try std.fmt.allocPrint(arena, "--build-id=0x{s}", .{
-                        std.fmt.fmtSliceHexLower(hs.toSlice()),
-                    }));
-                },
-            }
+        switch (self.base.build_id) {
+            .none => try argv.append("--build-id=none"),
+            .fast, .uuid, .sha1, .md5 => try argv.append(try std.fmt.allocPrint(arena, "--build-id={s}", .{
+                @tagName(self.base.build_id),
+            })),
+            .hexstring => |hs| try argv.append(try std.fmt.allocPrint(arena, "--build-id=0x{s}", .{
+                std.fmt.fmtSliceHexLower(hs.toSlice()),
+            })),
         }
 
         try argv.append(try std.fmt.allocPrint(arena, "--image-base={d}", .{self.image_base}));
@@ -1984,16 +1989,6 @@ fn linkWithLLD(self: *Elf, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: s
             try argv.append(try p.toString(arena));
         }
 
-        // libc
-        if (is_exe_or_dyn_lib and
-            !comp.skip_linker_dependencies and
-            !comp.config.link_libc)
-        {
-            if (comp.libc_static_lib) |lib| {
-                try argv.append(try lib.full_object_path.toString(arena));
-            }
-        }
-
         // Shared libraries.
         if (is_exe_or_dyn_lib) {
             // Worst-case, we need an --as-needed argument for every lib, as well
@@ -2063,13 +2058,31 @@ fn linkWithLLD(self: *Elf, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: s
                         try argv.append(lib_path);
                     }
                     try argv.append(try comp.crtFileAsString(arena, "libc_nonshared.a"));
-                } else if (target.abi.isMusl()) {
+                } else if (target.isMuslLibC()) {
                     try argv.append(try comp.crtFileAsString(arena, switch (link_mode) {
                         .static => "libc.a",
                         .dynamic => "libc.so",
                     }));
+                } else if (target.isFreeBSDLibC()) {
+                    for (freebsd.libs) |lib| {
+                        const lib_path = try std.fmt.allocPrint(arena, "{}{c}lib{s}.so.{d}", .{
+                            comp.freebsd_so_files.?.dir_path, fs.path.sep, lib.name, lib.sover,
+                        });
+                        try argv.append(lib_path);
+                    }
+                } else if (target.isNetBSDLibC()) {
+                    for (netbsd.libs) |lib| {
+                        const lib_path = try std.fmt.allocPrint(arena, "{}{c}lib{s}.so.{d}", .{
+                            comp.netbsd_so_files.?.dir_path, fs.path.sep, lib.name, lib.sover,
+                        });
+                        try argv.append(lib_path);
+                    }
                 } else {
                     diags.flags.missing_libc = true;
+                }
+
+                if (comp.zigc_static_lib) |zigc| {
+                    try argv.append(try zigc.full_object_path.toString(arena));
                 }
             }
         }
@@ -4186,7 +4199,6 @@ fn getLDMOption(target: std.Target) ?[]const u8 {
         .s390x => "elf64_s390",
         .sparc64 => "elf64_sparc",
         .x86 => switch (target.os.tag) {
-            .elfiamcu => "elf_iamcu",
             .freebsd => "elf_i386_fbsd",
             else => "elf_i386",
         },
@@ -5281,9 +5293,11 @@ const codegen = @import("../codegen.zig");
 const dev = @import("../dev.zig");
 const eh_frame = @import("Elf/eh_frame.zig");
 const gc = @import("Elf/gc.zig");
-const glibc = @import("../glibc.zig");
+const glibc = @import("../libs/glibc.zig");
+const musl = @import("../libs/musl.zig");
+const freebsd = @import("../libs/freebsd.zig");
+const netbsd = @import("../libs/netbsd.zig");
 const link = @import("../link.zig");
-const musl = @import("../musl.zig");
 const relocatable = @import("Elf/relocatable.zig");
 const relocation = @import("Elf/relocation.zig");
 const target_util = @import("../target.zig");

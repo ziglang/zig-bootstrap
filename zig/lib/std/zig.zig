@@ -232,9 +232,14 @@ pub fn binNameAlloc(allocator: Allocator, options: BinNameOptions) error{OutOfMe
                 t.libPrefix(), root_name,
             }),
         },
-        .nvptx => return std.fmt.allocPrint(allocator, "{s}.ptx", .{root_name}),
     }
 }
+
+pub const SanitizeC = enum {
+    off,
+    trap,
+    full,
+};
 
 pub const BuildId = union(enum) {
     none,
@@ -543,7 +548,7 @@ pub fn readSourceFileToEndAlloc(gpa: Allocator, input: std.fs.File, size_hint: ?
         gpa,
         max_src_size,
         size_hint,
-        @alignOf(u8),
+        .of(u8),
         0,
     ) catch |err| switch (err) {
         error.ConnectionResetByPeer => unreachable,

@@ -44,7 +44,7 @@ const dev = @import("../dev.zig");
 const link = @import("../link.zig");
 const lldMain = @import("../main.zig").lldMain;
 const trace = @import("../tracy.zig").trace;
-const wasi_libc = @import("../wasi_libc.zig");
+const wasi_libc = @import("../libs/wasi_libc.zig");
 const Value = @import("../Value.zig");
 
 base: link.File,
@@ -4078,6 +4078,17 @@ fn linkWithLLD(wasm: *Wasm, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: 
             try std.fmt.allocPrint(arena, "stack-size={d}", .{wasm.base.stack_size}),
         });
 
+        switch (wasm.base.build_id) {
+            .none => try argv.append("--build-id=none"),
+            .fast, .uuid, .sha1 => try argv.append(try std.fmt.allocPrint(arena, "--build-id={s}", .{
+                @tagName(wasm.base.build_id),
+            })),
+            .hexstring => |hs| try argv.append(try std.fmt.allocPrint(arena, "--build-id=0x{s}", .{
+                std.fmt.fmtSliceHexLower(hs.toSlice()),
+            })),
+            .md5 => {},
+        }
+
         if (wasm.import_symbols) {
             try argv.append("--allow-undefined");
         }
@@ -4089,21 +4100,17 @@ fn linkWithLLD(wasm: *Wasm, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: 
             try argv.append("--pie");
         }
 
-        // XXX - TODO: add when wasm-ld supports --build-id.
-        // if (wasm.base.build_id) {
-        //     try argv.append("--build-id=tree");
-        // }
-
         try argv.appendSlice(&.{ "-o", full_out_path });
 
         if (target.cpu.arch == .wasm64) {
             try argv.append("-mwasm64");
         }
 
-        if (target.os.tag == .wasi) {
-            const is_exe_or_dyn_lib = comp.config.output_mode == .Exe or
-                (comp.config.output_mode == .Lib and comp.config.link_mode == .dynamic);
-            if (is_exe_or_dyn_lib) {
+        const is_exe_or_dyn_lib = comp.config.output_mode == .Exe or
+            (comp.config.output_mode == .Lib and comp.config.link_mode == .dynamic);
+
+        if (comp.config.link_libc and is_exe_or_dyn_lib) {
+            if (target.os.tag == .wasi) {
                 for (comp.wasi_emulated_libs) |crt_file| {
                     try argv.append(try comp.crtFileAsString(
                         arena,
@@ -4111,18 +4118,20 @@ fn linkWithLLD(wasm: *Wasm, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: 
                     ));
                 }
 
-                if (comp.config.link_libc) {
-                    try argv.append(try comp.crtFileAsString(
-                        arena,
-                        wasi_libc.execModelCrtFileFullName(comp.config.wasi_exec_model),
-                    ));
-                    try argv.append(try comp.crtFileAsString(arena, "libc.a"));
-                }
+                try argv.append(try comp.crtFileAsString(
+                    arena,
+                    wasi_libc.execModelCrtFileFullName(comp.config.wasi_exec_model),
+                ));
+                try argv.append(try comp.crtFileAsString(arena, "libc.a"));
+            }
 
-                if (comp.config.link_libcpp) {
-                    try argv.append(try comp.libcxx_static_lib.?.full_object_path.toString(arena));
-                    try argv.append(try comp.libcxxabi_static_lib.?.full_object_path.toString(arena));
-                }
+            if (comp.zigc_static_lib) |zigc| {
+                try argv.append(try zigc.full_object_path.toString(arena));
+            }
+
+            if (comp.config.link_libcpp) {
+                try argv.append(try comp.libcxx_static_lib.?.full_object_path.toString(arena));
+                try argv.append(try comp.libcxxabi_static_lib.?.full_object_path.toString(arena));
             }
         }
 
@@ -4155,10 +4164,6 @@ fn linkWithLLD(wasm: *Wasm, arena: Allocator, tid: Zcu.PerThread.Id, prog_node: 
         }
         if (module_obj_path) |p| {
             try argv.append(p);
-        }
-
-        if (comp.libc_static_lib) |crt_file| {
-            try argv.append(try crt_file.full_object_path.toString(arena));
         }
 
         if (compiler_rt_path) |p| {
@@ -4622,10 +4627,13 @@ fn convertZcuFnType(
         try params_buffer.append(gpa, .i32); // memory address is always a 32-bit handle
     } else if (return_type.hasRuntimeBitsIgnoreComptime(zcu)) {
         if (cc == .wasm_mvp) {
-            const res_classes = abi.classifyType(return_type, zcu);
-            assert(res_classes[0] == .direct and res_classes[1] == .none);
-            const scalar_type = abi.scalarType(return_type, zcu);
-            try returns_buffer.append(gpa, CodeGen.typeToValtype(scalar_type, zcu, target));
+            switch (abi.classifyType(return_type, zcu)) {
+                .direct => |scalar_ty| {
+                    assert(!abi.lowerAsDoubleI64(scalar_ty, zcu));
+                    try returns_buffer.append(gpa, CodeGen.typeToValtype(scalar_ty, zcu, target));
+                },
+                .indirect => unreachable,
+            }
         } else {
             try returns_buffer.append(gpa, CodeGen.typeToValtype(return_type, zcu, target));
         }
@@ -4640,18 +4648,16 @@ fn convertZcuFnType(
 
         switch (cc) {
             .wasm_mvp => {
-                const param_classes = abi.classifyType(param_type, zcu);
-                if (param_classes[1] == .none) {
-                    if (param_classes[0] == .direct) {
-                        const scalar_type = abi.scalarType(param_type, zcu);
-                        try params_buffer.append(gpa, CodeGen.typeToValtype(scalar_type, zcu, target));
-                    } else {
-                        try params_buffer.append(gpa, CodeGen.typeToValtype(param_type, zcu, target));
-                    }
-                } else {
-                    // i128/f128
-                    try params_buffer.append(gpa, .i64);
-                    try params_buffer.append(gpa, .i64);
+                switch (abi.classifyType(param_type, zcu)) {
+                    .direct => |scalar_ty| {
+                        if (!abi.lowerAsDoubleI64(scalar_ty, zcu)) {
+                            try params_buffer.append(gpa, CodeGen.typeToValtype(scalar_ty, zcu, target));
+                        } else {
+                            try params_buffer.append(gpa, .i64);
+                            try params_buffer.append(gpa, .i64);
+                        }
+                    },
+                    .indirect => try params_buffer.append(gpa, CodeGen.typeToValtype(param_type, zcu, target)),
                 }
             },
             else => try params_buffer.append(gpa, CodeGen.typeToValtype(param_type, zcu, target)),

@@ -86,6 +86,7 @@ pub const MREMAP = system.MREMAP;
 pub const MSF = system.MSF;
 pub const MSG = system.MSG;
 pub const NAME_MAX = system.NAME_MAX;
+pub const NSIG = system.NSIG;
 pub const O = system.O;
 pub const PATH_MAX = system.PATH_MAX;
 pub const POLL = system.POLL;
@@ -126,10 +127,8 @@ pub const timerfd_clockid_t = system.timerfd_clockid_t;
 pub const cpu_set_t = system.cpu_set_t;
 pub const dev_t = system.dev_t;
 pub const dl_phdr_info = system.dl_phdr_info;
-pub const empty_sigset = system.empty_sigset;
 pub const fd_t = system.fd_t;
 pub const file_obj = system.file_obj;
-pub const filled_sigset = system.filled_sigset;
 pub const gid_t = system.gid_t;
 pub const ifreq = system.ifreq;
 pub const ino_t = system.ino_t;
@@ -152,6 +151,8 @@ pub const rusage = system.rusage;
 pub const sa_family_t = system.sa_family_t;
 pub const siginfo_t = system.siginfo_t;
 pub const sigset_t = system.sigset_t;
+pub const sigrtmin = system.sigrtmin;
+pub const sigrtmax = system.sigrtmax;
 pub const sockaddr = system.sockaddr;
 pub const socklen_t = system.socklen_t;
 pub const stack_t = system.stack_t;
@@ -678,7 +679,8 @@ pub fn abort() noreturn {
         raise(SIG.ABRT) catch {};
 
         // Disable all signal handlers.
-        sigprocmask(SIG.BLOCK, &linux.all_mask, null);
+        const filledset = linux.sigfillset();
+        sigprocmask(SIG.BLOCK, &filledset, null);
 
         // Only one thread may proceed to the rest of abort().
         if (!builtin.single_threaded) {
@@ -691,14 +693,15 @@ pub fn abort() noreturn {
         // Install default handler so that the tkill below will terminate.
         const sigact = Sigaction{
             .handler = .{ .handler = SIG.DFL },
-            .mask = empty_sigset,
+            .mask = sigemptyset(),
             .flags = 0,
         };
         sigaction(SIG.ABRT, &sigact, null);
 
         _ = linux.tkill(linux.gettid(), SIG.ABRT);
 
-        const sigabrtmask: linux.sigset_t = [_]u32{0} ** 31 ++ [_]u32{1 << (SIG.ABRT - 1)};
+        var sigabrtmask = sigemptyset();
+        sigaddset(&sigabrtmask, SIG.ABRT);
         sigprocmask(SIG.UNBLOCK, &sigabrtmask, null);
 
         // Beyond this point should be unreachable.
@@ -723,18 +726,13 @@ pub fn raise(sig: u8) RaiseError!void {
     }
 
     if (native_os == .linux) {
-        // https://git.musl-libc.org/cgit/musl/commit/?id=0bed7e0acfd34e3fb63ca0e4d99b7592571355a9
-        //
-        // Unlike musl, libc-less Zig std does not have any internal signals for implementation purposes, so we
-        // need to block all signals on the assumption that any of them could potentially fork() in a handler.
-        var set: sigset_t = undefined;
-        sigprocmask(SIG.BLOCK, &linux.all_mask, &set);
-
-        const tid = linux.gettid();
-        const rc = linux.tkill(tid, sig);
-
-        // restore signal mask
-        sigprocmask(SIG.SETMASK, &set, null);
+        // Block all signals so a `fork` (from a signal handler) between the gettid() and kill() syscalls
+        // cannot trigger an extra, unexpected, inter-process signal.  Signal paranoia inherited from Musl.
+        const filled = linux.sigfillset();
+        var orig: sigset_t = undefined;
+        sigprocmask(SIG.BLOCK, &filled, &orig);
+        const rc = linux.tkill(linux.gettid(), sig);
+        sigprocmask(SIG.SETMASK, &orig, null);
 
         switch (errno(rc)) {
             .SUCCESS => return,
@@ -869,7 +867,7 @@ pub fn read(fd: fd_t, buf: []u8) ReadError!usize {
             .INTR => continue,
             .INVAL => unreachable,
             .FAULT => unreachable,
-            .NOENT => return error.ProcessNotFound,
+            .SRCH => return error.ProcessNotFound,
             .AGAIN => return error.WouldBlock,
             .CANCELED => return error.Canceled,
             .BADF => return error.NotOpenForReading, // Can be a race condition.
@@ -933,7 +931,7 @@ pub fn readv(fd: fd_t, iov: []const iovec) ReadError!usize {
             .INTR => continue,
             .INVAL => unreachable,
             .FAULT => unreachable,
-            .NOENT => return error.ProcessNotFound,
+            .SRCH => return error.ProcessNotFound,
             .AGAIN => return error.WouldBlock,
             .BADF => return error.NotOpenForReading, // can be a race condition
             .IO => return error.InputOutput,
@@ -1013,7 +1011,7 @@ pub fn pread(fd: fd_t, buf: []u8, offset: u64) PReadError!usize {
             .INTR => continue,
             .INVAL => unreachable,
             .FAULT => unreachable,
-            .NOENT => return error.ProcessNotFound,
+            .SRCH => return error.ProcessNotFound,
             .AGAIN => return error.WouldBlock,
             .BADF => return error.NotOpenForReading, // Can be a race condition.
             .IO => return error.InputOutput,
@@ -1155,7 +1153,7 @@ pub fn preadv(fd: fd_t, iov: []const iovec, offset: u64) PReadError!usize {
             .INTR => continue,
             .INVAL => unreachable,
             .FAULT => unreachable,
-            .NOENT => return error.ProcessNotFound,
+            .SRCH => return error.ProcessNotFound,
             .AGAIN => return error.WouldBlock,
             .BADF => return error.NotOpenForReading, // can be a race condition
             .IO => return error.InputOutput,
@@ -1277,7 +1275,7 @@ pub fn write(fd: fd_t, bytes: []const u8) WriteError!usize {
             .INTR => continue,
             .INVAL => return error.InvalidArgument,
             .FAULT => unreachable,
-            .NOENT => return error.ProcessNotFound,
+            .SRCH => return error.ProcessNotFound,
             .AGAIN => return error.WouldBlock,
             .BADF => return error.NotOpenForWriting, // can be a race condition.
             .DESTADDRREQ => unreachable, // `connect` was never called.
@@ -1353,7 +1351,7 @@ pub fn writev(fd: fd_t, iov: []const iovec_const) WriteError!usize {
             .INTR => continue,
             .INVAL => return error.InvalidArgument,
             .FAULT => unreachable,
-            .NOENT => return error.ProcessNotFound,
+            .SRCH => return error.ProcessNotFound,
             .AGAIN => return error.WouldBlock,
             .BADF => return error.NotOpenForWriting, // Can be a race condition.
             .DESTADDRREQ => unreachable, // `connect` was never called.
@@ -1443,7 +1441,7 @@ pub fn pwrite(fd: fd_t, bytes: []const u8, offset: u64) PWriteError!usize {
             .INTR => continue,
             .INVAL => return error.InvalidArgument,
             .FAULT => unreachable,
-            .NOENT => return error.ProcessNotFound,
+            .SRCH => return error.ProcessNotFound,
             .AGAIN => return error.WouldBlock,
             .BADF => return error.NotOpenForWriting, // Can be a race condition.
             .DESTADDRREQ => unreachable, // `connect` was never called.
@@ -1528,7 +1526,7 @@ pub fn pwritev(fd: fd_t, iov: []const iovec_const, offset: u64) PWriteError!usiz
             .INTR => continue,
             .INVAL => return error.InvalidArgument,
             .FAULT => unreachable,
-            .NOENT => return error.ProcessNotFound,
+            .SRCH => return error.ProcessNotFound,
             .AGAIN => return error.WouldBlock,
             .BADF => return error.NotOpenForWriting, // Can be a race condition.
             .DESTADDRREQ => unreachable, // `connect` was never called.
@@ -1607,6 +1605,9 @@ pub const OpenError = error{
     /// On Windows, `\\server` or `\\server\share` was not found.
     NetworkNotFound,
 
+    /// This error occurs in Linux if the process to be open was not found.
+    ProcessNotFound,
+
     /// One of these three things:
     /// * pathname  refers to an executable image which is currently being
     ///   executed and write access was requested.
@@ -1666,6 +1667,7 @@ pub fn openZ(file_path: [*:0]const u8, flags: O, perm: mode_t) OpenError!fd_t {
             .NFILE => return error.SystemFdQuotaExceeded,
             .NODEV => return error.NoDevice,
             .NOENT => return error.FileNotFound,
+            .SRCH => return error.ProcessNotFound,
             .NOMEM => return error.SystemResources,
             .NOSPC => return error.NoSpaceLeft,
             .NOTDIR => return error.NotDir,
@@ -1837,6 +1839,7 @@ pub fn openatZ(dir_fd: fd_t, file_path: [*:0]const u8, flags: O, mode: mode_t) O
             .NFILE => return error.SystemFdQuotaExceeded,
             .NODEV => return error.NoDevice,
             .NOENT => return error.FileNotFound,
+            .SRCH => return error.ProcessNotFound,
             .NOMEM => return error.SystemResources,
             .NOSPC => return error.NoSpaceLeft,
             .NOTDIR => return error.NotDir,
@@ -2007,14 +2010,18 @@ pub fn getenv(key: []const u8) ?[:0]const u8 {
     if (native_os == .windows) {
         @compileError("std.posix.getenv is unavailable for Windows because environment strings are in WTF-16 format. See std.process.getEnvVarOwned for a cross-platform API or std.process.getenvW for a Windows-specific API.");
     }
+    if (mem.indexOfScalar(u8, key, '=') != null) {
+        return null;
+    }
     if (builtin.link_libc) {
         var ptr = std.c.environ;
         while (ptr[0]) |line| : (ptr += 1) {
             var line_i: usize = 0;
-            while (line[line_i] != 0 and line[line_i] != '=') : (line_i += 1) {}
-            const this_key = line[0..line_i];
-
-            if (!mem.eql(u8, this_key, key)) continue;
+            while (line[line_i] != 0) : (line_i += 1) {
+                if (line_i == key.len) break;
+                if (line[line_i] != key[line_i]) break;
+            }
+            if ((line_i != key.len) or (line[line_i] != '=')) continue;
 
             return mem.sliceTo(line + line_i + 1, 0);
         }
@@ -2028,9 +2035,11 @@ pub fn getenv(key: []const u8) ?[:0]const u8 {
     // TODO see https://github.com/ziglang/zig/issues/4524
     for (std.os.environ) |ptr| {
         var line_i: usize = 0;
-        while (ptr[line_i] != 0 and ptr[line_i] != '=') : (line_i += 1) {}
-        const this_key = ptr[0..line_i];
-        if (!mem.eql(u8, key, this_key)) continue;
+        while (ptr[line_i] != 0) : (line_i += 1) {
+            if (line_i == key.len) break;
+            if (ptr[line_i] != key[line_i]) break;
+        }
+        if ((line_i != key.len) or (ptr[line_i] != '=')) continue;
 
         return mem.sliceTo(ptr + line_i + 1, 0);
     }
@@ -5477,6 +5486,7 @@ pub const RealPathError = error{
     FileSystem,
     BadPathName,
     DeviceBusy,
+    ProcessNotFound,
 
     SharingViolation,
     PipeBusy,
@@ -5806,8 +5816,63 @@ pub fn sigaltstack(ss: ?*stack_t, old_ss: ?*stack_t) SigaltstackError!void {
     }
 }
 
+/// Return a filled sigset_t.
+pub fn sigfillset() sigset_t {
+    if (builtin.link_libc) {
+        var set: sigset_t = undefined;
+        switch (errno(system.sigfillset(&set))) {
+            .SUCCESS => return set,
+            else => unreachable,
+        }
+    }
+    return system.sigfillset();
+}
+
+/// Return an empty sigset_t.
+pub fn sigemptyset() sigset_t {
+    if (builtin.link_libc) {
+        var set: sigset_t = undefined;
+        switch (errno(system.sigemptyset(&set))) {
+            .SUCCESS => return set,
+            else => unreachable,
+        }
+    }
+    return system.sigemptyset();
+}
+
+pub fn sigaddset(set: *sigset_t, sig: u8) void {
+    if (builtin.link_libc) {
+        switch (errno(system.sigaddset(set, sig))) {
+            .SUCCESS => return,
+            else => unreachable,
+        }
+    }
+    system.sigaddset(set, sig);
+}
+
+pub fn sigdelset(set: *sigset_t, sig: u8) void {
+    if (builtin.link_libc) {
+        switch (errno(system.sigdelset(set, sig))) {
+            .SUCCESS => return,
+            else => unreachable,
+        }
+    }
+    system.sigdelset(set, sig);
+}
+
+pub fn sigismember(set: *const sigset_t, sig: u8) bool {
+    if (builtin.link_libc) {
+        const rc = system.sigismember(set, sig);
+        switch (errno(rc)) {
+            .SUCCESS => return rc == 1,
+            else => unreachable,
+        }
+    }
+    return system.sigismember(set, sig);
+}
+
 /// Examine and change a signal action.
-pub fn sigaction(sig: u6, noalias act: ?*const Sigaction, noalias oact: ?*Sigaction) void {
+pub fn sigaction(sig: u8, noalias act: ?*const Sigaction, noalias oact: ?*Sigaction) void {
     switch (errno(system.sigaction(sig, act, oact))) {
         .SUCCESS => return,
         // EINVAL means the signal is either invalid or some signal that cannot have its action
