@@ -677,6 +677,7 @@ const usage_build_generic =
     \\  --debug-compile-errors       Crash with helpful diagnostics at the first compile error
     \\  --debug-link-snapshot        Enable dumping of the linker's state in JSON format
     \\  --debug-rt                   Debug compiler runtime libraries
+    \\  --debug-incremental          Enable incremental compilation debug features
     \\
 ;
 
@@ -832,6 +833,7 @@ fn buildOutputType(
     var data_sections = false;
     var listen: Listen = .none;
     var debug_compile_errors = false;
+    var debug_incremental = false;
     var verbose_link = (native_os != .wasi or builtin.link_libc) and
         EnvVar.ZIG_VERBOSE_LINK.isSet();
     var verbose_cc = (native_os != .wasi or builtin.link_libc) and
@@ -1383,6 +1385,12 @@ fn buildOutputType(
                         }
                     } else if (mem.eql(u8, arg, "--debug-rt")) {
                         debug_compiler_runtime_libs = true;
+                    } else if (mem.eql(u8, arg, "--debug-incremental")) {
+                        if (build_options.enable_debug_extensions) {
+                            debug_incremental = true;
+                        } else {
+                            warn("Zig was compiled without debug extensions. --debug-incremental has no effect.", .{});
+                        }
                     } else if (mem.eql(u8, arg, "-fincremental")) {
                         dev.check(.incremental);
                         opt_incremental = true;
@@ -3460,6 +3468,9 @@ fn buildOutputType(
     };
 
     const incremental = opt_incremental orelse false;
+    if (debug_incremental and !incremental) {
+        fatal("--debug-incremental requires -fincremental", .{});
+    }
 
     const disable_lld_caching = !output_to_cache;
 
@@ -3592,6 +3603,7 @@ fn buildOutputType(
         .cache_mode = cache_mode,
         .subsystem = subsystem,
         .debug_compile_errors = debug_compile_errors,
+        .debug_incremental = debug_incremental,
         .incremental = incremental,
         .enable_link_snapshots = enable_link_snapshots,
         .install_name = install_name,
@@ -3910,6 +3922,7 @@ fn createModule(
             .result = target,
             .is_native_os = target_query.isNativeOs(),
             .is_native_abi = target_query.isNativeAbi(),
+            .is_explicit_dynamic_linker = !target_query.dynamic_linker.eql(.none),
         };
     };
 
@@ -4194,8 +4207,24 @@ fn serve(
     const main_progress_node = std.Progress.start(.{});
     const file_system_inputs = comp.file_system_inputs.?;
 
+    const IncrementalDebugServer = if (build_options.enable_debug_extensions)
+        @import("IncrementalDebugServer.zig")
+    else
+        void;
+
+    var ids: IncrementalDebugServer = if (comp.debugIncremental()) ids: {
+        break :ids .init(comp.zcu orelse @panic("--debug-incremental requires a ZCU"));
+    } else undefined;
+    defer if (comp.debugIncremental()) ids.deinit();
+
+    if (comp.debugIncremental()) ids.spawn();
+
     while (true) {
         const hdr = try server.receiveMessage();
+
+        // Lock the debug server while hanling the message.
+        if (comp.debugIncremental()) ids.mutex.lock();
+        defer if (comp.debugIncremental()) ids.mutex.unlock();
 
         switch (hdr.tag) {
             .exit => return cleanExit(),
@@ -4720,6 +4749,7 @@ const usage_init =
     \\   directory.
     \\
     \\Options:
+    \\  -s, --strip            Generate files without comments
     \\  -h, --help             Print this help and exit
     \\
     \\
@@ -4728,12 +4758,15 @@ const usage_init =
 fn cmdInit(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
     dev.check(.init_command);
 
+    var strip = false;
     {
         var i: usize = 0;
         while (i < args.len) : (i += 1) {
             const arg = args[i];
             if (mem.startsWith(u8, arg, "-")) {
-                if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
+                if (mem.eql(u8, arg, "-s") or mem.eql(u8, arg, "--strip")) {
+                    strip = true;
+                } else if (mem.eql(u8, arg, "-h") or mem.eql(u8, arg, "--help")) {
                     try io.getStdOut().writeAll(usage_init);
                     return cleanExit();
                 } else {
@@ -4745,7 +4778,7 @@ fn cmdInit(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
         }
     }
 
-    var templates = findTemplates(gpa, arena);
+    var templates = findTemplates(gpa, arena, strip);
     defer templates.deinit();
 
     const cwd_path = try introspect.getResolvedCwd(arena);
@@ -5041,6 +5074,7 @@ fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
                     .result = std.zig.resolveTargetQueryOrFatal(target_query),
                     .is_native_os = false,
                     .is_native_abi = false,
+                    .is_explicit_dynamic_linker = false,
                 };
             }
         }
@@ -5048,6 +5082,7 @@ fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
             .result = std.zig.resolveTargetQueryOrFatal(.{}),
             .is_native_os = true,
             .is_native_abi = true,
+            .is_explicit_dynamic_linker = false,
         };
     };
 
@@ -5465,6 +5500,7 @@ fn jitCmd(
         .result = std.zig.resolveTargetQueryOrFatal(target_query),
         .is_native_os = true,
         .is_native_abi = true,
+        .is_explicit_dynamic_linker = false,
     };
 
     const exe_basename = try std.zig.binNameAlloc(arena, .{
@@ -7300,7 +7336,7 @@ fn loadManifest(
         ) catch |err| switch (err) {
             error.FileNotFound => {
                 const fingerprint: Package.Fingerprint = .generate(options.root_name);
-                var templates = findTemplates(gpa, arena);
+                var templates = findTemplates(gpa, arena, true);
                 defer templates.deinit();
                 templates.write(arena, options.dir, options.root_name, Package.Manifest.basename, fingerprint) catch |e| {
                     fatal("unable to write {s}: {s}", .{
@@ -7346,6 +7382,7 @@ const Templates = struct {
     zig_lib_directory: Cache.Directory,
     dir: fs.Dir,
     buffer: std.ArrayList(u8),
+    strip: bool,
 
     fn deinit(templates: *Templates) void {
         templates.zig_lib_directory.handle.close();
@@ -7374,9 +7411,28 @@ const Templates = struct {
         };
         templates.buffer.clearRetainingCapacity();
         try templates.buffer.ensureUnusedCapacity(contents.len);
+        var new_line = templates.strip;
         var i: usize = 0;
         while (i < contents.len) {
-            if (contents[i] == '.') {
+            if (new_line) {
+                const trimmed = std.mem.trimLeft(u8, contents[i..], " ");
+                if (std.mem.startsWith(u8, trimmed, "//")) {
+                    i += std.mem.indexOfScalar(u8, contents[i..], '\n') orelse break;
+                    i += 1;
+                    continue;
+                } else {
+                    new_line = false;
+                }
+            }
+            if (templates.strip and contents[i] == '\n') {
+                new_line = true;
+            } else if (contents[i] == '_') {
+                if (std.mem.startsWith(u8, contents[i..], "_LITNAME")) {
+                    try templates.buffer.appendSlice(root_name);
+                    i += "_LITNAME".len;
+                    continue;
+                }
+            } else if (contents[i] == '.') {
                 if (std.mem.startsWith(u8, contents[i..], ".LITNAME")) {
                     try templates.buffer.append('.');
                     try templates.buffer.appendSlice(root_name);
@@ -7408,7 +7464,7 @@ const Templates = struct {
     }
 };
 
-fn findTemplates(gpa: Allocator, arena: Allocator) Templates {
+fn findTemplates(gpa: Allocator, arena: Allocator, strip: bool) Templates {
     const cwd_path = introspect.getResolvedCwd(arena) catch |err| {
         fatal("unable to get cwd: {s}", .{@errorName(err)});
     };
@@ -7432,6 +7488,7 @@ fn findTemplates(gpa: Allocator, arena: Allocator) Templates {
         .zig_lib_directory = zig_lib_directory,
         .dir = template_dir,
         .buffer = std.ArrayList(u8).init(gpa),
+        .strip = strip,
     };
 }
 

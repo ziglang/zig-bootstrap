@@ -88,6 +88,7 @@ pub const ResolvedTarget = struct {
     result: std.Target,
     is_native_os: bool,
     is_native_abi: bool,
+    is_explicit_dynamic_linker: bool,
     llvm_cpu_features: ?[*:0]const u8 = null,
 };
 
@@ -365,6 +366,7 @@ pub fn create(arena: Allocator, options: CreateOptions) !*Package.Module {
             .result = target,
             .is_native_os = resolved_target.is_native_os,
             .is_native_abi = resolved_target.is_native_abi,
+            .is_explicit_dynamic_linker = resolved_target.is_explicit_dynamic_linker,
             .llvm_cpu_features = llvm_cpu_features,
         },
         .optimize_mode = optimize_mode,
@@ -430,7 +432,7 @@ pub fn createLimited(gpa: Allocator, options: LimitedOptions) Allocator.Error!*P
 
 /// Does not ensure that the module's root directory exists on-disk; see `Builtin.updateFileOnDisk` for that task.
 pub fn createBuiltin(arena: Allocator, opts: Builtin, dirs: Compilation.Directories) Allocator.Error!*Module {
-    const sub_path = "b" ++ Cache.binToHex(opts.hash());
+    const sub_path = "b" ++ std.fs.path.sep_str ++ Cache.binToHex(opts.hash());
     const new = try arena.create(Module);
     new.* = .{
         .root = try .fromRoot(arena, dirs, .global_cache, sub_path),
@@ -441,6 +443,7 @@ pub fn createBuiltin(arena: Allocator, opts: Builtin, dirs: Compilation.Director
             // These values are not in `opts`, but do not matter because `builtin.zig` contains no runtime code.
             .is_native_os = false,
             .is_native_abi = false,
+            .is_explicit_dynamic_linker = false,
             .llvm_cpu_features = null,
         },
         .optimize_mode = opts.optimize_mode,
