@@ -1113,8 +1113,6 @@ const test_targets = blk: {
                 .os_tag = .linux,
                 .abi = .none,
             },
-            .use_llvm = false,
-            .use_lld = false,
         },
         .{
             .target = .{
@@ -1123,8 +1121,6 @@ const test_targets = blk: {
                 .os_tag = .linux,
                 .abi = .none,
             },
-            .use_llvm = false,
-            .use_lld = false,
             .pic = true,
         },
         .{
@@ -1134,8 +1130,6 @@ const test_targets = blk: {
                 .os_tag = .linux,
                 .abi = .none,
             },
-            .use_llvm = false,
-            .use_lld = false,
             .strip = true,
         },
         .{
@@ -1144,6 +1138,8 @@ const test_targets = blk: {
                 .os_tag = .linux,
                 .abi = .none,
             },
+            .use_llvm = true,
+            .use_lld = true,
         },
         .{
             .target = .{
@@ -1597,137 +1593,320 @@ const CAbiTarget = struct {
     c_defines: []const []const u8 = &.{},
 };
 
-const c_abi_targets = [_]CAbiTarget{
-    // Native Targets
+const c_abi_targets = blk: {
+    @setEvalBranchQuota(20000);
+    break :blk [_]CAbiTarget{
+        // Native Targets
 
-    .{},
+        .{
+            .use_llvm = true,
+        },
 
-    // Linux Targets
+        // Linux Targets
 
-    .{
-        .target = .{
-            .cpu_arch = .aarch64,
-            .os_tag = .linux,
-            .abi = .musl,
+        .{
+            .target = .{
+                .cpu_arch = .aarch64,
+                .os_tag = .linux,
+                .abi = .musl,
+            },
         },
-    },
 
-    .{
-        .target = .{
-            .cpu_arch = .arm,
-            .os_tag = .linux,
-            .abi = .musleabihf,
+        .{
+            .target = .{
+                .cpu_arch = .aarch64_be,
+                .os_tag = .linux,
+                .abi = .musl,
+            },
         },
-    },
 
-    .{
-        .target = .{
-            .cpu_arch = .mips,
-            .os_tag = .linux,
-            .abi = .musleabihf,
+        .{
+            .target = .{
+                .cpu_arch = .arm,
+                .os_tag = .linux,
+                .abi = .musleabi,
+            },
         },
-    },
+        .{
+            .target = .{
+                .cpu_arch = .arm,
+                .os_tag = .linux,
+                .abi = .musleabihf,
+            },
+        },
 
-    .{
-        .target = .{
-            .cpu_arch = .powerpc,
-            .os_tag = .linux,
-            .abi = .musleabihf,
+        .{
+            .target = .{
+                .cpu_arch = .armeb,
+                .os_tag = .linux,
+                .abi = .musleabi,
+            },
         },
-    },
+        .{
+            .target = .{
+                .cpu_arch = .armeb,
+                .os_tag = .linux,
+                .abi = .musleabihf,
+            },
+        },
 
-    .{
-        .target = .{
-            .cpu_arch = .powerpc64le,
-            .os_tag = .linux,
-            .abi = .musl,
-        },
-    },
+        // Crashes in LLVM instruction selection.
+        // .{
+        //     .target = .{
+        //         .cpu_arch = .hexagon,
+        //         .os_tag = .linux,
+        //         .abi = .musl,
+        //     },
+        // },
 
-    .{
-        .target = .{
-            .cpu_arch = .riscv64,
-            .os_tag = .linux,
-            .abi = .musl,
+        .{
+            .target = .{
+                .cpu_arch = .loongarch64,
+                .os_tag = .linux,
+                .abi = .musl,
+            },
         },
-    },
 
-    .{
-        .target = .{
-            .cpu_arch = .x86,
-            .os_tag = .linux,
-            .abi = .musl,
+        .{
+            .target = .{
+                .cpu_arch = .mips,
+                .os_tag = .linux,
+                .abi = .musleabi,
+            },
         },
-    },
+        .{
+            .target = .{
+                .cpu_arch = .mips,
+                .os_tag = .linux,
+                .abi = .musleabihf,
+            },
+        },
 
-    .{
-        .target = .{
-            .cpu_arch = .x86_64,
-            .os_tag = .linux,
-            .abi = .musl,
+        .{
+            .target = .{
+                .cpu_arch = .mipsel,
+                .os_tag = .linux,
+                .abi = .musleabi,
+            },
         },
-        .use_llvm = false,
-        .use_lld = false,
-        .c_defines = &.{"ZIG_BACKEND_STAGE2_X86_64"},
-    },
-    .{
-        .target = .{
-            .cpu_arch = .x86_64,
-            .cpu_model = .{ .explicit = &std.Target.x86.cpu.x86_64_v2 },
-            .os_tag = .linux,
-            .abi = .musl,
+        .{
+            .target = .{
+                .cpu_arch = .mipsel,
+                .os_tag = .linux,
+                .abi = .musleabihf,
+            },
         },
-        .use_llvm = false,
-        .use_lld = false,
-        .strip = true,
-        .c_defines = &.{"ZIG_BACKEND_STAGE2_X86_64"},
-    },
-    .{
-        .target = .{
-            .cpu_arch = .x86_64,
-            .cpu_model = .{ .explicit = &std.Target.x86.cpu.x86_64_v3 },
-            .os_tag = .linux,
-            .abi = .musl,
-        },
-        .use_llvm = false,
-        .use_lld = false,
-        .pic = true,
-        .c_defines = &.{"ZIG_BACKEND_STAGE2_X86_64"},
-    },
-    .{
-        .target = .{
-            .cpu_arch = .x86_64,
-            .os_tag = .linux,
-            .abi = .musl,
-        },
-    },
 
-    // WASI Targets
-
-    .{
-        .target = .{
-            .cpu_arch = .wasm32,
-            .os_tag = .wasi,
-            .abi = .musl,
+        .{
+            .target = .{
+                .cpu_arch = .mips64,
+                .os_tag = .linux,
+                .abi = .muslabi64,
+            },
         },
-    },
-
-    // Windows Targets
-
-    .{
-        .target = .{
-            .cpu_arch = .x86,
-            .os_tag = .windows,
-            .abi = .gnu,
+        .{
+            .target = .{
+                .cpu_arch = .mips64,
+                .os_tag = .linux,
+                .abi = .muslabin32,
+            },
         },
-    },
-    .{
-        .target = .{
-            .cpu_arch = .x86_64,
-            .os_tag = .windows,
-            .abi = .gnu,
+
+        .{
+            .target = .{
+                .cpu_arch = .mips64el,
+                .os_tag = .linux,
+                .abi = .muslabi64,
+            },
         },
-    },
+        .{
+            .target = .{
+                .cpu_arch = .mips64el,
+                .os_tag = .linux,
+                .abi = .muslabin32,
+            },
+        },
+
+        .{
+            .target = .{
+                .cpu_arch = .powerpc,
+                .os_tag = .linux,
+                .abi = .musleabi,
+            },
+        },
+        .{
+            .target = .{
+                .cpu_arch = .powerpc,
+                .os_tag = .linux,
+                .abi = .musleabihf,
+            },
+        },
+
+        .{
+            .target = .{
+                .cpu_arch = .powerpc64,
+                .os_tag = .linux,
+                .abi = .musl,
+            },
+        },
+        .{
+            .target = .{
+                .cpu_arch = .powerpc64le,
+                .os_tag = .linux,
+                .abi = .musl,
+            },
+        },
+
+        .{
+            .target = std.Target.Query.parse(.{
+                .arch_os_abi = "riscv32-linux-musl",
+                .cpu_features = "baseline-d-f",
+            }) catch unreachable,
+        },
+        .{
+            .target = .{
+                .cpu_arch = .riscv32,
+                .os_tag = .linux,
+                .abi = .musl,
+            },
+        },
+
+        .{
+            .target = std.Target.Query.parse(.{
+                .arch_os_abi = "riscv64-linux-musl",
+                .cpu_features = "baseline-d-f",
+            }) catch unreachable,
+        },
+        .{
+            .target = .{
+                .cpu_arch = .riscv64,
+                .os_tag = .linux,
+                .abi = .musl,
+            },
+        },
+
+        // Clang explodes when parsing `cfuncs.c`.
+        // .{
+        //     .target = .{
+        //         .cpu_arch = .s390x,
+        //         .os_tag = .linux,
+        //         .abi = .musl,
+        //     },
+        // },
+
+        .{
+            .target = std.Target.Query.parse(.{
+                .arch_os_abi = "thumb-linux-musleabi",
+                .cpu_features = "baseline+long_calls",
+            }) catch unreachable,
+            .pic = false, // Long calls don't work with PIC.
+        },
+        .{
+            .target = std.Target.Query.parse(.{
+                .arch_os_abi = "thumb-linux-musleabihf",
+                .cpu_features = "baseline+long_calls",
+            }) catch unreachable,
+            .pic = false, // Long calls don't work with PIC.
+        },
+
+        .{
+            .target = std.Target.Query.parse(.{
+                .arch_os_abi = "thumbeb-linux-musleabi",
+                .cpu_features = "baseline+long_calls",
+            }) catch unreachable,
+            .pic = false, // Long calls don't work with PIC.
+        },
+        .{
+            .target = std.Target.Query.parse(.{
+                .arch_os_abi = "thumbeb-linux-musleabihf",
+                .cpu_features = "baseline+long_calls",
+            }) catch unreachable,
+            .pic = false, // Long calls don't work with PIC.
+        },
+
+        .{
+            .target = .{
+                .cpu_arch = .x86,
+                .os_tag = .linux,
+                .abi = .musl,
+            },
+        },
+
+        .{
+            .target = .{
+                .cpu_arch = .x86_64,
+                .os_tag = .linux,
+                .abi = .musl,
+            },
+            .use_llvm = false,
+            .c_defines = &.{"ZIG_BACKEND_STAGE2_X86_64"},
+        },
+        .{
+            .target = .{
+                .cpu_arch = .x86_64,
+                .cpu_model = .{ .explicit = &std.Target.x86.cpu.x86_64_v2 },
+                .os_tag = .linux,
+                .abi = .musl,
+            },
+            .use_llvm = false,
+            .strip = true,
+            .c_defines = &.{"ZIG_BACKEND_STAGE2_X86_64"},
+        },
+        .{
+            .target = .{
+                .cpu_arch = .x86_64,
+                .cpu_model = .{ .explicit = &std.Target.x86.cpu.x86_64_v3 },
+                .os_tag = .linux,
+                .abi = .musl,
+            },
+            .use_llvm = false,
+            .pic = true,
+            .c_defines = &.{"ZIG_BACKEND_STAGE2_X86_64"},
+        },
+        .{
+            .target = .{
+                .cpu_arch = .x86_64,
+                .os_tag = .linux,
+                .abi = .musl,
+            },
+            .use_llvm = true,
+        },
+        .{
+            .target = .{
+                .cpu_arch = .x86_64,
+                .os_tag = .linux,
+                .abi = .muslx32,
+            },
+            .use_llvm = true,
+        },
+
+        // WASI Targets
+
+        .{
+            .target = .{
+                .cpu_arch = .wasm32,
+                .os_tag = .wasi,
+                .abi = .musl,
+            },
+        },
+
+        // Windows Targets
+
+        .{
+            .target = .{
+                .cpu_arch = .x86,
+                .os_tag = .windows,
+                .abi = .gnu,
+            },
+        },
+        .{
+            .target = .{
+                .cpu_arch = .x86_64,
+                .os_tag = .windows,
+                .abi = .gnu,
+            },
+        },
+    };
 };
 
 pub fn addCompareOutputTests(
@@ -2094,8 +2273,13 @@ const ModuleTestOptions = struct {
     include_paths: []const []const u8,
     skip_single_threaded: bool,
     skip_non_native: bool,
+    skip_freebsd: bool,
+    skip_netbsd: bool,
+    skip_windows: bool,
+    skip_macos: bool,
+    skip_linux: bool,
+    skip_llvm: bool,
     skip_libc: bool,
-    use_llvm: ?bool = null,
     max_rss: usize = 0,
     no_builtin: bool = false,
     build_options: ?*std.Build.Step.Options = null,
@@ -2116,6 +2300,15 @@ pub fn addModuleTests(b: *std.Build, options: ModuleTestOptions) *Step {
         if (options.skip_non_native and !test_target.target.isNative())
             continue;
 
+        if (options.skip_freebsd and test_target.target.os_tag == .freebsd) continue;
+        if (options.skip_netbsd and test_target.target.os_tag == .netbsd) continue;
+        if (options.skip_windows and test_target.target.os_tag == .windows) continue;
+        if (options.skip_macos and test_target.target.os_tag == .macos) continue;
+        if (options.skip_linux and test_target.target.os_tag == .linux) continue;
+
+        const would_use_llvm = wouldUseLlvm(test_target.use_llvm, test_target.target, test_target.optimize_mode);
+        if (options.skip_llvm and would_use_llvm) continue;
+
         const resolved_target = b.resolveTargetQuery(test_target.target);
         const target = resolved_target.result;
         const triple_txt = target.zigTriple(b.allocator) catch @panic("OOM");
@@ -2135,10 +2328,6 @@ pub fn addModuleTests(b: *std.Build, options: ModuleTestOptions) *Step {
 
         if (options.skip_single_threaded and test_target.single_threaded == true)
             continue;
-
-        if (options.use_llvm) |use_llvm| {
-            if (test_target.use_llvm != use_llvm) continue;
-        }
 
         // TODO get compiler-rt tests passing for self-hosted backends.
         if ((target.cpu.arch != .x86_64 or target.ofmt != .elf) and
@@ -2319,9 +2508,31 @@ pub fn addModuleTests(b: *std.Build, options: ModuleTestOptions) *Step {
     return step;
 }
 
+fn wouldUseLlvm(use_llvm: ?bool, query: std.Target.Query, optimize_mode: OptimizeMode) bool {
+    if (use_llvm) |x| return x;
+    if (query.ofmt == .c) return false;
+    switch (optimize_mode) {
+        .Debug => {},
+        else => return true,
+    }
+    const cpu_arch = query.cpu_arch orelse builtin.cpu.arch;
+    switch (cpu_arch) {
+        .x86_64 => if (std.Target.ptrBitWidth_arch_abi(cpu_arch, query.abi orelse .none) != 64) return true,
+        .spirv, .spirv32, .spirv64 => return false,
+        else => return true,
+    }
+    return false;
+}
+
 const CAbiTestOptions = struct {
     test_target_filters: []const []const u8,
     skip_non_native: bool,
+    skip_freebsd: bool,
+    skip_netbsd: bool,
+    skip_windows: bool,
+    skip_macos: bool,
+    skip_linux: bool,
+    skip_llvm: bool,
     skip_release: bool,
 };
 
@@ -2335,6 +2546,14 @@ pub fn addCAbiTests(b: *std.Build, options: CAbiTestOptions) *Step {
 
         for (c_abi_targets) |c_abi_target| {
             if (options.skip_non_native and !c_abi_target.target.isNative()) continue;
+            if (options.skip_freebsd and c_abi_target.target.os_tag == .freebsd) continue;
+            if (options.skip_netbsd and c_abi_target.target.os_tag == .netbsd) continue;
+            if (options.skip_windows and c_abi_target.target.os_tag == .windows) continue;
+            if (options.skip_macos and c_abi_target.target.os_tag == .macos) continue;
+            if (options.skip_linux and c_abi_target.target.os_tag == .linux) continue;
+
+            const would_use_llvm = wouldUseLlvm(c_abi_target.use_llvm, c_abi_target.target, .Debug);
+            if (options.skip_llvm and would_use_llvm) continue;
 
             const resolved_target = b.resolveTargetQuery(c_abi_target.target);
             const target = resolved_target.result;

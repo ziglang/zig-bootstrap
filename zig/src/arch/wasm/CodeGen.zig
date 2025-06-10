@@ -1616,8 +1616,8 @@ fn memcpy(cg: *CodeGen, dst: WValue, src: WValue, len: WValue) !void {
     };
     // When bulk_memory is enabled, we lower it to wasm's memcpy instruction.
     // If not, we lower it ourselves manually
-    if (std.Target.wasm.featureSetHas(cg.target.cpu.features, .bulk_memory)) {
-        const len0_ok = std.Target.wasm.featureSetHas(cg.target.cpu.features, .nontrapping_bulk_memory_len0);
+    if (cg.target.cpu.has(.wasm, .bulk_memory)) {
+        const len0_ok = cg.target.cpu.has(.wasm, .nontrapping_bulk_memory_len0);
         const emit_check = !(len0_ok or len_known_neq_0);
 
         if (emit_check) {
@@ -1839,9 +1839,7 @@ const SimdStoreStrategy = enum {
 pub fn determineSimdStoreStrategy(ty: Type, zcu: *const Zcu, target: *const std.Target) SimdStoreStrategy {
     assert(ty.zigTypeTag(zcu) == .vector);
     if (ty.bitSize(zcu) != 128) return .unrolled;
-    const hasFeature = std.Target.wasm.featureSetHas;
-    const features = target.cpu.features;
-    if (hasFeature(features, .relaxed_simd) or hasFeature(features, .simd128)) {
+    if (target.cpu.has(.wasm, .relaxed_simd) or target.cpu.has(.wasm, .simd128)) {
         return .direct;
     }
     return .unrolled;
@@ -2059,7 +2057,7 @@ fn genInst(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
         .error_set_has_value => cg.airErrorSetHasValue(inst),
         .frame_addr => cg.airFrameAddress(inst),
 
-        .tlv_dllimport_ptr => cg.airTlvDllimportPtr(inst),
+        .runtime_nav_ptr => cg.airRuntimeNavPtr(inst),
 
         .assembly,
         .is_err_ptr,
@@ -4838,8 +4836,8 @@ fn memset(cg: *CodeGen, elem_ty: Type, ptr: WValue, len: WValue, value: WValue) 
 
     // When bulk_memory is enabled, we lower it to wasm's memset instruction.
     // If not, we lower it ourselves.
-    if (std.Target.wasm.featureSetHas(cg.target.cpu.features, .bulk_memory) and abi_size == 1) {
-        const len0_ok = std.Target.wasm.featureSetHas(cg.target.cpu.features, .nontrapping_bulk_memory_len0);
+    if (cg.target.cpu.has(.wasm, .bulk_memory) and abi_size == 1) {
+        const len0_ok = cg.target.cpu.has(.wasm, .nontrapping_bulk_memory_len0);
 
         if (!len0_ok) {
             try cg.startBlock(.block, .empty);
@@ -7304,7 +7302,7 @@ fn airErrorSetHasValue(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
 }
 
 inline fn useAtomicFeature(cg: *const CodeGen) bool {
-    return std.Target.wasm.featureSetHas(cg.target.cpu.features, .atomics);
+    return cg.target.cpu.has(.wasm, .atomics);
 }
 
 fn airCmpxchg(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
@@ -7618,7 +7616,7 @@ fn airFrameAddress(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     return cg.finishAir(inst, .stack, &.{});
 }
 
-fn airTlvDllimportPtr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
+fn airRuntimeNavPtr(cg: *CodeGen, inst: Air.Inst.Index) InnerError!void {
     const ty_nav = cg.air.instructions.items(.data)[@intFromEnum(inst)].ty_nav;
     const mod = cg.pt.zcu.navFileScope(cg.owner_nav).mod.?;
     if (mod.single_threaded) {

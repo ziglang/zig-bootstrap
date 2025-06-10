@@ -11,7 +11,7 @@ to find and inspect the patch diffs.
  * LLVM, LLD, Clang 20.1.2
  * zlib 1.3.1
  * zstd 1.5.2
- * zig 0.15.0-dev.718+826e1c30b
+ * zig 0.15.0-dev.769+4d7980645
 
 For other versions, check the git tags of this repository.
 

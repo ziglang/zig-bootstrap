@@ -40,9 +40,9 @@ pub fn legalizeFeatures(_: *const std.Target) ?*const Air.Legalize.Features {
     return null;
 }
 
-fn subArchName(features: std.Target.Cpu.Feature.Set, arch: anytype, mappings: anytype) ?[]const u8 {
+fn subArchName(target: std.Target, comptime family: std.Target.Cpu.Arch.Family, mappings: anytype) ?[]const u8 {
     inline for (mappings) |mapping| {
-        if (arch.featureSetHas(features, mapping[0])) return mapping[1];
+        if (target.cpu.has(family, mapping[0])) return mapping[1];
     }
 
     return null;
@@ -51,8 +51,6 @@ fn subArchName(features: std.Target.Cpu.Feature.Set, arch: anytype, mappings: an
 pub fn targetTriple(allocator: Allocator, target: std.Target) ![]const u8 {
     var llvm_triple = std.ArrayList(u8).init(allocator);
     defer llvm_triple.deinit();
-
-    const features = target.cpu.features;
 
     const llvm_arch = switch (target.cpu.arch) {
         .arm => "arm",
@@ -69,10 +67,10 @@ pub fn targetTriple(allocator: Allocator, target: std.Target) ![]const u8 {
         .loongarch64 => "loongarch64",
         .m68k => "m68k",
         // MIPS sub-architectures are a bit irregular, so we handle them manually here.
-        .mips => if (std.Target.mips.featureSetHas(features, .mips32r6)) "mipsisa32r6" else "mips",
-        .mipsel => if (std.Target.mips.featureSetHas(features, .mips32r6)) "mipsisa32r6el" else "mipsel",
-        .mips64 => if (std.Target.mips.featureSetHas(features, .mips64r6)) "mipsisa64r6" else "mips64",
-        .mips64el => if (std.Target.mips.featureSetHas(features, .mips64r6)) "mipsisa64r6el" else "mips64el",
+        .mips => if (target.cpu.has(.mips, .mips32r6)) "mipsisa32r6" else "mips",
+        .mipsel => if (target.cpu.has(.mips, .mips32r6)) "mipsisa32r6el" else "mipsel",
+        .mips64 => if (target.cpu.has(.mips, .mips64r6)) "mipsisa64r6" else "mips64",
+        .mips64el => if (target.cpu.has(.mips, .mips64r6)) "mipsisa64r6el" else "mips64el",
         .msp430 => "msp430",
         .powerpc => "powerpc",
         .powerpcle => "powerpcle",
@@ -109,7 +107,7 @@ pub fn targetTriple(allocator: Allocator, target: std.Target) ![]const u8 {
     try llvm_triple.appendSlice(llvm_arch);
 
     const llvm_sub_arch: ?[]const u8 = switch (target.cpu.arch) {
-        .arm, .armeb, .thumb, .thumbeb => subArchName(features, std.Target.arm, .{
+        .arm, .armeb, .thumb, .thumbeb => subArchName(target, .arm, .{
             .{ .v4t, "v4t" },
             .{ .v5t, "v5t" },
             .{ .v5te, "v5te" },
@@ -146,13 +144,13 @@ pub fn targetTriple(allocator: Allocator, target: std.Target) ![]const u8 {
             .{ .v9_5a, "v9.5a" },
             .{ .v9_6a, "v9.6a" },
         }),
-        .powerpc => subArchName(features, std.Target.powerpc, .{
+        .powerpc => subArchName(target, .powerpc, .{
             .{ .spe, "spe" },
         }),
-        .spirv => subArchName(features, std.Target.spirv, .{
+        .spirv => subArchName(target, .spirv, .{
             .{ .v1_5, "1.5" },
         }),
-        .spirv32, .spirv64 => subArchName(features, std.Target.spirv, .{
+        .spirv32, .spirv64 => subArchName(target, .spirv, .{
             .{ .v1_5, "1.5" },
             .{ .v1_4, "1.4" },
             .{ .v1_3, "1.3" },
@@ -309,13 +307,13 @@ pub fn targetTriple(allocator: Allocator, target: std.Target) ![]const u8 {
 }
 
 pub fn supportsTailCall(target: std.Target) bool {
-    switch (target.cpu.arch) {
-        .wasm32, .wasm64 => return std.Target.wasm.featureSetHas(target.cpu.features, .tail_call),
+    return switch (target.cpu.arch) {
+        .wasm32, .wasm64 => target.cpu.has(.wasm, .tail_call),
         // Although these ISAs support tail calls, LLVM does not support tail calls on them.
-        .mips, .mipsel, .mips64, .mips64el => return false,
-        .powerpc, .powerpcle, .powerpc64, .powerpc64le => return false,
-        else => return true,
-    }
+        .mips, .mipsel, .mips64, .mips64el => false,
+        .powerpc, .powerpcle, .powerpc64, .powerpc64le => false,
+        else => true,
+    };
 }
 
 pub fn dataLayout(target: std.Target) []const u8 {
@@ -391,11 +389,11 @@ pub fn dataLayout(target: std.Target) []const u8 {
         .nvptx => "e-p:32:32-i64:64-i128:128-v16:16-v32:32-n16:32:64",
         .nvptx64 => "e-i64:64-i128:128-v16:16-v32:32-n16:32:64",
         .amdgcn => "e-p:64:64-p1:64:64-p2:32:32-p3:32:32-p4:64:64-p5:32:32-p6:32:32-p7:160:256:256:32-p8:128:128-p9:192:256:256:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-v2048:2048-n32:64-S32-A5-G1-ni:7:8:9",
-        .riscv32 => if (std.Target.riscv.featureSetHas(target.cpu.features, .e))
+        .riscv32 => if (target.cpu.has(.riscv, .e))
             "e-m:e-p:32:32-i64:64-n32-S32"
         else
             "e-m:e-p:32:32-i64:64-n32-S128",
-        .riscv64 => if (std.Target.riscv.featureSetHas(target.cpu.features, .e))
+        .riscv64 => if (target.cpu.has(.riscv, .e))
             "e-m:e-p:64:64-i64:64-i128:128-n32:64-S64"
         else
             "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128",
@@ -2981,36 +2979,49 @@ pub const Object = struct {
         const zcu = pt.zcu;
         const ip = &zcu.intern_pool;
         const nav = ip.getNav(nav_index);
-        const is_extern, const is_threadlocal, const is_weak_linkage, const is_dll_import = switch (nav.status) {
+        const linkage: std.builtin.GlobalLinkage, const visibility: Builder.Visibility, const is_threadlocal, const is_dll_import = switch (nav.status) {
             .unresolved => unreachable,
             .fully_resolved => |r| switch (ip.indexToKey(r.val)) {
-                .variable => |variable| .{ false, variable.is_threadlocal, variable.is_weak_linkage, false },
-                .@"extern" => |@"extern"| .{ true, @"extern".is_threadlocal, @"extern".is_weak_linkage, @"extern".is_dll_import },
-                else => .{ false, false, false, false },
+                .variable => |variable| .{ .internal, .default, variable.is_threadlocal, false },
+                .@"extern" => |@"extern"| .{ @"extern".linkage, .fromSymbolVisibility(@"extern".visibility), @"extern".is_threadlocal, @"extern".is_dll_import },
+                else => .{ .internal, .default, false, false },
             },
             // This means it's a source declaration which is not `extern`!
-            .type_resolved => |r| .{ false, r.is_threadlocal, false, false },
+            .type_resolved => |r| .{ .internal, .default, r.is_threadlocal, false },
         };
 
         const variable_index = try o.builder.addVariable(
-            try o.builder.strtabString((if (is_extern) nav.name else nav.fqn).toSlice(ip)),
+            try o.builder.strtabString(switch (linkage) {
+                .internal => nav.fqn,
+                .strong, .weak => nav.name,
+                .link_once => unreachable,
+            }.toSlice(ip)),
             try o.lowerType(Type.fromInterned(nav.typeOf(ip))),
             toLlvmGlobalAddressSpace(nav.getAddrspace(), zcu.getTarget()),
         );
         gop.value_ptr.* = variable_index.ptrConst(&o.builder).global;
 
         // This is needed for declarations created by `@extern`.
-        if (is_extern) {
-            variable_index.setLinkage(.external, &o.builder);
-            variable_index.setUnnamedAddr(.default, &o.builder);
-            if (is_threadlocal and !zcu.navFileScope(nav_index).mod.?.single_threaded)
-                variable_index.setThreadLocal(.generaldynamic, &o.builder);
-            if (is_weak_linkage) variable_index.setLinkage(.extern_weak, &o.builder);
-            if (is_dll_import) variable_index.setDllStorageClass(.dllimport, &o.builder);
-        } else {
-            variable_index.setLinkage(.internal, &o.builder);
-            variable_index.setUnnamedAddr(.unnamed_addr, &o.builder);
+        switch (linkage) {
+            .internal => {
+                variable_index.setLinkage(.internal, &o.builder);
+                variable_index.setUnnamedAddr(.unnamed_addr, &o.builder);
+            },
+            .strong, .weak => {
+                variable_index.setLinkage(switch (linkage) {
+                    .internal => unreachable,
+                    .strong => .external,
+                    .weak => .extern_weak,
+                    .link_once => unreachable,
+                }, &o.builder);
+                variable_index.setUnnamedAddr(.default, &o.builder);
+                if (is_threadlocal and !zcu.navFileScope(nav_index).mod.?.single_threaded)
+                    variable_index.setThreadLocal(.generaldynamic, &o.builder);
+                if (is_dll_import) variable_index.setDllStorageClass(.dllimport, &o.builder);
+            },
+            .link_once => unreachable,
         }
+        variable_index.setVisibility(visibility, &o.builder);
         return variable_index;
     }
 
@@ -4532,14 +4543,14 @@ pub const NavGen = struct {
         const nav = ip.getNav(nav_index);
         const resolved = nav.status.fully_resolved;
 
-        const is_extern, const lib_name, const is_threadlocal, const is_weak_linkage, const is_dll_import, const is_const, const init_val, const owner_nav = switch (ip.indexToKey(resolved.val)) {
-            .variable => |variable| .{ false, .none, variable.is_threadlocal, variable.is_weak_linkage, false, false, variable.init, variable.owner_nav },
-            .@"extern" => |@"extern"| .{ true, @"extern".lib_name, @"extern".is_threadlocal, @"extern".is_weak_linkage, @"extern".is_dll_import, @"extern".is_const, .none, @"extern".owner_nav },
-            else => .{ false, .none, false, false, false, true, resolved.val, nav_index },
+        const lib_name, const linkage, const visibility: Builder.Visibility, const is_threadlocal, const is_dll_import, const is_const, const init_val, const owner_nav = switch (ip.indexToKey(resolved.val)) {
+            .variable => |variable| .{ .none, .internal, .default, variable.is_threadlocal, false, false, variable.init, variable.owner_nav },
+            .@"extern" => |@"extern"| .{ @"extern".lib_name, @"extern".linkage, .fromSymbolVisibility(@"extern".visibility), @"extern".is_threadlocal, @"extern".is_dll_import, @"extern".is_const, .none, @"extern".owner_nav },
+            else => .{ .none, .internal, .default, false, false, true, resolved.val, nav_index },
         };
         const ty = Type.fromInterned(nav.typeOf(ip));
 
-        if (is_extern and ip.isFunctionType(ty.toIntern())) {
+        if (linkage != .internal and ip.isFunctionType(ty.toIntern())) {
             _ = try o.resolveLlvmFunction(owner_nav);
         } else {
             const variable_index = try o.resolveGlobalNav(nav_index);
@@ -4551,6 +4562,7 @@ pub const NavGen = struct {
                 .none => .no_init,
                 else => try o.lowerValue(init_val),
             }, &o.builder);
+            variable_index.setVisibility(visibility, &o.builder);
 
             const file_scope = zcu.navFileScopeIndex(nav_index);
             const mod = zcu.fileByIndex(file_scope).mod.?;
@@ -4570,7 +4582,7 @@ pub const NavGen = struct {
                     line_number,
                     try o.lowerDebugType(ty),
                     variable_index,
-                    .{ .local = !is_extern },
+                    .{ .local = linkage == .internal },
                 );
 
                 const debug_expression = try o.builder.debugExpression(&.{});
@@ -4585,38 +4597,47 @@ pub const NavGen = struct {
             }
         }
 
-        if (is_extern) {
-            const global_index = o.nav_map.get(nav_index).?;
+        switch (linkage) {
+            .internal => {},
+            .strong, .weak => {
+                const global_index = o.nav_map.get(nav_index).?;
 
-            const decl_name = decl_name: {
-                if (zcu.getTarget().cpu.arch.isWasm() and ty.zigTypeTag(zcu) == .@"fn") {
-                    if (lib_name.toSlice(ip)) |lib_name_slice| {
-                        if (!std.mem.eql(u8, lib_name_slice, "c")) {
-                            break :decl_name try o.builder.strtabStringFmt("{}|{s}", .{ nav.name.fmt(ip), lib_name_slice });
+                const decl_name = decl_name: {
+                    if (zcu.getTarget().cpu.arch.isWasm() and ty.zigTypeTag(zcu) == .@"fn") {
+                        if (lib_name.toSlice(ip)) |lib_name_slice| {
+                            if (!std.mem.eql(u8, lib_name_slice, "c")) {
+                                break :decl_name try o.builder.strtabStringFmt("{}|{s}", .{ nav.name.fmt(ip), lib_name_slice });
+                            }
                         }
                     }
+                    break :decl_name try o.builder.strtabString(nav.name.toSlice(ip));
+                };
+
+                if (o.builder.getGlobal(decl_name)) |other_global| {
+                    if (other_global != global_index) {
+                        // Another global already has this name; just use it in place of this global.
+                        try global_index.replace(other_global, &o.builder);
+                        return;
+                    }
                 }
-                break :decl_name try o.builder.strtabString(nav.name.toSlice(ip));
-            };
 
-            if (o.builder.getGlobal(decl_name)) |other_global| {
-                if (other_global != global_index) {
-                    // Another global already has this name; just use it in place of this global.
-                    try global_index.replace(other_global, &o.builder);
-                    return;
+                try global_index.rename(decl_name, &o.builder);
+                global_index.setUnnamedAddr(.default, &o.builder);
+                if (is_dll_import) {
+                    global_index.setDllStorageClass(.dllimport, &o.builder);
+                } else if (zcu.comp.config.dll_export_fns) {
+                    global_index.setDllStorageClass(.default, &o.builder);
                 }
-            }
 
-            try global_index.rename(decl_name, &o.builder);
-            global_index.setLinkage(.external, &o.builder);
-            global_index.setUnnamedAddr(.default, &o.builder);
-            if (is_dll_import) {
-                global_index.setDllStorageClass(.dllimport, &o.builder);
-            } else if (zcu.comp.config.dll_export_fns) {
-                global_index.setDllStorageClass(.default, &o.builder);
-            }
-
-            if (is_weak_linkage) global_index.setLinkage(.extern_weak, &o.builder);
+                global_index.setLinkage(switch (linkage) {
+                    .internal => unreachable,
+                    .strong => .external,
+                    .weak => .extern_weak,
+                    .link_once => unreachable,
+                }, &o.builder);
+                global_index.setVisibility(visibility, &o.builder);
+            },
+            .link_once => unreachable,
         }
     }
 };
@@ -5025,7 +5046,7 @@ pub const FuncGen = struct {
 
                 .vector_store_elem => try self.airVectorStoreElem(inst),
 
-                .tlv_dllimport_ptr => try self.airTlvDllimportPtr(inst),
+                .runtime_nav_ptr => try self.airRuntimeNavPtr(inst),
 
                 .inferred_alloc, .inferred_alloc_comptime => unreachable,
 
@@ -8124,7 +8145,7 @@ pub const FuncGen = struct {
         return .none;
     }
 
-    fn airTlvDllimportPtr(fg: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
+    fn airRuntimeNavPtr(fg: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
         const o = fg.ng.object;
         const ty_nav = fg.air.instructions.items(.data)[@intFromEnum(inst)].ty_nav;
         const llvm_ptr_const = try o.lowerNavRefValue(ty_nav.nav);
@@ -11604,7 +11625,7 @@ pub const FuncGen = struct {
         const pt = o.pt;
         const zcu = pt.zcu;
         const target = zcu.getTarget();
-        if (!target_util.hasValgrindSupport(target)) return default_value;
+        if (!target_util.hasValgrindSupport(target, .stage2_llvm)) return default_value;
 
         const llvm_usize = try o.lowerType(Type.usize);
         const usize_alignment = Type.usize.abiAlignment(zcu).toLlvm();
@@ -11677,6 +11698,19 @@ pub const FuncGen = struct {
                 \\ or     1, 1, 1
                 ,
                 .constraints = "={r3},{r4},{r3},~{cc},~{memory}",
+            },
+            .riscv64 => .{
+                .template =
+                \\ .option push
+                \\ .option norvc
+                \\ srli zero, zero, 3
+                \\ srli zero, zero, 13
+                \\ srli zero, zero, 51
+                \\ srli zero, zero, 61
+                \\ or   a0,   a0,   a0
+                \\ .option pop
+                ,
+                .constraints = "={a3},{a4},{a3},~{cc},~{memory}",
             },
             .s390x => .{
                 .template =
@@ -12034,7 +12068,7 @@ fn returnTypeByRef(zcu: *Zcu, target: std.Target, ty: Type) bool {
     if (isByRef(ty, zcu)) {
         return true;
     } else if (target.cpu.arch.isX86() and
-        !std.Target.x86.featureSetHas(target.cpu.features, .evex512) and
+        !target.cpu.has(.x86, .evex512) and
         ty.totalVectorBits(zcu) >= 512)
     {
         // As of LLVM 18, passing a vector byval with fastcc that is 512 bits or more returns
@@ -12309,7 +12343,7 @@ const ParamTypeIterator = struct {
                 } else if (isByRef(ty, zcu)) {
                     return .byref;
                 } else if (target.cpu.arch.isX86() and
-                    !std.Target.x86.featureSetHas(target.cpu.features, .evex512) and
+                    !target.cpu.has(.x86, .evex512) and
                     ty.totalVectorBits(zcu) >= 512)
                 {
                     // As of LLVM 18, passing a vector byval with fastcc that is 512 bits or more returns
@@ -12733,7 +12767,7 @@ fn isScalar(zcu: *Zcu, ty: Type) bool {
 /// or if it produces miscompilations.
 fn backendSupportsF80(target: std.Target) bool {
     return switch (target.cpu.arch) {
-        .x86_64, .x86 => !std.Target.x86.featureSetHas(target.cpu.features, .soft_float),
+        .x86, .x86_64 => !target.cpu.has(.x86, .soft_float),
         else => false,
     };
 }
@@ -12765,11 +12799,11 @@ fn backendSupportsF16(target: std.Target) bool {
         .armeb,
         .thumb,
         .thumbeb,
-        => target.abi.float() == .soft or std.Target.arm.featureSetHas(target.cpu.features, .fullfp16),
+        => target.abi.float() == .soft or target.cpu.has(.arm, .fullfp16),
         // https://github.com/llvm/llvm-project/issues/129394
         .aarch64,
         .aarch64_be,
-        => std.Target.aarch64.featureSetHas(target.cpu.features, .fp_armv8),
+        => target.cpu.has(.aarch64, .fp_armv8),
         else => true,
     };
 }
@@ -12800,7 +12834,7 @@ fn backendSupportsF128(target: std.Target) bool {
         .armeb,
         .thumb,
         .thumbeb,
-        => target.abi.float() == .soft or std.Target.arm.featureSetHas(target.cpu.features, .fp_armv8),
+        => target.abi.float() == .soft or target.cpu.has(.arm, .fp_armv8),
         else => true,
     };
 }

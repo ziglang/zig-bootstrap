@@ -39,7 +39,7 @@ test {
     _ = Package;
 }
 
-const thread_stack_size = 50 << 20;
+const thread_stack_size = 60 << 20;
 
 pub const std_options: std.Options = .{
     .wasiCwd = wasi_cwd,
@@ -4118,6 +4118,7 @@ fn createModule(
             error.LibCppRequiresLibC => fatal("libc++ requires linking libc", .{}),
             error.LibUnwindRequiresLibC => fatal("libunwind requires linking libc", .{}),
             error.TargetCannotDynamicLink => fatal("dynamic linking unavailable on the specified target", .{}),
+            error.TargetCannotStaticLinkExecutables => fatal("static linking of executables unavailable on the specified target", .{}),
             error.LibCRequiresDynamicLinking => fatal("libc of the specified target requires dynamic linking", .{}),
             error.SharedLibrariesRequireDynamicLinking => fatal("using shared libraries requires dynamic linking", .{}),
             error.ExportMemoryAndDynamicIncompatible => fatal("exporting memory is incompatible with dynamic linking", .{}),
@@ -4207,7 +4208,7 @@ fn serve(
     const main_progress_node = std.Progress.start(.{});
     const file_system_inputs = comp.file_system_inputs.?;
 
-    const IncrementalDebugServer = if (build_options.enable_debug_extensions)
+    const IncrementalDebugServer = if (build_options.enable_debug_extensions and !builtin.single_threaded)
         @import("IncrementalDebugServer.zig")
     else
         void;
