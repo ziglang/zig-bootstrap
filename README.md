@@ -185,24 +185,24 @@ is more portable across Linux distributions.
 
 | Target                   | Status |
 |--------------------------|--------|
-| `aarch64-netbsd-none`    | [#218](https://github.com/ziglang/zig-bootstrap/issues/218) |
-| `aarch64_be-netbsd-none` | [#219](https://github.com/ziglang/zig-bootstrap/issues/219) |
-| `arm-netbsd-eabi`        | [#220](https://github.com/ziglang/zig-bootstrap/issues/220) |
-| `arm-netbsd-eabihf`      | [#221](https://github.com/ziglang/zig-bootstrap/issues/221) |
-| `armeb-netbsd-eabi`      | [#222](https://github.com/ziglang/zig-bootstrap/issues/222) |
-| `armeb-netbsd-eabihf`    | [#223](https://github.com/ziglang/zig-bootstrap/issues/223) |
+| `aarch64-netbsd-none`    | OK     |
+| `aarch64_be-netbsd-none` | OK     |
+| `arm-netbsd-eabi`        | OK     |
+| `arm-netbsd-eabihf`      | OK     |
+| `armeb-netbsd-eabi`      | OK     |
+| `armeb-netbsd-eabihf`    | OK     |
 | `mips-netbsd-eabi`       | [#224](https://github.com/ziglang/zig-bootstrap/issues/224) |
 | `mips-netbsd-eabihf`     | [#225](https://github.com/ziglang/zig-bootstrap/issues/225) |
 | `mipsel-netbsd-eabi`     | [#226](https://github.com/ziglang/zig-bootstrap/issues/226) |
 | `mipsel-netbsd-eabihf`   | [#227](https://github.com/ziglang/zig-bootstrap/issues/227) |
-| `powerpc-netbsd-eabi`    | [#228](https://github.com/ziglang/zig-bootstrap/issues/228) |
-| `powerpc-netbsd-eabihf`  | [#229](https://github.com/ziglang/zig-bootstrap/issues/229) |
+| `powerpc-netbsd-eabi`    | OK     |
+| `powerpc-netbsd-eabihf`  | OK     |
 | `riscv32-netbsd-none`    | [#233](https://github.com/ziglang/zig-bootstrap/issues/233) |
 | `riscv64-netbsd-none`    | [#234](https://github.com/ziglang/zig-bootstrap/issues/234) |
 | `sparc-netbsd-none`      | [#230](https://github.com/ziglang/zig-bootstrap/issues/230) |
 | `sparc64-netbsd-none`    | [#231](https://github.com/ziglang/zig-bootstrap/issues/231) |
-| `x86-netbsd-none`        | [#232](https://github.com/ziglang/zig-bootstrap/issues/232) |
-| `x86_64-netbsd-none`     | [#71](https://github.com/ziglang/zig-bootstrap/issues/71) |
+| `x86-netbsd-none`        | OK     |
+| `x86_64-netbsd-none`     | OK     |
 
 #### Windows
 
