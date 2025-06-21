@@ -24,6 +24,7 @@ For other versions, check the git tags of this repository.
  * LLVM: Fix `Triple::isTargetEHABICompatible()` for NetBSD
  * Clang: Ignore the examples directory
  * Clang: Disable building of libclang-cpp.so.
+ * Clang: Correctly define `IntPtrType` for MIPS
  * LLD: Added additional include directory to Zig's libunwind.
  * LLD: Respect `LLD_BUILD_TOOLS=OFF`
  * LLD: Skip building docs
