@@ -22,9 +22,6 @@ case $TARGET_OS_CMAKE in
   native) TARGET_OS_CMAKE="";;
 esac
 
-# Work around CMake silliness: https://github.com/ziglang/zig/issues/23546
-CMAKE_LINK_DEPENDS_WORKAROUND=-DCMAKE_LINK_DEPENDS_USE_LINKER=FALSE
-
 # First build the libraries for Zig to link against, as well as native `llvm-tblgen`.
 mkdir -p "$ROOTDIR/out/build-llvm-host"
 cd "$ROOTDIR/out/build-llvm-host"
@@ -88,7 +85,7 @@ cmake "$ROOTDIR/zlib" \
   -DCMAKE_C_COMPILER="$ZIG;cc;-fno-sanitize=all;-s;-target;$TARGET;-mcpu=$MCPU" \
   -DCMAKE_CXX_COMPILER="$ZIG;c++;-fno-sanitize=all;-s;-target;$TARGET;-mcpu=$MCPU" \
   -DCMAKE_ASM_COMPILER="$ZIG;cc;-fno-sanitize=all;-s;-target;$TARGET;-mcpu=$MCPU" \
-  $CMAKE_LINK_DEPENDS_WORKAROUND \
+  -DCMAKE_LINK_DEPENDS_USE_LINKER=OFF \
   -DCMAKE_RC_COMPILER="$ROOTDIR/out/host/bin/llvm-rc" \
   -DCMAKE_AR="$ROOTDIR/out/host/bin/llvm-ar" \
   -DCMAKE_RANLIB="$ROOTDIR/out/host/bin/llvm-ranlib"
@@ -151,7 +148,7 @@ cmake "$ROOTDIR/llvm" \
   -DCMAKE_C_COMPILER="$ZIG;cc;-fno-sanitize=all;-s;-target;$TARGET;-mcpu=$MCPU" \
   -DCMAKE_CXX_COMPILER="$ZIG;c++;-fno-sanitize=all;-s;-target;$TARGET;-mcpu=$MCPU" \
   -DCMAKE_ASM_COMPILER="$ZIG;cc;-fno-sanitize=all;-s;-target;$TARGET;-mcpu=$MCPU" \
-  $CMAKE_LINK_DEPENDS_WORKAROUND \
+  -DCMAKE_LINK_DEPENDS_USE_LINKER=OFF \
   -DCMAKE_RC_COMPILER="$ROOTDIR/out/host/bin/llvm-rc" \
   -DCMAKE_AR="$ROOTDIR/out/host/bin/llvm-ar" \
   -DCMAKE_RANLIB="$ROOTDIR/out/host/bin/llvm-ranlib" \
