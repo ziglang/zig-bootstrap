@@ -722,9 +722,12 @@ pub fn raise(sig: u8) RaiseError!void {
     }
 
     if (native_os == .linux) {
+        // https://git.musl-libc.org/cgit/musl/commit/?id=0bed7e0acfd34e3fb63ca0e4d99b7592571355a9
+        //
+        // Unlike musl, libc-less Zig std does not have any internal signals for implementation purposes, so we
+        // need to block all signals on the assumption that any of them could potentially fork() in a handler.
         var set: sigset_t = undefined;
-        // block application signals
-        sigprocmask(SIG.BLOCK, &linux.app_mask, &set);
+        sigprocmask(SIG.BLOCK, &linux.all_mask, &set);
 
         const tid = linux.gettid();
         const rc = linux.tkill(tid, sig);
@@ -7474,7 +7477,7 @@ pub fn ioctl_SIOCGIFINDEX(fd: fd_t, ifr: *ifreq) IoCtl_SIOCGIFINDEX_Error!void {
     }
 }
 
-const lfs64_abi = native_os == .linux and builtin.link_libc and builtin.abi.isGnu();
+const lfs64_abi = native_os == .linux and builtin.link_libc and (builtin.abi.isGnu() or builtin.abi.isAndroid());
 
 /// Whether or not `error.Unexpected` will print its value and a stack trace.
 ///

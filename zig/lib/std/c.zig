@@ -2269,7 +2269,10 @@ pub const SC = switch (native_os) {
     else => void,
 };
 
-pub const _SC = switch (native_os) {
+pub const _SC = if (builtin.abi.isAndroid()) enum(c_int) {
+    PAGESIZE = 39,
+    NPROCESSORS_ONLN = 97,
+} else switch (native_os) {
     .driverkit, .ios, .macos, .tvos, .visionos, .watchos => enum(c_int) {
         PAGESIZE = 29,
     },
@@ -9328,9 +9331,11 @@ pub extern "c" fn setrlimit64(resource: rlimit_resource, rlim: *const rlimit) c_
 
 pub const arc4random_buf = switch (native_os) {
     .dragonfly, .netbsd, .freebsd, .solaris, .openbsd, .macos, .ios, .tvos, .watchos, .visionos => private.arc4random_buf,
+    .linux => if (builtin.abi.isAndroid()) private.arc4random_buf else {},
     else => {},
 };
 pub const getentropy = switch (native_os) {
+    .linux => if (builtin.abi.isAndroid() and versionCheck(.{ .major = 28, .minor = 0, .patch = 0 })) private.getentropy else {},
     .emscripten => private.getentropy,
     else => {},
 };

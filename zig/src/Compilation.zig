@@ -259,8 +259,6 @@ crt_files: std.StringHashMapUnmanaged(CrtFile) = .empty,
 /// Null means only show snippet on first error.
 reference_trace: ?u32 = null,
 
-libcxx_abi_version: libcxx.AbiVersion = libcxx.AbiVersion.default,
-
 /// This mutex guards all `Compilation` mutable state.
 /// Disabled in single-threaded mode because the thread pool spawns in the same thread.
 mutex: if (builtin.single_threaded) struct {
@@ -827,7 +825,7 @@ pub const MiscTask = enum {
 
     @"mingw-w64 crt2.o",
     @"mingw-w64 dllcrt2.o",
-    @"mingw-w64 mingw32.lib",
+    @"mingw-w64 libmingw32.lib",
 };
 
 pub const MiscError = struct {
@@ -1172,7 +1170,6 @@ pub const CreateOptions = struct {
     force_load_objc: bool = false,
     /// Whether local symbols should be discarded from the symbol table.
     discard_local_symbols: bool = false,
-    libcxx_abi_version: libcxx.AbiVersion = libcxx.AbiVersion.default,
     /// (Windows) PDB source path prefix to instruct the linker how to resolve relative
     /// paths when consolidating CodeView streams into a single PDB file.
     pdb_source_path: ?[]const u8 = null,
@@ -1512,7 +1509,7 @@ pub fn create(gpa: Allocator, arena: Allocator, options: CreateOptions) !*Compil
             .emit_asm = options.emit_asm,
             .emit_llvm_ir = options.emit_llvm_ir,
             .emit_llvm_bc = options.emit_llvm_bc,
-            .work_queues = .{std.fifo.LinearFifo(Job, .Dynamic).init(gpa)} ** @typeInfo(std.meta.FieldType(Compilation, .work_queues)).array.len,
+            .work_queues = @splat(.init(gpa)),
             .c_object_work_queue = std.fifo.LinearFifo(*CObject, .Dynamic).init(gpa),
             .win32_resource_work_queue = if (dev.env.supports(.win32_resource)) std.fifo.LinearFifo(*Win32Resource, .Dynamic).init(gpa) else .{},
             .astgen_work_queue = std.fifo.LinearFifo(Zcu.File.Index, .Dynamic).init(gpa),
@@ -1545,7 +1542,6 @@ pub fn create(gpa: Allocator, arena: Allocator, options: CreateOptions) !*Compil
             .debug_compiler_runtime_libs = options.debug_compiler_runtime_libs,
             .debug_compile_errors = options.debug_compile_errors,
             .incremental = options.incremental,
-            .libcxx_abi_version = options.libcxx_abi_version,
             .root_name = root_name,
             .sysroot = sysroot,
             .windows_libs = windows_libs,
@@ -1886,7 +1882,7 @@ pub fn create(gpa: Allocator, arena: Allocator, options: CreateOptions) !*Compil
 
                     const main_crt_file: mingw.CrtFile = if (is_dyn_lib) .dllcrt2_o else .crt2_o;
                     comp.queued_jobs.mingw_crt_file[@intFromEnum(main_crt_file)] = true;
-                    comp.queued_jobs.mingw_crt_file[@intFromEnum(mingw.CrtFile.mingw32_lib)] = true;
+                    comp.queued_jobs.mingw_crt_file[@intFromEnum(mingw.CrtFile.libmingw32_lib)] = true;
                     comp.remaining_prelink_tasks += 2;
 
                     // When linking mingw-w64 there are some import libs we always need.
@@ -2129,7 +2125,7 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) !void {
             const is_hit = man.hit() catch |err| switch (err) {
                 error.CacheCheckFailed => switch (man.diagnostic) {
                     .none => unreachable,
-                    .manifest_create, .manifest_read, .manifest_lock => |e| return comp.setMiscFailure(
+                    .manifest_create, .manifest_read, .manifest_lock, .manifest_seek => |e| return comp.setMiscFailure(
                         .check_whole_cache,
                         "failed to check cache: {s} {s}",
                         .{ @tagName(man.diagnostic), @errorName(e) },
@@ -2261,7 +2257,7 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) !void {
 
         zcu.compile_log_text.shrinkAndFree(gpa, 0);
 
-        zcu.skip_analysis_errors = false;
+        zcu.skip_analysis_this_update = false;
 
         // Make sure std.zig is inside the import_table. We unconditionally need
         // it for start.zig.
@@ -2336,6 +2332,17 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) !void {
         const pt: Zcu.PerThread = .activate(zcu, .main);
         defer pt.deactivate();
 
+        if (!zcu.skip_analysis_this_update) {
+            if (comp.config.is_test) {
+                // The `test_functions` decl has been intentionally postponed until now,
+                // at which point we must populate it with the list of test functions that
+                // have been discovered and not filtered out.
+                try pt.populateTestFunctions(main_progress_node);
+            }
+
+            try pt.processExports();
+        }
+
         if (build_options.enable_debug_extensions and comp.verbose_intern_pool) {
             std.debug.print("intern pool stats for '{s}':\n", .{
                 comp.root_name,
@@ -2350,15 +2357,6 @@ pub fn update(comp: *Compilation, main_progress_node: std.Progress.Node) !void {
             });
             zcu.intern_pool.dumpGenericInstances(gpa);
         }
-
-        if (comp.config.is_test) {
-            // The `test_functions` decl has been intentionally postponed until now,
-            // at which point we must populate it with the list of test functions that
-            // have been discovered and not filtered out.
-            try pt.populateTestFunctions(main_progress_node);
-        }
-
-        try pt.processExports();
     }
 
     if (anyErrors(comp)) {
@@ -3310,7 +3308,7 @@ pub fn getAllErrorsAlloc(comp: *Compilation) !ErrorBundle {
                 }
             }
         }
-        if (zcu.skip_analysis_errors) break :zcu_errors;
+        if (zcu.skip_analysis_this_update) break :zcu_errors;
         var sorted_failed_analysis: std.AutoArrayHashMapUnmanaged(InternPool.AnalUnit, *Zcu.ErrorMsg).DataList.Slice = s: {
             const SortOrder = struct {
                 zcu: *Zcu,
@@ -3446,7 +3444,7 @@ pub fn getAllErrorsAlloc(comp: *Compilation) !ErrorBundle {
     try comp.link_diags.addMessagesToBundle(&bundle, comp.bin_file);
 
     if (comp.zcu) |zcu| {
-        if (!zcu.skip_analysis_errors and bundle.root_list.items.len == 0 and zcu.compile_log_sources.count() != 0) {
+        if (!zcu.skip_analysis_this_update and bundle.root_list.items.len == 0 and zcu.compile_log_sources.count() != 0) {
             const values = zcu.compile_log_sources.values();
             // First one will be the error; subsequent ones will be notes.
             const src_loc = values[0].src();
@@ -3957,7 +3955,7 @@ fn performAllTheWorkInner(
             // However, this means our analysis data is invalid, so we want to omit all analysis errors.
 
             assert(zcu.failed_files.count() > 0); // we will get an error
-            zcu.skip_analysis_errors = true;
+            zcu.skip_analysis_this_update = true;
             return;
         }
 
@@ -5115,11 +5113,13 @@ fn updateCObject(comp: *Compilation, c_object: *CObject, c_obj_prog_node: std.Pr
         }
 
         // Just to save disk space, we delete the files that are never needed again.
-        defer if (out_diag_path) |diag_file_path| zig_cache_tmp_dir.deleteFile(std.fs.path.basename(diag_file_path)) catch |err| {
-            log.warn("failed to delete '{s}': {s}", .{ diag_file_path, @errorName(err) });
+        defer if (out_diag_path) |diag_file_path| zig_cache_tmp_dir.deleteFile(std.fs.path.basename(diag_file_path)) catch |err| switch (err) {
+            error.FileNotFound => {}, // the file wasn't created due to an error we reported
+            else => log.warn("failed to delete '{s}': {s}", .{ diag_file_path, @errorName(err) }),
         };
-        defer if (out_dep_path) |dep_file_path| zig_cache_tmp_dir.deleteFile(std.fs.path.basename(dep_file_path)) catch |err| {
-            log.warn("failed to delete '{s}': {s}", .{ dep_file_path, @errorName(err) });
+        defer if (out_dep_path) |dep_file_path| zig_cache_tmp_dir.deleteFile(std.fs.path.basename(dep_file_path)) catch |err| switch (err) {
+            error.FileNotFound => {}, // the file wasn't created due to an error we reported
+            else => log.warn("failed to delete '{s}': {s}", .{ dep_file_path, @errorName(err) }),
         };
         if (std.process.can_spawn) {
             var child = std.process.Child.init(argv.items, arena);
@@ -5626,12 +5626,40 @@ pub fn addCCArgs(
     const llvm_triple = try @import("codegen/llvm.zig").targetTriple(arena, target);
     try argv.appendSlice(&[_][]const u8{ "-target", llvm_triple });
 
+    switch (target.os.tag) {
+        .ios, .macos, .tvos, .watchos => |os| {
+            try argv.ensureUnusedCapacity(2);
+            // Pass the proper -m<os>-version-min argument for darwin.
+            const ver = target.os.version_range.semver.min;
+            argv.appendAssumeCapacity(try std.fmt.allocPrint(arena, "-m{s}{s}-version-min={d}.{d}.{d}", .{
+                @tagName(os),
+                switch (target.abi) {
+                    .simulator => "-simulator",
+                    else => "",
+                },
+                ver.major,
+                ver.minor,
+                ver.patch,
+            }));
+            // This avoids a warning that sometimes occurs when
+            // providing both a -target argument that contains a
+            // version as well as the -mmacosx-version-min argument.
+            // Zig provides the correct value in both places, so it
+            // doesn't matter which one gets overridden.
+            argv.appendAssumeCapacity("-Wno-overriding-option");
+        },
+        else => {},
+    }
+
     if (target.cpu.arch.isArm()) {
         try argv.append(if (target.cpu.arch.isThumb()) "-mthumb" else "-mno-thumb");
     }
 
     if (target_util.llvmMachineAbi(target)) |mabi| {
-        try argv.append(try std.fmt.allocPrint(arena, "-mabi={s}", .{mabi}));
+        // Clang's integrated Arm assembler doesn't support `-mabi` yet...
+        if (!(target.cpu.arch.isArm() and (ext == .assembly or ext == .assembly_with_cpp))) {
+            try argv.append(try std.fmt.allocPrint(arena, "-mabi={s}", .{mabi}));
+        }
     }
 
     // We might want to support -mfloat-abi=softfp for Arm and CSKY here in the future.
@@ -5743,6 +5771,19 @@ pub fn addCCArgs(
                 try argv.append("-D_SOFT_DOUBLE");
             }
 
+            switch (mod.optimize_mode) {
+                .Debug => {
+                    // windows c runtime requires -D_DEBUG if using debug libraries
+                    try argv.append("-D_DEBUG");
+                },
+                .ReleaseSafe => {
+                    try argv.append("-D_FORTIFY_SOURCE=2");
+                },
+                .ReleaseFast, .ReleaseSmall => {
+                    try argv.append("-DNDEBUG");
+                },
+            }
+
             if (comp.config.link_libc) {
                 if (target.isGnuLibC()) {
                     const target_version = target.os.versionRange().gnuLibCVersion().?;
@@ -5786,11 +5827,12 @@ pub fn addCCArgs(
                 // See the comment in libcxx.zig for more details about this.
                 try argv.append("-D_LIBCPP_PSTL_BACKEND_SERIAL");
 
+                const abi_version: u2 = if (target.os.tag == .emscripten) 2 else 1;
                 try argv.append(try std.fmt.allocPrint(arena, "-D_LIBCPP_ABI_VERSION={d}", .{
-                    @intFromEnum(comp.libcxx_abi_version),
+                    abi_version,
                 }));
                 try argv.append(try std.fmt.allocPrint(arena, "-D_LIBCPP_ABI_NAMESPACE=__{d}", .{
-                    @intFromEnum(comp.libcxx_abi_version),
+                    abi_version,
                 }));
 
                 try argv.append(libcxx.hardeningModeFlag(mod.optimize_mode));
@@ -5833,6 +5875,32 @@ pub fn addCCArgs(
                 try argv.appendSlice(&.{ "-F", framework_dir });
             }
         }
+    }
+
+    // Only C-family files support these flags.
+    switch (ext) {
+        .c,
+        .h,
+        .cpp,
+        .hpp,
+        .m,
+        .hm,
+        .mm,
+        .hmm,
+        => {
+            try argv.append("-fno-spell-checking");
+
+            if (target.os.tag == .windows and target.abi.isGnu()) {
+                // windows.h has files such as pshpack1.h which do #pragma packing,
+                // triggering a clang warning. So for this target, we disable this warning.
+                try argv.append("-Wno-pragma-pack");
+            }
+
+            if (mod.optimize_mode != .Debug) {
+                try argv.append("-Werror=date-time");
+            }
+        },
+        else => {},
     }
 
     // Only assembly files support these flags.
@@ -5909,7 +5977,7 @@ pub fn addCCArgs(
         else => {},
     }
 
-    // Only C-family files support these flags.
+    // Only compiled files support these flags.
     switch (ext) {
         .c,
         .h,
@@ -5919,9 +5987,9 @@ pub fn addCCArgs(
         .hm,
         .mm,
         .hmm,
+        .ll,
+        .bc,
         => {
-            try argv.append("-fno-spell-checking");
-
             if (target_util.clangSupportsTargetCpuArg(target)) {
                 if (target.cpu.model.llvm_name) |llvm_name| {
                     try argv.appendSlice(&[_][]const u8{
@@ -5941,53 +6009,15 @@ pub fn addCCArgs(
                     // We communicate float ABI to Clang through the dedicated options further down.
                     if (std.mem.eql(u8, llvm_name, "soft-float")) continue;
 
+                    // Ignore these until we figure out how to handle the concept of omitting features.
+                    // See https://github.com/ziglang/zig/issues/23539
+                    if (target_util.isDynamicAMDGCNFeature(target, feature)) continue;
+
                     argv.appendSliceAssumeCapacity(&[_][]const u8{ "-Xclang", "-target-feature", "-Xclang" });
                     const plus_or_minus = "-+"[@intFromBool(is_enabled)];
                     const arg = try std.fmt.allocPrint(arena, "{c}{s}", .{ plus_or_minus, llvm_name });
                     argv.appendAssumeCapacity(arg);
                 }
-            }
-
-            switch (target.os.tag) {
-                .windows => {
-                    // windows.h has files such as pshpack1.h which do #pragma packing,
-                    // triggering a clang warning. So for this target, we disable this warning.
-                    if (target.abi.isGnu()) {
-                        try argv.append("-Wno-pragma-pack");
-                    }
-                },
-                .macos => {
-                    try argv.ensureUnusedCapacity(2);
-                    // Pass the proper -m<os>-version-min argument for darwin.
-                    const ver = target.os.version_range.semver.min;
-                    argv.appendAssumeCapacity(try std.fmt.allocPrint(arena, "-mmacos-version-min={d}.{d}.{d}", .{
-                        ver.major, ver.minor, ver.patch,
-                    }));
-                    // This avoids a warning that sometimes occurs when
-                    // providing both a -target argument that contains a
-                    // version as well as the -mmacosx-version-min argument.
-                    // Zig provides the correct value in both places, so it
-                    // doesn't matter which one gets overridden.
-                    argv.appendAssumeCapacity("-Wno-overriding-option");
-                },
-                .ios => switch (target.cpu.arch) {
-                    // Pass the proper -m<os>-version-min argument for darwin.
-                    .x86, .x86_64 => {
-                        const ver = target.os.version_range.semver.min;
-                        try argv.append(try std.fmt.allocPrint(
-                            arena,
-                            "-m{s}-simulator-version-min={d}.{d}.{d}",
-                            .{ @tagName(target.os.tag), ver.major, ver.minor, ver.patch },
-                        ));
-                    },
-                    else => {
-                        const ver = target.os.version_range.semver.min;
-                        try argv.append(try std.fmt.allocPrint(arena, "-m{s}-version-min={d}.{d}.{d}", .{
-                            @tagName(target.os.tag), ver.major, ver.minor, ver.patch,
-                        }));
-                    },
-                },
-                else => {},
             }
 
             {
@@ -6026,17 +6056,21 @@ pub fn addCCArgs(
                         // function was called.
                         try argv.append("-fno-sanitize=function");
 
-                        // It's recommended to use the minimal runtime in production environments
-                        // due to the security implications of the full runtime. The minimal runtime
-                        // doesn't provide much benefit over simply trapping.
-                        if (mod.optimize_mode == .ReleaseSafe) {
+                        // If we want to sanitize C, but the ubsan runtime has been turned off,
+                        // we'll switch to just trapping.
+                        if (comp.ubsan_rt_strat == .none or mod.optimize_mode == .ReleaseSafe) {
+                            // It's recommended to use the minimal runtime in production
+                            // environments due to the security implications of the full runtime.
+                            // The minimal runtime doesn't provide much benefit over simply
+                            // trapping, however, so we do that instead.
                             try argv.append("-fsanitize-trap=undefined");
-                        }
-
-                        // This is necessary because, by default, Clang instructs LLVM to embed a COFF link
-                        // dependency on `libclang_rt.ubsan_standalone.a` when the UBSan runtime is used.
-                        if (target.os.tag == .windows) {
-                            try argv.append("-fno-rtlib-defaultlib");
+                        } else {
+                            // This is necessary because, by default, Clang instructs LLVM to embed
+                            // a COFF link dependency on `libclang_rt.ubsan_standalone.a` when the
+                            // UBSan runtime is used.
+                            if (target.os.tag == .windows) {
+                                try argv.append("-fno-rtlib-defaultlib");
+                            }
                         }
                     }
                 }
@@ -6048,8 +6082,6 @@ pub fn addCCArgs(
 
             switch (mod.optimize_mode) {
                 .Debug => {
-                    // windows c runtime requires -D_DEBUG if using debug libraries
-                    try argv.append("-D_DEBUG");
                     // Clang has -Og for compatibility with GCC, but currently it is just equivalent
                     // to -O1. Besides potentially impairing debugging, -O1/-Og significantly
                     // increases compile times.
@@ -6059,10 +6091,8 @@ pub fn addCCArgs(
                     // See the comment in the BuildModeFastRelease case for why we pass -O2 rather
                     // than -O3 here.
                     try argv.append("-O2");
-                    try argv.append("-D_FORTIFY_SOURCE=2");
                 },
                 .ReleaseFast => {
-                    try argv.append("-DNDEBUG");
                     // Here we pass -O2 rather than -O3 because, although we do the equivalent of
                     // -O3 in Zig code, the justification for the difference here is that Zig
                     // has better detection and prevention of undefined behavior, so -O3 is safer for
@@ -6071,13 +6101,8 @@ pub fn addCCArgs(
                     try argv.append("-O2");
                 },
                 .ReleaseSmall => {
-                    try argv.append("-DNDEBUG");
                     try argv.append("-Os");
                 },
-            }
-
-            if (mod.optimize_mode != .Debug) {
-                try argv.append("-Werror=date-time");
             }
         },
         else => {},

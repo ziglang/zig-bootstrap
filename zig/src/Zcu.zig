@@ -181,7 +181,10 @@ analysis_roots: std.BoundedArray(*Package.Module, 4) = .{},
 /// Allocated into `gpa`.
 resolved_references: ?std.AutoHashMapUnmanaged(AnalUnit, ?ResolvedReference) = null,
 
-skip_analysis_errors: bool = false,
+/// If `true`, then semantic analysis must not occur on this update due to AstGen errors.
+/// Essentially the entire pipeline after AstGen, including Sema, codegen, and link, is skipped.
+/// Reset to `false` at the start of each update in `Compilation.update`.
+skip_analysis_this_update: bool = false,
 
 stage1_flags: packed struct {
     have_winmain: bool = false,
@@ -2748,7 +2751,7 @@ pub fn saveZoirCache(cache_file: std.fs.File, stat: std.fs.File.Stat, zoir: Zoir
         },
         .{
             .base = @ptrCast(zoir.limbs),
-            .len = zoir.limbs.len * 4,
+            .len = zoir.limbs.len * @sizeOf(std.math.big.Limb),
         },
         .{
             .base = zoir.string_bytes.ptr,
@@ -3869,9 +3872,11 @@ fn resolveReferencesInner(zcu: *Zcu) !std.AutoHashMapUnmanaged(AnalUnit, ?Resolv
                     .unnamed_test => true,
                     .@"test", .decltest => a: {
                         const fqn_slice = nav.fqn.toSlice(ip);
-                        for (comp.test_filters) |test_filter| {
-                            if (std.mem.indexOf(u8, fqn_slice, test_filter) != null) break;
-                        } else break :a false;
+                        if (comp.test_filters.len > 0) {
+                            for (comp.test_filters) |test_filter| {
+                                if (std.mem.indexOf(u8, fqn_slice, test_filter) != null) break;
+                            } else break :a false;
+                        }
                         break :a true;
                     },
                 };
@@ -3881,7 +3886,10 @@ fn resolveReferencesInner(zcu: *Zcu) !std.AutoHashMapUnmanaged(AnalUnit, ?Resolv
                         @intFromEnum(inst_info.inst),
                     });
                     try unit_queue.put(gpa, .wrap(.{ .nav_val = nav_id }), referencer);
-                    try unit_queue.put(gpa, .wrap(.{ .func = nav.status.fully_resolved.val }), referencer);
+                    // Non-fatal AstGen errors could mean this test decl failed
+                    if (nav.status == .fully_resolved) {
+                        try unit_queue.put(gpa, .wrap(.{ .func = nav.status.fully_resolved.val }), referencer);
+                    }
                 }
             }
             for (zcu.namespacePtr(ns).pub_decls.keys()) |nav| {

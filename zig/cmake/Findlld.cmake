@@ -12,8 +12,9 @@ find_path(LLD_INCLUDE_DIRS NAMES lld/Common/Driver.h
         /usr/lib/llvm-19/include
         /usr/local/llvm190/include
         /usr/local/llvm19/include
-        /usr/local/opt/llvm@19/include
-        /opt/homebrew/opt/llvm@19/include
+        /usr/local/opt/lld@19/include
+        /opt/homebrew/opt/lld@19/include
+        /home/linuxbrew/.linuxbrew/opt/lld@19/include
         /mingw64/include)
 
 find_library(LLD_LIBRARY NAMES lld-19.0 lld190 lld NAMES_PER_DIR
@@ -22,8 +23,9 @@ find_library(LLD_LIBRARY NAMES lld-19.0 lld190 lld NAMES_PER_DIR
         /usr/lib/llvm-19/lib
         /usr/local/llvm190/lib
         /usr/local/llvm19/lib
-        /usr/local/opt/llvm@19/lib
-        /opt/homebrew/opt/llvm@19/lib
+        /usr/local/opt/lld@19/lib
+        /opt/homebrew/opt/lld@19/lib
+        /home/linuxbrew/.linuxbrew/opt/lld@19/lib
 )
 if(EXISTS ${LLD_LIBRARY})
     set(LLD_LIBRARIES ${LLD_LIBRARY})
@@ -37,8 +39,9 @@ else()
                 /usr/lib/llvm-19/lib
                 /usr/local/llvm190/lib
                 /usr/local/llvm19/lib
-                /usr/local/opt/llvm@19/lib
-                /opt/homebrew/opt/llvm@19/lib
+                /usr/local/opt/lld@19/lib
+                /opt/homebrew/opt/lld@19/lib
+                /home/linuxbrew/.linuxbrew/opt/lld@19/lib
                 /mingw64/lib
                 /c/msys64/mingw64/lib
                 c:/msys64/mingw64/lib)

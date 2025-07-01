@@ -482,26 +482,27 @@ pub const O = switch (native_arch) {
 /// Set by startup code, used by `getauxval`.
 pub var elf_aux_maybe: ?[*]std.elf.Auxv = null;
 
+/// Whether an external or internal getauxval implementation is used.
 const extern_getauxval = switch (builtin.zig_backend) {
     // Calling extern functions is not yet supported with these backends
     .stage2_aarch64, .stage2_arm, .stage2_riscv64, .stage2_sparc64 => false,
     else => !builtin.link_libc,
 };
 
-comptime {
-    const root = @import("root");
-    // Export this only when building executable, otherwise it is overriding
-    // the libc implementation
-    if (extern_getauxval and (builtin.output_mode == .Exe or @hasDecl(root, "main"))) {
-        @export(&getauxvalImpl, .{ .name = "getauxval", .linkage = .weak });
-    }
-}
-
 pub const getauxval = if (extern_getauxval) struct {
+    comptime {
+        const root = @import("root");
+        // Export this only when building an executable, otherwise it is overriding
+        // the libc implementation
+        if (builtin.output_mode == .Exe or @hasDecl(root, "main")) {
+            @export(&getauxvalImpl, .{ .name = "getauxval", .linkage = .weak });
+        }
+    }
     extern fn getauxval(index: usize) usize;
 }.getauxval else getauxvalImpl;
 
 fn getauxvalImpl(index: usize) callconv(.c) usize {
+    @disableInstrumentation();
     const auxv = elf_aux_maybe orelse return 0;
     var i: usize = 0;
     while (auxv[i].a_type != std.elf.AT_NULL) : (i += 1) {
@@ -1979,7 +1980,7 @@ pub fn socketpair(domain: i32, socket_type: i32, protocol: i32, fd: *[2]i32) usi
 
 pub fn accept(fd: i32, noalias addr: ?*sockaddr, noalias len: ?*socklen_t) usize {
     if (native_arch == .x86) {
-        return socketcall(SC.accept, &[4]usize{ fd, addr, len, 0 });
+        return socketcall(SC.accept, &[4]usize{ @as(usize, @bitCast(@as(isize, fd))), @intFromPtr(addr), @intFromPtr(len), 0 });
     }
     return accept4(fd, addr, len, 0);
 }
@@ -2221,7 +2222,7 @@ pub fn epoll_pwait(epoll_fd: i32, events: [*]epoll_event, maxevents: u32, timeou
         @as(usize, @intCast(maxevents)),
         @as(usize, @bitCast(@as(isize, timeout))),
         @intFromPtr(sigmask),
-        @sizeOf(sigset_t),
+        NSIG / 8,
     );
 }
 
@@ -3385,6 +3386,7 @@ pub const SIG = if (is_mips) struct {
     pub const UNBLOCK = 2;
     pub const SETMASK = 3;
 
+    // https://github.com/torvalds/linux/blob/ca91b9500108d4cf083a635c2e11c884d5dd20ea/arch/mips/include/uapi/asm/signal.h#L25
     pub const HUP = 1;
     pub const INT = 2;
     pub const QUIT = 3;
@@ -3392,33 +3394,32 @@ pub const SIG = if (is_mips) struct {
     pub const TRAP = 5;
     pub const ABRT = 6;
     pub const IOT = ABRT;
-    pub const BUS = 7;
+    pub const EMT = 7;
     pub const FPE = 8;
     pub const KILL = 9;
-    pub const USR1 = 10;
+    pub const BUS = 10;
     pub const SEGV = 11;
-    pub const USR2 = 12;
+    pub const SYS = 12;
     pub const PIPE = 13;
     pub const ALRM = 14;
     pub const TERM = 15;
-    pub const STKFLT = 16;
-    pub const CHLD = 17;
-    pub const CONT = 18;
-    pub const STOP = 19;
-    pub const TSTP = 20;
-    pub const TTIN = 21;
-    pub const TTOU = 22;
-    pub const URG = 23;
-    pub const XCPU = 24;
-    pub const XFSZ = 25;
-    pub const VTALRM = 26;
-    pub const PROF = 27;
-    pub const WINCH = 28;
-    pub const IO = 29;
-    pub const POLL = 29;
-    pub const PWR = 30;
-    pub const SYS = 31;
-    pub const UNUSED = SIG.SYS;
+    pub const USR1 = 16;
+    pub const USR2 = 17;
+    pub const CHLD = 18;
+    pub const PWR = 19;
+    pub const WINCH = 20;
+    pub const URG = 21;
+    pub const IO = 22;
+    pub const POLL = IO;
+    pub const STOP = 23;
+    pub const TSTP = 24;
+    pub const CONT = 25;
+    pub const TTIN = 26;
+    pub const TTOU = 27;
+    pub const VTALRM = 28;
+    pub const PROF = 29;
+    pub const XCPU = 30;
+    pub const XFZ = 31;
 
     pub const ERR: ?Sigaction.handler_fn = @ptrFromInt(maxInt(usize));
     pub const DFL: ?Sigaction.handler_fn = @ptrFromInt(0);

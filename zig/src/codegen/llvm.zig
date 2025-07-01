@@ -265,7 +265,12 @@ pub fn targetTriple(allocator: Allocator, target: std.Target) ![]const u8 {
         .eabihf => "eabihf",
         .android => "android",
         .androideabi => "androideabi",
-        .musl => "musl",
+        .musl => switch (target.os.tag) {
+            // For WASI/Emscripten, "musl" refers to the libc, not really the ABI.
+            // "unknown" provides better compatibility with LLVM-based tooling for these targets.
+            .wasi, .emscripten => "unknown",
+            else => "musl",
+        },
         .muslabin32 => "musl", // Should be muslabin32 in LLVM 20.
         .muslabi64 => "musl", // Should be muslabi64 in LLVM 20.
         .musleabi => "musleabi",
@@ -771,6 +776,30 @@ const DataLayoutBuilder = struct {
     }
 };
 
+// Avoid depending on `llvm.CodeModel` in the bitcode-only case.
+const CodeModel = enum {
+    default,
+    tiny,
+    small,
+    kernel,
+    medium,
+    large,
+};
+
+fn codeModel(model: std.builtin.CodeModel, target: std.Target) CodeModel {
+    // Roughly match Clang's mapping of GCC code models to LLVM code models.
+    return switch (model) {
+        .default => .default,
+        .extreme, .large => .large,
+        .kernel => .kernel,
+        .medany => if (target.cpu.arch.isRISCV()) .medium else .large,
+        .medium => if (target.os.tag == .aix) .large else .medium,
+        .medmid => .medium,
+        .normal, .medlow, .small => .small,
+        .tiny => .tiny,
+    };
+}
+
 pub const Object = struct {
     gpa: Allocator,
     builder: Builder,
@@ -1135,14 +1164,17 @@ pub const Object = struct {
                 module_flags.appendAssumeCapacity(try o.builder.metadataModuleFlag(
                     behavior_error,
                     try o.builder.metadataString("Code Model"),
-                    try o.builder.metadataConstant(try o.builder.intConst(.i32, @as(i32, switch (comp.root_mod.code_model) {
-                        .tiny => 0,
-                        .small => 1,
-                        .kernel => 2,
-                        .medium => 3,
-                        .large => 4,
-                        else => unreachable,
-                    }))),
+                    try o.builder.metadataConstant(try o.builder.intConst(.i32, @as(
+                        i32,
+                        switch (codeModel(comp.root_mod.code_model, comp.root_mod.resolved_target.result)) {
+                            .default => unreachable,
+                            .tiny => 0,
+                            .small => 1,
+                            .kernel => 2,
+                            .medium => 3,
+                            .large => 4,
+                        },
+                    ))),
                 ));
             }
 
@@ -1294,7 +1326,7 @@ pub const Object = struct {
         else
             .Static;
 
-        const code_model: llvm.CodeModel = switch (comp.root_mod.code_model) {
+        const code_model: llvm.CodeModel = switch (codeModel(comp.root_mod.code_model, comp.root_mod.resolved_target.result)) {
             .default => .Default,
             .tiny => .Tiny,
             .small => .Small,
@@ -1440,8 +1472,10 @@ pub const Object = struct {
             _ = try attributes.removeFnAttr(.sanitize_thread);
         }
         const is_naked = fn_info.cc == .naked;
-        if (owner_mod.fuzz and !func_analysis.disable_instrumentation and !is_naked) {
-            try attributes.addFnAttr(.optforfuzzing, &o.builder);
+        if (!func_analysis.disable_instrumentation and !is_naked) {
+            if (owner_mod.fuzz) {
+                try attributes.addFnAttr(.optforfuzzing, &o.builder);
+            }
             _ = try attributes.removeFnAttr(.skipprofile);
             _ = try attributes.removeFnAttr(.nosanitize_coverage);
         } else {
@@ -1735,7 +1769,12 @@ pub const Object = struct {
             try o.used.append(gpa, counters_variable.toConst(&o.builder));
             counters_variable.setLinkage(.private, &o.builder);
             counters_variable.setAlignment(comptime Builder.Alignment.fromByteUnits(1), &o.builder);
-            counters_variable.setSection(try o.builder.string("__sancov_cntrs"), &o.builder);
+
+            if (target.ofmt == .macho) {
+                counters_variable.setSection(try o.builder.string("__DATA,__sancov_cntrs"), &o.builder);
+            } else {
+                counters_variable.setSection(try o.builder.string("__sancov_cntrs"), &o.builder);
+            }
 
             break :f .{
                 .counters_variable = counters_variable,
@@ -1797,7 +1836,11 @@ pub const Object = struct {
             pcs_variable.setLinkage(.private, &o.builder);
             pcs_variable.setMutability(.constant, &o.builder);
             pcs_variable.setAlignment(Type.usize.abiAlignment(zcu).toLlvm(), &o.builder);
-            pcs_variable.setSection(try o.builder.string("__sancov_pcs1"), &o.builder);
+            if (target.ofmt == .macho) {
+                pcs_variable.setSection(try o.builder.string("__DATA,__sancov_pcs1"), &o.builder);
+            } else {
+                pcs_variable.setSection(try o.builder.string("__sancov_pcs1"), &o.builder);
+            }
             try pcs_variable.setInitializer(init_val, &o.builder);
         }
 
@@ -12051,7 +12094,7 @@ fn firstParamSRet(fn_info: InternPool.Key.FuncType, zcu: *Zcu, target: std.Targe
         .x86_64_win => x86_64_abi.classifyWindows(return_type, zcu) == .memory,
         .x86_sysv, .x86_win => isByRef(return_type, zcu),
         .x86_stdcall => !isScalar(zcu, return_type),
-        .wasm_mvp => wasm_c_abi.classifyType(return_type, zcu)[0] == .indirect,
+        .wasm_mvp => wasm_c_abi.classifyType(return_type, zcu) == .indirect,
         .aarch64_aapcs,
         .aarch64_aapcs_darwin,
         .aarch64_aapcs_win,
@@ -12136,18 +12179,9 @@ fn lowerFnRetTy(o: *Object, fn_info: InternPool.Key.FuncType) Allocator.Error!Bu
                 return o.builder.structType(.normal, types[0..types_len]);
             },
         },
-        .wasm_mvp => {
-            if (isScalar(zcu, return_type)) {
-                return o.lowerType(return_type);
-            }
-            const classes = wasm_c_abi.classifyType(return_type, zcu);
-            if (classes[0] == .indirect or classes[0] == .none) {
-                return .void;
-            }
-
-            assert(classes[0] == .direct and classes[1] == .none);
-            const scalar_type = wasm_c_abi.scalarType(return_type, zcu);
-            return o.builder.intType(@intCast(scalar_type.abiSize(zcu) * 8));
+        .wasm_mvp => switch (wasm_c_abi.classifyType(return_type, zcu)) {
+            .direct => |scalar_ty| return o.lowerType(scalar_ty),
+            .indirect => return .void,
         },
         // TODO investigate other callconvs
         else => return o.lowerType(return_type),
@@ -12401,17 +12435,28 @@ const ParamTypeIterator = struct {
                     },
                 }
             },
-            .wasm_mvp => {
-                it.zig_index += 1;
-                it.llvm_index += 1;
-                if (isScalar(zcu, ty)) {
-                    return .byval;
-                }
-                const classes = wasm_c_abi.classifyType(ty, zcu);
-                if (classes[0] == .indirect) {
+            .wasm_mvp => switch (wasm_c_abi.classifyType(ty, zcu)) {
+                .direct => |scalar_ty| {
+                    if (isScalar(zcu, ty)) {
+                        it.zig_index += 1;
+                        it.llvm_index += 1;
+                        return .byval;
+                    } else {
+                        var types_buffer: [8]Builder.Type = undefined;
+                        types_buffer[0] = try it.object.lowerType(scalar_ty);
+                        it.types_buffer = types_buffer;
+                        it.types_len = 1;
+                        it.llvm_index += 1;
+                        it.zig_index += 1;
+                        return .multiple_llvm_types;
+                    }
+                },
+                .indirect => {
+                    it.zig_index += 1;
+                    it.llvm_index += 1;
+                    it.byval_attr = true;
                     return .byref;
-                }
-                return .abi_sized_int;
+                },
             },
             // TODO investigate other callconvs
             else => {

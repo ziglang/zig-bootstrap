@@ -1132,6 +1132,8 @@ pub fn compareHeteroAdvanced(
             else => {},
         }
     }
+
+    if (lhs.isNan(zcu) or rhs.isNan(zcu)) return op == .neq;
     return (try orderAdvanced(lhs, rhs, strat, zcu, tid)).compare(op);
 }
 
@@ -2675,7 +2677,7 @@ pub fn shlSatScalar(
     const shift: usize = @intCast(rhs.toUnsignedInt(zcu));
     const limbs = try arena.alloc(
         std.math.big.Limb,
-        std.math.big.int.calcTwosCompLimbCount(info.bits) + 1,
+        std.math.big.int.calcTwosCompLimbCount(info.bits),
     );
     var result_bigint = BigIntMutable{
         .limbs = limbs,
@@ -3777,6 +3779,7 @@ pub fn ptrField(parent_ptr: Value, field_idx: u32, pt: Zcu.PerThread) !Value {
                 .auto => break :field .{ field_ty, try aggregate_ty.fieldAlignmentSema(field_idx, pt) },
                 .@"extern" => {
                     // Well-defined layout, so just offset the pointer appropriately.
+                    try aggregate_ty.resolveLayout(pt);
                     const byte_off = aggregate_ty.structFieldOffset(field_idx, zcu);
                     const field_align = a: {
                         const parent_align = if (parent_ptr_info.flags.alignment == .none) pa: {
