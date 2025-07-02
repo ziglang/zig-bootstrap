@@ -898,7 +898,7 @@ pub fn readFromPackedMemory(
 pub fn toFloat(val: Value, comptime T: type, zcu: *const Zcu) T {
     return switch (zcu.intern_pool.indexToKey(val.toIntern())) {
         .int => |int| switch (int.storage) {
-            .big_int => |big_int| big_int.toFloat(T),
+            .big_int => |big_int| big_int.toFloat(T, .nearest_even)[0],
             inline .u64, .i64 => |x| {
                 if (T == f80) {
                     @panic("TODO we can't lower this properly on non-x86 llvm backend yet");
@@ -995,16 +995,6 @@ pub fn floatCast(val: Value, dest_ty: Type, pt: Zcu.PerThread) !Value {
             else => unreachable,
         },
     } }));
-}
-
-/// Asserts the value is a float
-pub fn floatHasFraction(self: Value, zcu: *const Zcu) bool {
-    return switch (zcu.intern_pool.indexToKey(self.toIntern())) {
-        .float => |float| switch (float.storage) {
-            inline else => |x| @rem(x, 1) != 0,
-        },
-        else => unreachable,
-    };
 }
 
 pub fn orderAgainstZero(lhs: Value, zcu: *Zcu) std.math.Order {
@@ -1557,17 +1547,13 @@ pub fn floatFromIntAdvanced(
 }
 
 pub fn floatFromIntScalar(val: Value, float_ty: Type, pt: Zcu.PerThread, comptime strat: ResolveStrat) !Value {
-    const zcu = pt.zcu;
-    return switch (zcu.intern_pool.indexToKey(val.toIntern())) {
+    return switch (pt.zcu.intern_pool.indexToKey(val.toIntern())) {
         .undef => try pt.undefValue(float_ty),
         .int => |int| switch (int.storage) {
-            .big_int => |big_int| {
-                const float = big_int.toFloat(f128);
-                return pt.floatValue(float_ty, float);
-            },
+            .big_int => |big_int| pt.floatValue(float_ty, big_int.toFloat(f128, .nearest_even)[0]),
             inline .u64, .i64 => |x| floatFromIntInner(x, float_ty, pt),
-            .lazy_align => |ty| return floatFromIntInner((try Type.fromInterned(ty).abiAlignmentInner(strat.toLazy(), pt.zcu, pt.tid)).scalar.toByteUnits() orelse 0, float_ty, pt),
-            .lazy_size => |ty| return floatFromIntInner((try Type.fromInterned(ty).abiSizeInner(strat.toLazy(), pt.zcu, pt.tid)).scalar, float_ty, pt),
+            .lazy_align => |ty| floatFromIntInner((try Type.fromInterned(ty).abiAlignmentInner(strat.toLazy(), pt.zcu, pt.tid)).scalar.toByteUnits() orelse 0, float_ty, pt),
+            .lazy_size => |ty| floatFromIntInner((try Type.fromInterned(ty).abiSizeInner(strat.toLazy(), pt.zcu, pt.tid)).scalar, float_ty, pt),
         },
         else => unreachable,
     };
@@ -1627,7 +1613,7 @@ pub fn numberMin(lhs: Value, rhs: Value, zcu: *Zcu) Value {
     };
 }
 
-/// operands must be (vectors of) integers; handles undefined scalars.
+/// operands must be (vectors of) integers or bools; handles undefined scalars.
 pub fn bitwiseNot(val: Value, ty: Type, arena: Allocator, pt: Zcu.PerThread) !Value {
     const zcu = pt.zcu;
     if (ty.zigTypeTag(zcu) == .vector) {
@@ -1645,7 +1631,7 @@ pub fn bitwiseNot(val: Value, ty: Type, arena: Allocator, pt: Zcu.PerThread) !Va
     return bitwiseNotScalar(val, ty, arena, pt);
 }
 
-/// operands must be integers; handles undefined.
+/// operands must be integers or bools; handles undefined.
 pub fn bitwiseNotScalar(val: Value, ty: Type, arena: Allocator, pt: Zcu.PerThread) !Value {
     const zcu = pt.zcu;
     if (val.isUndef(zcu)) return Value.fromInterned(try pt.intern(.{ .undef = ty.toIntern() }));
@@ -1671,7 +1657,7 @@ pub fn bitwiseNotScalar(val: Value, ty: Type, arena: Allocator, pt: Zcu.PerThrea
     return pt.intValue_big(ty, result_bigint.toConst());
 }
 
-/// operands must be (vectors of) integers; handles undefined scalars.
+/// operands must be (vectors of) integers or bools; handles undefined scalars.
 pub fn bitwiseAnd(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, pt: Zcu.PerThread) !Value {
     const zcu = pt.zcu;
     if (ty.zigTypeTag(zcu) == .vector) {
@@ -1690,7 +1676,7 @@ pub fn bitwiseAnd(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, pt: Zc
     return bitwiseAndScalar(lhs, rhs, ty, allocator, pt);
 }
 
-/// operands must be integers; handles undefined.
+/// operands must be integers or bools; handles undefined.
 pub fn bitwiseAndScalar(orig_lhs: Value, orig_rhs: Value, ty: Type, arena: Allocator, pt: Zcu.PerThread) !Value {
     const zcu = pt.zcu;
     // If one operand is defined, we turn the other into `0xAA` so the bitwise AND can
@@ -1744,7 +1730,7 @@ fn intValueAa(ty: Type, arena: Allocator, pt: Zcu.PerThread) !Value {
     return pt.intValue_big(ty, result_bigint.toConst());
 }
 
-/// operands must be (vectors of) integers; handles undefined scalars.
+/// operands must be (vectors of) integers or bools; handles undefined scalars.
 pub fn bitwiseNand(lhs: Value, rhs: Value, ty: Type, arena: Allocator, pt: Zcu.PerThread) !Value {
     const zcu = pt.zcu;
     if (ty.zigTypeTag(zcu) == .vector) {
@@ -1763,7 +1749,7 @@ pub fn bitwiseNand(lhs: Value, rhs: Value, ty: Type, arena: Allocator, pt: Zcu.P
     return bitwiseNandScalar(lhs, rhs, ty, arena, pt);
 }
 
-/// operands must be integers; handles undefined.
+/// operands must be integers or bools; handles undefined.
 pub fn bitwiseNandScalar(lhs: Value, rhs: Value, ty: Type, arena: Allocator, pt: Zcu.PerThread) !Value {
     const zcu = pt.zcu;
     if (lhs.isUndef(zcu) or rhs.isUndef(zcu)) return Value.fromInterned(try pt.intern(.{ .undef = ty.toIntern() }));
@@ -1774,7 +1760,7 @@ pub fn bitwiseNandScalar(lhs: Value, rhs: Value, ty: Type, arena: Allocator, pt:
     return bitwiseXor(anded, all_ones, ty, arena, pt);
 }
 
-/// operands must be (vectors of) integers; handles undefined scalars.
+/// operands must be (vectors of) integers or bools; handles undefined scalars.
 pub fn bitwiseOr(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, pt: Zcu.PerThread) !Value {
     const zcu = pt.zcu;
     if (ty.zigTypeTag(zcu) == .vector) {
@@ -1793,7 +1779,7 @@ pub fn bitwiseOr(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, pt: Zcu
     return bitwiseOrScalar(lhs, rhs, ty, allocator, pt);
 }
 
-/// operands must be integers; handles undefined.
+/// operands must be integers or bools; handles undefined.
 pub fn bitwiseOrScalar(orig_lhs: Value, orig_rhs: Value, ty: Type, arena: Allocator, pt: Zcu.PerThread) !Value {
     // If one operand is defined, we turn the other into `0xAA` so the bitwise AND can
     // still zero out some bits.
@@ -1827,7 +1813,7 @@ pub fn bitwiseOrScalar(orig_lhs: Value, orig_rhs: Value, ty: Type, arena: Alloca
     return pt.intValue_big(ty, result_bigint.toConst());
 }
 
-/// operands must be (vectors of) integers; handles undefined scalars.
+/// operands must be (vectors of) integers or bools; handles undefined scalars.
 pub fn bitwiseXor(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, pt: Zcu.PerThread) !Value {
     const zcu = pt.zcu;
     if (ty.zigTypeTag(zcu) == .vector) {
@@ -1846,7 +1832,7 @@ pub fn bitwiseXor(lhs: Value, rhs: Value, ty: Type, allocator: Allocator, pt: Zc
     return bitwiseXorScalar(lhs, rhs, ty, allocator, pt);
 }
 
-/// operands must be integers; handles undefined.
+/// operands must be integers or bools; handles undefined.
 pub fn bitwiseXorScalar(lhs: Value, rhs: Value, ty: Type, arena: Allocator, pt: Zcu.PerThread) !Value {
     const zcu = pt.zcu;
     if (lhs.isUndef(zcu) or rhs.isUndef(zcu)) return Value.fromInterned(try pt.intern(.{ .undef = ty.toIntern() }));

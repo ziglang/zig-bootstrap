@@ -260,6 +260,16 @@ ZIG_EXTERN_C bool ZigLLVMTargetMachineEmitToFile(LLVMTargetMachineRef targ_machi
 
     TargetMachine &target_machine = *reinterpret_cast<TargetMachine*>(targ_machine_ref);
 
+    if (options->allow_fast_isel) {
+        target_machine.setO0WantsFastISel(true);
+    } else {
+        target_machine.setFastISel(false);
+    }
+
+    if (!options->allow_machine_outliner) {
+        target_machine.setMachineOutliner(false);
+    }
+
     Module &llvm_module = *unwrap(module_ref);
 
     // Pipeline configurations
@@ -385,12 +395,6 @@ ZIG_EXTERN_C bool ZigLLVMTargetMachineEmitToFile(LLVMTargetMachineRef targ_machi
         }
     }
 
-    if (options->allow_fast_isel) {
-        target_machine.setO0WantsFastISel(true);
-    } else {
-        target_machine.setFastISel(false);
-    }
-
     // Optimization phase
     module_pm.run(llvm_module, module_am);
 
@@ -484,20 +488,22 @@ bool ZigLLVMWriteImportLibrary(const char *def_path, unsigned int coff_machine,
         }
     }
 
-    if (machine == COFF::IMAGE_FILE_MACHINE_I386 && kill_at) {
+    if (kill_at) {
         for (object::COFFShortExport& E : def->Exports) {
             if (!E.ImportName.empty() || (!E.Name.empty() && E.Name[0] == '?'))
                 continue;
-            E.SymbolName = E.Name;
+            if (machine == COFF::IMAGE_FILE_MACHINE_I386) {
+                // By making sure E.SymbolName != E.Name for decorated symbols,
+                // writeImportLibrary writes these symbols with the type
+                // IMPORT_NAME_UNDECORATE.
+                E.SymbolName = E.Name;
+            }
             // Trim off the trailing decoration. Symbols will always have a
             // starting prefix here (either _ for cdecl/stdcall, @ for fastcall
             // or ? for C++ functions). Vectorcall functions won't have any
             // fixed prefix, but the function base name will still be at least
             // one char.
             E.Name = E.Name.substr(0, E.Name.find('@', 1));
-            // By making sure E.SymbolName != E.Name for decorated symbols,
-            // writeImportLibrary writes these symbols with the type
-            // IMPORT_NAME_UNDECORATE.
         }
     }
 

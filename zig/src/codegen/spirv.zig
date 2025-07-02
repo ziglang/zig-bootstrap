@@ -31,6 +31,8 @@ const InstMap = std.AutoHashMapUnmanaged(Air.Inst.Index, IdRef);
 pub fn legalizeFeatures(_: *const std.Target) *const Air.Legalize.Features {
     return comptime &.initMany(&.{
         .expand_intcast_safe,
+        .expand_int_from_float_safe,
+        .expand_int_from_float_optimized_safe,
         .expand_add_safe,
         .expand_sub_safe,
         .expand_mul_safe,
@@ -183,7 +185,7 @@ pub const Object = struct {
     /// related to that.
     error_buffer: ?SpvModule.Decl.Index = null,
 
-    pub fn init(gpa: Allocator, target: std.Target) Object {
+    pub fn init(gpa: Allocator, target: *const std.Target) Object {
         return .{
             .gpa = gpa,
             .spv = SpvModule.init(gpa, target),
@@ -230,8 +232,9 @@ pub const Object = struct {
         defer nav_gen.deinit();
 
         nav_gen.genNav(do_codegen) catch |err| switch (err) {
-            error.CodegenFail => {
-                try zcu.failed_codegen.put(gpa, nav_index, nav_gen.error_msg.?);
+            error.CodegenFail => switch (zcu.codegenFailMsg(nav_index, nav_gen.error_msg.?)) {
+                error.CodegenFail => {},
+                error.OutOfMemory => |e| return e,
             },
             else => |other| {
                 // There might be an error that happened *after* self.error_msg
@@ -249,12 +252,12 @@ pub const Object = struct {
         self: *Object,
         pt: Zcu.PerThread,
         func_index: InternPool.Index,
-        air: Air,
-        liveness: Air.Liveness,
+        air: *const Air,
+        liveness: *const Air.Liveness,
     ) !void {
         const nav = pt.zcu.funcInfo(func_index).owner_nav;
         // TODO: Separate types for generating decls and functions?
-        try self.genNav(pt, nav, air, liveness, true);
+        try self.genNav(pt, nav, air.*, liveness.*, true);
     }
 
     pub fn updateNav(
@@ -436,7 +439,7 @@ const NavGen = struct {
     fn importExtendedSet(self: *NavGen) !IdResult {
         const target = self.spv.target;
         return switch (target.os.tag) {
-            .opencl => try self.spv.importInstructionSet(.@"OpenCL.std"),
+            .opencl, .amdhsa => try self.spv.importInstructionSet(.@"OpenCL.std"),
             .vulkan, .opengl => try self.spv.importInstructionSet(.@"GLSL.std.450"),
             else => unreachable,
         };
@@ -558,7 +561,7 @@ const NavGen = struct {
     }
 
     fn castToGeneric(self: *NavGen, type_id: IdRef, ptr_id: IdRef) !IdRef {
-        if (self.spv.hasFeature(.kernel)) {
+        if (self.spv.hasFeature(.generic_pointer)) {
             const result_id = self.spv.allocId();
             try self.func.body.emit(self.spv.gpa, .OpPtrCastToGeneric, .{
                 .id_result_type = type_id,
@@ -598,16 +601,18 @@ const NavGen = struct {
 
         // We require Int8 and Int16 capabilities and benefit Int64 when available.
         // 32-bit integers are always supported (see spec, 2.16.1, Data rules).
-        const ints = [_]struct { bits: u16, feature: ?Target.spirv.Feature }{
-            .{ .bits = 8, .feature = null },
-            .{ .bits = 16, .feature = null },
-            .{ .bits = 32, .feature = null },
-            .{ .bits = 64, .feature = .int64 },
+        const ints = [_]struct { bits: u16, enabled: bool }{
+            .{ .bits = 8, .enabled = true },
+            .{ .bits = 16, .enabled = true },
+            .{ .bits = 32, .enabled = true },
+            .{
+                .bits = 64,
+                .enabled = self.spv.hasFeature(.int64) or self.spv.target.cpu.arch == .spirv64,
+            },
         };
 
         for (ints) |int| {
-            const has_feature = if (int.feature) |feature| self.spv.hasFeature(feature) else true;
-            if (bits <= int.bits and has_feature) return .{ int.bits, false };
+            if (bits <= int.bits and int.enabled) return .{ int.bits, false };
         }
 
         // Big int
@@ -621,7 +626,10 @@ const NavGen = struct {
     /// is no way of knowing whether those are actually supported.
     /// TODO: Maybe this should be cached?
     fn largestSupportedIntBits(self: *NavGen) u16 {
-        return if (self.spv.hasFeature(.int64)) 64 else 32;
+        if (self.spv.hasFeature(.int64) or self.spv.target.cpu.arch == .spirv64) {
+            return 64;
+        }
+        return 32;
     }
 
     fn arithmeticTypeInfo(self: *NavGen, ty: Type) ArithmeticTypeInfo {
@@ -733,8 +741,8 @@ const NavGen = struct {
             });
         }
 
-        const final_value: spec.LiteralContextDependentNumber = blk: {
-            if (self.spv.hasFeature(.kernel)) {
+        const final_value: spec.LiteralContextDependentNumber = switch (self.spv.target.os.tag) {
+            .opencl, .amdhsa => blk: {
                 const value64: u64 = switch (signedness) {
                     .signed => @bitCast(@as(i64, @intCast(value))),
                     .unsigned => @as(u64, @intCast(value)),
@@ -751,13 +759,12 @@ const NavGen = struct {
                     33...64 => .{ .uint64 = truncated_value },
                     else => unreachable,
                 };
-            }
-
-            break :blk switch (backing_bits) {
+            },
+            else => switch (backing_bits) {
                 1...32 => if (signedness == .signed) .{ .int32 = @intCast(value) } else .{ .uint32 = @intCast(value) },
                 33...64 => if (signedness == .signed) .{ .int64 = value } else .{ .uint64 = value },
                 else => unreachable,
-            };
+            },
         };
 
         const result_id = try self.spv.constant(result_ty_id, final_value);
@@ -1273,12 +1280,11 @@ const NavGen = struct {
             return self.arrayType(backing_bits / big_int_bits, int_ty);
         }
 
-        // Kernel only supports unsigned ints.
-        if (self.spv.hasFeature(.kernel)) {
-            return self.spv.intType(.unsigned, backing_bits);
-        }
-
-        return self.spv.intType(signedness, backing_bits);
+        return switch (self.spv.target.os.tag) {
+            // Kernel only supports unsigned ints.
+            .opencl, .amdhsa => return self.spv.intType(.unsigned, backing_bits),
+            else => self.spv.intType(signedness, backing_bits),
+        };
     }
 
     fn arrayType(self: *NavGen, len: u32, child_ty: IdRef) !IdRef {
@@ -1311,20 +1317,23 @@ const NavGen = struct {
 
         const child_ty_id = try self.resolveType(child_ty, child_repr);
 
-        if (self.spv.hasFeature(.shader)) {
-            if (child_ty.zigTypeTag(zcu) == .@"struct") {
-                switch (storage_class) {
-                    .Uniform, .PushConstant => try self.spv.decorate(child_ty_id, .Block),
-                    else => {},
+        switch (self.spv.target.os.tag) {
+            .vulkan, .opengl => {
+                if (child_ty.zigTypeTag(zcu) == .@"struct") {
+                    switch (storage_class) {
+                        .Uniform, .PushConstant => try self.spv.decorate(child_ty_id, .Block),
+                        else => {},
+                    }
                 }
-            }
 
-            switch (ip.indexToKey(child_ty.toIntern())) {
-                .func_type, .opaque_type => {},
-                else => {
-                    try self.spv.decorate(result_id, .{ .ArrayStride = .{ .array_stride = @intCast(child_ty.abiSize(zcu)) } });
-                },
-            }
+                switch (ip.indexToKey(child_ty.toIntern())) {
+                    .func_type, .opaque_type => {},
+                    else => {
+                        try self.spv.decorate(result_id, .{ .ArrayStride = .{ .array_stride = @intCast(child_ty.abiSize(zcu)) } });
+                    },
+                }
+            },
+            else => {},
         }
 
         try self.spv.sections.types_globals_constants.emit(self.spv.gpa, .OpTypePointer, .{
@@ -1551,10 +1560,13 @@ const NavGen = struct {
                     return try self.arrayType(1, elem_ty_id);
                 } else {
                     const result_id = try self.arrayType(total_len, elem_ty_id);
-                    if (self.spv.hasFeature(.shader)) {
-                        try self.spv.decorate(result_id, .{ .ArrayStride = .{
-                            .array_stride = @intCast(elem_ty.abiSize(zcu)),
-                        } });
+                    switch (self.spv.target.os.tag) {
+                        .vulkan, .opengl => {
+                            try self.spv.decorate(result_id, .{ .ArrayStride = .{
+                                .array_stride = @intCast(elem_ty.abiSize(zcu)),
+                            } });
+                        },
+                        else => {},
                     }
                     return result_id;
                 }
@@ -1685,11 +1697,15 @@ const NavGen = struct {
                         continue;
                     }
 
-                    if (self.spv.hasFeature(.shader)) {
-                        try self.spv.decorateMember(result_id, index, .{ .Offset = .{
-                            .byte_offset = @intCast(ty.structFieldOffset(field_index, zcu)),
-                        } });
+                    switch (self.spv.target.os.tag) {
+                        .vulkan, .opengl => {
+                            try self.spv.decorateMember(result_id, index, .{ .Offset = .{
+                                .byte_offset = @intCast(ty.structFieldOffset(field_index, zcu)),
+                            } });
+                        },
+                        else => {},
                     }
+
                     const field_name = struct_type.fieldName(ip, field_index).unwrap() orelse
                         try ip.getOrPutStringFmt(zcu.gpa, pt.tid, "{d}", .{field_index}, .no_embedded_nulls);
                     try member_types.append(try self.resolveType(field_ty, .indirect));
@@ -1792,28 +1808,23 @@ const NavGen = struct {
     fn spvStorageClass(self: *NavGen, as: std.builtin.AddressSpace) StorageClass {
         return switch (as) {
             .generic => if (self.spv.hasFeature(.generic_pointer)) .Generic else .Function,
-            .global => {
-                if (self.spv.hasFeature(.kernel)) return .CrossWorkgroup;
-                return .StorageBuffer;
+            .global => switch (self.spv.target.os.tag) {
+                .opencl, .amdhsa => .CrossWorkgroup,
+                else => .StorageBuffer,
             },
             .push_constant => {
-                assert(self.spv.hasFeature(.shader));
                 return .PushConstant;
             },
             .output => {
-                assert(self.spv.hasFeature(.shader));
                 return .Output;
             },
             .uniform => {
-                assert(self.spv.hasFeature(.shader));
                 return .Uniform;
             },
             .storage_buffer => {
-                assert(self.spv.hasFeature(.shader));
                 return .StorageBuffer;
             },
             .physical_storage_buffer => {
-                assert(self.spv.hasFeature(.physical_storage_buffer));
                 return .PhysicalStorageBuffer;
             },
             .constant => .UniformConstant,
@@ -2765,7 +2776,7 @@ const NavGen = struct {
 
         const p_error_id = self.spv.allocId();
         switch (target.os.tag) {
-            .opencl => {
+            .opencl, .amdhsa => {
                 const kernel_proto_ty_id = try self.functionType(Type.void, &.{ptr_anyerror_ty});
 
                 try section.emit(self.spv.gpa, .OpFunction, .{
@@ -2873,7 +2884,7 @@ const NavGen = struct {
 
         const execution_mode: spec.ExecutionModel = switch (target.os.tag) {
             .vulkan, .opengl => .GLCompute,
-            .opencl => .Kernel,
+            .opencl, .amdhsa => .Kernel,
             else => unreachable,
         };
 
@@ -3627,8 +3638,13 @@ const NavGen = struct {
             .integer, .strange_integer => {
                 const abs_value = try self.buildUnary(.i_abs, value);
 
-                if (value.ty.intInfo(zcu).signedness == .signed and self.spv.hasFeature(.shader)) {
-                    return self.todo("perform bitcast after @abs", .{});
+                switch (self.spv.target.os.tag) {
+                    .vulkan, .opengl => {
+                        if (value.ty.intInfo(zcu).signedness == .signed) {
+                            return self.todo("perform bitcast after @abs", .{});
+                        }
+                    },
+                    else => {},
                 }
 
                 return try self.normalize(abs_value, self.arithmeticTypeInfo(result_ty));
@@ -3645,6 +3661,7 @@ const NavGen = struct {
         comptime ucmp: CmpPredicate,
         comptime scmp: CmpPredicate,
     ) !?IdRef {
+        _ = scmp;
         // Note: OpIAddCarry and OpISubBorrow are not really useful here: For unsigned numbers,
         // there is in both cases only one extra operation required. For signed operations,
         // the overflow bit is set then going from 0x80.. to 0x00.., but this doesn't actually
@@ -3673,26 +3690,30 @@ const NavGen = struct {
             // Overflow happened if the result is smaller than either of the operands. It doesn't matter which.
             // For subtraction the conditions need to be swapped.
             .unsigned => try self.buildCmp(ucmp, result, lhs),
-            // For addition, overflow happened if:
-            // - rhs is negative and value > lhs
-            // - rhs is positive and value < lhs
-            // This can be shortened to:
-            //   (rhs < 0 and value > lhs) or (rhs >= 0 and value <= lhs)
-            // = (rhs < 0) == (value > lhs)
-            // = (rhs < 0) == (lhs < value)
-            // Note that signed overflow is also wrapping in spir-v.
-            // For subtraction, overflow happened if:
-            // - rhs is negative and value < lhs
-            // - rhs is positive and value > lhs
-            // This can be shortened to:
-            //   (rhs < 0 and value < lhs) or (rhs >= 0 and value >= lhs)
-            // = (rhs < 0) == (value < lhs)
-            // = (rhs < 0) == (lhs > value)
+            // For signed operations, we check the signs of the operands and the result.
             .signed => blk: {
+                // Signed overflow detection using the sign bits of the operands and the result.
+                // For addition (a + b), overflow occurs if the operands have the same sign
+                // and the result's sign is different from the operands' sign.
+                //   (sign(a) == sign(b)) && (sign(a) != sign(result))
+                // For subtraction (a - b), overflow occurs if the operands have different signs
+                // and the result's sign is different from the minuend's (a's) sign.
+                //   (sign(a) != sign(b)) && (sign(a) != sign(result))
                 const zero = Temporary.init(rhs.ty, try self.constInt(rhs.ty, 0));
-                const rhs_lt_zero = try self.buildCmp(.s_lt, rhs, zero);
-                const result_gt_lhs = try self.buildCmp(scmp, lhs, result);
-                break :blk try self.buildCmp(.l_eq, rhs_lt_zero, result_gt_lhs);
+
+                const lhs_is_neg = try self.buildCmp(.s_lt, lhs, zero);
+                const rhs_is_neg = try self.buildCmp(.s_lt, rhs, zero);
+                const result_is_neg = try self.buildCmp(.s_lt, result, zero);
+
+                const signs_match = try self.buildCmp(.l_eq, lhs_is_neg, rhs_is_neg);
+                const result_sign_differs = try self.buildCmp(.l_ne, lhs_is_neg, result_is_neg);
+
+                const overflow_condition = if (add == .i_add)
+                    signs_match
+                else // .i_sub
+                    try self.buildUnary(.l_not, signs_match);
+
+                break :blk try self.buildBinary(.l_and, overflow_condition, result_sign_differs);
             },
         };
 
@@ -4153,22 +4174,25 @@ const NavGen = struct {
         defer self.gpa.free(ids);
 
         const result_id = self.spv.allocId();
-        if (self.spv.hasFeature(.addresses)) {
-            try self.func.body.emit(self.spv.gpa, .OpInBoundsPtrAccessChain, .{
-                .id_result_type = result_ty_id,
-                .id_result = result_id,
-                .base = base,
-                .element = element,
-                .indexes = ids,
-            });
-        } else {
-            try self.func.body.emit(self.spv.gpa, .OpPtrAccessChain, .{
-                .id_result_type = result_ty_id,
-                .id_result = result_id,
-                .base = base,
-                .element = element,
-                .indexes = ids,
-            });
+        switch (self.spv.target.os.tag) {
+            .opencl, .amdhsa => {
+                try self.func.body.emit(self.spv.gpa, .OpInBoundsPtrAccessChain, .{
+                    .id_result_type = result_ty_id,
+                    .id_result = result_id,
+                    .base = base,
+                    .element = element,
+                    .indexes = ids,
+                });
+            },
+            else => {
+                try self.func.body.emit(self.spv.gpa, .OpPtrAccessChain, .{
+                    .id_result_type = result_ty_id,
+                    .id_result = result_id,
+                    .base = base,
+                    .element = element,
+                    .indexes = ids,
+                });
+            },
         }
         return result_id;
     }
@@ -4678,9 +4702,8 @@ const NavGen = struct {
                         const field_int_ty = try self.pt.intType(.unsigned, ty_bit_size);
                         const field_int_id = blk: {
                             if (field_ty.isPtrAtRuntime(zcu)) {
-                                assert(self.spv.hasFeature(.addresses) or
-                                    (self.spv.hasFeature(.physical_storage_buffer) and
-                                        field_ty.ptrAddressSpace(zcu) == .storage_buffer));
+                                assert(self.spv.target.cpu.arch == .spirv64 and
+                                    field_ty.ptrAddressSpace(zcu) == .storage_buffer);
                                 break :blk try self.intFromPtr(field_id);
                             }
                             break :blk try self.bitCast(field_int_ty, field_ty, field_id);
@@ -5330,7 +5353,10 @@ const NavGen = struct {
             .initializer = options.initializer,
         });
 
-        if (self.spv.hasFeature(.shader)) return var_id;
+        switch (self.spv.target.os.tag) {
+            .vulkan, .opengl => return var_id,
+            else => {},
+        }
 
         switch (options.storage_class) {
             .Generic => {

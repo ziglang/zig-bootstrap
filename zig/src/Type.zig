@@ -177,6 +177,7 @@ pub fn print(ty: Type, writer: anytype, pt: Zcu.PerThread) @TypeOf(writer).Error
     const zcu = pt.zcu;
     const ip = &zcu.intern_pool;
     switch (ip.indexToKey(ty.toIntern())) {
+        .undef => return writer.writeAll("@as(type, undefined)"),
         .int_type => |int_type| {
             const sign_char: u8 = switch (int_type.signedness) {
                 .signed => 'i',
@@ -398,7 +399,6 @@ pub fn print(ty: Type, writer: anytype, pt: Zcu.PerThread) @TypeOf(writer).Error
         },
 
         // values, not types
-        .undef,
         .simple_value,
         .variable,
         .@"extern",
@@ -1602,7 +1602,7 @@ fn abiSizeInnerOptional(
     };
 }
 
-pub fn ptrAbiAlignment(target: Target) Alignment {
+pub fn ptrAbiAlignment(target: *const Target) Alignment {
     return Alignment.fromNonzeroByteUnits(@divExact(target.ptrBitWidth(), 8));
 }
 
@@ -2395,7 +2395,7 @@ pub fn isAnyFloat(ty: Type) bool {
 
 /// Asserts the type is a fixed-size float or comptime_float.
 /// Returns 128 for comptime_float types.
-pub fn floatBits(ty: Type, target: Target) u16 {
+pub fn floatBits(ty: Type, target: *const Target) u16 {
     return switch (ty.toIntern()) {
         .f16_type => 16,
         .f32_type => 32,
@@ -3915,29 +3915,32 @@ fn resolveUnionInner(
 pub fn getUnionLayout(loaded_union: InternPool.LoadedUnionType, zcu: *const Zcu) Zcu.UnionLayout {
     const ip = &zcu.intern_pool;
     assert(loaded_union.haveLayout(ip));
-    var most_aligned_field: u32 = undefined;
-    var most_aligned_field_size: u64 = undefined;
-    var biggest_field: u32 = undefined;
+    var most_aligned_field: u32 = 0;
+    var most_aligned_field_align: InternPool.Alignment = .@"1";
+    var most_aligned_field_size: u64 = 0;
+    var biggest_field: u32 = 0;
     var payload_size: u64 = 0;
     var payload_align: InternPool.Alignment = .@"1";
-    for (loaded_union.field_types.get(ip), 0..) |field_ty, field_index| {
-        if (!Type.fromInterned(field_ty).hasRuntimeBitsIgnoreComptime(zcu)) continue;
+    for (loaded_union.field_types.get(ip), 0..) |field_ty_ip_index, field_index| {
+        const field_ty: Type = .fromInterned(field_ty_ip_index);
+        if (field_ty.isNoReturn(zcu)) continue;
 
         const explicit_align = loaded_union.fieldAlign(ip, field_index);
         const field_align = if (explicit_align != .none)
             explicit_align
         else
-            Type.fromInterned(field_ty).abiAlignment(zcu);
-        const field_size = Type.fromInterned(field_ty).abiSize(zcu);
+            field_ty.abiAlignment(zcu);
+        const field_size = field_ty.abiSize(zcu);
         if (field_size > payload_size) {
             payload_size = field_size;
             biggest_field = @intCast(field_index);
         }
-        if (field_align.compare(.gte, payload_align)) {
-            payload_align = field_align;
+        if (field_size > 0 and field_align.compare(.gte, most_aligned_field_align)) {
             most_aligned_field = @intCast(field_index);
+            most_aligned_field_align = field_align;
             most_aligned_field_size = field_size;
         }
+        payload_align = payload_align.max(field_align);
     }
     const have_tag = loaded_union.flagsUnordered(ip).runtime_tag.hasTag();
     if (!have_tag or !Type.fromInterned(loaded_union.enum_tag_ty).hasRuntimeBits(zcu)) {
@@ -4185,6 +4188,6 @@ pub fn smallestUnsignedBits(max: u64) u16 {
 /// to packed struct layout to find out all the places in the codebase you need to edit!
 pub const packed_struct_layout_version = 2;
 
-fn cTypeAlign(target: Target, c_type: Target.CType) Alignment {
+fn cTypeAlign(target: *const Target, c_type: Target.CType) Alignment {
     return Alignment.fromByteUnits(target.cTypeAlignment(c_type));
 }
