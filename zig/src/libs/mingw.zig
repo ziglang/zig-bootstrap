@@ -931,7 +931,6 @@ const mingw32_x86_src = [_][]const u8{
     "math" ++ path.sep_str ++ "x86" ++ path.sep_str ++ "exp2l.S",
     "math" ++ path.sep_str ++ "x86" ++ path.sep_str ++ "expl.c",
     "math" ++ path.sep_str ++ "x86" ++ path.sep_str ++ "expm1l.c",
-    "math" ++ path.sep_str ++ "x86" ++ path.sep_str ++ "floorl.S",
     "math" ++ path.sep_str ++ "x86" ++ path.sep_str ++ "fmodl.c",
     "math" ++ path.sep_str ++ "x86" ++ path.sep_str ++ "fucom.c",
     "math" ++ path.sep_str ++ "x86" ++ path.sep_str ++ "ilogbl.S",
@@ -975,7 +974,6 @@ const mingw32_x86_32_src = [_][]const u8{
     "math" ++ path.sep_str ++ "x86" ++ path.sep_str ++ "atan2f.c",
     "math" ++ path.sep_str ++ "x86" ++ path.sep_str ++ "atanf.c",
     "math" ++ path.sep_str ++ "x86" ++ path.sep_str ++ "ceilf.S",
-    "math" ++ path.sep_str ++ "x86" ++ path.sep_str ++ "floorf.S",
     "math" ++ path.sep_str ++ "x86" ++ path.sep_str ++ "fmodf.c",
 };
 
@@ -1014,6 +1012,7 @@ const mingw32_winpthreads_src = [_][]const u8{
     "winpthreads" ++ path.sep_str ++ "thread.c",
 };
 
+// Note: kernel32 and ntdll are always linked even without targeting MinGW-w64.
 pub const always_link_libs = [_][]const u8{
     "api-ms-win-crt-conio-l1-1-0",
     "api-ms-win-crt-convert-l1-1-0",
@@ -1031,8 +1030,6 @@ pub const always_link_libs = [_][]const u8{
     "api-ms-win-crt-time-l1-1-0",
     "api-ms-win-crt-utility-l1-1-0",
     "advapi32",
-    "kernel32",
-    "ntdll",
     "shell32",
     "user32",
 };

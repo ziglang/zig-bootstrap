@@ -1480,16 +1480,8 @@ const test_targets = blk: {
             .target = .{
                 .cpu_arch = .aarch64,
                 .os_tag = .windows,
-                .abi = .none,
+                .abi = .msvc,
             },
-        },
-        .{
-            .target = .{
-                .cpu_arch = .aarch64,
-                .os_tag = .windows,
-                .abi = .gnu,
-            },
-            .link_libc = true,
         },
         .{
             .target = .{
@@ -1499,27 +1491,18 @@ const test_targets = blk: {
             },
             .link_libc = true,
         },
-
         .{
             .target = .{
-                .cpu_arch = .x86,
-                .os_tag = .windows,
-                .abi = .none,
-            },
-        },
-        .{
-            .target = .{
-                .cpu_arch = .x86,
+                .cpu_arch = .aarch64,
                 .os_tag = .windows,
                 .abi = .gnu,
             },
-            .link_libc = true,
         },
         .{
             .target = .{
-                .cpu_arch = .x86,
+                .cpu_arch = .aarch64,
                 .os_tag = .windows,
-                .abi = .msvc,
+                .abi = .gnu,
             },
             .link_libc = true,
         },
@@ -1528,8 +1511,16 @@ const test_targets = blk: {
             .target = .{
                 .cpu_arch = .thumb,
                 .os_tag = .windows,
-                .abi = .none,
+                .abi = .msvc,
             },
+        },
+        .{
+            .target = .{
+                .cpu_arch = .thumb,
+                .os_tag = .windows,
+                .abi = .msvc,
+            },
+            .link_libc = true,
         },
         // https://github.com/ziglang/zig/issues/24016
         // .{
@@ -1538,13 +1529,43 @@ const test_targets = blk: {
         //         .os_tag = .windows,
         //         .abi = .gnu,
         //     },
+        // },
+        // .{
+        //     .target = .{
+        //         .cpu_arch = .thumb,
+        //         .os_tag = .windows,
+        //         .abi = .gnu,
+        //     },
         //     .link_libc = true,
         // },
+
         .{
             .target = .{
-                .cpu_arch = .thumb,
+                .cpu_arch = .x86,
                 .os_tag = .windows,
                 .abi = .msvc,
+            },
+        },
+        .{
+            .target = .{
+                .cpu_arch = .x86,
+                .os_tag = .windows,
+                .abi = .msvc,
+            },
+            .link_libc = true,
+        },
+        .{
+            .target = .{
+                .cpu_arch = .x86,
+                .os_tag = .windows,
+                .abi = .gnu,
+            },
+        },
+        .{
+            .target = .{
+                .cpu_arch = .x86,
+                .os_tag = .windows,
+                .abi = .gnu,
             },
             .link_libc = true,
         },
@@ -1553,7 +1574,7 @@ const test_targets = blk: {
             .target = .{
                 .cpu_arch = .x86_64,
                 .os_tag = .windows,
-                .abi = .none,
+                .abi = .msvc,
             },
             .use_llvm = false,
             .use_lld = false,
@@ -1562,23 +1583,14 @@ const test_targets = blk: {
             .target = .{
                 .cpu_arch = .x86_64,
                 .os_tag = .windows,
-                .abi = .gnu,
-            },
-            .use_llvm = false,
-            .use_lld = false,
-        },
-        .{
-            .target = .{
-                .cpu_arch = .x86_64,
-                .os_tag = .windows,
-                .abi = .none,
+                .abi = .msvc,
             },
         },
         .{
             .target = .{
                 .cpu_arch = .x86_64,
                 .os_tag = .windows,
-                .abi = .gnu,
+                .abi = .msvc,
             },
             .link_libc = true,
         },
@@ -1586,7 +1598,23 @@ const test_targets = blk: {
             .target = .{
                 .cpu_arch = .x86_64,
                 .os_tag = .windows,
-                .abi = .msvc,
+                .abi = .gnu,
+            },
+            .use_llvm = false,
+            .use_lld = false,
+        },
+        .{
+            .target = .{
+                .cpu_arch = .x86_64,
+                .os_tag = .windows,
+                .abi = .gnu,
+            },
+        },
+        .{
+            .target = .{
+                .cpu_arch = .x86_64,
+                .os_tag = .windows,
+                .abi = .gnu,
             },
             .link_libc = true,
         },
@@ -2280,6 +2308,7 @@ const ModuleTestOptions = struct {
     desc: []const u8,
     optimize_modes: []const OptimizeMode,
     include_paths: []const []const u8,
+    windows_libs: []const []const u8,
     skip_single_threaded: bool,
     skip_non_native: bool,
     skip_freebsd: bool,
@@ -2409,6 +2438,10 @@ pub fn addModuleTests(b: *std.Build, options: ModuleTestOptions) *Step {
 
         for (options.include_paths) |include_path| these_tests.addIncludePath(b.path(include_path));
 
+        if (target.os.tag == .windows) {
+            for (options.windows_libs) |lib| these_tests.linkSystemLibrary(lib);
+        }
+
         const qualified_name = b.fmt("{s}-{s}-{s}-{s}{s}{s}{s}{s}{s}{s}", .{
             options.name,
             triple_txt,
@@ -2517,7 +2550,7 @@ pub fn addModuleTests(b: *std.Build, options: ModuleTestOptions) *Step {
     return step;
 }
 
-fn wouldUseLlvm(use_llvm: ?bool, query: std.Target.Query, optimize_mode: OptimizeMode) bool {
+pub fn wouldUseLlvm(use_llvm: ?bool, query: std.Target.Query, optimize_mode: OptimizeMode) bool {
     if (use_llvm) |x| return x;
     if (query.ofmt == .c) return false;
     switch (optimize_mode) {
@@ -2629,9 +2662,8 @@ pub fn addCAbiTests(b: *std.Build, options: CAbiTestOptions) *Step {
 pub fn addCases(
     b: *std.Build,
     parent_step: *Step,
-    test_filters: []const []const u8,
-    test_target_filters: []const []const u8,
     target: std.Build.ResolvedTarget,
+    case_test_options: @import("src/Cases.zig").CaseTestOptions,
     translate_c_options: @import("src/Cases.zig").TranslateCOptions,
     build_options: @import("cases.zig").BuildOptions,
 ) !void {
@@ -2646,13 +2678,19 @@ pub fn addCases(
     cases.addFromDir(dir, b);
     try @import("cases.zig").addCases(&cases, build_options, b);
 
-    cases.lowerToTranslateCSteps(b, parent_step, test_filters, test_target_filters, target, translate_c_options);
+    cases.lowerToTranslateCSteps(
+        b,
+        parent_step,
+        case_test_options.test_filters,
+        case_test_options.test_target_filters,
+        target,
+        translate_c_options,
+    );
 
     cases.lowerToBuildSteps(
         b,
         parent_step,
-        test_filters,
-        test_target_filters,
+        case_test_options,
     );
 }
 
@@ -2698,6 +2736,10 @@ pub fn addIncrementalTests(b: *std.Build, test_step: *Step) !void {
             .optimize = .Debug,
         }),
     });
+
+    if (b.graph.host.result.os.tag == .windows) {
+        incr_check.root_module.linkSystemLibrary("advapi32", .{});
+    }
 
     var dir = try b.build_root.handle.openDir("test/incremental", .{ .iterate = true });
     defer dir.close();
