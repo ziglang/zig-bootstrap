@@ -85,6 +85,19 @@ pub fn defaultSingleThreaded(target: *const std.Target) bool {
     return false;
 }
 
+pub fn useEmulatedTls(target: *const std.Target) bool {
+    if (target.abi.isAndroid()) {
+        if (target.os.version_range.linux.android < 29) return true;
+        return false;
+    }
+    if (target.abi.isOpenHarmony()) return true;
+    return switch (target.os.tag) {
+        .openbsd => true,
+        .windows => target.abi == .cygnus,
+        else => false,
+    };
+}
+
 pub fn hasValgrindSupport(target: *const std.Target, backend: std.builtin.CompilerBackend) bool {
     // We can't currently output the necessary Valgrind client request assembly when using the C
     // backend and compiling with an MSVC-like compiler.
@@ -222,10 +235,16 @@ pub fn hasLldSupport(ofmt: std.Target.ObjectFormat) bool {
 /// than or equal to the number of behavior tests as the respective LLVM backend.
 pub fn selfHostedBackendIsAsRobustAsLlvm(target: *const std.Target) bool {
     if (target.cpu.arch.isSpirV()) return true;
-    if (target.cpu.arch == .x86_64 and target.ptrBitWidth() == 64) return switch (target.ofmt) {
-        .elf, .macho => true,
-        else => false,
-    };
+    if (target.cpu.arch == .x86_64 and target.ptrBitWidth() == 64) {
+        if (target.os.tag == .netbsd) {
+            // Self-hosted linker needs work: https://github.com/ziglang/zig/issues/24341
+            return false;
+        }
+        return switch (target.ofmt) {
+            .elf, .macho => true,
+            else => false,
+        };
+    }
     return false;
 }
 
