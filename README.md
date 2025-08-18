@@ -102,7 +102,7 @@ is more portable across Linux distributions.
 | Target                     | Status |
 |----------------------------|--------|
 | `aarch64-freebsd-none`     | OK     |
-| `arm-freebsd-eabihf`       | [#235](https://github.com/ziglang/zig-bootstrap/issues/235) |
+| `arm-freebsd-eabihf`       | OK     |
 | `powerpc64-freebsd-none`   | OK     |
 | `powerpc64le-freebsd-none` | OK     |
 | `riscv64-freebsd-none`     | OK     |
