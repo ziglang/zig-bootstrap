@@ -99,8 +99,6 @@ is more portable across Linux distributions.
 
 #### FreeBSD
 
-**Note:** You currently need to use `freebsd.14.0` or later, not just `freebsd`.
-
 | Target                     | Status |
 |----------------------------|--------|
 | `aarch64-freebsd-none`     | OK     |
@@ -181,8 +179,6 @@ is more portable across Linux distributions.
 | `x86_64-macos-none`  | OK     |
 
 #### NetBSD
-
-**Note:** You currently need to use `netbsd.10.1` or later, not just `netbsd`.
 
 | Target                   | Status |
 |--------------------------|--------|
