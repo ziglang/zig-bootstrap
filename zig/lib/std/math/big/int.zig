@@ -1412,7 +1412,7 @@ pub const Mutable = struct {
     ///
     /// `limbs_buffer` is used for temporary storage during the operation. When this function returns,
     /// it will have the same length as it had when the function was called.
-    pub fn gcd(rma: *Mutable, x: Const, y: Const, limbs_buffer: *std.ArrayList(Limb)) !void {
+    pub fn gcd(rma: *Mutable, x: Const, y: Const, limbs_buffer: *std.array_list.Managed(Limb)) !void {
         const prev_len = limbs_buffer.items.len;
         defer limbs_buffer.shrinkRetainingCapacity(prev_len);
         const x_copy = if (rma.limbs.ptr == x.limbs.ptr) blk: {
@@ -1538,13 +1538,13 @@ pub const Mutable = struct {
     /// Asserts that `rma` has enough limbs to store the result. Upper bound is given by `calcGcdNoAliasLimbLen`.
     ///
     /// `limbs_buffer` is used for temporary storage during the operation.
-    pub fn gcdNoAlias(rma: *Mutable, x: Const, y: Const, limbs_buffer: *std.ArrayList(Limb)) !void {
+    pub fn gcdNoAlias(rma: *Mutable, x: Const, y: Const, limbs_buffer: *std.array_list.Managed(Limb)) !void {
         assert(rma.limbs.ptr != x.limbs.ptr); // illegal aliasing
         assert(rma.limbs.ptr != y.limbs.ptr); // illegal aliasing
         return gcdLehmer(rma, x, y, limbs_buffer);
     }
 
-    fn gcdLehmer(result: *Mutable, xa: Const, ya: Const, limbs_buffer: *std.ArrayList(Limb)) !void {
+    fn gcdLehmer(result: *Mutable, xa: Const, ya: Const, limbs_buffer: *std.array_list.Managed(Limb)) !void {
         var x = try xa.toManaged(limbs_buffer.allocator);
         defer x.deinit();
         x.abs();
@@ -1710,7 +1710,7 @@ pub const Mutable = struct {
 
         if (xy_trailing != 0 and r.limbs[r.len - 1] != 0) {
             // Manually shift here since we know its limb aligned.
-            mem.copyBackwards(Limb, r.limbs[xy_trailing..], r.limbs[0..r.len]);
+            @memmove(r.limbs[xy_trailing..][0..r.len], r.limbs[0..r.len]);
             @memset(r.limbs[0..xy_trailing], 0);
             r.len += xy_trailing;
         }
@@ -2028,6 +2028,14 @@ pub const Mutable = struct {
     pub fn normalize(r: *Mutable, length: usize) void {
         r.len = llnormalize(r.limbs[0..length]);
     }
+
+    pub fn format(self: Mutable, w: *std.io.Writer) std.io.Writer.Error!void {
+        return formatNumber(self, w, .{});
+    }
+
+    pub fn formatNumber(self: Const, w: *std.io.Writer, n: std.fmt.Number) std.io.Writer.Error!void {
+        return self.toConst().formatNumber(w, n);
+    }
 };
 
 /// A arbitrary-precision big integer, with a fixed set of immutable limbs.
@@ -2214,9 +2222,6 @@ pub const Const = struct {
         TargetTooSmall,
     };
 
-    /// Deprecated; use `toInt`.
-    pub const to = toInt;
-
     /// Convert `self` to `Int`.
     ///
     /// Returns an error if self cannot be narrowed into the requested type without truncation.
@@ -2317,50 +2322,25 @@ pub const Const = struct {
         return .{ normalized_res.reconstruct(if (self.positive) .positive else .negative), exactness };
     }
 
-    /// To allow `std.fmt.format` to work with this type.
     /// If the absolute value of integer is greater than or equal to `pow(2, 64 * @sizeOf(usize) * 8)`,
     /// this function will fail to print the string, printing "(BigInt)" instead of a number.
     /// This is because the rendering algorithm requires reversing a string, which requires O(N) memory.
     /// See `toString` and `toStringAlloc` for a way to print big integers without failure.
-    pub fn format(
-        self: Const,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        out_stream: anytype,
-    ) !void {
-        _ = options;
-        comptime var base = 10;
-        comptime var case: std.fmt.Case = .lower;
-
-        if (fmt.len == 0 or comptime mem.eql(u8, fmt, "d")) {
-            base = 10;
-            case = .lower;
-        } else if (comptime mem.eql(u8, fmt, "b")) {
-            base = 2;
-            case = .lower;
-        } else if (comptime mem.eql(u8, fmt, "x")) {
-            base = 16;
-            case = .lower;
-        } else if (comptime mem.eql(u8, fmt, "X")) {
-            base = 16;
-            case = .upper;
-        } else {
-            std.fmt.invalidFmtError(fmt, self);
-        }
-
+    pub fn formatNumber(self: Const, w: *std.io.Writer, number: std.fmt.Number) std.io.Writer.Error!void {
         const available_len = 64;
         if (self.limbs.len > available_len)
-            return out_stream.writeAll("(BigInt)");
+            return w.writeAll("(BigInt)");
 
-        var limbs: [calcToStringLimbsBufferLen(available_len, base)]Limb = undefined;
+        var limbs: [calcToStringLimbsBufferLen(available_len, 10)]Limb = undefined;
 
         const biggest: Const = .{
             .limbs = &([1]Limb{comptime math.maxInt(Limb)} ** available_len),
             .positive = false,
         };
-        var buf: [biggest.sizeInBaseUpperBound(base)]u8 = undefined;
-        const len = self.toString(&buf, base, case, &limbs);
-        return out_stream.writeAll(buf[0..len]);
+        var buf: [biggest.sizeInBaseUpperBound(2)]u8 = undefined;
+        const base: u8 = number.mode.base() orelse @panic("TODO print big int in scientific form");
+        const len = self.toString(&buf, base, number.case, &limbs);
+        return w.writeAll(buf[0..len]);
     }
 
     /// Converts self to a string in the requested base.
@@ -2872,9 +2852,6 @@ pub const Managed = struct {
 
     pub const ConvertError = Const.ConvertError;
 
-    /// Deprecated; use `toInt`.
-    pub const to = toInt;
-
     /// Convert `self` to `Int`.
     ///
     /// Returns an error if self cannot be narrowed into the requested type without truncation.
@@ -2930,17 +2907,16 @@ pub const Managed = struct {
     }
 
     /// To allow `std.fmt.format` to work with `Managed`.
+    pub fn format(self: Managed, w: *std.io.Writer) std.io.Writer.Error!void {
+        return formatNumber(self, w, .{});
+    }
+
     /// If the absolute value of integer is greater than or equal to `pow(2, 64 * @sizeOf(usize) * 8)`,
     /// this function will fail to print the string, printing "(BigInt)" instead of a number.
     /// This is because the rendering algorithm requires reversing a string, which requires O(N) memory.
     /// See `toString` and `toStringAlloc` for a way to print big integers without failure.
-    pub fn format(
-        self: Managed,
-        comptime fmt: []const u8,
-        options: std.fmt.FormatOptions,
-        out_stream: anytype,
-    ) !void {
-        return self.toConst().format(fmt, options, out_stream);
+    pub fn formatNumber(self: Managed, w: *std.io.Writer, n: std.fmt.Number) std.io.Writer.Error!void {
+        return self.toConst().formatNumber(w, n);
     }
 
     /// Returns math.Order.lt, math.Order.eq, math.Order.gt if |a| < |b|, |a| ==
@@ -3291,7 +3267,7 @@ pub const Managed = struct {
     pub fn gcd(rma: *Managed, x: *const Managed, y: *const Managed) !void {
         try rma.ensureCapacity(@min(x.len(), y.len()));
         var m = rma.toMutable();
-        var limbs_buffer = std.ArrayList(Limb).init(rma.allocator);
+        var limbs_buffer = std.array_list.Managed(Limb).init(rma.allocator);
         defer limbs_buffer.deinit();
         try m.gcd(x.toConst(), y.toConst(), &limbs_buffer);
         rma.setMetadata(m.positive, m.len);
@@ -3860,8 +3836,7 @@ fn llshl(r: []Limb, a: []const Limb, shift: usize) usize {
         std.debug.assert(@intFromPtr(r.ptr) >= @intFromPtr(a.ptr));
 
     if (shift == 0) {
-        if (a.ptr != r.ptr)
-            std.mem.copyBackwards(Limb, r[0..a.len], a);
+        if (a.ptr != r.ptr) @memmove(r[0..a.len], a);
         return a.len;
     }
     if (shift >= limb_bits) {
@@ -3915,8 +3890,7 @@ fn llshr(r: []Limb, a: []const Limb, shift: usize) usize {
     if (shift == 0) {
         std.debug.assert(r.len >= a.len);
 
-        if (a.ptr != r.ptr)
-            std.mem.copyForwards(Limb, r[0..a.len], a);
+        if (a.ptr != r.ptr) @memmove(r[0..a.len], a);
         return a.len;
     }
     if (shift >= limb_bits) {

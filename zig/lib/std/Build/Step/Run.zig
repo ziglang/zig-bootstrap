@@ -73,9 +73,12 @@ skip_foreign_checks: bool,
 /// external executor (such as qemu) but not fail if the executor is unavailable.
 failing_to_execute_foreign_is_an_error: bool,
 
+/// Deprecated in favor of `stdio_limit`.
+max_stdio_size: usize,
+
 /// If stderr or stdout exceeds this amount, the child process is killed and
 /// the step fails.
-max_stdio_size: usize,
+stdio_limit: std.Io.Limit,
 
 captured_stdout: ?*Output,
 captured_stderr: ?*Output,
@@ -169,7 +172,7 @@ pub const Output = struct {
 pub fn create(owner: *std.Build, name: []const u8) *Run {
     const run = owner.allocator.create(Run) catch @panic("OOM");
     run.* = .{
-        .step = Step.init(.{
+        .step = .init(.{
             .id = base_id,
             .name = name,
             .owner = owner,
@@ -186,6 +189,7 @@ pub fn create(owner: *std.Build, name: []const u8) *Run {
         .skip_foreign_checks = false,
         .failing_to_execute_foreign_is_an_error = true,
         .max_stdio_size = 10 * 1024 * 1024,
+        .stdio_limit = .unlimited,
         .captured_stdout = null,
         .captured_stderr = null,
         .dep_output_file = null,
@@ -675,15 +679,15 @@ fn make(step: *Step, options: Step.MakeOptions) !void {
     const run: *Run = @fieldParentPtr("step", step);
     const has_side_effects = run.hasSideEffects();
 
-    var argv_list = std.ArrayList([]const u8).init(arena);
-    var output_placeholders = std.ArrayList(IndexedOutput).init(arena);
+    var argv_list = std.array_list.Managed([]const u8).init(arena);
+    var output_placeholders = std.array_list.Managed(IndexedOutput).init(arena);
 
     var man = b.graph.cache.obtain();
     defer man.deinit();
 
     if (run.env_map) |env_map| {
         const KV = struct { []const u8, []const u8 };
-        var kv_pairs = try std.ArrayList(KV).initCapacity(arena, env_map.count());
+        var kv_pairs = try std.array_list.Managed(KV).initCapacity(arena, env_map.count());
         var iter = env_map.iterator();
         while (iter.next()) |entry| {
             kv_pairs.appendAssumeCapacity(.{ entry.key_ptr.*, entry.value_ptr.* });
@@ -832,7 +836,7 @@ fn make(step: *Step, options: Step.MakeOptions) !void {
                 else => unreachable,
             };
             b.cache_root.handle.makePath(output_sub_dir_path) catch |err| {
-                return step.fail("unable to make path '{}{s}': {s}", .{
+                return step.fail("unable to make path '{f}{s}': {s}", .{
                     b.cache_root, output_sub_dir_path, @errorName(err),
                 });
             };
@@ -864,7 +868,7 @@ fn make(step: *Step, options: Step.MakeOptions) !void {
             else => unreachable,
         };
         b.cache_root.handle.makePath(output_sub_dir_path) catch |err| {
-            return step.fail("unable to make path '{}{s}': {s}", .{
+            return step.fail("unable to make path '{f}{s}': {s}", .{
                 b.cache_root, output_sub_dir_path, @errorName(err),
             });
         };
@@ -903,21 +907,21 @@ fn make(step: *Step, options: Step.MakeOptions) !void {
         b.cache_root.handle.rename(tmp_dir_path, o_sub_path) catch |err| {
             if (err == error.PathAlreadyExists) {
                 b.cache_root.handle.deleteTree(o_sub_path) catch |del_err| {
-                    return step.fail("unable to remove dir '{}'{s}: {s}", .{
+                    return step.fail("unable to remove dir '{f}'{s}: {s}", .{
                         b.cache_root,
                         tmp_dir_path,
                         @errorName(del_err),
                     });
                 };
                 b.cache_root.handle.rename(tmp_dir_path, o_sub_path) catch |retry_err| {
-                    return step.fail("unable to rename dir '{}{s}' to '{}{s}': {s}", .{
+                    return step.fail("unable to rename dir '{f}{s}' to '{f}{s}': {s}", .{
                         b.cache_root,          tmp_dir_path,
                         b.cache_root,          o_sub_path,
                         @errorName(retry_err),
                     });
                 };
             } else {
-                return step.fail("unable to rename dir '{}{s}' to '{}{s}': {s}", .{
+                return step.fail("unable to rename dir '{f}{s}' to '{f}{s}': {s}", .{
                     b.cache_root,    tmp_dir_path,
                     b.cache_root,    o_sub_path,
                     @errorName(err),
@@ -940,7 +944,7 @@ fn make(step: *Step, options: Step.MakeOptions) !void {
 
 pub fn rerunInFuzzMode(
     run: *Run,
-    web_server: *std.Build.Fuzz.WebServer,
+    fuzz: *std.Build.Fuzz,
     unit_test_index: u32,
     prog_node: std.Progress.Node,
 ) !void {
@@ -964,7 +968,7 @@ pub fn rerunInFuzzMode(
             .artifact => |pa| {
                 const artifact = pa.artifact;
                 const file_path: []const u8 = p: {
-                    if (artifact == run.producer.?) break :p b.fmt("{}", .{run.rebuilt_executable.?});
+                    if (artifact == run.producer.?) break :p b.fmt("{f}", .{run.rebuilt_executable.?});
                     break :p artifact.installed_path orelse artifact.generated_bin.?.path.?;
                 };
                 try argv_list.append(arena, b.fmt("{s}{s}", .{
@@ -980,7 +984,7 @@ pub fn rerunInFuzzMode(
     const tmp_dir_path = "tmp" ++ fs.path.sep_str ++ std.fmt.hex(rand_int);
     try runCommand(run, argv_list.items, has_side_effects, tmp_dir_path, prog_node, .{
         .unit_test_index = unit_test_index,
-        .web_server = web_server,
+        .fuzz = fuzz,
     });
 }
 
@@ -1011,24 +1015,17 @@ fn populateGeneratedPaths(
     }
 }
 
-fn formatTerm(
-    term: ?std.process.Child.Term,
-    comptime fmt: []const u8,
-    options: std.fmt.FormatOptions,
-    writer: anytype,
-) !void {
-    _ = fmt;
-    _ = options;
+fn formatTerm(term: ?std.process.Child.Term, w: *std.Io.Writer) std.Io.Writer.Error!void {
     if (term) |t| switch (t) {
-        .Exited => |code| try writer.print("exited with code {}", .{code}),
-        .Signal => |sig| try writer.print("terminated with signal {}", .{sig}),
-        .Stopped => |sig| try writer.print("stopped with signal {}", .{sig}),
-        .Unknown => |code| try writer.print("terminated for unknown reason with code {}", .{code}),
+        .Exited => |code| try w.print("exited with code {d}", .{code}),
+        .Signal => |sig| try w.print("terminated with signal {d}", .{sig}),
+        .Stopped => |sig| try w.print("stopped with signal {d}", .{sig}),
+        .Unknown => |code| try w.print("terminated for unknown reason with code {d}", .{code}),
     } else {
-        try writer.writeAll("exited with any code");
+        try w.writeAll("exited with any code");
     }
 }
-fn fmtTerm(term: ?std.process.Child.Term) std.fmt.Formatter(formatTerm) {
+fn fmtTerm(term: ?std.process.Child.Term) std.fmt.Formatter(?std.process.Child.Term, formatTerm) {
     return .{ .data = term };
 }
 
@@ -1057,7 +1054,7 @@ fn termMatches(expected: ?std.process.Child.Term, actual: std.process.Child.Term
 }
 
 const FuzzContext = struct {
-    web_server: *std.Build.Fuzz.WebServer,
+    fuzz: *std.Build.Fuzz,
     unit_test_index: u32,
 };
 
@@ -1083,10 +1080,12 @@ fn runCommand(
         else => false,
     };
 
-    var interp_argv = std.ArrayList([]const u8).init(b.allocator);
+    var interp_argv = std.array_list.Managed([]const u8).init(b.allocator);
     defer interp_argv.deinit();
 
-    const result = spawnChildAndCollect(run, argv, has_side_effects, prog_node, fuzz_context) catch |err| term: {
+    var env_map = run.env_map orelse &b.graph.env_map;
+
+    const result = spawnChildAndCollect(run, argv, env_map, has_side_effects, prog_node, fuzz_context) catch |err| term: {
         // InvalidExe: cpu arch mismatch
         // FileNotFound: can happen with a wrong dynamic linker path
         if (err == error.InvalidExe or err == error.FileNotFound) interpret: {
@@ -1119,6 +1118,17 @@ fn runCommand(
                     if (b.enable_wine) {
                         try interp_argv.append(bin_name);
                         try interp_argv.appendSlice(argv);
+
+                        // Wine's excessive stderr logging is only situationally helpful. Disable it by default, but
+                        // allow the user to override it (e.g. with `WINEDEBUG=err+all`) if desired.
+                        if (env_map.get("WINEDEBUG") == null) {
+                            // We don't own `env_map` at this point, so create a copy in order to modify it.
+                            const new_env_map = arena.create(EnvMap) catch @panic("OOM");
+                            new_env_map.hash_map = try env_map.hash_map.cloneWithAllocator(arena);
+                            try new_env_map.put("WINEDEBUG", "-all");
+
+                            env_map = new_env_map;
+                        }
                     } else {
                         return failForeign(run, "-fwine", argv[0], exe);
                     }
@@ -1214,7 +1224,7 @@ fn runCommand(
 
             try Step.handleVerbose2(step.owner, cwd, run.env_map, interp_argv.items);
 
-            break :term spawnChildAndCollect(run, interp_argv.items, has_side_effects, prog_node, fuzz_context) catch |e| {
+            break :term spawnChildAndCollect(run, interp_argv.items, env_map, has_side_effects, prog_node, fuzz_context) catch |e| {
                 if (!run.failing_to_execute_foreign_is_an_error) return error.MakeSkipped;
 
                 return step.fail("unable to spawn interpreter {s}: {s}", .{
@@ -1262,12 +1272,12 @@ fn runCommand(
             const sub_path = b.pathJoin(&output_components);
             const sub_path_dirname = fs.path.dirname(sub_path).?;
             b.cache_root.handle.makePath(sub_path_dirname) catch |err| {
-                return step.fail("unable to make path '{}{s}': {s}", .{
+                return step.fail("unable to make path '{f}{s}': {s}", .{
                     b.cache_root, sub_path_dirname, @errorName(err),
                 });
             };
             b.cache_root.handle.writeFile(.{ .sub_path = sub_path, .data = stream.bytes.? }) catch |err| {
-                return step.fail("unable to write file '{}{s}': {s}", .{
+                return step.fail("unable to write file '{f}{s}': {s}", .{
                     b.cache_root, sub_path, @errorName(err),
                 });
             };
@@ -1346,7 +1356,7 @@ fn runCommand(
             },
             .expect_term => |expected_term| {
                 if (!termMatches(expected_term, result.term)) {
-                    return step.fail("the following command {} (expected {}):\n{s}", .{
+                    return step.fail("the following command {f} (expected {f}):\n{s}", .{
                         fmtTerm(result.term),
                         fmtTerm(expected_term),
                         try Step.allocPrintCmd(arena, cwd, final_argv),
@@ -1366,7 +1376,7 @@ fn runCommand(
             };
             const expected_term: std.process.Child.Term = .{ .Exited = 0 };
             if (!termMatches(expected_term, result.term)) {
-                return step.fail("{s}the following command {} (expected {}):\n{s}", .{
+                return step.fail("{s}the following command {f} (expected {f}):\n{s}", .{
                     prefix,
                     fmtTerm(result.term),
                     fmtTerm(expected_term),
@@ -1381,6 +1391,16 @@ fn runCommand(
             }
         },
         else => {
+            // On failure, print stderr if captured.
+            const bad_exit = switch (result.term) {
+                .Exited => |code| code != 0,
+                .Signal, .Stopped, .Unknown => true,
+            };
+
+            if (bad_exit) if (result.stdio.stderr) |err| {
+                try step.addError("stderr:\n{s}", .{err});
+            };
+
             try step.handleChildProcessTerm(result.term, cwd, final_argv);
         },
     }
@@ -1397,6 +1417,7 @@ const ChildProcResult = struct {
 fn spawnChildAndCollect(
     run: *Run,
     argv: []const []const u8,
+    env_map: *EnvMap,
     has_side_effects: bool,
     prog_node: std.Progress.Node,
     fuzz_context: ?FuzzContext,
@@ -1413,7 +1434,7 @@ fn spawnChildAndCollect(
     if (run.cwd) |lazy_cwd| {
         child.cwd = lazy_cwd.getPath2(b, &run.step);
     }
-    child.env_map = run.env_map orelse &b.graph.env_map;
+    child.env_map = env_map;
     child.request_resource_usage_statistics = true;
 
     child.stdin_behavior = switch (run.stdio) {
@@ -1493,7 +1514,7 @@ fn evalZigTest(
     const gpa = run.step.owner.allocator;
     const arena = run.step.owner.allocator;
 
-    var poller = std.io.poll(gpa, enum { stdout, stderr }, .{
+    var poller = std.Io.poll(gpa, enum { stdout, stderr }, .{
         .stdout = child.stdout.?,
         .stderr = child.stderr.?,
     });
@@ -1517,11 +1538,6 @@ fn evalZigTest(
         break :failed false;
     };
 
-    const Header = std.zig.Server.Message.Header;
-
-    const stdout = poller.fifo(.stdout);
-    const stderr = poller.fifo(.stderr);
-
     var fail_count: u32 = 0;
     var skip_count: u32 = 0;
     var leak_count: u32 = 0;
@@ -1534,16 +1550,14 @@ fn evalZigTest(
     var sub_prog_node: ?std.Progress.Node = null;
     defer if (sub_prog_node) |n| n.end();
 
+    const stdout = poller.reader(.stdout);
+    const stderr = poller.reader(.stderr);
     const any_write_failed = first_write_failed or poll: while (true) {
-        while (stdout.readableLength() < @sizeOf(Header)) {
-            if (!(try poller.poll())) break :poll false;
-        }
-        const header = stdout.reader().readStruct(Header) catch unreachable;
-        while (stdout.readableLength() < header.bytes_len) {
-            if (!(try poller.poll())) break :poll false;
-        }
-        const body = stdout.readableSliceOfLen(header.bytes_len);
-
+        const Header = std.zig.Server.Message.Header;
+        while (stdout.buffered().len < @sizeOf(Header)) if (!try poller.poll()) break :poll false;
+        const header = stdout.takeStruct(Header, .little) catch unreachable;
+        while (stdout.buffered().len < header.bytes_len) if (!try poller.poll()) break :poll false;
+        const body = stdout.take(header.bytes_len) catch unreachable;
         switch (header.tag) {
             .zig_version => {
                 if (!std.mem.eql(u8, builtin.zig_version_string, body)) {
@@ -1600,9 +1614,9 @@ fn evalZigTest(
 
                 if (tr_hdr.flags.fail or tr_hdr.flags.leak or tr_hdr.flags.log_err_count > 0) {
                     const name = std.mem.sliceTo(md.string_bytes[md.names[tr_hdr.index]..], 0);
-                    const orig_msg = stderr.readableSlice(0);
-                    defer stderr.discard(orig_msg.len);
-                    const msg = std.mem.trim(u8, orig_msg, "\n");
+                    const stderr_contents = stderr.buffered();
+                    stderr.toss(stderr_contents.len);
+                    const msg = std.mem.trim(u8, stderr_contents, "\n");
                     const label = if (tr_hdr.flags.fail)
                         "failed"
                     else if (tr_hdr.flags.leak)
@@ -1624,37 +1638,35 @@ fn evalZigTest(
                 };
             },
             .coverage_id => {
-                const web_server = fuzz_context.?.web_server;
+                const fuzz = fuzz_context.?.fuzz;
                 const msg_ptr: *align(1) const u64 = @ptrCast(body);
                 coverage_id = msg_ptr.*;
                 {
-                    web_server.mutex.lock();
-                    defer web_server.mutex.unlock();
-                    try web_server.msg_queue.append(web_server.gpa, .{ .coverage = .{
+                    fuzz.queue_mutex.lock();
+                    defer fuzz.queue_mutex.unlock();
+                    try fuzz.msg_queue.append(fuzz.ws.gpa, .{ .coverage = .{
                         .id = coverage_id.?,
                         .run = run,
                     } });
-                    web_server.condition.signal();
+                    fuzz.queue_cond.signal();
                 }
             },
             .fuzz_start_addr => {
-                const web_server = fuzz_context.?.web_server;
+                const fuzz = fuzz_context.?.fuzz;
                 const msg_ptr: *align(1) const u64 = @ptrCast(body);
                 const addr = msg_ptr.*;
                 {
-                    web_server.mutex.lock();
-                    defer web_server.mutex.unlock();
-                    try web_server.msg_queue.append(web_server.gpa, .{ .entry_point = .{
+                    fuzz.queue_mutex.lock();
+                    defer fuzz.queue_mutex.unlock();
+                    try fuzz.msg_queue.append(fuzz.ws.gpa, .{ .entry_point = .{
                         .addr = addr,
                         .coverage_id = coverage_id.?,
                     } });
-                    web_server.condition.signal();
+                    fuzz.queue_cond.signal();
                 }
             },
             else => {}, // ignore other messages
         }
-
-        stdout.discard(body.len);
     };
 
     if (any_write_failed) {
@@ -1663,9 +1675,9 @@ fn evalZigTest(
         while (try poller.poll()) {}
     }
 
-    if (stderr.readableLength() > 0) {
-        const msg = std.mem.trim(u8, try stderr.toOwnedSlice(), "\n");
-        if (msg.len > 0) run.step.result_stderr = msg;
+    const stderr_contents = std.mem.trim(u8, stderr.buffered(), "\n");
+    if (stderr_contents.len > 0) {
+        run.step.result_stderr = try arena.dupe(u8, stderr_contents);
     }
 
     // Send EOF to stdin.
@@ -1737,7 +1749,7 @@ fn sendMessage(file: std.fs.File, tag: std.zig.Client.Message.Tag) !void {
         .tag = tag,
         .bytes_len = 0,
     };
-    try file.writeAll(std.mem.asBytes(&header));
+    try file.writeAll(@ptrCast(&header));
 }
 
 fn sendRunTestMessage(file: std.fs.File, tag: std.zig.Client.Message.Tag, index: u32) !void {
@@ -1762,13 +1774,28 @@ fn evalGeneric(run: *Run, child: *std.process.Child) !StdIoResult {
             child.stdin = null;
         },
         .lazy_path => |lazy_path| {
-            const path = lazy_path.getPath2(b, &run.step);
-            const file = b.build_root.handle.openFile(path, .{}) catch |err| {
+            const path = lazy_path.getPath3(b, &run.step);
+            const file = path.root_dir.handle.openFile(path.subPathOrDot(), .{}) catch |err| {
                 return run.step.fail("unable to open stdin file: {s}", .{@errorName(err)});
             };
             defer file.close();
-            child.stdin.?.writeFileAll(file, .{}) catch |err| {
-                return run.step.fail("unable to write file to stdin: {s}", .{@errorName(err)});
+            // TODO https://github.com/ziglang/zig/issues/23955
+            var read_buffer: [1024]u8 = undefined;
+            var file_reader = file.reader(&read_buffer);
+            var write_buffer: [1024]u8 = undefined;
+            var stdin_writer = child.stdin.?.writer(&write_buffer);
+            _ = stdin_writer.interface.sendFileAll(&file_reader, .unlimited) catch |err| switch (err) {
+                error.ReadFailed => return run.step.fail("failed to read from {f}: {t}", .{
+                    path, file_reader.err.?,
+                }),
+                error.WriteFailed => return run.step.fail("failed to write to stdin: {t}", .{
+                    stdin_writer.err.?,
+                }),
+            };
+            stdin_writer.interface.flush() catch |err| switch (err) {
+                error.WriteFailed => return run.step.fail("failed to write to stdin: {t}", .{
+                    stdin_writer.err.?,
+                }),
             };
             child.stdin.?.close();
             child.stdin = null;
@@ -1779,28 +1806,41 @@ fn evalGeneric(run: *Run, child: *std.process.Child) !StdIoResult {
     var stdout_bytes: ?[]const u8 = null;
     var stderr_bytes: ?[]const u8 = null;
 
+    run.stdio_limit = run.stdio_limit.min(.limited(run.max_stdio_size));
     if (child.stdout) |stdout| {
         if (child.stderr) |stderr| {
-            var poller = std.io.poll(arena, enum { stdout, stderr }, .{
+            var poller = std.Io.poll(arena, enum { stdout, stderr }, .{
                 .stdout = stdout,
                 .stderr = stderr,
             });
             defer poller.deinit();
 
             while (try poller.poll()) {
-                if (poller.fifo(.stdout).count > run.max_stdio_size)
-                    return error.StdoutStreamTooLong;
-                if (poller.fifo(.stderr).count > run.max_stdio_size)
-                    return error.StderrStreamTooLong;
+                if (run.stdio_limit.toInt()) |limit| {
+                    if (poller.reader(.stderr).buffered().len > limit)
+                        return error.StdoutStreamTooLong;
+                    if (poller.reader(.stderr).buffered().len > limit)
+                        return error.StderrStreamTooLong;
+                }
             }
 
-            stdout_bytes = try poller.fifo(.stdout).toOwnedSlice();
-            stderr_bytes = try poller.fifo(.stderr).toOwnedSlice();
+            stdout_bytes = try poller.toOwnedSlice(.stdout);
+            stderr_bytes = try poller.toOwnedSlice(.stderr);
         } else {
-            stdout_bytes = try stdout.reader().readAllAlloc(arena, run.max_stdio_size);
+            var stdout_reader = stdout.readerStreaming(&.{});
+            stdout_bytes = stdout_reader.interface.allocRemaining(arena, run.stdio_limit) catch |err| switch (err) {
+                error.OutOfMemory => return error.OutOfMemory,
+                error.ReadFailed => return stdout_reader.err.?,
+                error.StreamTooLong => return error.StdoutStreamTooLong,
+            };
         }
     } else if (child.stderr) |stderr| {
-        stderr_bytes = try stderr.reader().readAllAlloc(arena, run.max_stdio_size);
+        var stderr_reader = stderr.readerStreaming(&.{});
+        stderr_bytes = stderr_reader.interface.allocRemaining(arena, run.stdio_limit) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            error.ReadFailed => return stderr_reader.err.?,
+            error.StreamTooLong => return error.StderrStreamTooLong,
+        };
     }
 
     if (stderr_bytes) |bytes| if (bytes.len > 0) {

@@ -3,7 +3,6 @@ const builtin = std.builtin;
 const tests = @import("test/tests.zig");
 const BufMap = std.BufMap;
 const mem = std.mem;
-const ArrayList = std.ArrayList;
 const io = std.io;
 const fs = std.fs;
 const InstallDirectoryOptions = std.Build.InstallDirectoryOptions;
@@ -90,6 +89,7 @@ pub fn build(b: *std.Build) !void {
     const skip_non_native = b.option(bool, "skip-non-native", "Main test suite skips non-native builds") orelse false;
     const skip_libc = b.option(bool, "skip-libc", "Main test suite skips tests that link libc") orelse false;
     const skip_single_threaded = b.option(bool, "skip-single-threaded", "Main test suite skips tests that are single-threaded") orelse false;
+    const skip_compile_errors = b.option(bool, "skip-compile-errors", "Main test suite skips compile error tests") orelse false;
     const skip_translate_c = b.option(bool, "skip-translate-c", "Main test suite skips translate-c tests") orelse false;
     const skip_run_translated_c = b.option(bool, "skip-run-translated-c", "Main test suite skips run-translated-c tests") orelse false;
     const skip_freebsd = b.option(bool, "skip-freebsd", "Main test suite skips targets with freebsd OS") orelse false;
@@ -279,7 +279,7 @@ pub fn build(b: *std.Build) !void {
 
                 const ancestor_ver = try std.SemanticVersion.parse(tagged_ancestor);
                 if (zig_version.order(ancestor_ver) != .gt) {
-                    std.debug.print("Zig version '{}' must be greater than tagged ancestor '{}'\n", .{ zig_version, ancestor_ver });
+                    std.debug.print("Zig version '{f}' must be greater than tagged ancestor '{f}'\n", .{ zig_version, ancestor_ver });
                     std.process.exit(1);
                 }
 
@@ -418,6 +418,7 @@ pub fn build(b: *std.Build) !void {
     try tests.addCases(b, test_cases_step, target, .{
         .test_filters = test_filters,
         .test_target_filters = test_target_filters,
+        .skip_compile_errors = skip_compile_errors,
         .skip_non_native = skip_non_native,
         .skip_freebsd = skip_freebsd,
         .skip_netbsd = skip_netbsd,
@@ -450,7 +451,6 @@ pub fn build(b: *std.Build) !void {
         .desc = "Run the behavior tests",
         .optimize_modes = optimization_modes,
         .include_paths = &.{},
-        .windows_libs = &.{},
         .skip_single_threaded = skip_single_threaded,
         .skip_non_native = skip_non_native,
         .skip_freebsd = skip_freebsd,
@@ -460,8 +460,8 @@ pub fn build(b: *std.Build) !void {
         .skip_linux = skip_linux,
         .skip_llvm = skip_llvm,
         .skip_libc = skip_libc,
-        // 2923515904 was observed on an x86_64-linux-gnu host.
-        .max_rss = 3100000000,
+        // 3888779264 was observed on an x86_64-linux-gnu host.
+        .max_rss = 4000000000,
     }));
 
     test_modules_step.dependOn(tests.addModuleTests(b, .{
@@ -473,7 +473,6 @@ pub fn build(b: *std.Build) !void {
         .desc = "Run the @cImport tests",
         .optimize_modes = optimization_modes,
         .include_paths = &.{"test/c_import"},
-        .windows_libs = &.{},
         .skip_single_threaded = true,
         .skip_non_native = skip_non_native,
         .skip_freebsd = skip_freebsd,
@@ -494,7 +493,6 @@ pub fn build(b: *std.Build) !void {
         .desc = "Run the compiler_rt tests",
         .optimize_modes = optimization_modes,
         .include_paths = &.{},
-        .windows_libs = &.{},
         .skip_single_threaded = true,
         .skip_non_native = skip_non_native,
         .skip_freebsd = skip_freebsd,
@@ -516,7 +514,6 @@ pub fn build(b: *std.Build) !void {
         .desc = "Run the zigc tests",
         .optimize_modes = optimization_modes,
         .include_paths = &.{},
-        .windows_libs = &.{},
         .skip_single_threaded = true,
         .skip_non_native = skip_non_native,
         .skip_freebsd = skip_freebsd,
@@ -538,12 +535,6 @@ pub fn build(b: *std.Build) !void {
         .desc = "Run the standard library tests",
         .optimize_modes = optimization_modes,
         .include_paths = &.{},
-        .windows_libs = &.{
-            "advapi32",
-            "crypt32",
-            "iphlpapi",
-            "ws2_32",
-        },
         .skip_single_threaded = skip_single_threaded,
         .skip_non_native = skip_non_native,
         .skip_freebsd = skip_freebsd,
@@ -741,12 +732,6 @@ fn addCompilerMod(b: *std.Build, options: AddCompilerModOptions) *std.Build.Modu
     compiler_mod.addImport("aro", aro_mod);
     compiler_mod.addImport("aro_translate_c", aro_translate_c_mod);
 
-    if (options.target.result.os.tag == .windows) {
-        compiler_mod.linkSystemLibrary("advapi32", .{});
-        compiler_mod.linkSystemLibrary("crypt32", .{});
-        compiler_mod.linkSystemLibrary("ws2_32", .{});
-    }
-
     return compiler_mod;
 }
 
@@ -939,7 +924,7 @@ fn addCxxKnownPath(
         return error.RequiredLibraryNotFound;
 
     const path_padded = run: {
-        var args = std.ArrayList([]const u8).init(b.allocator);
+        var args = std.array_list.Managed([]const u8).init(b.allocator);
         try args.append(ctx.cxx_compiler);
         var it = std.mem.tokenizeAny(u8, ctx.cxx_compiler_arg1, &std.ascii.whitespace);
         while (it.next()) |arg| try args.append(arg);
@@ -1444,12 +1429,8 @@ fn generateLangRef(b: *std.Build) std.Build.LazyPath {
         }),
     });
 
-    if (b.graph.host.result.os.tag == .windows) {
-        doctest_exe.root_module.linkSystemLibrary("advapi32", .{});
-    }
-
     var dir = b.build_root.handle.openDir("doc/langref", .{ .iterate = true }) catch |err| {
-        std.debug.panic("unable to open '{}doc/langref' directory: {s}", .{
+        std.debug.panic("unable to open '{f}doc/langref' directory: {s}", .{
             b.build_root, @errorName(err),
         });
     };
@@ -1470,7 +1451,7 @@ fn generateLangRef(b: *std.Build) std.Build.LazyPath {
             // in a temporary directory
             "--cache-root", b.cache_root.path orelse ".",
         });
-        cmd.addArgs(&.{ "--zig-lib-dir", b.fmt("{}", .{b.graph.zig_lib_directory}) });
+        cmd.addArgs(&.{ "--zig-lib-dir", b.fmt("{f}", .{b.graph.zig_lib_directory}) });
         cmd.addArgs(&.{"-i"});
         cmd.addFileArg(b.path(b.fmt("doc/langref/{s}", .{entry.name})));
 

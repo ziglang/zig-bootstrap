@@ -22,6 +22,8 @@ const Zir = std.zig.Zir;
 const Alignment = InternPool.Alignment;
 const dev = @import("dev.zig");
 
+pub const aarch64 = @import("codegen/aarch64.zig");
+
 pub const CodeGenError = GenerateSymbolError || error{
     /// Indicates the error is already stored in Zcu `failed_codegen`.
     CodegenFail,
@@ -48,14 +50,14 @@ fn devFeatureForBackend(backend: std.builtin.CompilerBackend) dev.Feature {
 fn importBackend(comptime backend: std.builtin.CompilerBackend) type {
     return switch (backend) {
         .other, .stage1 => unreachable,
-        .stage2_aarch64 => unreachable,
+        .stage2_aarch64 => aarch64,
         .stage2_arm => unreachable,
         .stage2_c => @import("codegen/c.zig"),
         .stage2_llvm => @import("codegen/llvm.zig"),
         .stage2_powerpc => unreachable,
         .stage2_riscv64 => @import("arch/riscv64/CodeGen.zig"),
         .stage2_sparc64 => @import("arch/sparc64/CodeGen.zig"),
-        .stage2_spirv => @import("codegen/spirv.zig"),
+        .stage2_spirv => @import("codegen/spirv/CodeGen.zig"),
         .stage2_wasm => @import("arch/wasm/CodeGen.zig"),
         .stage2_x86, .stage2_x86_64 => @import("arch/x86_64/CodeGen.zig"),
         _ => unreachable,
@@ -71,6 +73,7 @@ pub fn legalizeFeatures(pt: Zcu.PerThread, nav_index: InternPool.Nav.Index) ?*co
         .stage2_c,
         .stage2_wasm,
         .stage2_x86_64,
+        .stage2_aarch64,
         .stage2_x86,
         .stage2_riscv64,
         .stage2_sparc64,
@@ -82,20 +85,29 @@ pub fn legalizeFeatures(pt: Zcu.PerThread, nav_index: InternPool.Nav.Index) ?*co
     }
 }
 
+pub fn wantsLiveness(pt: Zcu.PerThread, nav_index: InternPool.Nav.Index) bool {
+    const zcu = pt.zcu;
+    const target = &zcu.navFileScope(nav_index).mod.?.resolved_target.result;
+    return switch (target_util.zigBackend(target, zcu.comp.config.use_llvm)) {
+        else => true,
+        .stage2_aarch64 => false,
+    };
+}
+
 /// Every code generation backend has a different MIR representation. However, we want to pass
 /// MIR from codegen to the linker *regardless* of which backend is in use. So, we use this: a
 /// union of all MIR types. The active tag is known from the backend in use; see `AnyMir.tag`.
 pub const AnyMir = union {
-    riscv64: @import("arch/riscv64/Mir.zig"),
-    sparc64: @import("arch/sparc64/Mir.zig"),
-    x86_64: @import("arch/x86_64/Mir.zig"),
-    wasm: @import("arch/wasm/Mir.zig"),
-    c: @import("codegen/c.zig").Mir,
+    aarch64: if (dev.env.supports(.aarch64_backend)) @import("codegen/aarch64/Mir.zig") else noreturn,
+    riscv64: if (dev.env.supports(.riscv64_backend)) @import("arch/riscv64/Mir.zig") else noreturn,
+    sparc64: if (dev.env.supports(.sparc64_backend)) @import("arch/sparc64/Mir.zig") else noreturn,
+    x86_64: if (dev.env.supports(.x86_64_backend)) @import("arch/x86_64/Mir.zig") else noreturn,
+    wasm: if (dev.env.supports(.wasm_backend)) @import("arch/wasm/Mir.zig") else noreturn,
+    c: if (dev.env.supports(.c_backend)) @import("codegen/c.zig").Mir else noreturn,
 
     pub inline fn tag(comptime backend: std.builtin.CompilerBackend) []const u8 {
         return switch (backend) {
             .stage2_aarch64 => "aarch64",
-            .stage2_arm => "arm",
             .stage2_riscv64 => "riscv64",
             .stage2_sparc64 => "sparc64",
             .stage2_x86_64 => "x86_64",
@@ -110,7 +122,8 @@ pub const AnyMir = union {
         const backend = target_util.zigBackend(&zcu.root_mod.resolved_target.result, zcu.comp.config.use_llvm);
         switch (backend) {
             else => unreachable,
-            inline .stage2_riscv64,
+            inline .stage2_aarch64,
+            .stage2_riscv64,
             .stage2_sparc64,
             .stage2_x86_64,
             .stage2_wasm,
@@ -131,14 +144,15 @@ pub fn generateFunction(
     src_loc: Zcu.LazySrcLoc,
     func_index: InternPool.Index,
     air: *const Air,
-    liveness: *const Air.Liveness,
+    liveness: *const ?Air.Liveness,
 ) CodeGenError!AnyMir {
     const zcu = pt.zcu;
     const func = zcu.funcInfo(func_index);
     const target = &zcu.navFileScope(func.owner_nav).mod.?.resolved_target.result;
     switch (target_util.zigBackend(target, false)) {
         else => unreachable,
-        inline .stage2_riscv64,
+        inline .stage2_aarch64,
+        .stage2_riscv64,
         .stage2_sparc64,
         .stage2_x86_64,
         .stage2_wasm,
@@ -173,7 +187,8 @@ pub fn emitFunction(
     const target = &zcu.navFileScope(func.owner_nav).mod.?.resolved_target.result;
     switch (target_util.zigBackend(target, zcu.comp.config.use_llvm)) {
         else => unreachable,
-        inline .stage2_riscv64,
+        inline .stage2_aarch64,
+        .stage2_riscv64,
         .stage2_sparc64,
         .stage2_x86_64,
         => |backend| {
@@ -237,7 +252,7 @@ pub fn generateLazySymbol(
     const target = &comp.root_mod.resolved_target.result;
     const endian = target.cpu.arch.endian();
 
-    log.debug("generateLazySymbol: kind = {s}, ty = {}", .{
+    log.debug("generateLazySymbol: kind = {s}, ty = {f}", .{
         @tagName(lazy_sym.kind),
         Type.fromInterned(lazy_sym.ty).fmt(pt),
     });
@@ -277,7 +292,7 @@ pub fn generateLazySymbol(
             code.appendAssumeCapacity(0);
         }
     } else {
-        return zcu.codegenFailType(lazy_sym.ty, "TODO implement generateLazySymbol for {s} {}", .{
+        return zcu.codegenFailType(lazy_sym.ty, "TODO implement generateLazySymbol for {s} {f}", .{
             @tagName(lazy_sym.kind), Type.fromInterned(lazy_sym.ty).fmt(pt),
         });
     }
@@ -310,9 +325,9 @@ pub fn generateSymbol(
     const target = zcu.getTarget();
     const endian = target.cpu.arch.endian();
 
-    log.debug("generateSymbol: val = {}", .{val.fmtValue(pt)});
+    log.debug("generateSymbol: val = {f}", .{val.fmtValue(pt)});
 
-    if (val.isUndefDeep(zcu)) {
+    if (val.isUndef(zcu)) {
         const abi_size = math.cast(usize, ty.abiSize(zcu)) orelse return error.Overflow;
         try code.appendNTimes(gpa, 0xaa, abi_size);
         return;
@@ -420,7 +435,7 @@ pub fn generateSymbol(
             const int_tag_ty = ty.intTagType(zcu);
             try generateSymbol(bin_file, pt, src_loc, try pt.getCoerced(Value.fromInterned(enum_tag.int), int_tag_ty), code, reloc_parent);
         },
-        .float => |float| switch (float.storage) {
+        .float => |float| storage: switch (float.storage) {
             .f16 => |f16_val| writeFloat(f16, f16_val, target, endian, try code.addManyAsArray(gpa, 2)),
             .f32 => |f32_val| writeFloat(f32, f32_val, target, endian, try code.addManyAsArray(gpa, 4)),
             .f64 => |f64_val| writeFloat(f64, f64_val, target, endian, try code.addManyAsArray(gpa, 8)),
@@ -429,7 +444,13 @@ pub fn generateSymbol(
                 const abi_size = math.cast(usize, ty.abiSize(zcu)) orelse return error.Overflow;
                 try code.appendNTimes(gpa, 0, abi_size - 10);
             },
-            .f128 => |f128_val| writeFloat(f128, f128_val, target, endian, try code.addManyAsArray(gpa, 16)),
+            .f128 => |f128_val| switch (Type.fromInterned(float.ty).floatBits(target)) {
+                else => unreachable,
+                16 => continue :storage .{ .f16 = @floatCast(f128_val) },
+                32 => continue :storage .{ .f32 = @floatCast(f128_val) },
+                64 => continue :storage .{ .f64 = @floatCast(f128_val) },
+                128 => writeFloat(f128, f128_val, target, endian, try code.addManyAsArray(gpa, 16)),
+            },
         },
         .ptr => try lowerPtr(bin_file, pt, src_loc, val.toIntern(), code, reloc_parent, 0),
         .slice => |slice| {
@@ -767,7 +788,7 @@ fn lowerUavRef(
     const uav_ty = Type.fromInterned(ip.typeOf(uav_val));
     const is_fn_body = uav_ty.zigTypeTag(zcu) == .@"fn";
 
-    log.debug("lowerUavRef: ty = {}", .{uav_ty.fmt(pt)});
+    log.debug("lowerUavRef: ty = {f}", .{uav_ty.fmt(pt)});
     try code.ensureUnusedCapacity(gpa, ptr_width_bytes);
 
     if (!is_fn_body and !uav_ty.hasRuntimeBits(zcu)) {
@@ -913,7 +934,7 @@ pub fn genNavRef(
     const zcu = pt.zcu;
     const ip = &zcu.intern_pool;
     const nav = ip.getNav(nav_index);
-    log.debug("genNavRef({})", .{nav.fqn.fmt(ip)});
+    log.debug("genNavRef({f})", .{nav.fqn.fmt(ip)});
 
     const lib_name, const linkage, const is_threadlocal = if (nav.getExtern(ip)) |e|
         .{ e.lib_name, e.linkage, e.is_threadlocal and zcu.comp.config.any_non_single_threaded }
@@ -976,8 +997,6 @@ pub fn genNavRef(
             },
             .link_once => unreachable,
         }
-    } else if (lf.cast(.plan9)) |p9| {
-        return .{ .sym_index = try p9.seeNav(pt, nav_index) };
     } else {
         const msg = try ErrorMsg.create(zcu.gpa, src_loc, "TODO genNavRef for target {}", .{target});
         return .{ .fail = msg };
@@ -1065,7 +1084,7 @@ pub fn lowerValue(pt: Zcu.PerThread, val: Value, target: *const std.Target) Allo
     const ip = &zcu.intern_pool;
     const ty = val.typeOf(zcu);
 
-    log.debug("lowerValue(@as({}, {}))", .{ ty.fmt(pt), val.fmtValue(pt) });
+    log.debug("lowerValue(@as({f}, {f}))", .{ ty.fmt(pt), val.fmtValue(pt) });
 
     if (val.isUndef(zcu)) return .undef;
 
@@ -1217,4 +1236,18 @@ pub fn errUnionErrorOffset(payload_ty: Type, zcu: *Zcu) u64 {
     } else {
         return 0;
     }
+}
+
+pub fn fieldOffset(ptr_agg_ty: Type, ptr_field_ty: Type, field_index: u32, zcu: *Zcu) u64 {
+    const agg_ty = ptr_agg_ty.childType(zcu);
+    return switch (agg_ty.containerLayout(zcu)) {
+        .auto, .@"extern" => agg_ty.structFieldOffset(field_index, zcu),
+        .@"packed" => @divExact(@as(u64, ptr_agg_ty.ptrInfo(zcu).packed_offset.bit_offset) +
+            (if (zcu.typeToPackedStruct(agg_ty)) |loaded_struct| zcu.structPackedFieldBitOffset(loaded_struct, field_index) else 0) -
+            ptr_field_ty.ptrInfo(zcu).packed_offset.bit_offset, 8),
+    };
+}
+
+test {
+    _ = aarch64;
 }
