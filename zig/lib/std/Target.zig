@@ -55,6 +55,7 @@ pub const Os = struct {
         ps3,
         ps4,
         ps5,
+        vita,
 
         emscripten,
         wasi,
@@ -197,6 +198,8 @@ pub const Os = struct {
                 .uefi,
 
                 .@"3ds",
+
+                .vita,
 
                 .wasi,
 
@@ -607,6 +610,7 @@ pub const Os = struct {
                         .max = .{ .major = 2, .minor = 11, .patch = 0 },
                     },
                 },
+
                 .@"3ds" => .{
                     .semver = .{
                         // These signify release versions (https://www.3dbrew.org/wiki/NCCH/Extended_Header#ARM11_Kernel_Capabilities)
@@ -618,6 +622,15 @@ pub const Os = struct {
                         .max = .{ .major = 2, .minor = 58, .patch = 0 }, // 11.17.0-50
                     },
                 },
+
+                .vita => .{
+                    .semver = .{
+                        // 1.3 is the first public release
+                        .min = .{ .major = 1, .minor = 3, .patch = 0 },
+                        .max = .{ .major = 3, .minor = 60, .patch = 0 },
+                    },
+                },
+
                 .wasi => .{
                     .semver = .{
                         .min = .{ .major = 0, .minor = 1, .patch = 0 },
@@ -876,6 +889,7 @@ pub const Abi = enum {
             .windows => .gnu,
             .uefi => .msvc,
             .@"3ds" => .eabihf,
+            .vita => .eabihf,
             .wasi, .emscripten => .musl,
 
             .contiki,
@@ -1042,7 +1056,7 @@ pub fn toElfMachine(target: *const Target) std.elf.EM {
         .powerpc, .powerpcle => .PPC,
         .powerpc64, .powerpc64le => .PPC64,
         .propeller => .PROPELLER,
-        .riscv32, .riscv64 => .RISCV,
+        .riscv32, .riscv32be, .riscv64, .riscv64be => .RISCV,
         .s390x => .S390,
         .sparc => if (target.cpu.has(.sparc, .v9)) .SPARC32PLUS else .SPARC,
         .sparc64 => .SPARCV9,
@@ -1099,6 +1113,8 @@ pub fn toCoffMachine(target: *const Target) std.coff.MachineType {
         .powerpcle,
         .powerpc64,
         .powerpc64le,
+        .riscv32be,
+        .riscv64be,
         .s390x,
         .sparc,
         .sparc64,
@@ -1159,7 +1175,7 @@ pub const Cpu = struct {
         pub const Set = struct {
             ints: [usize_count]usize,
 
-            pub const needed_bit_count = 288;
+            pub const needed_bit_count = 317;
             pub const byte_count = (needed_bit_count + 7) / 8;
             pub const usize_count = (byte_count + (@sizeOf(usize) - 1)) / @sizeOf(usize);
             pub const Index = std.math.Log2Int(std.meta.Int(.unsigned, usize_count * @bitSizeOf(usize)));
@@ -1310,7 +1326,9 @@ pub const Cpu = struct {
         powerpc64le,
         propeller,
         riscv32,
+        riscv32be,
         riscv64,
+        riscv64be,
         s390x,
         sparc,
         sparc64,
@@ -1340,6 +1358,7 @@ pub const Cpu = struct {
         // - sparcel
         // - spir
         // - spir64
+        // - spirv
         // - tce
         // - tcele
 
@@ -1396,7 +1415,7 @@ pub const Cpu = struct {
                 .nvptx, .nvptx64 => .nvptx,
                 .powerpc, .powerpcle, .powerpc64, .powerpc64le => .powerpc,
                 .propeller => .propeller,
-                .riscv32, .riscv64 => .riscv,
+                .riscv32, .riscv32be, .riscv64, .riscv64be => .riscv,
                 .s390x => .s390x,
                 .sparc, .sparc64 => .sparc,
                 .spirv32, .spirv64 => .spirv,
@@ -1452,8 +1471,19 @@ pub const Cpu = struct {
         }
 
         pub inline fn isRISCV(arch: Arch) bool {
+            return arch.isRiscv32() or arch.isRiscv64();
+        }
+
+        pub inline fn isRiscv32(arch: Arch) bool {
             return switch (arch) {
-                .riscv32, .riscv64 => true,
+                .riscv32, .riscv32be => true,
+                else => false,
+            };
+        }
+
+        pub inline fn isRiscv64(arch: Arch) bool {
+            return switch (arch) {
+                .riscv64, .riscv64be => true,
                 else => false,
             };
         }
@@ -1576,6 +1606,8 @@ pub const Cpu = struct {
                 .or1k,
                 .powerpc,
                 .powerpc64,
+                .riscv32be,
+                .riscv64be,
                 .thumbeb,
                 .sparc,
                 .sparc64,
@@ -1688,12 +1720,12 @@ pub const Cpu = struct {
                 .riscv64_lp64,
                 .riscv64_lp64_v,
                 .riscv64_interrupt,
-                => &.{.riscv64},
+                => &.{ .riscv64, .riscv64be },
 
                 .riscv32_ilp32,
                 .riscv32_ilp32_v,
                 .riscv32_interrupt,
-                => &.{.riscv32},
+                => &.{ .riscv32, .riscv32be },
 
                 .sparc64_sysv,
                 => &.{.sparc64},
@@ -1822,8 +1854,8 @@ pub const Cpu = struct {
                 .powerpc, .powerpcle => &powerpc.cpu.ppc,
                 .powerpc64, .powerpc64le => &powerpc.cpu.ppc64,
                 .propeller => &propeller.cpu.p1,
-                .riscv32 => &riscv.cpu.generic_rv32,
-                .riscv64 => &riscv.cpu.generic_rv64,
+                .riscv32, .riscv32be => &riscv.cpu.generic_rv32,
+                .riscv64, .riscv64be => &riscv.cpu.generic_rv64,
                 .sparc64 => &sparc.cpu.v9, // SPARC can only be 64-bit from v9 and up.
                 .wasm32, .wasm64 => &wasm.cpu.mvp,
                 .x86 => &x86.cpu.i386,
@@ -1845,9 +1877,14 @@ pub const Cpu = struct {
                 .amdgcn => &amdgcn.cpu.gfx906,
                 .arm => switch (os.tag) {
                     .@"3ds" => &arm.cpu.mpcore,
+                    .vita => &arm.cpu.cortex_a9,
                     else => &arm.cpu.baseline,
                 },
-                .armeb, .thumb, .thumbeb => &arm.cpu.baseline,
+                .thumb => switch (os.tag) {
+                    .vita => &arm.cpu.cortex_a9,
+                    else => &arm.cpu.baseline,
+                },
+                .armeb, .thumbeb => &arm.cpu.baseline,
                 .aarch64 => switch (os.tag) {
                     .driverkit, .macos => &aarch64.cpu.apple_m1,
                     .ios, .tvos => &aarch64.cpu.apple_a7,
@@ -1867,10 +1904,14 @@ pub const Cpu = struct {
                 .msp430 => &msp430.cpu.msp430,
                 .nvptx, .nvptx64 => &nvptx.cpu.sm_52,
                 .powerpc64le => &powerpc.cpu.ppc64le,
-                .riscv32 => &riscv.cpu.baseline_rv32,
-                .riscv64 => &riscv.cpu.baseline_rv64,
+                .riscv32, .riscv32be => &riscv.cpu.baseline_rv32,
+                .riscv64, .riscv64be => &riscv.cpu.baseline_rv64,
                 .s390x => &s390x.cpu.arch8, // gcc/clang do not have a generic s390x model.
                 .sparc => &sparc.cpu.v9, // glibc does not work with 'plain' v8.
+                .sparc64 => switch (os.tag) {
+                    .solaris => &sparc.cpu.ultrasparc3,
+                    else => generic(arch),
+                },
                 .x86 => &x86.cpu.pentium4,
                 .x86_64 => switch (os.tag) {
                     .driverkit => &x86.cpu.nehalem,
@@ -2061,6 +2102,7 @@ pub fn requiresLibC(target: *const Target) bool {
         .amdhsa,
         .ps4,
         .ps5,
+        .vita,
         .mesa3d,
         .contiki,
         .amdpal,
@@ -2190,6 +2232,7 @@ pub const DynamicLinker = struct {
             .ps3,
             .ps4,
             .ps5,
+            .vita,
             => .none,
         };
     }
@@ -2561,6 +2604,8 @@ pub const DynamicLinker = struct {
 
             .@"3ds",
 
+            .vita,
+
             .emscripten,
             .wasi,
 
@@ -2615,6 +2660,7 @@ pub fn ptrBitWidth_arch_abi(cpu_arch: Cpu.Arch, abi: Abi) u16 {
         .powerpc,
         .powerpcle,
         .riscv32,
+        .riscv32be,
         .thumb,
         .thumbeb,
         .x86,
@@ -2637,6 +2683,7 @@ pub fn ptrBitWidth_arch_abi(cpu_arch: Cpu.Arch, abi: Abi) u16 {
         .powerpc64,
         .powerpc64le,
         .riscv64,
+        .riscv64be,
         .x86_64,
         .nvptx64,
         .wasm64,
@@ -2691,7 +2738,9 @@ pub fn stackAlignment(target: *const Target) u16 {
         .powerpc64le,
         => if (target.os.tag == .linux or target.os.tag == .aix) return 16,
         .riscv32,
+        .riscv32be,
         .riscv64,
+        .riscv64be,
         => if (!target.cpu.has(.riscv, .e)) return 16,
         .x86 => if (target.os.tag != .windows and target.os.tag != .uefi) return 16,
         .x86_64 => return 16,
@@ -2724,7 +2773,9 @@ pub fn cCharSignedness(target: *const Target) std.builtin.Signedness {
         .powerpc64le,
         .s390x,
         .riscv32,
+        .riscv32be,
         .riscv64,
+        .riscv64be,
         .xcore,
         .xtensa,
         => .unsigned,
@@ -2838,7 +2889,9 @@ pub fn cTypeBitSize(target: *const Target, c_type: CType) u16 {
                     },
 
                     .riscv32,
+                    .riscv32be,
                     .riscv64,
+                    .riscv64be,
                     .aarch64,
                     .aarch64_be,
                     .s390x,
@@ -2957,7 +3010,9 @@ pub fn cTypeBitSize(target: *const Target, c_type: CType) u16 {
                     },
 
                     .riscv32,
+                    .riscv32be,
                     .riscv64,
+                    .riscv64be,
                     .aarch64,
                     .aarch64_be,
                     .s390x,
@@ -3083,6 +3138,13 @@ pub fn cTypeBitSize(target: *const Target, c_type: CType) u16 {
             .longlong, .ulonglong, .double => return 64,
             .longdouble => return 80,
         },
+        .vita => switch (c_type) {
+            .char => return 8,
+            .short, .ushort => return 16,
+            .int, .uint, .float => return 32,
+            .long, .ulong => return 64,
+            .longlong, .ulonglong, .double, .longdouble => return 64,
+        },
 
         .ps3,
         .contiki,
@@ -3104,6 +3166,10 @@ pub fn cTypeAlignment(target: *const Target, c_type: CType) u16 {
                 },
                 else => {},
             },
+            else => {},
+        },
+        .m68k => switch (c_type) {
+            .int, .uint, .long, .ulong => return 2,
             else => {},
         },
         .powerpc, .powerpcle, .powerpc64, .powerpc64le => switch (target.os.tag) {
@@ -3169,7 +3235,9 @@ pub fn cTypeAlignment(target: *const Target, c_type: CType) u16 {
             .powerpc64,
             .powerpc64le,
             .riscv32,
+            .riscv32be,
             .riscv64,
+            .riscv64be,
             .sparc64,
             .spirv32,
             .spirv64,
@@ -3205,6 +3273,10 @@ pub fn cTypePreferredAlignment(target: *const Target, c_type: CType) u16 {
                 .longdouble => return 4,
                 else => {},
             },
+        },
+        .m68k => switch (c_type) {
+            .int, .uint, .long, .ulong => return 2,
+            else => {},
         },
         .wasm32, .wasm64 => switch (target.os.tag) {
             .emscripten => switch (c_type) {
@@ -3261,7 +3333,9 @@ pub fn cTypePreferredAlignment(target: *const Target, c_type: CType) u16 {
             .powerpc64,
             .powerpc64le,
             .riscv32,
+            .riscv32be,
             .riscv64,
+            .riscv64be,
             .sparc64,
             .spirv32,
             .spirv64,
@@ -3300,6 +3374,7 @@ pub fn cMaxIntAlignment(target: *const Target) u16 {
         .powerpc,
         .powerpcle,
         .riscv32,
+        .riscv32be,
         .s390x,
         => 8,
 
@@ -3315,6 +3390,7 @@ pub fn cMaxIntAlignment(target: *const Target) u16 {
         .powerpc64,
         .powerpc64le,
         .riscv64,
+        .riscv64be,
         .sparc,
         .sparc64,
         .wasm32,
@@ -3364,8 +3440,8 @@ pub fn cCallingConvention(target: *const Target) ?std.builtin.CallingConvention 
             else => .{ .mips64_n64 = .{} },
         },
         .mips, .mipsel => .{ .mips_o32 = .{} },
-        .riscv64 => .{ .riscv64_lp64 = .{} },
-        .riscv32 => .{ .riscv32_ilp32 = .{} },
+        .riscv64, .riscv64be => .{ .riscv64_lp64 = .{} },
+        .riscv32, .riscv32be => .{ .riscv32_ilp32 = .{} },
         .sparc64 => .{ .sparc64_sysv = .{} },
         .sparc => .{ .sparc_sysv = .{} },
         .powerpc64 => if (target.abi.isMusl())
