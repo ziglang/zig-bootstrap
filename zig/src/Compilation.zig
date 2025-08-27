@@ -12,7 +12,7 @@ const ThreadPool = std.Thread.Pool;
 const WaitGroup = std.Thread.WaitGroup;
 const ErrorBundle = std.zig.ErrorBundle;
 const fatal = std.process.fatal;
-const Writer = std.io.Writer;
+const Writer = std.Io.Writer;
 
 const Value = @import("Value.zig");
 const Type = @import("Type.zig");
@@ -255,7 +255,6 @@ mutex: if (builtin.single_threaded) struct {
 } else std.Thread.Mutex = .{},
 
 test_filters: []const []const u8,
-test_name_prefix: ?[]const u8,
 
 link_task_wait_group: WaitGroup = .{},
 link_prog_node: std.Progress.Node = std.Progress.Node.none,
@@ -469,7 +468,7 @@ pub const Path = struct {
     const Formatter = struct {
         p: Path,
         comp: *Compilation,
-        pub fn format(f: Formatter, w: *std.io.Writer) std.io.Writer.Error!void {
+        pub fn format(f: Formatter, w: *Writer) Writer.Error!void {
             const root_path: []const u8 = switch (f.p.root) {
                 .zig_lib => f.comp.dirs.zig_lib.path orelse ".",
                 .global_cache => f.comp.dirs.global_cache.path orelse ".",
@@ -1766,7 +1765,6 @@ pub const CreateOptions = struct {
     clang_preprocessor_mode: ClangPreprocessorMode = .no,
     reference_trace: ?u32 = null,
     test_filters: []const []const u8 = &.{},
-    test_name_prefix: ?[]const u8 = null,
     test_runner_path: ?[]const u8 = null,
     subsystem: ?std.Target.SubSystem = null,
     mingw_unicode_entry_point: bool = false,
@@ -1885,7 +1883,7 @@ pub const CreateDiagnostic = union(enum) {
         sub: []const u8,
         err: (fs.Dir.MakeError || fs.Dir.OpenError || fs.Dir.StatFileError),
     };
-    pub fn format(diag: CreateDiagnostic, w: *std.Io.Writer) std.Io.Writer.Error!void {
+    pub fn format(diag: CreateDiagnostic, w: *Writer) Writer.Error!void {
         switch (diag) {
             .export_table_import_table_conflict => try w.writeAll("'--import-table' and '--export-table' cannot be used together"),
             .emit_h_without_zcu => try w.writeAll("cannot emit C header with no Zig source files"),
@@ -2048,7 +2046,14 @@ pub fn create(gpa: Allocator, arena: Allocator, diag: *CreateDiagnostic, options
                     break :s .none; // only LLD can handle ubsan-rt for this target
                 } else true,
             };
-            if (have_zcu and (!need_llvm or use_llvm)) break :s .zcu;
+            if (have_zcu and (!need_llvm or use_llvm)) {
+                // ubsan-rt's exports use hidden visibility. If we're building a Windows DLL and
+                // exported functions are going to be dllexported, LLVM will complain that
+                // dllexported functions must use default or protected visibility. So we can't use
+                // the ZCU strategy in this case.
+                if (options.config.dll_export_fns) break :s .lib;
+                break :s .zcu;
+            }
             if (need_llvm and !build_options.have_llvm) break :s .none; // impossible to build without llvm
             if (is_exe_or_dyn_lib) break :s .lib;
             break :s .obj;
@@ -2259,7 +2264,6 @@ pub fn create(gpa: Allocator, arena: Allocator, diag: *CreateDiagnostic, options
             .time_report = if (options.time_report) .init else null,
             .stack_report = options.stack_report,
             .test_filters = options.test_filters,
-            .test_name_prefix = options.test_name_prefix,
             .debug_compiler_runtime_libs = options.debug_compiler_runtime_libs,
             .debug_compile_errors = options.debug_compile_errors,
             .debug_incremental = options.debug_incremental,
@@ -2409,7 +2413,6 @@ pub fn create(gpa: Allocator, arena: Allocator, diag: *CreateDiagnostic, options
                 hash.add(options.config.dll_export_fns);
                 hash.add(options.config.is_test);
                 hash.addListOfBytes(options.test_filters);
-                hash.addOptionalBytes(options.test_name_prefix);
                 hash.add(options.skip_linker_dependencies);
                 hash.add(options.emit_h != .no);
                 hash.add(error_limit);
@@ -3443,7 +3446,6 @@ fn addNonIncrementalStuffToCacheManifest(
 
         // Synchronize with other matching comments: ZigOnlyHashStuff
         man.hash.addListOfBytes(comp.test_filters);
-        man.hash.addOptionalBytes(comp.test_name_prefix);
         man.hash.add(comp.skip_linker_dependencies);
         //man.hash.add(zcu.emit_h != .no);
         man.hash.add(zcu.error_limit);
@@ -5891,15 +5893,16 @@ fn buildGlibcCrtFile(comp: *Compilation, crt_file: glibc.CrtFile, prog_node: std
 
 fn buildGlibcSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) void {
     defer comp.link_task_queue.finishPrelinkItem(comp);
-    if (glibc.buildSharedObjects(comp, prog_node)) |_| {
-        // The job should no longer be queued up since it succeeded.
-        comp.queued_jobs.glibc_shared_objects = false;
-    } else |err| switch (err) {
-        error.AlreadyReported => return,
-        else => comp.lockAndSetMiscFailure(.glibc_shared_objects, "unable to build glibc shared objects: {s}", .{
-            @errorName(err),
-        }),
-    }
+    glibc.buildSharedObjects(comp, prog_node) catch unreachable;
+    //if (glibc.buildSharedObjects(comp, prog_node)) |_| {
+    //    // The job should no longer be queued up since it succeeded.
+    //    comp.queued_jobs.glibc_shared_objects = false;
+    //} else |err| switch (err) {
+    //    error.AlreadyReported => return,
+    //    else => comp.lockAndSetMiscFailure(.glibc_shared_objects, "unable to build glibc shared objects: {s}", .{
+    //        @errorName(err),
+    //    }),
+    //}
 }
 
 fn buildFreeBSDCrtFile(comp: *Compilation, crt_file: freebsd.CrtFile, prog_node: std.Progress.Node) void {
@@ -6454,7 +6457,7 @@ fn updateWin32Resource(comp: *Compilation, win32_resource: *Win32Resource, win32
 
             // In .rc files, a " within a quoted string is escaped as ""
             const fmtRcEscape = struct {
-                fn formatRcEscape(bytes: []const u8, writer: *std.io.Writer) std.io.Writer.Error!void {
+                fn formatRcEscape(bytes: []const u8, writer: *Writer) Writer.Error!void {
                     for (bytes) |byte| switch (byte) {
                         '"' => try writer.writeAll("\"\""),
                         '\\' => try writer.writeAll("\\\\"),
@@ -6573,7 +6576,7 @@ fn updateWin32Resource(comp: *Compilation, win32_resource: *Win32Resource, win32
         // Read depfile and update cache manifest
         {
             const dep_basename = fs.path.basename(out_dep_path);
-            const dep_file_contents = try zig_cache_tmp_dir.readFileAlloc(arena, dep_basename, 50 * 1024 * 1024);
+            const dep_file_contents = try zig_cache_tmp_dir.readFileAlloc(dep_basename, arena, .limited(50 * 1024 * 1024));
             defer arena.free(dep_file_contents);
 
             const value = try std.json.parseFromSliceLeaky(std.json.Value, arena, dep_file_contents, .{});
@@ -6795,8 +6798,48 @@ pub fn addCCArgs(
         else => {},
     }
 
-    if (target.cpu.arch.isArm()) {
-        try argv.append(if (target.cpu.arch.isThumb()) "-mthumb" else "-mno-thumb");
+    const xclang_flag = switch (ext) {
+        .assembly, .assembly_with_cpp => "-Xclangas",
+        else => "-Xclang",
+    };
+
+    if (target_util.clangSupportsTargetCpuArg(target)) {
+        if (target.cpu.model.llvm_name) |llvm_name| {
+            try argv.appendSlice(&[_][]const u8{
+                xclang_flag, "-target-cpu", xclang_flag, llvm_name,
+            });
+        }
+    }
+
+    // It would be really nice if there was a more compact way to communicate this info to Clang.
+    const all_features_list = target.cpu.arch.allFeaturesList();
+    try argv.ensureUnusedCapacity(all_features_list.len * 4);
+    for (all_features_list, 0..) |feature, index_usize| {
+        const index = @as(std.Target.Cpu.Feature.Set.Index, @intCast(index_usize));
+        const is_enabled = target.cpu.features.isEnabled(index);
+
+        if (feature.llvm_name) |llvm_name| {
+            // We communicate float ABI to Clang through the dedicated options.
+            if (std.mem.startsWith(u8, llvm_name, "soft-float") or
+                std.mem.startsWith(u8, llvm_name, "hard-float"))
+                continue;
+
+            // Ignore these until we figure out how to handle the concept of omitting features.
+            // See https://github.com/ziglang/zig/issues/23539
+            if (target_util.isDynamicAMDGCNFeature(target, feature)) continue;
+
+            argv.appendSliceAssumeCapacity(&[_][]const u8{ xclang_flag, "-target-feature", xclang_flag });
+            const plus_or_minus = "-+"[@intFromBool(is_enabled)];
+            const arg = try std.fmt.allocPrint(arena, "{c}{s}", .{ plus_or_minus, llvm_name });
+            argv.appendAssumeCapacity(arg);
+        }
+    }
+
+    if (target.cpu.arch.isThumb()) {
+        try argv.append(switch (ext) {
+            .assembly, .assembly_with_cpp => "-Wa,-mthumb",
+            else => "-mthumb",
+        });
     }
 
     if (target_util.llvmMachineAbi(target)) |mabi| {
@@ -6829,10 +6872,6 @@ pub fn addCCArgs(
 
     if (comp.mingw_unicode_entry_point) {
         try argv.append("-municode");
-    }
-
-    if (mod.code_model != .default) {
-        try argv.append(try std.fmt.allocPrint(arena, "-mcmodel={s}", .{@tagName(mod.code_model)}));
     }
 
     try argv.ensureUnusedCapacity(2);
@@ -6924,8 +6963,10 @@ pub fn addCCArgs(
                 },
             }
 
+            // Homebrew targets without LLVM support; use communities's preferred macros.
             switch (target.os.tag) {
                 .@"3ds" => try argv.append("-D__3DS__"),
+                .vita => try argv.append("-D__vita__"),
                 else => {},
             }
 
@@ -7051,7 +7092,7 @@ pub fn addCCArgs(
             // compiler frontend does. Therefore we must hard-code the -m flags for
             // all CPU features here.
             switch (target.cpu.arch) {
-                .riscv32, .riscv64 => {
+                .riscv32, .riscv32be, .riscv64, .riscv64be => {
                     const RvArchFeat = struct { char: u8, feat: std.Target.riscv.Feature };
                     const letters = [_]RvArchFeat{
                         .{ .char = 'm', .feat = .m },
@@ -7129,36 +7170,8 @@ pub fn addCCArgs(
         .ll,
         .bc,
         => {
-            if (target_util.clangSupportsTargetCpuArg(target)) {
-                if (target.cpu.model.llvm_name) |llvm_name| {
-                    try argv.appendSlice(&[_][]const u8{
-                        "-Xclang", "-target-cpu", "-Xclang", llvm_name,
-                    });
-                }
-            }
-
-            // It would be really nice if there was a more compact way to communicate this info to Clang.
-            const all_features_list = target.cpu.arch.allFeaturesList();
-            try argv.ensureUnusedCapacity(all_features_list.len * 4);
-            for (all_features_list, 0..) |feature, index_usize| {
-                const index = @as(std.Target.Cpu.Feature.Set.Index, @intCast(index_usize));
-                const is_enabled = target.cpu.features.isEnabled(index);
-
-                if (feature.llvm_name) |llvm_name| {
-                    // We communicate float ABI to Clang through the dedicated options.
-                    if (std.mem.startsWith(u8, llvm_name, "soft-float") or
-                        std.mem.startsWith(u8, llvm_name, "hard-float"))
-                        continue;
-
-                    // Ignore these until we figure out how to handle the concept of omitting features.
-                    // See https://github.com/ziglang/zig/issues/23539
-                    if (target_util.isDynamicAMDGCNFeature(target, feature)) continue;
-
-                    argv.appendSliceAssumeCapacity(&[_][]const u8{ "-Xclang", "-target-feature", "-Xclang" });
-                    const plus_or_minus = "-+"[@intFromBool(is_enabled)];
-                    const arg = try std.fmt.allocPrint(arena, "{c}{s}", .{ plus_or_minus, llvm_name });
-                    argv.appendAssumeCapacity(arg);
-                }
+            if (mod.code_model != .default) {
+                try argv.append(try std.fmt.allocPrint(arena, "-mcmodel={s}", .{@tagName(mod.code_model)}));
             }
 
             {

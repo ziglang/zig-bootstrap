@@ -4,7 +4,6 @@ const testing = std.testing;
 const expect = testing.expect;
 const expectEqual = testing.expectEqual;
 const expectError = testing.expectError;
-const io = std.io;
 const fs = std.fs;
 const mem = std.mem;
 const elf = std.elf;
@@ -675,19 +674,19 @@ test "mmap" {
     }
 
     const test_out_file = "os_tmp_test";
-    // Must be a multiple of 4096 so that the test works with mmap2
-    const alloc_size = 8 * 4096;
+    // Must be a multiple of the page size so that the test works with mmap2
+    const alloc_size = 8 * std.heap.pageSize();
 
     // Create a file used for testing mmap() calls with a file descriptor
     {
         const file = try tmp.dir.createFile(test_out_file, .{});
         defer file.close();
 
-        const stream = file.deprecatedWriter();
+        var stream = file.writer(&.{});
 
-        var i: u32 = 0;
+        var i: usize = 0;
         while (i < alloc_size / @sizeOf(u32)) : (i += 1) {
-            try stream.writeInt(u32, i, .little);
+            try stream.interface.writeInt(u32, @intCast(i), .little);
         }
     }
 
@@ -706,12 +705,11 @@ test "mmap" {
         );
         defer posix.munmap(data);
 
-        var mem_stream = io.fixedBufferStream(data);
-        const stream = mem_stream.reader();
+        var stream: std.Io.Reader = .fixed(data);
 
-        var i: u32 = 0;
+        var i: usize = 0;
         while (i < alloc_size / @sizeOf(u32)) : (i += 1) {
-            try testing.expectEqual(i, try stream.readInt(u32, .little));
+            try testing.expectEqual(i, try stream.takeInt(u32, .little));
         }
     }
 
@@ -730,12 +728,11 @@ test "mmap" {
         );
         defer posix.munmap(data);
 
-        var mem_stream = io.fixedBufferStream(data);
-        const stream = mem_stream.reader();
+        var stream: std.Io.Reader = .fixed(data);
 
-        var i: u32 = alloc_size / 2 / @sizeOf(u32);
+        var i: usize = alloc_size / 2 / @sizeOf(u32);
         while (i < alloc_size / @sizeOf(u32)) : (i += 1) {
-            try testing.expectEqual(i, try stream.readInt(u32, .little));
+            try testing.expectEqual(i, try stream.takeInt(u32, .little));
         }
     }
 }

@@ -83,10 +83,9 @@ pub fn sleep(nanoseconds: u64) void {
                     req = rem;
                     continue;
                 },
-                .FAULT,
-                .INVAL,
-                .OPNOTSUPP,
-                => unreachable,
+                .FAULT => unreachable,
+                .INVAL => unreachable,
+                .OPNOTSUPP => unreachable,
                 else => return,
             }
         }
@@ -167,7 +166,7 @@ pub fn setName(self: Thread, name: []const u8) SetNameError!void {
             const file = try std.fs.cwd().openFile(path, .{ .mode = .write_only });
             defer file.close();
 
-            try file.deprecatedWriter().writeAll(name);
+            try file.writeAll(name);
             return;
         },
         .windows => {
@@ -281,8 +280,10 @@ pub fn getName(self: Thread, buffer_ptr: *[max_name_len:0]u8) GetNameError!?[]co
             const file = try std.fs.cwd().openFile(path, .{});
             defer file.close();
 
-            const data_len = try file.deprecatedReader().readAll(buffer_ptr[0 .. max_name_len + 1]);
-
+            var file_reader = file.readerStreaming(&.{});
+            const data_len = file_reader.interface.readSliceShort(buffer_ptr[0 .. max_name_len + 1]) catch |err| switch (err) {
+                error.ReadFailed => return file_reader.err.?,
+            };
             return if (data_len >= 1) buffer[0 .. data_len - 1] else null;
         },
         .windows => {

@@ -961,7 +961,7 @@ pub const Inst = struct {
             return index.unwrap().target;
         }
 
-        pub fn format(index: Index, w: *std.io.Writer) std.io.Writer.Error!void {
+        pub fn format(index: Index, w: *std.Io.Writer) std.Io.Writer.Error!void {
             try w.writeByte('%');
             switch (index.unwrap()) {
                 .ref => {},
@@ -1153,6 +1153,10 @@ pub const Inst = struct {
 
         pub fn fromValue(v: Value) Ref {
             return .fromIntern(v.toIntern());
+        }
+
+        pub fn fromType(t: Type) Ref {
+            return .fromIntern(t.toIntern());
         }
     };
 

@@ -1,7 +1,6 @@
 const std = @import("std");
 const builtin = @import("builtin");
 const assert = std.debug.assert;
-const io = std.io;
 const fs = std.fs;
 const mem = std.mem;
 const process = std.process;
@@ -87,6 +86,7 @@ const normal_usage =
     \\  build-lib        Create library from source or object files
     \\  build-obj        Create object from source or object files
     \\  test             Perform unit testing
+    \\  test-obj         Create object for unit testing
     \\  run              Create executable and run immediately
     \\
     \\  ast-check        Look for simple compile errors in any set of files
@@ -667,10 +667,8 @@ const usage_build_generic =
     \\
     \\Test Options:
     \\  --test-filter [text]           Skip tests that do not match any filter
-    \\  --test-name-prefix [text]      Add prefix to all tests
     \\  --test-cmd [arg]               Specify test execution command one arg at a time
     \\  --test-cmd-bin                 Appends test binary path to test cmd args
-    \\  --test-evented-io              Runs the test in evented I/O mode
     \\  --test-no-exec                 Compiles test binary without running it
     \\  --test-runner [path]           Specify a custom test runner
     \\
@@ -895,7 +893,6 @@ fn buildOutputType(
     var build_id: ?std.zig.BuildId = null;
     var runtime_args_start: ?usize = null;
     var test_filters: std.ArrayListUnmanaged([]const u8) = .empty;
-    var test_name_prefix: ?[]const u8 = null;
     var test_runner_path: ?[]const u8 = null;
     var override_local_cache_dir: ?[]const u8 = try EnvVar.ZIG_LOCAL_CACHE_DIR.get(arena);
     var override_global_cache_dir: ?[]const u8 = try EnvVar.ZIG_GLOBAL_CACHE_DIR.get(arena);
@@ -1325,8 +1322,6 @@ fn buildOutputType(
                         create_module.libc_paths_file = args_iter.nextOrFatal();
                     } else if (mem.eql(u8, arg, "--test-filter")) {
                         try test_filters.append(arena, args_iter.nextOrFatal());
-                    } else if (mem.eql(u8, arg, "--test-name-prefix")) {
-                        test_name_prefix = args_iter.nextOrFatal();
                     } else if (mem.eql(u8, arg, "--test-runner")) {
                         test_runner_path = args_iter.nextOrFatal();
                     } else if (mem.eql(u8, arg, "--test-cmd")) {
@@ -3494,7 +3489,6 @@ fn buildOutputType(
         .stack_report = stack_report,
         .build_id = build_id,
         .test_filters = test_filters.items,
-        .test_name_prefix = test_name_prefix,
         .test_runner_path = test_runner_path,
         .cache_mode = cache_mode,
         .subsystem = subsystem,
@@ -4235,7 +4229,7 @@ fn serveUpdateResults(s: *Server, comp: *Compilation) !void {
             const decl_name = zir.nullTerminatedString(zir.getDeclaration(resolved.inst).name);
 
             const gop = try files.getOrPut(gpa, resolved.file);
-            if (!gop.found_existing) try file_name_bytes.writer(gpa).print("{f}\x00", .{file.path.fmt(comp)});
+            if (!gop.found_existing) try file_name_bytes.print(gpa, "{f}\x00", .{file.path.fmt(comp)});
 
             const codegen_ns = tr.decl_codegen_ns.get(tracked_inst) orelse 0;
             const link_ns = tr.decl_link_ns.get(tracked_inst) orelse 0;
@@ -5449,7 +5443,7 @@ fn cmdBuild(gpa: Allocator, arena: Allocator, args: []const []const u8) !void {
                         // that are missing.
                         const s = fs.path.sep_str;
                         const tmp_sub_path = "tmp" ++ s ++ results_tmp_file_nonce;
-                        const stdout = dirs.local_cache.handle.readFileAlloc(arena, tmp_sub_path, 50 * 1024 * 1024) catch |err| {
+                        const stdout = dirs.local_cache.handle.readFileAlloc(tmp_sub_path, arena, .limited(50 * 1024 * 1024)) catch |err| {
                             fatal("unable to read results of configure phase from '{f}{s}': {s}", .{
                                 dirs.local_cache, tmp_sub_path, @errorName(err),
                             });
@@ -5699,7 +5693,8 @@ fn jitCmd(
     try child.spawn();
 
     if (options.capture) |ptr| {
-        ptr.* = try child.stdout.?.readToEndAlloc(arena, std.math.maxInt(u32));
+        var stdout_reader = child.stdout.?.readerStreaming(&.{});
+        ptr.* = try stdout_reader.interface.allocRemaining(arena, .limited(std.math.maxInt(u32)));
     }
 
     const term = try child.wait();
@@ -5832,7 +5827,7 @@ const ArgIteratorResponseFile = process.ArgIteratorGeneral(.{ .comments = true, 
 /// Initialize the arguments from a Response File. "*.rsp"
 fn initArgIteratorResponseFile(allocator: Allocator, resp_file_path: []const u8) !ArgIteratorResponseFile {
     const max_bytes = 10 * 1024 * 1024; // 10 MiB of command line arguments is a reasonable limit
-    const cmd_line = try fs.cwd().readFileAlloc(allocator, resp_file_path, max_bytes);
+    const cmd_line = try fs.cwd().readFileAlloc(resp_file_path, allocator, .limited(max_bytes));
     errdefer allocator.free(cmd_line);
 
     return ArgIteratorResponseFile.initTakeOwnership(allocator, cmd_line);
@@ -7356,10 +7351,9 @@ fn loadManifest(
 ) !struct { Package.Manifest, Ast } {
     const manifest_bytes = while (true) {
         break options.dir.readFileAllocOptions(
-            arena,
             Package.Manifest.basename,
-            Package.Manifest.max_bytes,
-            null,
+            arena,
+            .limited(Package.Manifest.max_bytes),
             .@"1",
             0,
         ) catch |err| switch (err) {
@@ -7441,7 +7435,7 @@ const Templates = struct {
         }
 
         const max_bytes = 10 * 1024 * 1024;
-        const contents = templates.dir.readFileAlloc(arena, template_path, max_bytes) catch |err| {
+        const contents = templates.dir.readFileAlloc(template_path, arena, .limited(max_bytes)) catch |err| {
             fatal("unable to read template file '{s}': {s}", .{ template_path, @errorName(err) });
         };
         templates.buffer.clearRetainingCapacity();
@@ -7456,7 +7450,7 @@ const Templates = struct {
                     i += "_NAME".len;
                     continue;
                 } else if (std.mem.startsWith(u8, contents[i + 1 ..], "FINGERPRINT")) {
-                    try templates.buffer.writer().print("0x{x}", .{fingerprint.int()});
+                    try templates.buffer.print("0x{x}", .{fingerprint.int()});
                     i += "_FINGERPRINT".len;
                     continue;
                 } else if (std.mem.startsWith(u8, contents[i + 1 ..], "ZIGVER")) {

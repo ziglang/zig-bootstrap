@@ -82,7 +82,9 @@ pub fn targetTriple(allocator: Allocator, target: *const std.Target) ![]const u8
         .powerpc64le => "powerpc64le",
         .amdgcn => "amdgcn",
         .riscv32 => "riscv32",
+        .riscv32be => "riscv32be",
         .riscv64 => "riscv64",
+        .riscv64be => "riscv64be",
         .sparc => "sparc",
         .sparc64 => "sparc64",
         .s390x => "s390x",
@@ -198,7 +200,6 @@ pub fn targetTriple(allocator: Allocator, target: *const std.Target) ![]const u8
         .freebsd => "freebsd",
         .fuchsia => "fuchsia",
         .linux => "linux",
-        .ps3 => "lv2",
         .netbsd => "netbsd",
         .openbsd => "openbsd",
         .solaris, .illumos => "solaris",
@@ -211,8 +212,10 @@ pub fn targetTriple(allocator: Allocator, target: *const std.Target) ![]const u8
         .nvcl => "nvcl",
         .amdhsa => "amdhsa",
         .opencl => "unknown", // https://llvm.org/docs/SPIRVUsage.html#target-triples
+        .ps3 => "lv2",
         .ps4 => "ps4",
         .ps5 => "ps5",
+        .vita => "unknown", // LLVM doesn't know about this target
         .mesa3d => "mesa3d",
         .amdpal => "amdpal",
         .hermit => "hermit",
@@ -227,6 +230,7 @@ pub fn targetTriple(allocator: Allocator, target: *const std.Target) ![]const u8
         .visionos => "xros",
         .serenity => "serenity",
         .vulkan => "vulkan",
+        .managarm => "managarm",
 
         .@"3ds",
         .opengl,
@@ -329,16 +333,16 @@ pub fn dataLayout(target: *const std.Target) []const u8 {
         .lanai => "E-m:e-p:32:32-i64:64-a:0:32-n32-S64",
         .aarch64 => if (target.ofmt == .macho)
             if (target.os.tag == .windows)
-                "e-m:o-i64:64-i128:128-n32:64-S128-Fn32"
+                "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
             else if (target.abi == .ilp32)
-                "e-m:o-p:32:32-i64:64-i128:128-n32:64-S128-Fn32"
+                "e-m:o-p:32:32-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
             else
-                "e-m:o-i64:64-i128:128-n32:64-S128-Fn32"
+                "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
         else if (target.os.tag == .windows)
-            "e-m:w-p:64:64-i32:32-i64:64-i128:128-n32:64-S128-Fn32"
+            "e-m:w-p270:32:32-p271:32:32-p272:64:64-p:64:64-i32:32-i64:64-i128:128-n32:64-S128-Fn32"
         else
-            "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32",
-        .aarch64_be => "E-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32",
+            "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32",
+        .aarch64_be => "E-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32",
         .arm => if (target.ofmt == .macho)
             "e-m:o-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64"
         else
@@ -387,20 +391,28 @@ pub fn dataLayout(target: *const std.Target) []const u8 {
                 "E-m:e-Fi64-i64:64-i128:128-n32:64",
         },
         .powerpc64le => if (target.os.tag == .linux)
-            "e-m:e-Fn32-i64:64-n32:64-S128-v256:256:256-v512:512:512"
+            "e-m:e-Fn32-i64:64-i128:128-n32:64-S128-v256:256:256-v512:512:512"
         else
-            "e-m:e-Fn32-i64:64-n32:64",
-        .nvptx => "e-p:32:32-i64:64-i128:128-v16:16-v32:32-n16:32:64",
-        .nvptx64 => "e-i64:64-i128:128-v16:16-v32:32-n16:32:64",
-        .amdgcn => "e-p:64:64-p1:64:64-p2:32:32-p3:32:32-p4:64:64-p5:32:32-p6:32:32-p7:160:256:256:32-p8:128:128-p9:192:256:256:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-v2048:2048-n32:64-S32-A5-G1-ni:7:8:9",
+            "e-m:e-Fn32-i64:64-i128:128-n32:64",
+        .nvptx => "e-p:32:32-p6:32:32-p7:32:32-i64:64-i128:128-v16:16-v32:32-n16:32:64",
+        .nvptx64 => "e-p6:32:32-i64:64-i128:128-v16:16-v32:32-n16:32:64",
+        .amdgcn => "e-p:64:64-p1:64:64-p2:32:32-p3:32:32-p4:64:64-p5:32:32-p6:32:32-p7:160:256:256:32-p8:128:128:128:48-p9:192:256:256:32-i64:64-v16:16-v24:32-v32:32-v48:64-v96:128-v192:256-v256:256-v512:512-v1024:1024-v2048:2048-n32:64-S32-A5-G1-ni:7:8:9",
         .riscv32 => if (target.cpu.has(.riscv, .e))
             "e-m:e-p:32:32-i64:64-n32-S32"
         else
             "e-m:e-p:32:32-i64:64-n32-S128",
+        .riscv32be => if (target.cpu.has(.riscv, .e))
+            "E-m:e-p:32:32-i64:64-n32-S32"
+        else
+            "E-m:e-p:32:32-i64:64-n32-S128",
         .riscv64 => if (target.cpu.has(.riscv, .e))
             "e-m:e-p:64:64-i64:64-i128:128-n32:64-S64"
         else
             "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128",
+        .riscv64be => if (target.cpu.has(.riscv, .e))
+            "E-m:e-p:64:64-i64:64-i128:128-n32:64-S64"
+        else
+            "E-m:e-p:64:64-i64:64-i128:128-n32:64-S128",
         .sparc => "E-m:e-p:32:32-i64:64-i128:128-f128:64-n32-S64",
         .sparc64 => "E-m:e-i64:64-i128:128-n32:64-S128",
         .s390x => if (target.os.tag == .zos)
@@ -2672,7 +2684,7 @@ pub const Object = struct {
     }
 
     fn allocTypeName(o: *Object, pt: Zcu.PerThread, ty: Type) Allocator.Error![:0]const u8 {
-        var aw: std.io.Writer.Allocating = .init(o.gpa);
+        var aw: std.Io.Writer.Allocating = .init(o.gpa);
         defer aw.deinit();
         ty.print(&aw.writer, pt) catch |err| switch (err) {
             error.WriteFailed => return error.OutOfMemory,
@@ -6400,9 +6412,6 @@ pub const FuncGen = struct {
             // * https://github.com/llvm/llvm-project/blob/56905dab7da50bccfcceaeb496b206ff476127e1/llvm/test/MC/WebAssembly/blockaddress.ll
             if (zcu.comp.getTarget().cpu.arch.isWasm()) break :jmp_table null;
 
-            // Workaround for https://github.com/ziglang/zig/issues/24383:
-            if (self.ng.ownerModule().optimize_mode == .ReleaseSafe) break :jmp_table null;
-
             // On a 64-bit target, 1024 pointers in our jump table is about 8K of pointers. This seems just
             // about acceptable - it won't fill L1d cache on most CPUs.
             const max_table_len = 1024;
@@ -9762,6 +9771,7 @@ pub const FuncGen = struct {
         const ptr = try fg.resolveInst(ty_op.operand);
 
         elide: {
+            if (ptr_info.flags.alignment != .none) break :elide;
             if (!isByRef(Type.fromInterned(ptr_info.child), zcu)) break :elide;
             if (!canElideLoad(fg, body_tail)) break :elide;
             return ptr;
@@ -12224,8 +12234,8 @@ fn lowerFnRetTy(o: *Object, pt: Zcu.PerThread, fn_info: InternPool.Key.FuncType)
             .integer => return o.builder.intType(@intCast(return_type.bitSize(zcu))),
             .double_integer => {
                 const integer: Builder.Type = switch (zcu.getTarget().cpu.arch) {
-                    .riscv64 => .i64,
-                    .riscv32 => .i32,
+                    .riscv64, .riscv64be => .i64,
+                    .riscv32, .riscv32be => .i32,
                     else => unreachable,
                 };
                 return o.builder.structType(.normal, &.{ integer, integer });
@@ -12685,7 +12695,7 @@ fn ccAbiPromoteInt(
             else => null,
         },
         else => switch (target.cpu.arch) {
-            .loongarch64, .riscv64 => switch (int_info.bits) {
+            .loongarch64, .riscv64, .riscv64be => switch (int_info.bits) {
                 0...16 => int_info.signedness,
                 32 => .signed, // LLVM always signextends 32 bit ints, unsure if bug.
                 17...31, 33...63 => int_info.signedness,
@@ -12839,8 +12849,6 @@ fn backendSupportsF16(target: *const std.Target) bool {
         // https://github.com/llvm/llvm-project/issues/97981
         .csky,
         // https://github.com/llvm/llvm-project/issues/97981
-        .hexagon,
-        // https://github.com/llvm/llvm-project/issues/97981
         .powerpc,
         .powerpcle,
         .powerpc64,
@@ -12848,8 +12856,6 @@ fn backendSupportsF16(target: *const std.Target) bool {
         // https://github.com/llvm/llvm-project/issues/97981
         .wasm32,
         .wasm64,
-        // https://github.com/llvm/llvm-project/issues/50374
-        .s390x,
         // https://github.com/llvm/llvm-project/issues/97981
         .sparc,
         .sparc64,
@@ -12859,10 +12865,6 @@ fn backendSupportsF16(target: *const std.Target) bool {
         .thumb,
         .thumbeb,
         => target.abi.float() == .soft or target.cpu.has(.arm, .fullfp16),
-        // https://github.com/llvm/llvm-project/issues/129394
-        .aarch64,
-        .aarch64_be,
-        => target.cpu.has(.aarch64, .fp_armv8),
         else => true,
     };
 }
@@ -12877,9 +12879,6 @@ fn backendSupportsF128(target: *const std.Target) bool {
         // Test failures all over the place.
         .mips64,
         .mips64el,
-        // https://github.com/llvm/llvm-project/issues/95471
-        .nvptx,
-        .nvptx64,
         // https://github.com/llvm/llvm-project/issues/41838
         .sparc,
         => false,
@@ -13079,7 +13078,7 @@ pub fn initializeLLVMTarget(arch: std.Target.Cpu.Arch) void {
             llvm.LLVMInitializePowerPCAsmPrinter();
             llvm.LLVMInitializePowerPCAsmParser();
         },
-        .riscv32, .riscv64 => {
+        .riscv32, .riscv32be, .riscv64, .riscv64be => {
             llvm.LLVMInitializeRISCVTarget();
             llvm.LLVMInitializeRISCVTargetInfo();
             llvm.LLVMInitializeRISCVTargetMC();

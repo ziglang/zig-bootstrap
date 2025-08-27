@@ -811,10 +811,6 @@ fn flushInner(self: *Elf, arena: Allocator, tid: Zcu.PerThread.Id) !void {
 
     if (self.base.gc_sections) {
         try gc.gcAtoms(self);
-
-        if (self.base.print_gc_sections) {
-            try gc.dumpPrunedAtoms(self);
-        }
     }
 
     self.checkDuplicates() catch |err| switch (err) {
@@ -3005,7 +3001,7 @@ fn writeAtoms(self: *Elf) !void {
         undefs.deinit();
     }
 
-    var buffer = std.array_list.Managed(u8).init(gpa);
+    var buffer: std.Io.Writer.Allocating = .init(gpa);
     defer buffer.deinit();
 
     const slice = self.sections.slice();
@@ -3032,9 +3028,9 @@ fn writeAtoms(self: *Elf) !void {
             try buffer.ensureUnusedCapacity(thunk_size);
             const shdr = slice.items(.shdr)[th.output_section_index];
             const offset = @as(u64, @intCast(th.value)) + shdr.sh_offset;
-            try th.write(self, buffer.writer());
-            assert(buffer.items.len == thunk_size);
-            try self.pwriteAll(buffer.items, offset);
+            try th.write(self, &buffer.writer);
+            assert(buffer.written().len == thunk_size);
+            try self.pwriteAll(buffer.written(), offset);
             buffer.clearRetainingCapacity();
         }
     }
@@ -3166,26 +3162,26 @@ fn writeSyntheticSections(self: *Elf) !void {
 
     if (self.section_indexes.verneed) |shndx| {
         const shdr = slice.items(.shdr)[shndx];
-        var buffer = try std.array_list.Managed(u8).initCapacity(gpa, self.verneed.size());
+        var buffer = try std.Io.Writer.Allocating.initCapacity(gpa, self.verneed.size());
         defer buffer.deinit();
-        try self.verneed.write(buffer.writer());
-        try self.pwriteAll(buffer.items, shdr.sh_offset);
+        try self.verneed.write(&buffer.writer);
+        try self.pwriteAll(buffer.written(), shdr.sh_offset);
     }
 
     if (self.section_indexes.dynamic) |shndx| {
         const shdr = slice.items(.shdr)[shndx];
-        var buffer = try std.array_list.Managed(u8).initCapacity(gpa, self.dynamic.size(self));
+        var buffer = try std.Io.Writer.Allocating.initCapacity(gpa, self.dynamic.size(self));
         defer buffer.deinit();
-        try self.dynamic.write(self, buffer.writer());
-        try self.pwriteAll(buffer.items, shdr.sh_offset);
+        try self.dynamic.write(self, &buffer.writer);
+        try self.pwriteAll(buffer.written(), shdr.sh_offset);
     }
 
     if (self.section_indexes.dynsymtab) |shndx| {
         const shdr = slice.items(.shdr)[shndx];
-        var buffer = try std.array_list.Managed(u8).initCapacity(gpa, self.dynsym.size());
+        var buffer = try std.Io.Writer.Allocating.initCapacity(gpa, self.dynsym.size());
         defer buffer.deinit();
-        try self.dynsym.write(self, buffer.writer());
-        try self.pwriteAll(buffer.items, shdr.sh_offset);
+        try self.dynsym.write(self, &buffer.writer);
+        try self.pwriteAll(buffer.written(), shdr.sh_offset);
     }
 
     if (self.section_indexes.dynstrtab) |shndx| {
@@ -3201,28 +3197,28 @@ fn writeSyntheticSections(self: *Elf) !void {
         };
         const shdr = slice.items(.shdr)[shndx];
         const sh_size = try self.cast(usize, shdr.sh_size);
-        var buffer = try std.array_list.Managed(u8).initCapacity(gpa, @intCast(sh_size - existing_size));
+        var buffer = try std.Io.Writer.Allocating.initCapacity(gpa, @intCast(sh_size - existing_size));
         defer buffer.deinit();
-        try eh_frame.writeEhFrame(self, buffer.writer());
-        assert(buffer.items.len == sh_size - existing_size);
-        try self.pwriteAll(buffer.items, shdr.sh_offset + existing_size);
+        try eh_frame.writeEhFrame(self, &buffer.writer);
+        assert(buffer.written().len == sh_size - existing_size);
+        try self.pwriteAll(buffer.written(), shdr.sh_offset + existing_size);
     }
 
     if (self.section_indexes.eh_frame_hdr) |shndx| {
         const shdr = slice.items(.shdr)[shndx];
         const sh_size = try self.cast(usize, shdr.sh_size);
-        var buffer = try std.array_list.Managed(u8).initCapacity(gpa, sh_size);
+        var buffer = try std.Io.Writer.Allocating.initCapacity(gpa, sh_size);
         defer buffer.deinit();
-        try eh_frame.writeEhFrameHdr(self, buffer.writer());
-        try self.pwriteAll(buffer.items, shdr.sh_offset);
+        try eh_frame.writeEhFrameHdr(self, &buffer.writer);
+        try self.pwriteAll(buffer.written(), shdr.sh_offset);
     }
 
     if (self.section_indexes.got) |index| {
         const shdr = slice.items(.shdr)[index];
-        var buffer = try std.array_list.Managed(u8).initCapacity(gpa, self.got.size(self));
+        var buffer = try std.Io.Writer.Allocating.initCapacity(gpa, self.got.size(self));
         defer buffer.deinit();
-        try self.got.write(self, buffer.writer());
-        try self.pwriteAll(buffer.items, shdr.sh_offset);
+        try self.got.write(self, &buffer.writer);
+        try self.pwriteAll(buffer.written(), shdr.sh_offset);
     }
 
     if (self.section_indexes.rela_dyn) |shndx| {
@@ -3235,26 +3231,26 @@ fn writeSyntheticSections(self: *Elf) !void {
 
     if (self.section_indexes.plt) |shndx| {
         const shdr = slice.items(.shdr)[shndx];
-        var buffer = try std.array_list.Managed(u8).initCapacity(gpa, self.plt.size(self));
+        var buffer = try std.Io.Writer.Allocating.initCapacity(gpa, self.plt.size(self));
         defer buffer.deinit();
-        try self.plt.write(self, buffer.writer());
-        try self.pwriteAll(buffer.items, shdr.sh_offset);
+        try self.plt.write(self, &buffer.writer);
+        try self.pwriteAll(buffer.written(), shdr.sh_offset);
     }
 
     if (self.section_indexes.got_plt) |shndx| {
         const shdr = slice.items(.shdr)[shndx];
-        var buffer = try std.array_list.Managed(u8).initCapacity(gpa, self.got_plt.size(self));
+        var buffer = try std.Io.Writer.Allocating.initCapacity(gpa, self.got_plt.size(self));
         defer buffer.deinit();
-        try self.got_plt.write(self, buffer.writer());
-        try self.pwriteAll(buffer.items, shdr.sh_offset);
+        try self.got_plt.write(self, &buffer.writer);
+        try self.pwriteAll(buffer.written(), shdr.sh_offset);
     }
 
     if (self.section_indexes.plt_got) |shndx| {
         const shdr = slice.items(.shdr)[shndx];
-        var buffer = try std.array_list.Managed(u8).initCapacity(gpa, self.plt_got.size(self));
+        var buffer = try std.Io.Writer.Allocating.initCapacity(gpa, self.plt_got.size(self));
         defer buffer.deinit();
-        try self.plt_got.write(self, buffer.writer());
-        try self.pwriteAll(buffer.items, shdr.sh_offset);
+        try self.plt_got.write(self, &buffer.writer);
+        try self.pwriteAll(buffer.written(), shdr.sh_offset);
     }
 
     if (self.section_indexes.rela_plt) |shndx| {
@@ -3722,8 +3718,8 @@ pub fn tpAddress(self: *Elf) i64 {
     const phdr = self.phdrs.items[index];
     const addr = switch (self.getTarget().cpu.arch) {
         .x86_64 => mem.alignForward(u64, phdr.p_vaddr + phdr.p_memsz, phdr.p_align),
-        .aarch64 => mem.alignBackward(u64, phdr.p_vaddr - 16, phdr.p_align),
-        .riscv64 => phdr.p_vaddr,
+        .aarch64, .aarch64_be => mem.alignBackward(u64, phdr.p_vaddr - 16, phdr.p_align),
+        .riscv64, .riscv64be => phdr.p_vaddr,
         else => |arch| std.debug.panic("TODO implement getTpAddress for {s}", .{@tagName(arch)}),
     };
     return @intCast(addr);
@@ -3757,7 +3753,7 @@ pub fn insertShString(self: *Elf, name: [:0]const u8) error{OutOfMemory}!u32 {
     const gpa = self.base.comp.gpa;
     const off = @as(u32, @intCast(self.shstrtab.items.len));
     try self.shstrtab.ensureUnusedCapacity(gpa, name.len + 1);
-    self.shstrtab.writer(gpa).print("{s}\x00", .{name}) catch unreachable;
+    self.shstrtab.print(gpa, "{s}\x00", .{name}) catch unreachable;
     return off;
 }
 
@@ -3770,7 +3766,7 @@ pub fn insertDynString(self: *Elf, name: []const u8) error{OutOfMemory}!u32 {
     const gpa = self.base.comp.gpa;
     const off = @as(u32, @intCast(self.dynstrtab.items.len));
     try self.dynstrtab.ensureUnusedCapacity(gpa, name.len + 1);
-    self.dynstrtab.writer(gpa).print("{s}\x00", .{name}) catch unreachable;
+    self.dynstrtab.print(gpa, "{s}\x00", .{name}) catch unreachable;
     return off;
 }
 
@@ -3873,7 +3869,7 @@ fn fmtShdr(self: *Elf, shdr: elf.Elf64_Shdr) std.fmt.Formatter(FormatShdr, forma
     } };
 }
 
-fn formatShdr(ctx: FormatShdr, writer: *std.io.Writer) std.io.Writer.Error!void {
+fn formatShdr(ctx: FormatShdr, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     const shdr = ctx.shdr;
     try writer.print("{s} : @{x} ({x}) : align({x}) : size({x}) : entsize({x}) : flags({f})", .{
         ctx.elf_file.getShString(shdr.sh_name), shdr.sh_offset,
@@ -3887,7 +3883,7 @@ pub fn fmtShdrFlags(sh_flags: u64) std.fmt.Formatter(u64, formatShdrFlags) {
     return .{ .data = sh_flags };
 }
 
-fn formatShdrFlags(sh_flags: u64, writer: *std.io.Writer) std.io.Writer.Error!void {
+fn formatShdrFlags(sh_flags: u64, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     if (elf.SHF_WRITE & sh_flags != 0) {
         try writer.writeAll("W");
     }
@@ -3944,7 +3940,7 @@ fn fmtPhdr(self: *Elf, phdr: elf.Elf64_Phdr) std.fmt.Formatter(FormatPhdr, forma
     } };
 }
 
-fn formatPhdr(ctx: FormatPhdr, writer: *std.io.Writer) std.io.Writer.Error!void {
+fn formatPhdr(ctx: FormatPhdr, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     const phdr = ctx.phdr;
     const write = phdr.p_flags & elf.PF_W != 0;
     const read = phdr.p_flags & elf.PF_R != 0;
@@ -3975,7 +3971,7 @@ pub fn dumpState(self: *Elf) std.fmt.Formatter(*Elf, fmtDumpState) {
     return .{ .data = self };
 }
 
-fn fmtDumpState(self: *Elf, writer: *std.io.Writer) std.io.Writer.Error!void {
+fn fmtDumpState(self: *Elf, writer: *std.Io.Writer) std.Io.Writer.Error!void {
     const shared_objects = self.shared_objects.values();
 
     if (self.zigObjectPtr()) |zig_object| {
@@ -4099,8 +4095,8 @@ pub fn getTarget(self: *const Elf) *const std.Target {
 
 fn requiresThunks(self: Elf) bool {
     return switch (self.getTarget().cpu.arch) {
-        .aarch64 => true,
-        .x86_64, .riscv64 => false,
+        .aarch64, .aarch64_be => true,
+        .x86_64, .riscv64, .riscv64be => false,
         else => @panic("TODO unimplemented architecture"),
     };
 }
@@ -4193,7 +4189,7 @@ pub const Ref = struct {
         return ref.index == other.index and ref.file == other.file;
     }
 
-    pub fn format(ref: Ref, writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(ref: Ref, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         try writer.print("ref({d},{d})", .{ ref.index, ref.file });
     }
 };
@@ -4345,8 +4341,8 @@ fn createThunks(elf_file: *Elf, atom_list: *AtomList) !void {
     // A branch will need an extender if its target is larger than
     // `2^(jump_bits - 1) - margin` where margin is some arbitrary number.
     const max_distance = switch (cpu_arch) {
-        .aarch64 => 0x500_000,
-        .x86_64, .riscv64 => unreachable,
+        .aarch64, .aarch64_be => 0x500_000,
+        .x86_64, .riscv64, .riscv64be => unreachable,
         else => @panic("unhandled arch"),
     };
 
@@ -4392,7 +4388,7 @@ fn createThunks(elf_file: *Elf, atom_list: *AtomList) !void {
             log.debug("atom({f}) {s}", .{ ref, atom_ptr.name(elf_file) });
             for (atom_ptr.relocs(elf_file)) |rel| {
                 const is_reachable = switch (cpu_arch) {
-                    .aarch64 => r: {
+                    .aarch64, .aarch64_be => r: {
                         const r_type: elf.R_AARCH64 = @enumFromInt(rel.r_type());
                         if (r_type != .CALL26 and r_type != .JUMP26) break :r true;
                         const target_ref = file_ptr.resolveSymbol(rel.r_sym(), elf_file);
@@ -4406,7 +4402,7 @@ fn createThunks(elf_file: *Elf, atom_list: *AtomList) !void {
                         _ = math.cast(i28, taddr + rel.r_addend - saddr) orelse break :r false;
                         break :r true;
                     },
-                    .x86_64, .riscv64 => unreachable,
+                    .x86_64, .riscv64, .riscv64be => unreachable,
                     else => @panic("unsupported arch"),
                 };
                 if (is_reachable) continue;

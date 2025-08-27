@@ -1468,6 +1468,7 @@ fn analyzeBodyInner(
                         continue;
                     },
                     .astgen_error => return error.AnalysisFail,
+                    .float_op_result_ty => try sema.zirFloatOpResultType(block, extended),
                 };
             },
 
@@ -3079,7 +3080,7 @@ pub fn createTypeName(
             const fn_info = sema.code.getFnInfo(ip.funcZirBodyInst(sema.func_index).resolve(ip) orelse return error.AnalysisFail);
             const zir_tags = sema.code.instructions.items(.tag);
 
-            var aw: std.io.Writer.Allocating = .init(gpa);
+            var aw: std.Io.Writer.Allocating = .init(gpa);
             defer aw.deinit();
             const w = &aw.writer;
             w.print("{f}(", .{block.type_name_ctx.fmt(ip)}) catch return error.OutOfMemory;
@@ -5507,7 +5508,7 @@ fn zirCompileLog(
     const zcu = pt.zcu;
     const gpa = zcu.gpa;
 
-    var aw: std.io.Writer.Allocating = .init(gpa);
+    var aw: std.Io.Writer.Allocating = .init(gpa);
     defer aw.deinit();
     const writer = &aw.writer;
 
@@ -9079,7 +9080,7 @@ fn callConvSupportsVarArgs(cc: std.builtin.CallingConvention.Tag) bool {
 fn checkCallConvSupportsVarArgs(sema: *Sema, block: *Block, src: LazySrcLoc, cc: std.builtin.CallingConvention.Tag) CompileError!void {
     const CallingConventionsSupportingVarArgsList = struct {
         arch: std.Target.Cpu.Arch,
-        pub fn format(ctx: @This(), w: *std.io.Writer) std.io.Writer.Error!void {
+        pub fn format(ctx: @This(), w: *std.Io.Writer) std.Io.Writer.Error!void {
             var first = true;
             for (calling_conventions_supporting_var_args) |cc_inner| {
                 for (std.Target.Cpu.Arch.fromCallingConvention(cc_inner)) |supported_arch| {
@@ -9520,7 +9521,7 @@ fn finishFunc(
         .bad_arch => |allowed_archs| {
             const ArchListFormatter = struct {
                 archs: []const std.Target.Cpu.Arch,
-                pub fn format(formatter: @This(), w: *std.io.Writer) std.io.Writer.Error!void {
+                pub fn format(formatter: @This(), w: *std.Io.Writer) std.Io.Writer.Error!void {
                     for (formatter.archs, 0..) |arch, i| {
                         if (i != 0)
                             try w.writeAll(", ");
@@ -25922,6 +25923,28 @@ fn zirBranchHint(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstDat
     }
 }
 
+fn zirFloatOpResultType(sema: *Sema, block: *Block, extended: Zir.Inst.Extended.InstData) CompileError!Air.Inst.Ref {
+    const pt = sema.pt;
+    const zcu = pt.zcu;
+    const extra = sema.code.extraData(Zir.Inst.UnNode, extended.operand).data;
+    const operand_src = block.builtinCallArgSrc(extra.node, 0);
+
+    const raw_ty = try sema.resolveTypeOrPoison(block, operand_src, extra.operand) orelse return .generic_poison_type;
+    const float_ty = raw_ty.optEuBaseType(zcu);
+
+    switch (float_ty.scalarType(zcu).zigTypeTag(zcu)) {
+        .float, .comptime_float => {},
+        else => return sema.fail(
+            block,
+            operand_src,
+            "expected vector of floats or float type, found '{f}'",
+            .{float_ty.fmt(sema.pt)},
+        ),
+    }
+
+    return .fromType(float_ty);
+}
+
 fn requireRuntimeBlock(sema: *Sema, block: *Block, src: LazySrcLoc, runtime_src: ?LazySrcLoc) !void {
     if (block.isComptime()) {
         const msg, const fail_block = msg: {
@@ -36939,7 +36962,7 @@ fn notePathToComptimeAllocPtr(
         error.AnalysisFail => unreachable,
     };
 
-    var second_path_aw: std.io.Writer.Allocating = .init(arena);
+    var second_path_aw: std.Io.Writer.Allocating = .init(arena);
     defer second_path_aw.deinit();
     const inter_name = try std.fmt.allocPrint(arena, "v{d}", .{intermediate_value_count});
     const deriv_start = @import("print_value.zig").printPtrDerivation(

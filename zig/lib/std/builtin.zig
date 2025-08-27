@@ -38,7 +38,7 @@ pub const StackTrace = struct {
     index: usize,
     instruction_addresses: []usize,
 
-    pub fn format(self: StackTrace, writer: *std.io.Writer) std.io.Writer.Error!void {
+    pub fn format(self: StackTrace, writer: *std.Io.Writer) std.Io.Writer.Error!void {
         // TODO: re-evaluate whether to use format() methods at all.
         // Until then, avoid an error when using GeneralPurposeAllocator with WebAssembly
         // where it tries to call detectTTYConfig here.
@@ -47,7 +47,7 @@ pub const StackTrace = struct {
         const debug_info = std.debug.getSelfDebugInfo() catch |err| {
             return writer.print("\nUnable to print stack trace: Unable to open debug info: {s}\n", .{@errorName(err)});
         };
-        const tty_config = std.io.tty.detectConfig(std.fs.File.stderr());
+        const tty_config = std.Io.tty.detectConfig(std.fs.File.stderr());
         try writer.writeAll("\n");
         std.debug.writeStackTrace(self, writer, debug_info, tty_config) catch |err| {
             try writer.print("Unable to print stack trace: {s}\n", .{@errorName(err)});
@@ -909,7 +909,7 @@ pub const VaList = switch (builtin.cpu.arch) {
     .hexagon => if (builtin.target.abi.isMusl()) VaListHexagon else *u8,
     .loongarch32, .loongarch64 => *anyopaque,
     .mips, .mipsel, .mips64, .mips64el => *anyopaque,
-    .riscv32, .riscv64 => *anyopaque,
+    .riscv32, .riscv32be, .riscv64, .riscv64be => *anyopaque,
     .powerpc, .powerpcle => switch (builtin.os.tag) {
         .ios, .macos, .tvos, .watchos, .visionos, .aix => *u8,
         else => VaListPowerPc,
