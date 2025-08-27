@@ -21,10 +21,9 @@ For other versions, check the git tags of this repository.
  * LLVM: Support .lib extension for static zstd.
  * LLVM: Portable handling of .def linker flag
  * LLVM: Don't pass -static when building executables.
- * LLVM: Fix `Triple::isTargetEHABICompatible()` for NetBSD
  * Clang: Ignore the examples directory
  * Clang: Disable building of libclang-cpp.so.
- * Clang: Correctly define `IntPtrType` for MIPS
+ * Clang: remove `nvptx-arch` and `amdgpu-arch` symlinks
  * LLD: Added additional include directory to Zig's libunwind.
  * LLD: Respect `LLD_BUILD_TOOLS=OFF`
  * LLD: Skip building docs
