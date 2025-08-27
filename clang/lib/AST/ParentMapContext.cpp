@@ -81,7 +81,8 @@ class ParentMapContext::ParentMap {
         Items.push_back(Value);
       }
     }
-    llvm::ArrayRef<DynTypedNode> view() const { return Items; }
+    ArrayRef<DynTypedNode> view() const { return Items; }
+
   private:
     llvm::SmallVector<DynTypedNode, 1> Items;
     llvm::SmallPtrSet<const void *, 2> Dedup;
@@ -120,9 +121,9 @@ class ParentMapContext::ParentMap {
                                                         const MapTy &Map) {
     auto I = Map.find(Node);
     if (I == Map.end()) {
-      return llvm::ArrayRef<DynTypedNode>();
+      return ArrayRef<DynTypedNode>();
     }
-    if (const auto *V = I->second.template dyn_cast<ParentVector *>()) {
+    if (const auto *V = dyn_cast<ParentVector *>(I->second)) {
       return V->view();
     }
     return getSingleDynTypedNodeFromParentMap(I->second);
@@ -273,9 +274,9 @@ public:
       auto It = PointerParents.find(E);
       if (It == PointerParents.end())
         break;
-      const auto *S = It->second.dyn_cast<const Stmt *>();
+      const auto *S = dyn_cast<const Stmt *>(It->second);
       if (!S) {
-        if (auto *Vec = It->second.dyn_cast<ParentVector *>())
+        if (auto *Vec = dyn_cast<ParentVector *>(It->second))
           return Vec->view();
         return getSingleDynTypedNodeFromParentMap(It->second);
       }
@@ -400,7 +401,7 @@ private:
       if (!isa<ParentVector *>(NodeOrVector)) {
         auto *Vector = new ParentVector(
             1, getSingleDynTypedNodeFromParentMap(NodeOrVector));
-        delete NodeOrVector.template dyn_cast<DynTypedNode *>();
+        delete dyn_cast<DynTypedNode *>(NodeOrVector);
         NodeOrVector = Vector;
       }
 
