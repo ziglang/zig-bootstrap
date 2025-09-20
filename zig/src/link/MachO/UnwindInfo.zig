@@ -311,7 +311,7 @@ pub fn write(info: UnwindInfo, macho_file: *MachO, buffer: []u8) !void {
         .indexCount = indexes_count,
     }), .little);
 
-    try writer.writeAll(mem.sliceAsBytes(info.common_encodings[0..info.common_encodings_count]));
+    try writer.writeSliceEndian(Encoding, info.common_encodings[0..info.common_encodings_count], .little);
 
     for (info.personalities[0..info.personalities_count]) |ref| {
         const sym = ref.getSymbol(macho_file).?;
@@ -509,7 +509,7 @@ pub const Record = struct {
         return lsda.getAddress(macho_file) + rec.lsda_offset;
     }
 
-    pub fn fmt(rec: Record, macho_file: *MachO) std.fmt.Formatter(Format, Format.default) {
+    pub fn fmt(rec: Record, macho_file: *MachO) std.fmt.Alt(Format, Format.default) {
         return .{ .data = .{
             .rec = rec,
             .macho_file = macho_file,
@@ -603,7 +603,7 @@ const Page = struct {
         }
     };
 
-    fn fmt(page: Page, info: UnwindInfo) std.fmt.Formatter(Format, Format.default) {
+    fn fmt(page: Page, info: UnwindInfo) std.fmt.Alt(Format, Format.default) {
         return .{ .data = .{
             .page = page,
             .info = info,

@@ -617,7 +617,7 @@ pub fn claimUnresolved(self: *ZigObject, elf_file: *Elf) void {
 
         const is_import = blk: {
             if (!elf_file.isEffectivelyDynLib()) break :blk false;
-            const vis = @as(elf.STV, @enumFromInt(esym.st_other));
+            const vis: elf.STV = @enumFromInt(@as(u3, @truncate(esym.st_other)));
             if (vis == .HIDDEN) break :blk false;
             break :blk true;
         };
@@ -695,7 +695,7 @@ pub fn markImportsExports(self: *ZigObject, elf_file: *Elf) void {
         const file = sym.file(elf_file).?;
         // https://github.com/ziglang/zig/issues/21678
         if (@as(u16, @bitCast(sym.version_index)) == @as(u16, @bitCast(elf.Versym.LOCAL))) continue;
-        const vis: elf.STV = @enumFromInt(sym.elfSym(elf_file).st_other);
+        const vis: elf.STV = @enumFromInt(@as(u3, @truncate(sym.elfSym(elf_file).st_other)));
         if (vis == .HIDDEN) continue;
         if (file == .shared_object and !sym.isAbs(elf_file)) {
             sym.flags.import = true;
@@ -1140,7 +1140,109 @@ fn getNavShdrIndex(
     const ptr_size = elf_file.ptrWidthBytes();
     const ip = &zcu.intern_pool;
     const nav_val = zcu.navValue(nav_index);
-    if (ip.isFunctionType(nav_val.typeOf(zcu).toIntern())) {
+    const is_func = ip.isFunctionType(nav_val.typeOf(zcu).toIntern());
+    if (ip.getNav(nav_index).getLinkSection().unwrap()) |@"linksection"| {
+        const section_name = @"linksection".toSlice(ip);
+        if (elf_file.sectionByName(section_name)) |osec| {
+            if (is_func) {
+                elf_file.sections.items(.shdr)[osec].sh_flags |= elf.SHF_EXECINSTR;
+            } else {
+                elf_file.sections.items(.shdr)[osec].sh_flags |= elf.SHF_WRITE;
+            }
+            return osec;
+        }
+        const osec = try elf_file.addSection(.{
+            .type = elf.SHT_PROGBITS,
+            .flags = elf.SHF_ALLOC | @as(u64, if (is_func) elf.SHF_EXECINSTR else elf.SHF_WRITE),
+            .name = try elf_file.insertShString(section_name),
+            .addralign = 1,
+        });
+        const section_index = try self.addSectionSymbol(gpa, try self.addString(gpa, section_name), osec);
+        if (std.mem.eql(u8, section_name, ".text")) {
+            elf_file.sections.items(.shdr)[osec].sh_flags = elf.SHF_ALLOC | elf.SHF_EXECINSTR;
+            self.text_index = section_index;
+        } else if (std.mem.startsWith(u8, section_name, ".text.")) {
+            elf_file.sections.items(.shdr)[osec].sh_flags = elf.SHF_ALLOC | elf.SHF_EXECINSTR;
+        } else if (std.mem.eql(u8, section_name, ".rodata")) {
+            elf_file.sections.items(.shdr)[osec].sh_flags = elf.SHF_ALLOC;
+            self.rodata_index = section_index;
+        } else if (std.mem.startsWith(u8, section_name, ".rodata.")) {
+            elf_file.sections.items(.shdr)[osec].sh_flags = elf.SHF_ALLOC;
+        } else if (std.mem.eql(u8, section_name, ".data.rel.ro")) {
+            elf_file.sections.items(.shdr)[osec].sh_flags = elf.SHF_ALLOC | elf.SHF_WRITE;
+            self.data_relro_index = section_index;
+        } else if (std.mem.eql(u8, section_name, ".data")) {
+            elf_file.sections.items(.shdr)[osec].sh_flags = elf.SHF_ALLOC | elf.SHF_WRITE;
+            self.data_index = section_index;
+        } else if (std.mem.startsWith(u8, section_name, ".data.")) {
+            elf_file.sections.items(.shdr)[osec].sh_flags = elf.SHF_ALLOC | elf.SHF_WRITE;
+        } else if (std.mem.eql(u8, section_name, ".bss")) {
+            const shdr = &elf_file.sections.items(.shdr)[osec];
+            shdr.sh_type = elf.SHT_NOBITS;
+            shdr.sh_flags = elf.SHF_ALLOC | elf.SHF_WRITE;
+            self.bss_index = section_index;
+        } else if (std.mem.startsWith(u8, section_name, ".bss.")) {
+            const shdr = &elf_file.sections.items(.shdr)[osec];
+            shdr.sh_type = elf.SHT_NOBITS;
+            shdr.sh_flags = elf.SHF_ALLOC | elf.SHF_WRITE;
+        } else if (std.mem.eql(u8, section_name, ".tdata")) {
+            elf_file.sections.items(.shdr)[osec].sh_flags = elf.SHF_ALLOC | elf.SHF_WRITE | elf.SHF_TLS;
+            self.tdata_index = section_index;
+        } else if (std.mem.startsWith(u8, section_name, ".tdata.")) {
+            elf_file.sections.items(.shdr)[osec].sh_flags = elf.SHF_ALLOC | elf.SHF_WRITE | elf.SHF_TLS;
+        } else if (std.mem.eql(u8, section_name, ".tbss")) {
+            const shdr = &elf_file.sections.items(.shdr)[osec];
+            shdr.sh_type = elf.SHT_NOBITS;
+            shdr.sh_flags = elf.SHF_ALLOC | elf.SHF_WRITE | elf.SHF_TLS;
+            self.tbss_index = section_index;
+        } else if (std.mem.startsWith(u8, section_name, ".tbss.")) {
+            const shdr = &elf_file.sections.items(.shdr)[osec];
+            shdr.sh_type = elf.SHT_NOBITS;
+            shdr.sh_flags = elf.SHF_ALLOC | elf.SHF_WRITE | elf.SHF_TLS;
+        } else if (std.mem.eql(u8, section_name, ".eh_frame")) {
+            const target = &zcu.navFileScope(nav_index).mod.?.resolved_target.result;
+            const shdr = &elf_file.sections.items(.shdr)[osec];
+            if (target.cpu.arch == .x86_64) shdr.sh_type = elf.SHT_X86_64_UNWIND;
+            shdr.sh_flags = elf.SHF_ALLOC;
+            self.eh_frame_index = section_index;
+        } else if (std.mem.eql(u8, section_name, ".debug_info")) {
+            elf_file.sections.items(.shdr)[osec].sh_flags = 0;
+            self.debug_info_index = section_index;
+        } else if (std.mem.eql(u8, section_name, ".debug_abbrev")) {
+            elf_file.sections.items(.shdr)[osec].sh_flags = 0;
+            self.debug_abbrev_index = section_index;
+        } else if (std.mem.eql(u8, section_name, ".debug_aranges")) {
+            elf_file.sections.items(.shdr)[osec].sh_flags = 0;
+            self.debug_aranges_index = section_index;
+        } else if (std.mem.eql(u8, section_name, ".debug_str")) {
+            elf_file.sections.items(.shdr)[osec].sh_flags = 0;
+            self.debug_str_index = section_index;
+        } else if (std.mem.eql(u8, section_name, ".debug_line")) {
+            elf_file.sections.items(.shdr)[osec].sh_flags = 0;
+            self.debug_line_index = section_index;
+        } else if (std.mem.eql(u8, section_name, ".debug_line_str")) {
+            elf_file.sections.items(.shdr)[osec].sh_flags = 0;
+            self.debug_line_str_index = section_index;
+        } else if (std.mem.eql(u8, section_name, ".debug_loclists")) {
+            elf_file.sections.items(.shdr)[osec].sh_flags = 0;
+            self.debug_loclists_index = section_index;
+        } else if (std.mem.eql(u8, section_name, ".debug_rnglists")) {
+            elf_file.sections.items(.shdr)[osec].sh_flags = 0;
+            self.debug_rnglists_index = section_index;
+        } else if (std.mem.startsWith(u8, section_name, ".debug")) {
+            elf_file.sections.items(.shdr)[osec].sh_flags = 0;
+        } else if (std.mem.eql(u8, section_name, ".init_array") or std.mem.startsWith(u8, section_name, ".init_array.")) {
+            const shdr = &elf_file.sections.items(.shdr)[osec];
+            shdr.sh_type = elf.SHT_INIT_ARRAY;
+            shdr.sh_flags = elf.SHF_ALLOC | elf.SHF_WRITE;
+        } else if (std.mem.eql(u8, section_name, ".fini_array") or std.mem.startsWith(u8, section_name, ".fini_array.")) {
+            const shdr = &elf_file.sections.items(.shdr)[osec];
+            shdr.sh_type = elf.SHT_FINI_ARRAY;
+            shdr.sh_flags = elf.SHF_ALLOC | elf.SHF_WRITE;
+        }
+        return osec;
+    }
+    if (is_func) {
         if (self.text_index) |symbol_index|
             return self.symbol(symbol_index).outputShndx(elf_file).?;
         const osec = try elf_file.addSection(.{
@@ -2225,14 +2327,14 @@ const Format = struct {
     }
 };
 
-pub fn fmtSymtab(self: *ZigObject, elf_file: *Elf) std.fmt.Formatter(Format, Format.symtab) {
+pub fn fmtSymtab(self: *ZigObject, elf_file: *Elf) std.fmt.Alt(Format, Format.symtab) {
     return .{ .data = .{
         .self = self,
         .elf_file = elf_file,
     } };
 }
 
-pub fn fmtAtoms(self: *ZigObject, elf_file: *Elf) std.fmt.Formatter(Format, Format.atoms) {
+pub fn fmtAtoms(self: *ZigObject, elf_file: *Elf) std.fmt.Alt(Format, Format.atoms) {
     return .{ .data = .{
         .self = self,
         .elf_file = elf_file,

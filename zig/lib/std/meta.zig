@@ -935,7 +935,7 @@ fn CreateUniqueTuple(comptime N: comptime_int, comptime types: [N]type) type {
         @setEvalBranchQuota(10_000);
         var num_buf: [128]u8 = undefined;
         tuple_fields[i] = .{
-            .name = std.fmt.bufPrintZ(&num_buf, "{d}", .{i}) catch unreachable,
+            .name = std.fmt.bufPrintSentinel(&num_buf, "{d}", .{i}, 0) catch unreachable,
             .type = T,
             .default_value_ptr = null,
             .is_comptime = false,
@@ -1192,13 +1192,6 @@ test hasUniqueRepresentation {
     };
 
     try testing.expect(hasUniqueRepresentation(TestStruct6));
-
-    const TestUnion1 = packed union {
-        a: u32,
-        b: u16,
-    };
-
-    try testing.expect(!hasUniqueRepresentation(TestUnion1));
 
     const TestUnion2 = extern union {
         a: u32,

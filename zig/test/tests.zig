@@ -6,9 +6,7 @@ const OptimizeMode = std.builtin.OptimizeMode;
 const Step = std.Build.Step;
 
 // Cases
-const compare_output = @import("compare_output.zig");
 const stack_traces = @import("stack_traces.zig");
-const assemble_and_link = @import("assemble_and_link.zig");
 const translate_c = @import("translate_c.zig");
 const run_translated_c = @import("run_translated_c.zig");
 const llvm_ir = @import("llvm_ir.zig");
@@ -16,7 +14,6 @@ const llvm_ir = @import("llvm_ir.zig");
 // Implementations
 pub const TranslateCContext = @import("src/TranslateC.zig");
 pub const RunTranslatedCContext = @import("src/RunTranslatedC.zig");
-pub const CompareOutputContext = @import("src/CompareOutput.zig");
 pub const StackTracesContext = @import("src/StackTrace.zig");
 pub const DebuggerContext = @import("src/Debugger.zig");
 pub const LlvmIrContext = @import("src/LlvmIr.zig");
@@ -422,8 +419,6 @@ const test_targets = blk: {
                 .os_tag = .linux,
                 .abi = .none,
             },
-            // https://github.com/ziglang/zig/issues/21646
-            .skip_modules = &.{"std"},
         },
         .{
             .target = .{
@@ -432,8 +427,6 @@ const test_targets = blk: {
                 .abi = .musl,
             },
             .link_libc = true,
-            // https://github.com/ziglang/zig/issues/21646
-            .skip_modules = &.{"std"},
         },
         .{
             .target = .{
@@ -443,8 +436,6 @@ const test_targets = blk: {
             },
             .linkage = .dynamic,
             .link_libc = true,
-            // https://github.com/ziglang/zig/issues/21646
-            .skip_modules = &.{"std"},
             .extra_target = true,
         },
         .{
@@ -454,8 +445,6 @@ const test_targets = blk: {
                 .abi = .gnu,
             },
             .link_libc = true,
-            // https://github.com/ziglang/zig/issues/21646
-            .skip_modules = &.{"std"},
         },
 
         .{
@@ -1863,25 +1852,6 @@ const c_abi_targets = blk: {
     };
 };
 
-pub fn addCompareOutputTests(
-    b: *std.Build,
-    test_filters: []const []const u8,
-    optimize_modes: []const OptimizeMode,
-) *Step {
-    const cases = b.allocator.create(CompareOutputContext) catch @panic("OOM");
-    cases.* = CompareOutputContext{
-        .b = b,
-        .step = b.step("test-compare-output", "Run the compare output tests"),
-        .test_index = 0,
-        .test_filters = test_filters,
-        .optimize_modes = optimize_modes,
-    };
-
-    compare_output.addCases(cases);
-
-    return cases.step;
-}
-
 pub fn addStackTraceTests(
     b: *std.Build,
     test_filters: []const []const u8,
@@ -1923,6 +1893,7 @@ pub fn addStandaloneTests(
     enable_macos_sdk: bool,
     enable_ios_sdk: bool,
     enable_symlinks_windows: bool,
+    skip_translate_c: bool,
 ) *Step {
     const step = b.step("test-standalone", "Run the standalone tests");
     if (compilerHasPackageManager(b)) {
@@ -1935,6 +1906,7 @@ pub fn addStandaloneTests(
             .simple_skip_release_safe = mem.indexOfScalar(OptimizeMode, optimize_modes, .ReleaseSafe) == null,
             .simple_skip_release_fast = mem.indexOfScalar(OptimizeMode, optimize_modes, .ReleaseFast) == null,
             .simple_skip_release_small = mem.indexOfScalar(OptimizeMode, optimize_modes, .ReleaseSmall) == null,
+            .skip_translate_c = skip_translate_c,
         });
         const test_cases_dep_step = test_cases_dep.builder.default_step;
         test_cases_dep_step.name = b.dupe(test_cases_dep_name);
@@ -2175,21 +2147,6 @@ pub fn addCliTests(b: *std.Build) *Step {
     return step;
 }
 
-pub fn addAssembleAndLinkTests(b: *std.Build, test_filters: []const []const u8, optimize_modes: []const OptimizeMode) *Step {
-    const cases = b.allocator.create(CompareOutputContext) catch @panic("OOM");
-    cases.* = CompareOutputContext{
-        .b = b,
-        .step = b.step("test-asm-link", "Run the assemble and link tests"),
-        .test_index = 0,
-        .test_filters = test_filters,
-        .optimize_modes = optimize_modes,
-    };
-
-    assemble_and_link.addCases(cases);
-
-    return cases.step;
-}
-
 pub fn addTranslateCTests(
     b: *std.Build,
     parent_step: *std.Build.Step,
@@ -2291,11 +2248,6 @@ pub fn addModuleTests(b: *std.Build, options: ModuleTestOptions) *Step {
             continue;
 
         if (options.skip_single_threaded and test_target.single_threaded == true)
-            continue;
-
-        // https://github.com/ziglang/zig/issues/24405
-        if (!builtin.cpu.arch.isLoongArch() and target.cpu.arch.isLoongArch() and
-            (mem.eql(u8, options.name, "behavior") or mem.eql(u8, options.name, "std")))
             continue;
 
         // TODO get compiler-rt tests passing for self-hosted backends.

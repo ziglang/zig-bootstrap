@@ -865,6 +865,11 @@ pub inline fn writeSliceEndian(
     slice: []const Elem,
     endian: std.builtin.Endian,
 ) Error!void {
+    switch (@typeInfo(Elem)) {
+        .@"struct" => |info| comptime assert(info.layout != .auto),
+        .int, .@"enum" => {},
+        else => @compileError("ill-defined memory layout"),
+    }
     if (native_endian == endian) {
         return writeAll(w, @ptrCast(slice));
     } else {
@@ -2541,13 +2546,17 @@ pub const Allocating = struct {
     alignment: std.mem.Alignment,
 
     pub fn init(allocator: Allocator) Allocating {
+        return .initAligned(allocator, .of(u8));
+    }
+
+    pub fn initAligned(allocator: Allocator, alignment: std.mem.Alignment) Allocating {
         return .{
             .allocator = allocator,
             .writer = .{
                 .buffer = &.{},
                 .vtable = &vtable,
             },
-            .alignment = .of(u8),
+            .alignment = alignment,
         };
     }
 
@@ -2775,16 +2784,36 @@ pub const Allocating = struct {
         a.ensureUnusedCapacity(minimum_len) catch return error.WriteFailed;
     }
 
-    test Allocating {
-        var a: Allocating = .init(testing.allocator);
+    fn testAllocating(comptime alignment: std.mem.Alignment) !void {
+        var a: Allocating = .initAligned(testing.allocator, alignment);
         defer a.deinit();
         const w = &a.writer;
 
         const x: i32 = 42;
         const y: i32 = 1234;
         try w.print("x: {}\ny: {}\n", .{ x, y });
+        const expected = "x: 42\ny: 1234\n";
+        try testing.expectEqualSlices(u8, expected, a.written());
 
-        try testing.expectEqualSlices(u8, "x: 42\ny: 1234\n", a.written());
+        // exercise *Aligned methods
+        var l = a.toArrayListAligned(alignment);
+        defer l.deinit(testing.allocator);
+        try testing.expectEqualSlices(u8, expected, l.items);
+        a = .fromArrayListAligned(testing.allocator, alignment, &l);
+        try testing.expectEqualSlices(u8, expected, a.written());
+        const slice: []align(alignment.toByteUnits()) u8 = @alignCast(try a.toOwnedSlice());
+        try testing.expectEqualSlices(u8, expected, slice);
+        a = .initOwnedSliceAligned(testing.allocator, alignment, slice);
+        try testing.expectEqualSlices(u8, expected, a.writer.buffer);
+    }
+
+    test Allocating {
+        try testAllocating(.fromByteUnits(1));
+        try testAllocating(.fromByteUnits(4));
+        try testAllocating(.fromByteUnits(8));
+        try testAllocating(.fromByteUnits(16));
+        try testAllocating(.fromByteUnits(32));
+        try testAllocating(.fromByteUnits(64));
     }
 };
 

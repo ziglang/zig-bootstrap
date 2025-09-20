@@ -47,7 +47,7 @@ pub const Fde = struct {
         return object.relocs.items[fde.rel_index..][0..fde.rel_num];
     }
 
-    pub fn fmt(fde: Fde, elf_file: *Elf) std.fmt.Formatter(Format, Format.default) {
+    pub fn fmt(fde: Fde, elf_file: *Elf) std.fmt.Alt(Format, Format.default) {
         return .{ .data = .{
             .fde = fde,
             .elf_file = elf_file,
@@ -130,7 +130,7 @@ pub const Cie = struct {
         return true;
     }
 
-    pub fn fmt(cie: Cie, elf_file: *Elf) std.fmt.Formatter(Format, Format.default) {
+    pub fn fmt(cie: Cie, elf_file: *Elf) std.fmt.Alt(Format, Format.default) {
         return .{ .data = .{
             .cie = cie,
             .elf_file = elf_file,
@@ -482,7 +482,7 @@ pub fn writeEhFrameHdr(elf_file: *Elf, writer: anytype) !void {
     );
     try writer.writeInt(u32, num_fdes, .little);
 
-    const Entry = struct {
+    const Entry = extern struct {
         init_addr: u32,
         fde_addr: u32,
 
@@ -520,7 +520,7 @@ pub fn writeEhFrameHdr(elf_file: *Elf, writer: anytype) !void {
     }
 
     std.mem.sort(Entry, entries.items, {}, Entry.lessThan);
-    try writer.writeAll(std.mem.sliceAsBytes(entries.items));
+    try writer.writeSliceEndian(Entry, entries.items, .little);
 }
 
 const eh_frame_hdr_header_size: usize = 12;

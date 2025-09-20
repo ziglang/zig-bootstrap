@@ -169,6 +169,8 @@ pub const runtime_safety = switch (builtin.mode) {
 pub const sys_can_stack_trace = switch (builtin.cpu.arch) {
     // Observed to go into an infinite loop.
     // TODO: Make this work.
+    .loongarch32,
+    .loongarch64,
     .mips,
     .mipsel,
     .mips64,
@@ -567,7 +569,7 @@ pub fn assertReadable(slice: []const volatile u8) void {
 /// Invokes detectable illegal behavior when the provided array is not aligned
 /// to the provided amount.
 pub fn assertAligned(ptr: anytype, comptime alignment: std.mem.Alignment) void {
-    const aligned_ptr: *align(alignment.toByteUnits()) anyopaque = @ptrCast(@alignCast(ptr));
+    const aligned_ptr: *align(alignment.toByteUnits()) const anyopaque = @ptrCast(@alignCast(ptr));
     _ = aligned_ptr;
 }
 
@@ -1697,7 +1699,7 @@ pub fn ConfigurableTrace(comptime size: usize, comptime stack_frame_count: usize
         pub fn format(
             t: @This(),
             comptime fmt: []const u8,
-            options: std.fmt.FormatOptions,
+            options: std.fmt.Options,
             writer: *Writer,
         ) !void {
             if (fmt.len != 0) std.fmt.invalidFmtError(fmt, t);
