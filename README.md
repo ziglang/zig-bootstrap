@@ -127,7 +127,7 @@ is more portable across Linux distributions.
 | `loongarch64-linux-gnu`     | OK     |
 | `loongarch64-linux-gnusf`   | OK     |
 | `loongarch64-linux-musl`    | OK     |
-| `loongarch64-linux-muslsf`  | [#244](https://github.com/ziglang/zig-bootstrap/issues/244) |
+| `loongarch64-linux-muslsf`  | OK     |
 | `mips-linux-gnueabi`        | OK     |
 | `mips-linux-gnueabihf`      | OK     |
 | `mips-linux-musleabi`       | OK     |
