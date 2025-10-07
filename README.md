@@ -148,7 +148,7 @@ is more portable across Linux distributions.
 | `powerpc-linux-gnueabihf`   | OK     |
 | `powerpc-linux-musleabi`    | OK     |
 | `powerpc-linux-musleabihf`  | OK     |
-| `powerpc64-linux-gnu`       | [#113](https://github.com/ziglang/zig-bootstrap/issues/113) |
+| `powerpc64-linux-gnu`       | OK     |
 | `powerpc64-linux-musl`      | OK     |
 | `powerpc64le-linux-gnu`     | OK     |
 | `powerpc64le-linux-musl`    | OK     |
