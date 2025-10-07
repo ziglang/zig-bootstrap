@@ -64,6 +64,8 @@ static const char *get_host_os(void) {
     return "linux";
 #elif defined(__FreeBSD__)
     return "freebsd";
+#elif defined(__DragonFly__)
+    return "dragonfly";
 #elif defined(__HAIKU__)
     return "haiku";
 #else
@@ -123,7 +125,7 @@ int main(int argc, char **argv) {
         if (f == NULL)
             panic("unable to open config.zig for writing");
 
-        const char *zig_version = "0.16.0-dev.452+1f7ee99b3";
+        const char *zig_version = "0.16.0-dev.660+27aba2d77";
 
         int written = fprintf(f,
             "pub const have_llvm = false;\n"
