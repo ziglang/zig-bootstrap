@@ -1238,11 +1238,14 @@ pub fn access(path: [*:0]const u8, mode: u32) usize {
     if (@hasField(SYS, "access")) {
         return syscall2(.access, @intFromPtr(path), mode);
     } else {
-        return syscall4(.faccessat, @as(usize, @bitCast(@as(isize, AT.FDCWD))), @intFromPtr(path), mode, 0);
+        return faccessat(AT.FDCWD, path, mode, 0);
     }
 }
 
 pub fn faccessat(dirfd: i32, path: [*:0]const u8, mode: u32, flags: u32) usize {
+    if (flags == 0) {
+        return syscall3(.faccessat, @as(usize, @bitCast(@as(isize, dirfd))), @intFromPtr(path), mode);
+    }
     return syscall4(.faccessat2, @as(usize, @bitCast(@as(isize, dirfd))), @intFromPtr(path), mode, flags);
 }
 
@@ -9799,7 +9802,9 @@ pub const wrapped = struct {
     };
 
     pub fn copy_file_range(fd_in: fd_t, off_in: ?*i64, fd_out: fd_t, off_out: ?*i64, len: usize, flags: u32) CopyFileRangeError!usize {
-        const rc = system.copy_file_range(fd_in, off_in, fd_out, off_out, len, flags);
+        const use_c = std.c.versionCheck(if (builtin.abi.isAndroid()) .{ .major = 34, .minor = 0, .patch = 0 } else .{ .major = 2, .minor = 27, .patch = 0 });
+        const sys = if (use_c) std.c else std.os.linux;
+        const rc = sys.copy_file_range(fd_in, off_in, fd_out, off_out, len, flags);
         switch (errno(rc)) {
             .SUCCESS => return @intCast(rc),
             .BADF => return error.BadFileFlags,

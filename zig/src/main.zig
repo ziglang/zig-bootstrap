@@ -87,6 +87,7 @@ const normal_usage =
     \\  build-lib        Create library from source or object files
     \\  build-obj        Create object from source or object files
     \\  test             Perform unit testing
+    \\  test-obj         Create object for unit testing
     \\  run              Create executable and run immediately
     \\
     \\  ast-check        Look for simple compile errors in any set of files
@@ -538,8 +539,8 @@ const usage_build_generic =
     \\  -funwind-tables           Always produce unwind table entries for all functions
     \\  -fasync-unwind-tables     Always produce asynchronous unwind table entries for all functions
     \\  -fno-unwind-tables        Never produce unwind table entries
-    \\  -ferror-tracing           Enable error tracing in ReleaseFast mode
-    \\  -fno-error-tracing        Disable error tracing in Debug and ReleaseSafe mode
+    \\  -ferror-tracing           Enable error tracing in release builds
+    \\  -fno-error-tracing        Disable error tracing in debug builds
     \\  -fsingle-threaded         Code assumes there is only one thread
     \\  -fno-single-threaded      Code may not assume there is only one thread
     \\  -fstrip                   Omit debug symbols
@@ -1063,8 +1064,8 @@ fn buildOutputType(
                         }
                     } else if (mem.eql(u8, arg, "--dep")) {
                         var it = mem.splitScalar(u8, args_iter.nextOrFatal(), '=');
-                        const key = it.next().?;
-                        const value = it.next() orelse key;
+                        const key = it.first();
+                        const value = if (it.peek() != null) it.rest() else key;
                         if (mem.eql(u8, key, "std") and !mem.eql(u8, value, "std")) {
                             fatal("unable to import as '{s}': conflicts with builtin module", .{
                                 key,
@@ -1083,8 +1084,8 @@ fn buildOutputType(
                         });
                     } else if (mem.startsWith(u8, arg, "-M")) {
                         var it = mem.splitScalar(u8, arg["-M".len..], '=');
-                        const mod_name = it.next().?;
-                        const root_src_orig = it.next();
+                        const mod_name = it.first();
+                        const root_src_orig = if (it.peek() != null) it.rest() else null;
                         try handleModArg(
                             arena,
                             mod_name,
@@ -3393,6 +3394,14 @@ fn buildOutputType(
 
     var file_system_inputs: std.ArrayListUnmanaged(u8) = .empty;
     defer file_system_inputs.deinit(gpa);
+
+    // Deduplicate rpath entries
+    var rpath_dedup = std.StringArrayHashMapUnmanaged(void){};
+    for (create_module.rpath_list.items) |rpath| {
+        try rpath_dedup.put(arena, rpath, {});
+    }
+    create_module.rpath_list.clearRetainingCapacity();
+    try create_module.rpath_list.appendSlice(arena, rpath_dedup.keys());
 
     var create_diag: Compilation.CreateDiagnostic = undefined;
     const comp = Compilation.create(gpa, arena, &create_diag, .{

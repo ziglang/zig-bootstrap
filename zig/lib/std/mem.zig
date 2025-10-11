@@ -3785,6 +3785,7 @@ test rotate {
 
 /// Replace needle with replacement as many times as possible, writing to an output buffer which is assumed to be of
 /// appropriate size. Use replacementSize to calculate an appropriate buffer size.
+/// The `input` and `output` slices must not overlap.
 /// The needle must not be empty.
 /// Returns the number of replacements made.
 pub fn replace(comptime T: type, input: []const T, needle: []const T, replacement: []const T, output: []T) usize {
@@ -4484,7 +4485,8 @@ pub fn doNotOptimizeAway(val: anytype) void {
             } else doNotOptimizeAway(&val);
         },
         .float => {
-            if ((t.float.bits == 32 or t.float.bits == 64) and builtin.zig_backend != .stage2_c) {
+            // https://github.com/llvm/llvm-project/issues/159200
+            if ((t.float.bits == 32 or t.float.bits == 64) and builtin.zig_backend != .stage2_c and !builtin.cpu.arch.isLoongArch()) {
                 asm volatile (""
                     :
                     : [_] "rm" (val),

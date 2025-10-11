@@ -2235,39 +2235,69 @@ pub const S = switch (native_os) {
         }
     },
     .dragonfly => struct {
+        pub const IFMT = 0o170000;
+
+        pub const IFIFO = 0o010000;
+        pub const IFCHR = 0o020000;
+        pub const IFDIR = 0o040000;
+        pub const IFBLK = 0o060000;
+        pub const IFREG = 0o100000;
+        pub const IFLNK = 0o120000;
+        pub const IFSOCK = 0o140000;
+        pub const IFWHT = 0o160000;
+
+        pub const ISUID = 0o4000;
+        pub const ISGID = 0o2000;
+        pub const ISVTX = 0o1000;
+        pub const IRWXU = 0o700;
+        pub const IRUSR = 0o400;
+        pub const IWUSR = 0o200;
+        pub const IXUSR = 0o100;
+        pub const IRWXG = 0o070;
+        pub const IRGRP = 0o040;
+        pub const IWGRP = 0o020;
+        pub const IXGRP = 0o010;
+        pub const IRWXO = 0o007;
+        pub const IROTH = 0o004;
+        pub const IWOTH = 0o002;
+        pub const IXOTH = 0o001;
+
         pub const IREAD = IRUSR;
         pub const IEXEC = IXUSR;
         pub const IWRITE = IWUSR;
-        pub const IXOTH = 1;
-        pub const IWOTH = 2;
-        pub const IROTH = 4;
-        pub const IRWXO = 7;
-        pub const IXGRP = 8;
-        pub const IWGRP = 16;
-        pub const IRGRP = 32;
-        pub const IRWXG = 56;
-        pub const IXUSR = 64;
-        pub const IWUSR = 128;
-        pub const IRUSR = 256;
-        pub const IRWXU = 448;
         pub const ISTXT = 512;
         pub const BLKSIZE = 512;
-        pub const ISVTX = 512;
-        pub const ISGID = 1024;
-        pub const ISUID = 2048;
-        pub const IFIFO = 4096;
-        pub const IFCHR = 8192;
-        pub const IFDIR = 16384;
-        pub const IFBLK = 24576;
-        pub const IFREG = 32768;
-        pub const IFDB = 36864;
-        pub const IFLNK = 40960;
-        pub const IFSOCK = 49152;
-        pub const IFWHT = 57344;
-        pub const IFMT = 61440;
+
+        pub fn ISFIFO(m: u32) bool {
+            return m & IFMT == IFIFO;
+        }
 
         pub fn ISCHR(m: u32) bool {
             return m & IFMT == IFCHR;
+        }
+
+        pub fn ISDIR(m: u32) bool {
+            return m & IFMT == IFDIR;
+        }
+
+        pub fn ISBLK(m: u32) bool {
+            return m & IFMT == IFBLK;
+        }
+
+        pub fn ISREG(m: u32) bool {
+            return m & IFMT == IFREG;
+        }
+
+        pub fn ISLNK(m: u32) bool {
+            return m & IFMT == IFLNK;
+        }
+
+        pub fn ISSOCK(m: u32) bool {
+            return m & IFMT == IFSOCK;
+        }
+
+        pub fn IWHT(m: u32) bool {
+            return m & IFMT == IFWHT;
         }
     },
     .haiku => struct {
@@ -3091,8 +3121,17 @@ pub const SIG = switch (native_os) {
         pub const UNBLOCK = 2;
         pub const SETMASK = 3;
     },
+    // https://github.com/SerenityOS/serenity/blob/046c23f567a17758d762a33bdf04bacbfd088f9f/Kernel/API/POSIX/signal.h
     // https://github.com/SerenityOS/serenity/blob/046c23f567a17758d762a33bdf04bacbfd088f9f/Kernel/API/POSIX/signal_numbers.h
     .serenity => struct {
+        pub const DFL: ?Sigaction.handler_fn = @ptrFromInt(0);
+        pub const ERR: ?Sigaction.handler_fn = @ptrFromInt(maxInt(usize));
+        pub const IGN: ?Sigaction.handler_fn = @ptrFromInt(1);
+
+        pub const BLOCK = 1;
+        pub const UNBLOCK = 2;
+        pub const SETMASK = 3;
+
         pub const INVAL = 0;
         pub const HUP = 1;
         pub const INT = 2;
@@ -5685,6 +5724,23 @@ pub const MSG = switch (native_os) {
         pub const WAITFORONE = 0x2000;
         pub const NOTIFICATION = 0x4000;
     },
+    // https://github.com/openbsd/src/blob/42a7be81bef70c04732f45ec573622effe56b563/sys/sys/socket.h#L506
+    .openbsd => struct {
+        pub const OOB = 0x1;
+        pub const PEEK = 0x2;
+        pub const DONTROUTE = 0x4;
+        pub const EOR = 0x8;
+        pub const TRUNC = 0x10;
+        pub const CTRUNC = 0x20;
+        pub const WAITALL = 0x40;
+        pub const DONTWAIT = 0x80;
+        pub const BCAST = 0x100;
+        pub const MCAST = 0x200;
+        pub const NOSIGNAL = 0x400;
+        pub const CMSG_CLOEXEC = 0x800;
+        pub const WAITFORONE = 0x1000;
+        pub const CMSG_CLOFORK = 0x2000;
+    },
     else => void,
 };
 pub const SOCK = switch (native_os) {
@@ -6664,7 +6720,12 @@ pub const SOMAXCONN = switch (native_os) {
     .windows => ws2_32.SOMAXCONN,
     // https://github.com/SerenityOS/serenity/blob/ac44ec5ebc707f9dd0c3d4759a1e17e91db5d74f/Kernel/API/POSIX/sys/socket.h#L128
     .solaris, .illumos, .serenity => 128,
-    .openbsd => 28,
+    // https://github.com/freebsd/freebsd-src/blob/9ab31f821ad1c6bad474510447387c50bef2c24c/sys/sys/socket.h#L434
+    // https://github.com/DragonFlyBSD/DragonFlyBSD/blob/fd3d1949d526ffa646e57037770acd6f2f3bb617/sys/sys/socket.h#L393
+    // https://github.com/NetBSD/src/blob/a673fb3f8487e974c669216064f7588207229fea/sys/sys/socket.h#L472
+    // https://github.com/openbsd/src/blob/8ba9cd88f10123fef7af805b8e5ccc2463ad8fa4/sys/sys/socket.h#L483
+    // https://github.com/apple/darwin-xnu/blob/2ff845c2e033bd0ff64b5b6aa6063a1f8f65aa32/bsd/sys/socket.h#L815
+    .freebsd, .dragonfly, .netbsd, .openbsd, .driverkit, .macos, .ios, .tvos, .watchos, .visionos => 128,
     else => void,
 };
 pub const IFNAMESIZE = switch (native_os) {

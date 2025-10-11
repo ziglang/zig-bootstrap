@@ -1753,7 +1753,8 @@ pub fn totalSystemMemory() TotalSystemMemoryError!u64 {
             if (std.os.linux.E.init(result) != .SUCCESS) {
                 return error.UnknownTotalSystemMemory;
             }
-            return info.totalram * info.mem_unit;
+            // Promote to u64 to avoid overflow on systems where info.totalram is a 32-bit usize
+            return @as(u64, info.totalram) * info.mem_unit;
         },
         .freebsd => {
             var physmem: c_ulong = undefined;
@@ -1762,7 +1763,20 @@ pub fn totalSystemMemory() TotalSystemMemoryError!u64 {
                 error.NameTooLong, error.UnknownName => unreachable,
                 else => return error.UnknownTotalSystemMemory,
             };
-            return @as(usize, @intCast(physmem));
+            return @as(u64, @intCast(physmem));
+        },
+        // whole Darwin family
+        .driverkit, .ios, .macos, .tvos, .visionos, .watchos => {
+            // "hw.memsize" returns uint64_t
+            var physmem: u64 = undefined;
+            var len: usize = @sizeOf(u64);
+            posix.sysctlbynameZ("hw.memsize", &physmem, &len, null, 0) catch |err| switch (err) {
+                error.PermissionDenied => unreachable, // only when setting values,
+                error.SystemResources => unreachable, // memory already on the stack
+                error.UnknownName => unreachable, // constant, known good value
+                else => return error.UnknownTotalSystemMemory,
+            };
+            return physmem;
         },
         .openbsd => {
             const mib: [2]c_int = [_]c_int{

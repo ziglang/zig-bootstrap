@@ -102,6 +102,7 @@ pub fn getExternalExecutor(
                     else => "qemu-mips64el",
                 },
             },
+            .or1k => Executor{ .qemu = "qemu-or1k" },
             .powerpc => Executor{ .qemu = "qemu-ppc" },
             .powerpc64 => Executor{ .qemu = "qemu-ppc64" },
             .powerpc64le => Executor{ .qemu = "qemu-ppc64le" },
@@ -109,7 +110,7 @@ pub fn getExternalExecutor(
             .riscv64 => Executor{ .qemu = "qemu-riscv64" },
             .s390x => Executor{ .qemu = "qemu-s390x" },
             .sparc => Executor{
-                .qemu = if (candidate.cpu.has(.sparc, .v9))
+                .qemu = if (candidate.cpu.has(.sparc, .v8plus))
                     "qemu-sparc32plus"
                 else
                     "qemu-sparc",
@@ -121,7 +122,7 @@ pub fn getExternalExecutor(
                 else => Executor{ .qemu = "qemu-x86_64" },
             },
             .xtensa => Executor{ .qemu = "qemu-xtensa" },
-            else => return bad_result,
+            else => bad_result,
         };
     }
 

@@ -2053,7 +2053,14 @@ pub fn create(gpa: Allocator, arena: Allocator, diag: *CreateDiagnostic, options
                     break :s .none; // only LLD can handle ubsan-rt for this target
                 } else true,
             };
-            if (have_zcu and (!need_llvm or use_llvm)) break :s .zcu;
+            if (have_zcu and (!need_llvm or use_llvm)) {
+                // ubsan-rt's exports use hidden visibility. If we're building a Windows DLL and
+                // exported functions are going to be dllexported, LLVM will complain that
+                // dllexported functions must use default or protected visibility. So we can't use
+                // the ZCU strategy in this case.
+                if (options.config.dll_export_fns) break :s .lib;
+                break :s .zcu;
+            }
             if (need_llvm and !build_options.have_llvm) break :s .none; // impossible to build without llvm
             if (is_exe_or_dyn_lib) break :s .lib;
             break :s .obj;
@@ -3659,6 +3666,7 @@ const Header = extern struct {
             items_len: u32,
             extra_len: u32,
             limbs_len: u32,
+            strings_len: u32,
             string_bytes_len: u32,
             tracked_insts_len: u32,
             files_len: u32,
@@ -3707,7 +3715,8 @@ pub fn saveState(comp: *Compilation) !void {
                 .items_len = @intCast(local.mutate.items.len),
                 .extra_len = @intCast(local.mutate.extra.len),
                 .limbs_len = @intCast(local.mutate.limbs.len),
-                .string_bytes_len = @intCast(local.mutate.strings.len),
+                .strings_len = @intCast(local.mutate.strings.len),
+                .string_bytes_len = @intCast(local.mutate.string_bytes.len),
                 .tracked_insts_len = @intCast(local.mutate.tracked_insts.len),
                 .files_len = @intCast(local.mutate.files.len),
             },
@@ -3750,8 +3759,11 @@ pub fn saveState(comp: *Compilation) !void {
                 addBuf(&bufs, @ptrCast(local.shared.items.view().items(.data)[0..pt_header.intern_pool.items_len]));
                 addBuf(&bufs, @ptrCast(local.shared.items.view().items(.tag)[0..pt_header.intern_pool.items_len]));
             }
+            if (pt_header.intern_pool.strings_len > 0) {
+                addBuf(&bufs, @ptrCast(local.shared.strings.view().items(.@"0")[0..pt_header.intern_pool.strings_len]));
+            }
             if (pt_header.intern_pool.string_bytes_len > 0) {
-                addBuf(&bufs, local.shared.strings.view().items(.@"0")[0..pt_header.intern_pool.string_bytes_len]);
+                addBuf(&bufs, local.shared.string_bytes.view().items(.@"0")[0..pt_header.intern_pool.string_bytes_len]);
             }
             if (pt_header.intern_pool.tracked_insts_len > 0) {
                 addBuf(&bufs, @ptrCast(local.shared.tracked_insts.view().items(.@"0")[0..pt_header.intern_pool.tracked_insts_len]));
@@ -6836,10 +6848,6 @@ pub fn addCCArgs(
         try argv.append("-municode");
     }
 
-    if (mod.code_model != .default) {
-        try argv.append(try std.fmt.allocPrint(arena, "-mcmodel={s}", .{@tagName(mod.code_model)}));
-    }
-
     try argv.ensureUnusedCapacity(2);
     switch (comp.config.debug_format) {
         .strip => {},
@@ -7129,6 +7137,10 @@ pub fn addCCArgs(
         .ll,
         .bc,
         => {
+            if (mod.code_model != .default) {
+                try argv.append(try std.fmt.allocPrint(arena, "-mcmodel={s}", .{@tagName(mod.code_model)}));
+            }
+
             if (target_util.clangSupportsTargetCpuArg(target)) {
                 if (target.cpu.model.llvm_name) |llvm_name| {
                     try argv.appendSlice(&[_][]const u8{
@@ -8086,7 +8098,7 @@ pub fn addLinkLib(comp: *Compilation, lib_name: []const u8) !void {
 /// compiler-rt, libcxx, libc, libunwind, etc.
 pub fn compilerRtOptMode(comp: Compilation) std.builtin.OptimizeMode {
     if (comp.debug_compiler_runtime_libs) {
-        return comp.root_mod.optimize_mode;
+        return .Debug;
     }
     const target = &comp.root_mod.resolved_target.result;
     switch (comp.root_mod.optimize_mode) {
