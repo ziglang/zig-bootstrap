@@ -1,4 +1,5 @@
 const std = @import("std");
+const Io = std.Io;
 const assert = std.debug.assert;
 const EpochSeconds = std.time.epoch.EpochSeconds;
 const mem = std.mem;
@@ -113,7 +114,7 @@ pub const Environment = struct {
             if (parsed > max_timestamp) return error.InvalidEpoch;
             return .{ .provided = parsed };
         } else {
-            const timestamp = std.math.cast(u64, std.time.timestamp()) orelse return error.InvalidEpoch;
+            const timestamp = std.math.cast(u64, 0) orelse return error.InvalidEpoch;
             return .{ .system = std.math.clamp(timestamp, 0, max_timestamp) };
         }
     }
@@ -124,6 +125,7 @@ const Compilation = @This();
 gpa: Allocator,
 /// Allocations in this arena live all the way until `Compilation.deinit`.
 arena: Allocator,
+io: Io,
 diagnostics: *Diagnostics,
 
 code_gen_options: CodeGenOptions = .default,
@@ -157,10 +159,11 @@ type_store: TypeStore = .{},
 ms_cwd_source_id: ?Source.Id = null,
 cwd: std.fs.Dir,
 
-pub fn init(gpa: Allocator, arena: Allocator, diagnostics: *Diagnostics, cwd: std.fs.Dir) Compilation {
+pub fn init(gpa: Allocator, arena: Allocator, io: Io, diagnostics: *Diagnostics, cwd: std.fs.Dir) Compilation {
     return .{
         .gpa = gpa,
         .arena = arena,
+        .io = io,
         .diagnostics = diagnostics,
         .cwd = cwd,
     };
@@ -168,10 +171,11 @@ pub fn init(gpa: Allocator, arena: Allocator, diagnostics: *Diagnostics, cwd: st
 
 /// Initialize Compilation with default environment,
 /// pragma handlers and emulation mode set to target.
-pub fn initDefault(gpa: Allocator, arena: Allocator, diagnostics: *Diagnostics, cwd: std.fs.Dir) !Compilation {
+pub fn initDefault(gpa: Allocator, arena: Allocator, io: Io, diagnostics: *Diagnostics, cwd: std.fs.Dir) !Compilation {
     var comp: Compilation = .{
         .gpa = gpa,
         .arena = arena,
+        .io = io,
         .diagnostics = diagnostics,
         .environment = try Environment.loadAll(gpa),
         .cwd = cwd,
@@ -222,14 +226,14 @@ pub const SystemDefinesMode = enum {
     include_system_defines,
 };
 
-fn generateSystemDefines(comp: *Compilation, w: *std.Io.Writer) !void {
+fn generateSystemDefines(comp: *Compilation, w: *Io.Writer) !void {
     const define = struct {
-        fn define(_w: *std.Io.Writer, name: []const u8) !void {
+        fn define(_w: *Io.Writer, name: []const u8) !void {
             try _w.print("#define {s} 1\n", .{name});
         }
     }.define;
     const defineStd = struct {
-        fn defineStd(_w: *std.Io.Writer, name: []const u8, is_gnu: bool) !void {
+        fn defineStd(_w: *Io.Writer, name: []const u8, is_gnu: bool) !void {
             if (is_gnu) {
                 try _w.print("#define {s} 1\n", .{name});
             }
@@ -288,16 +292,9 @@ fn generateSystemDefines(comp: *Compilation, w: *std.Io.Writer) !void {
                 }
                 try define(w, "__MSVCRT__");
                 try define(w, "__MINGW32__");
-            } else if (comp.target.abi == .cygnus) {
-                try define(w, "__CYGWIN__");
-                if (ptr_width == 64) {
-                    try define(w, "__CYGWIN64__");
-                } else {
-                    try define(w, "__CYGWIN32__");
-                }
             }
 
-            if (comp.target.abi.isGnu() or comp.target.abi == .cygnus) {
+            if (comp.target.abi.isGnu()) {
                 // MinGW and Cygwin define __declspec(a) to __attribute((a)).
                 // Like Clang we make the define no op if -fdeclspec is enabled.
                 if (comp.langopts.declspec_attrs) {
@@ -337,7 +334,8 @@ fn generateSystemDefines(comp: *Compilation, w: *std.Io.Writer) !void {
         .netbsd => try define(w, "__NetBSD__"),
         .openbsd => try define(w, "__OpenBSD__"),
         .dragonfly => try define(w, "__DragonFly__"),
-        .solaris => try defineStd(w, "sun", is_gnu),
+        .illumos => try defineStd(w, "sun", is_gnu),
+        .maccatalyst,
         .macos,
         .tvos,
         .ios,
@@ -361,13 +359,12 @@ fn generateSystemDefines(comp: *Compilation, w: *std.Io.Writer) !void {
         .linux,
         .haiku,
         .hurd,
-        .solaris,
-        .aix,
+        .illumos,
         .emscripten,
         .ps4,
         .ps5,
         => try defineStd(w, "unix", is_gnu),
-        .windows => if (comp.target.abi.isGnu() or comp.target.abi == .cygnus) {
+        .windows => if (comp.target.abi.isGnu()) {
             try defineStd(w, "unix", is_gnu);
         },
         else => {},
@@ -618,7 +615,7 @@ fn generateSystemDefines(comp: *Compilation, w: *std.Io.Writer) !void {
             try defineStd(w, "sparc", is_gnu);
             try define(w, "__sparc_v9__");
             try define(w, "__arch64__");
-            if (comp.target.os.tag != .solaris) {
+            if (comp.target.os.tag != .illumos) {
                 try define(w, "__sparc64__");
                 try define(w, "__sparc_v9__");
                 try define(w, "__sparcv9__");
@@ -626,7 +623,7 @@ fn generateSystemDefines(comp: *Compilation, w: *std.Io.Writer) !void {
         },
         .sparc => {
             try defineStd(w, "sparc", is_gnu);
-            if (comp.target.os.tag == .solaris) {
+            if (comp.target.os.tag == .illumos) {
                 try define(w, "__sparcv8");
             }
         },
@@ -639,7 +636,7 @@ fn generateSystemDefines(comp: *Compilation, w: *std.Io.Writer) !void {
         },
         .aarch64, .aarch64_be => {
             try define(w, "__aarch64__");
-            if (comp.target.os.tag == .macos) {
+            if (comp.target.os.tag.isDarwin()) {
                 try define(w, "__AARCH64_SIMD__");
                 if (ptr_width == 32) {
                     try define(w, "__ARM64_ARCH_8_32__");
@@ -957,7 +954,7 @@ fn generateSystemDefines(comp: *Compilation, w: *std.Io.Writer) !void {
 pub fn generateBuiltinMacros(comp: *Compilation, system_defines_mode: SystemDefinesMode) AddSourceError!Source {
     try comp.type_store.initNamedTypes(comp);
 
-    var allocating: std.Io.Writer.Allocating = try .initCapacity(comp.gpa, 2 << 13);
+    var allocating: Io.Writer.Allocating = try .initCapacity(comp.gpa, 2 << 13);
     defer allocating.deinit();
 
     comp.writeBuiltinMacros(system_defines_mode, &allocating.writer) catch |err| switch (err) {
@@ -971,7 +968,7 @@ pub fn generateBuiltinMacros(comp: *Compilation, system_defines_mode: SystemDefi
     return comp.addSourceFromOwnedBuffer("<builtin>", contents, .user);
 }
 
-fn writeBuiltinMacros(comp: *Compilation, system_defines_mode: SystemDefinesMode, w: *std.Io.Writer) !void {
+fn writeBuiltinMacros(comp: *Compilation, system_defines_mode: SystemDefinesMode, w: *Io.Writer) !void {
     if (system_defines_mode == .include_system_defines) {
         try w.writeAll(
             \\#define __VERSION__ "Aro
@@ -996,20 +993,13 @@ fn writeBuiltinMacros(comp: *Compilation, system_defines_mode: SystemDefinesMode
         \\
     );
     if (comp.langopts.standard.atLeast(.c11)) switch (comp.target.os.tag) {
-        .openbsd, .driverkit, .ios, .macos, .tvos, .visionos, .watchos => {
+        .openbsd, .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => {
             try w.writeAll("#define __STDC_NO_THREADS__ 1\n");
         },
         .ps4, .ps5 => {
             try w.writeAll(
                 \\#define __STDC_NO_THREADS__ 1
                 \\#define __STDC_NO_COMPLEX__ 1
-                \\
-            );
-        },
-        .aix => {
-            try w.writeAll(
-                \\#define __STDC_NO_THREADS__ 1
-                \\#define __STDC_NO_ATOMICS__ 1
                 \\
             );
         },
@@ -1026,7 +1016,7 @@ fn writeBuiltinMacros(comp: *Compilation, system_defines_mode: SystemDefinesMode
     }
 }
 
-fn generateFloatMacros(w: *std.Io.Writer, prefix: []const u8, semantics: target_util.FPSemantics, ext: []const u8) !void {
+fn generateFloatMacros(w: *Io.Writer, prefix: []const u8, semantics: target_util.FPSemantics, ext: []const u8) !void {
     const denormMin = semantics.chooseValue(
         []const u8,
         .{
@@ -1101,7 +1091,7 @@ fn generateFloatMacros(w: *std.Io.Writer, prefix: []const u8, semantics: target_
     try w.print("#define __{s}_MIN__ {s}{s}\n", .{ prefix, min, ext });
 }
 
-fn generateTypeMacro(comp: *const Compilation, w: *std.Io.Writer, name: []const u8, qt: QualType) !void {
+fn generateTypeMacro(comp: *const Compilation, w: *Io.Writer, name: []const u8, qt: QualType) !void {
     try w.print("#define {s} ", .{name});
     try qt.print(comp, w);
     try w.writeByte('\n');
@@ -1136,7 +1126,7 @@ fn generateFastOrLeastType(
     bits: usize,
     kind: enum { least, fast },
     signedness: std.builtin.Signedness,
-    w: *std.Io.Writer,
+    w: *Io.Writer,
 ) !void {
     const ty = comp.intLeastN(bits, signedness); // defining the fast types as the least types is permitted
 
@@ -1166,7 +1156,7 @@ fn generateFastOrLeastType(
     try comp.generateFmt(prefix, w, ty);
 }
 
-fn generateFastAndLeastWidthTypes(comp: *Compilation, w: *std.Io.Writer) !void {
+fn generateFastAndLeastWidthTypes(comp: *Compilation, w: *Io.Writer) !void {
     const sizes = [_]usize{ 8, 16, 32, 64 };
     for (sizes) |size| {
         try comp.generateFastOrLeastType(size, .least, .signed, w);
@@ -1176,7 +1166,7 @@ fn generateFastAndLeastWidthTypes(comp: *Compilation, w: *std.Io.Writer) !void {
     }
 }
 
-fn generateExactWidthTypes(comp: *Compilation, w: *std.Io.Writer) !void {
+fn generateExactWidthTypes(comp: *Compilation, w: *Io.Writer) !void {
     try comp.generateExactWidthType(w, .schar);
 
     if (QualType.short.sizeof(comp) > QualType.char.sizeof(comp)) {
@@ -1224,7 +1214,7 @@ fn generateExactWidthTypes(comp: *Compilation, w: *std.Io.Writer) !void {
     }
 }
 
-fn generateFmt(comp: *const Compilation, prefix: []const u8, w: *std.Io.Writer, qt: QualType) !void {
+fn generateFmt(comp: *const Compilation, prefix: []const u8, w: *Io.Writer, qt: QualType) !void {
     const unsigned = qt.signedness(comp) == .unsigned;
     const modifier = qt.formatModifier(comp);
     const formats = if (unsigned) "ouxX" else "di";
@@ -1233,7 +1223,7 @@ fn generateFmt(comp: *const Compilation, prefix: []const u8, w: *std.Io.Writer, 
     }
 }
 
-fn generateSuffixMacro(comp: *const Compilation, prefix: []const u8, w: *std.Io.Writer, qt: QualType) !void {
+fn generateSuffixMacro(comp: *const Compilation, prefix: []const u8, w: *Io.Writer, qt: QualType) !void {
     return w.print("#define {s}_C_SUFFIX__ {s}\n", .{ prefix, qt.intValueSuffix(comp) });
 }
 
@@ -1241,7 +1231,7 @@ fn generateSuffixMacro(comp: *const Compilation, prefix: []const u8, w: *std.Io.
 ///     Name macro (e.g. #define __UINT32_TYPE__ unsigned int)
 ///     Format strings (e.g. #define __UINT32_FMTu__ "u")
 ///     Suffix macro (e.g. #define __UINT32_C_SUFFIX__ U)
-fn generateExactWidthType(comp: *Compilation, w: *std.Io.Writer, original_qt: QualType) !void {
+fn generateExactWidthType(comp: *Compilation, w: *Io.Writer, original_qt: QualType) !void {
     var qt = original_qt;
     const width = qt.sizeof(comp) * 8;
     const unsigned = qt.signedness(comp) == .unsigned;
@@ -1274,7 +1264,7 @@ pub fn hasHalfPrecisionFloatABI(comp: *const Compilation) bool {
     return comp.langopts.allow_half_args_and_returns or target_util.hasHalfPrecisionFloatABI(comp.target);
 }
 
-fn generateIntMax(comp: *const Compilation, w: *std.Io.Writer, name: []const u8, qt: QualType) !void {
+fn generateIntMax(comp: *const Compilation, w: *Io.Writer, name: []const u8, qt: QualType) !void {
     const unsigned = qt.signedness(comp) == .unsigned;
     const max: u128 = switch (qt.bitSizeof(comp)) {
         8 => if (unsigned) std.math.maxInt(u8) else std.math.maxInt(i8),
@@ -1298,7 +1288,7 @@ pub fn wcharMax(comp: *const Compilation) u32 {
     };
 }
 
-fn generateExactWidthIntMax(comp: *Compilation, w: *std.Io.Writer, original_qt: QualType) !void {
+fn generateExactWidthIntMax(comp: *Compilation, w: *Io.Writer, original_qt: QualType) !void {
     var qt = original_qt;
     const bit_count: u8 = @intCast(qt.sizeof(comp) * 8);
     const unsigned = qt.signedness(comp) == .unsigned;
@@ -1315,16 +1305,16 @@ fn generateExactWidthIntMax(comp: *Compilation, w: *std.Io.Writer, original_qt: 
     return comp.generateIntMax(w, name, qt);
 }
 
-fn generateIntWidth(comp: *Compilation, w: *std.Io.Writer, name: []const u8, qt: QualType) !void {
+fn generateIntWidth(comp: *Compilation, w: *Io.Writer, name: []const u8, qt: QualType) !void {
     try w.print("#define __{s}_WIDTH__ {d}\n", .{ name, qt.sizeof(comp) * 8 });
 }
 
-fn generateIntMaxAndWidth(comp: *Compilation, w: *std.Io.Writer, name: []const u8, qt: QualType) !void {
+fn generateIntMaxAndWidth(comp: *Compilation, w: *Io.Writer, name: []const u8, qt: QualType) !void {
     try comp.generateIntMax(w, name, qt);
     try comp.generateIntWidth(w, name, qt);
 }
 
-fn generateSizeofType(comp: *Compilation, w: *std.Io.Writer, name: []const u8, qt: QualType) !void {
+fn generateSizeofType(comp: *Compilation, w: *Io.Writer, name: []const u8, qt: QualType) !void {
     try w.print("#define {s} {d}\n", .{ name, qt.sizeof(comp) });
 }
 
@@ -1805,7 +1795,7 @@ pub const IncludeType = enum {
     angle_brackets,
 };
 
-fn getPathContents(comp: *Compilation, path: []const u8, limit: std.Io.Limit) ![]u8 {
+fn getPathContents(comp: *Compilation, path: []const u8, limit: Io.Limit) ![]u8 {
     if (mem.indexOfScalar(u8, path, 0) != null) {
         return error.FileNotFound;
     }
@@ -1815,11 +1805,12 @@ fn getPathContents(comp: *Compilation, path: []const u8, limit: std.Io.Limit) ![
     return comp.getFileContents(file, limit);
 }
 
-fn getFileContents(comp: *Compilation, file: std.fs.File, limit: std.Io.Limit) ![]u8 {
+fn getFileContents(comp: *Compilation, file: std.fs.File, limit: Io.Limit) ![]u8 {
+    const io = comp.io;
     var file_buf: [4096]u8 = undefined;
-    var file_reader = file.reader(&file_buf);
+    var file_reader = file.reader(io, &file_buf);
 
-    var allocating: std.Io.Writer.Allocating = .init(comp.gpa);
+    var allocating: Io.Writer.Allocating = .init(comp.gpa);
     defer allocating.deinit();
     if (file_reader.getSize()) |size| {
         const limited_size = limit.minInt64(size);
@@ -1846,7 +1837,7 @@ pub fn findEmbed(
     includer_token_source: Source.Id,
     /// angle bracket vs quotes
     include_type: IncludeType,
-    limit: std.Io.Limit,
+    limit: Io.Limit,
     opt_dep_file: ?*DepFile,
 ) !?[]u8 {
     if (std.fs.path.isAbsolute(filename)) {
@@ -2010,8 +2001,7 @@ pub fn locSlice(comp: *const Compilation, loc: Source.Location) []const u8 {
 pub fn getSourceMTimeUncached(comp: *const Compilation, source_id: Source.Id) ?u64 {
     const source = comp.getSource(source_id);
     if (comp.cwd.statFile(source.path)) |stat| {
-        const mtime = @divTrunc(stat.mtime, std.time.ns_per_s);
-        return std.math.cast(u64, mtime);
+        return std.math.cast(u64, stat.mtime.toSeconds());
     } else |_| {
         return null;
     }

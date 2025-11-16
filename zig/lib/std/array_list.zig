@@ -277,14 +277,13 @@ pub fn AlignedManaged(comptime T: type, comptime alignment: ?mem.Alignment) type
         /// The empty slot is filled from the end of the list.
         /// This operation is O(1).
         /// This may not preserve item order. Use `orderedRemove` if you need to preserve order.
-        /// Asserts that the list is not empty.
         /// Asserts that the index is in bounds.
         pub fn swapRemove(self: *Self, i: usize) T {
-            if (self.items.len - 1 == i) return self.pop().?;
-
-            const old_item = self.items[i];
-            self.items[i] = self.pop().?;
-            return old_item;
+            const val = self.items[i];
+            self.items[i] = self.items[self.items.len - 1];
+            self.items[self.items.len - 1] = undefined;
+            self.items.len -= 1;
+            return val;
         }
 
         /// Append the slice of items to the list. Allocates more
@@ -381,11 +380,14 @@ pub fn AlignedManaged(comptime T: type, comptime alignment: ?mem.Alignment) type
         /// Asserts that the new length is less than or equal to the previous length.
         pub fn shrinkRetainingCapacity(self: *Self, new_len: usize) void {
             assert(new_len <= self.items.len);
+            @memset(self.items[new_len..], undefined);
             self.items.len = new_len;
         }
 
+        /// Reduce length to 0.
         /// Invalidates all element pointers.
         pub fn clearRetainingCapacity(self: *Self) void {
+            @memset(self.items, undefined);
             self.items.len = 0;
         }
 
@@ -522,6 +524,7 @@ pub fn AlignedManaged(comptime T: type, comptime alignment: ?mem.Alignment) type
         pub fn pop(self: *Self) ?T {
             if (self.items.len == 0) return null;
             const val = self.items[self.items.len - 1];
+            self.items[self.items.len - 1] = undefined;
             self.items.len -= 1;
             return val;
         }
@@ -544,8 +547,7 @@ pub fn AlignedManaged(comptime T: type, comptime alignment: ?mem.Alignment) type
         /// Returns the last element from the list.
         /// Asserts that the list is not empty.
         pub fn getLast(self: Self) T {
-            const val = self.items[self.items.len - 1];
-            return val;
+            return self.items[self.items.len - 1];
         }
 
         /// Returns the last element from the list, or `null` if list is empty.
@@ -956,14 +958,13 @@ pub fn Aligned(comptime T: type, comptime alignment: ?mem.Alignment) type {
         /// The empty slot is filled from the end of the list.
         /// Invalidates pointers to last element.
         /// This operation is O(1).
-        /// Asserts that the list is not empty.
         /// Asserts that the index is in bounds.
         pub fn swapRemove(self: *Self, i: usize) T {
-            if (self.items.len - 1 == i) return self.pop().?;
-
-            const old_item = self.items[i];
-            self.items[i] = self.pop().?;
-            return old_item;
+            const val = self.items[i];
+            self.items[i] = self.items[self.items.len - 1];
+            self.items[self.items.len - 1] = undefined;
+            self.items.len -= 1;
+            return val;
         }
 
         /// Append the slice of items to the list. Allocates more
@@ -1140,11 +1141,14 @@ pub fn Aligned(comptime T: type, comptime alignment: ?mem.Alignment) type {
         /// Asserts that the new length is less than or equal to the previous length.
         pub fn shrinkRetainingCapacity(self: *Self, new_len: usize) void {
             assert(new_len <= self.items.len);
+            @memset(self.items[new_len..], undefined);
             self.items.len = new_len;
         }
 
+        /// Reduce length to 0.
         /// Invalidates all element pointers.
         pub fn clearRetainingCapacity(self: *Self) void {
+            @memset(self.items, undefined);
             self.items.len = 0;
         }
 
@@ -1327,6 +1331,7 @@ pub fn Aligned(comptime T: type, comptime alignment: ?mem.Alignment) type {
         pub fn pop(self: *Self) ?T {
             if (self.items.len == 0) return null;
             const val = self.items[self.items.len - 1];
+            self.items[self.items.len - 1] = undefined;
             self.items.len -= 1;
             return val;
         }
@@ -1348,8 +1353,7 @@ pub fn Aligned(comptime T: type, comptime alignment: ?mem.Alignment) type {
         /// Return the last element from the list.
         /// Asserts that the list is not empty.
         pub fn getLast(self: Self) T {
-            const val = self.items[self.items.len - 1];
-            return val;
+            return self.items[self.items.len - 1];
         }
 
         /// Return the last element from the list, or

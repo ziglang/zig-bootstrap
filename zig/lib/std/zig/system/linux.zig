@@ -1,5 +1,7 @@
-const std = @import("std");
 const builtin = @import("builtin");
+
+const std = @import("std");
+const Io = std.Io;
 const mem = std.mem;
 const fs = std.fs;
 const fmt = std.fmt;
@@ -344,7 +346,7 @@ fn testParser(
     expected_model: *const Target.Cpu.Model,
     input: []const u8,
 ) !void {
-    var r: std.Io.Reader = .fixed(input);
+    var r: Io.Reader = .fixed(input);
     const result = try parser.parse(arch, &r);
     try testing.expectEqual(expected_model, result.?.model);
     try testing.expect(expected_model.features.eql(result.?.features));
@@ -357,16 +359,13 @@ fn testParser(
 // When all the lines have been analyzed the finalize method is called.
 fn CpuinfoParser(comptime impl: anytype) type {
     return struct {
-        fn parse(arch: Target.Cpu.Arch, reader: *std.Io.Reader) !?Target.Cpu {
+        fn parse(arch: Target.Cpu.Arch, reader: *Io.Reader) !?Target.Cpu {
             var obj: impl = .{};
-            while (reader.takeDelimiterExclusive('\n')) |line| {
+            while (try reader.takeDelimiter('\n')) |line| {
                 const colon_pos = mem.indexOfScalar(u8, line, ':') orelse continue;
                 const key = mem.trimEnd(u8, line[0..colon_pos], " \t");
                 const value = mem.trimStart(u8, line[colon_pos + 1 ..], " \t");
                 if (!try obj.line_hook(key, value)) break;
-            } else |err| switch (err) {
-                error.EndOfStream => {},
-                else => |e| return e,
             }
             return obj.finalize(arch);
         }
@@ -379,14 +378,14 @@ inline fn getAArch64CpuFeature(comptime feat_reg: []const u8) u64 {
     );
 }
 
-pub fn detectNativeCpuAndFeatures() ?Target.Cpu {
+pub fn detectNativeCpuAndFeatures(io: Io) ?Target.Cpu {
     var file = fs.openFileAbsolute("/proc/cpuinfo", .{}) catch |err| switch (err) {
         else => return null,
     };
     defer file.close();
 
     var buffer: [4096]u8 = undefined; // "flags" lines can get pretty long.
-    var file_reader = file.reader(&buffer);
+    var file_reader = file.reader(io, &buffer);
 
     const current_arch = builtin.cpu.arch;
     switch (current_arch) {

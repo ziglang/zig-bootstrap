@@ -37,13 +37,13 @@ pub const ABI = struct {
 // The order of the elements in this array defines the linking order.
 pub const libs = [_]Lib{
     .{ .name = "m", .sover = 6 },
-    .{ .name = "pthread", .sover = 0, .removed_in = .{ .major = 2, .minor = 34, .patch = 0 } },
     .{ .name = "c", .sover = 6 },
+    .{ .name = "ld", .sover = 2 },
+    .{ .name = "resolv", .sover = 2 },
+    .{ .name = "pthread", .sover = 0, .removed_in = .{ .major = 2, .minor = 34, .patch = 0 } },
     .{ .name = "dl", .sover = 2, .removed_in = .{ .major = 2, .minor = 34, .patch = 0 } },
     .{ .name = "rt", .sover = 1, .removed_in = .{ .major = 2, .minor = 34, .patch = 0 } },
-    .{ .name = "ld", .sover = 2 },
     .{ .name = "util", .sover = 1, .removed_in = .{ .major = 2, .minor = 34, .patch = 0 } },
-    .{ .name = "resolv", .sover = 2 },
 };
 
 pub const LoadMetaDataError = error{
@@ -666,6 +666,7 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) anye
     }
 
     const gpa = comp.gpa;
+    const io = comp.io;
 
     var arena_allocator = std.heap.ArenaAllocator.init(gpa);
     defer arena_allocator.deinit();
@@ -677,6 +678,7 @@ pub fn buildSharedObjects(comp: *Compilation, prog_node: std.Progress.Node) anye
     // Use the global cache directory.
     var cache: Cache = .{
         .gpa = gpa,
+        .io = io,
         .manifest_dir = try comp.dirs.global_cache.handle.makeOpenPath("h", .{}),
     };
     cache.addPrefix(.{ .path = null, .handle = fs.cwd() });
@@ -1175,6 +1177,7 @@ fn buildSharedLib(
     const tracy = trace(@src());
     defer tracy.end();
 
+    const io = comp.io;
     const basename = try std.fmt.allocPrint(arena, "lib{s}.so.{d}", .{ lib.name, lib.sover });
     const version: Version = .{ .major = lib.sover, .minor = 0, .patch = 0 };
     const ld_basename = path.basename(comp.getTarget().standardDynamicLinkerPath().get().?);
@@ -1229,7 +1232,7 @@ fn buildSharedLib(
     const misc_task: Compilation.MiscTask = .@"glibc shared object";
 
     var sub_create_diag: Compilation.CreateDiagnostic = undefined;
-    const sub_compilation = Compilation.create(comp.gpa, arena, &sub_create_diag, .{
+    const sub_compilation = Compilation.create(comp.gpa, arena, io, &sub_create_diag, .{
         .dirs = comp.dirs.withoutLocalCache(),
         .thread_pool = comp.thread_pool,
         .self_exe_path = comp.self_exe_path,

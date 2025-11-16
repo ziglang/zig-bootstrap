@@ -81,12 +81,13 @@ pub fn build(b: *std.Build) !void {
     docs_step.dependOn(langref_step);
     docs_step.dependOn(std_docs_step);
 
+    const no_matrix = b.option(bool, "no-matrix", "Limit test matrix to exactly one target configuration") orelse false;
     const skip_debug = b.option(bool, "skip-debug", "Main test suite skips debug builds") orelse false;
-    const skip_release = b.option(bool, "skip-release", "Main test suite skips release builds") orelse false;
+    const skip_release = b.option(bool, "skip-release", "Main test suite skips release builds") orelse no_matrix;
     const skip_release_small = b.option(bool, "skip-release-small", "Main test suite skips release-small builds") orelse skip_release;
     const skip_release_fast = b.option(bool, "skip-release-fast", "Main test suite skips release-fast builds") orelse skip_release;
     const skip_release_safe = b.option(bool, "skip-release-safe", "Main test suite skips release-safe builds") orelse skip_release;
-    const skip_non_native = b.option(bool, "skip-non-native", "Main test suite skips non-native builds") orelse false;
+    const skip_non_native = b.option(bool, "skip-non-native", "Main test suite skips non-native builds") orelse no_matrix;
     const skip_libc = b.option(bool, "skip-libc", "Main test suite skips tests that link libc") orelse false;
     const skip_single_threaded = b.option(bool, "skip-single-threaded", "Main test suite skips tests that are single-threaded") orelse false;
     const skip_compile_errors = b.option(bool, "skip-compile-errors", "Main test suite skips compile error tests") orelse false;
@@ -449,6 +450,7 @@ pub fn build(b: *std.Build) !void {
         .include_paths = &.{},
         .skip_single_threaded = skip_single_threaded,
         .skip_non_native = skip_non_native,
+        .test_default_only = no_matrix,
         .skip_freebsd = skip_freebsd,
         .skip_netbsd = skip_netbsd,
         .skip_windows = skip_windows,
@@ -471,6 +473,7 @@ pub fn build(b: *std.Build) !void {
         .include_paths = &.{},
         .skip_single_threaded = true,
         .skip_non_native = skip_non_native,
+        .test_default_only = no_matrix,
         .skip_freebsd = skip_freebsd,
         .skip_netbsd = skip_netbsd,
         .skip_windows = skip_windows,
@@ -492,6 +495,7 @@ pub fn build(b: *std.Build) !void {
         .include_paths = &.{},
         .skip_single_threaded = true,
         .skip_non_native = skip_non_native,
+        .test_default_only = no_matrix,
         .skip_freebsd = skip_freebsd,
         .skip_netbsd = skip_netbsd,
         .skip_windows = skip_windows,
@@ -513,6 +517,7 @@ pub fn build(b: *std.Build) !void {
         .include_paths = &.{},
         .skip_single_threaded = skip_single_threaded,
         .skip_non_native = skip_non_native,
+        .test_default_only = no_matrix,
         .skip_freebsd = skip_freebsd,
         .skip_netbsd = skip_netbsd,
         .skip_windows = skip_windows,
@@ -610,6 +615,8 @@ pub fn build(b: *std.Build) !void {
         .optimize_modes = optimization_modes,
         .test_filters = test_filters,
         .test_target_filters = test_target_filters,
+        // Highest RSS observed in any test case was exactly 1802878976 on x86_64-linux.
+        .max_rss = 2253598720,
     })) |test_libc_step| test_step.dependOn(test_libc_step);
 }
 
@@ -671,14 +678,14 @@ fn addWasiUpdateStep(b: *std.Build, version: [:0]const u8) !void {
     });
     run_opt.addArtifactArg(exe);
     run_opt.addArg("-o");
-    run_opt.addFileArg(b.path("stage1/zig1.wasm"));
+    const optimized_wasm = run_opt.addOutputFileArg("zig1.wasm");
 
-    const copy_zig_h = b.addUpdateSourceFiles();
-    copy_zig_h.addCopyFileToSource(b.path("lib/zig.h"), "stage1/zig.h");
+    const update_zig1 = b.addUpdateSourceFiles();
+    update_zig1.addCopyFileToSource(optimized_wasm, "stage1/zig1.wasm");
+    update_zig1.addCopyFileToSource(b.path("lib/zig.h"), "stage1/zig.h");
 
     const update_zig1_step = b.step("update-zig1", "Update stage1/zig1.wasm");
-    update_zig1_step.dependOn(&run_opt.step);
-    update_zig1_step.dependOn(&copy_zig_h.step);
+    update_zig1_step.dependOn(&update_zig1.step);
 }
 
 const AddCompilerModOptions = struct {
@@ -811,7 +818,7 @@ fn addCmakeCfgOptionsToExe(
                 try addCxxKnownPath(b, cfg, exe, b.fmt("libstdc++.{s}", .{lib_suffix}), null, need_cpp_includes);
                 if (static) try addCxxKnownPath(b, cfg, exe, b.fmt("libgcc_eh.{s}", .{lib_suffix}), null, need_cpp_includes);
             },
-            .solaris, .illumos => {
+            .illumos => {
                 try addCxxKnownPath(b, cfg, exe, b.fmt("libstdc++.{s}", .{lib_suffix}), null, need_cpp_includes);
                 try addCxxKnownPath(b, cfg, exe, b.fmt("libgcc_eh.{s}", .{lib_suffix}), null, need_cpp_includes);
             },

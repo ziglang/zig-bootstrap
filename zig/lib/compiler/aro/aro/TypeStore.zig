@@ -2091,7 +2091,7 @@ fn generateVaListType(ts: *TypeStore, comp: *Compilation) !QualType {
         .xcore,
         => return .void_pointer,
         .aarch64, .aarch64_be => switch (comp.target.os.tag) {
-            .driverkit, .ios, .macos, .tvos, .visionos, .watchos, .windows => return .char_pointer,
+            .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .windows => return .char_pointer,
             else => .aarch64_va_list,
         },
         .arm, .armeb, .thumb, .thumbeb => .arm_va_list,
@@ -2099,10 +2099,7 @@ fn generateVaListType(ts: *TypeStore, comp: *Compilation) !QualType {
             .hexagon_va_list
         else
             return .char_pointer,
-        .powerpc, .powerpcle => switch (comp.target.os.tag) {
-            .aix => return .char_pointer,
-            else => .powerpc_va_list,
-        },
+        .powerpc, .powerpcle => .powerpc_va_list,
         .s390x => .s390x_va_list,
         .x86_64 => switch (comp.target.os.tag) {
             .uefi, .windows => return .char_pointer,

@@ -3122,6 +3122,13 @@ pub const cpu = struct {
             .x87,
         }),
     };
+    pub const @"i86": CpuModel = .{
+        .name = "i86",
+        .llvm_name = null,
+        .features = featureSet(&[_]Feature{
+            .@"16bit_mode",
+        }),
+    };
     pub const icelake_client: CpuModel = .{
         .name = "icelake_client",
         .llvm_name = "icelake-client",

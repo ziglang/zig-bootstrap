@@ -6,6 +6,7 @@ const std = @import("std.zig");
 const tokenizer = @import("zig/tokenizer.zig");
 const assert = std.debug.assert;
 const Allocator = std.mem.Allocator;
+const Io = std.Io;
 const Writer = std.Io.Writer;
 
 pub const ErrorBundle = @import("zig/ErrorBundle.zig");
@@ -52,17 +53,18 @@ pub const Color = enum {
     /// Assume stderr is a terminal.
     on,
 
-    pub fn get_tty_conf(color: Color) std.Io.tty.Config {
+    pub fn getTtyConf(color: Color, detected: Io.tty.Config) Io.tty.Config {
         return switch (color) {
-            .auto => std.Io.tty.detectConfig(std.fs.File.stderr()),
+            .auto => detected,
             .on => .escape_codes,
             .off => .no_color,
         };
     }
-
-    pub fn renderOptions(color: Color) std.zig.ErrorBundle.RenderOptions {
-        return .{
-            .ttyconf = get_tty_conf(color),
+    pub fn detectTtyConf(color: Color) Io.tty.Config {
+        return switch (color) {
+            .auto => .detect(.stderr()),
+            .on => .escape_codes,
+            .off => .no_color,
         };
     }
 };
@@ -169,7 +171,7 @@ pub fn binNameAlloc(allocator: Allocator, options: BinNameOptions) error{OutOfMe
             },
             .Obj => return std.fmt.allocPrint(allocator, "{s}.obj", .{root_name}),
         },
-        .elf, .goff, .xcoff => switch (options.output_mode) {
+        .elf => switch (options.output_mode) {
             .Exe => return allocator.dupe(u8, root_name),
             .Lib => {
                 switch (options.link_mode orelse .static) {
@@ -323,7 +325,7 @@ pub const BuildId = union(enum) {
         try std.testing.expectError(error.InvalidBuildIdStyle, parse("yaddaxxx"));
     }
 
-    pub fn format(id: BuildId, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+    pub fn format(id: BuildId, writer: *Writer) Writer.Error!void {
         switch (id) {
             .none, .fast, .uuid, .sha1, .md5 => {
                 try writer.writeAll(@tagName(id));
@@ -346,6 +348,47 @@ pub const BuildId = union(enum) {
 };
 
 pub const LtoMode = enum { none, full, thin };
+
+pub const Subsystem = enum {
+    console,
+    windows,
+    posix,
+    native,
+    efi_application,
+    efi_boot_service_driver,
+    efi_rom,
+    efi_runtime_driver,
+
+    /// Deprecated; use '.console' instead. To be removed after 0.16.0 is tagged.
+    pub const Console: Subsystem = .console;
+    /// Deprecated; use '.windows' instead. To be removed after 0.16.0 is tagged.
+    pub const Windows: Subsystem = .windows;
+    /// Deprecated; use '.posix' instead. To be removed after 0.16.0 is tagged.
+    pub const Posix: Subsystem = .posix;
+    /// Deprecated; use '.native' instead. To be removed after 0.16.0 is tagged.
+    pub const Native: Subsystem = .native;
+    /// Deprecated; use '.efi_application' instead. To be removed after 0.16.0 is tagged.
+    pub const EfiApplication: Subsystem = .efi_application;
+    /// Deprecated; use '.efi_boot_service_driver' instead. To be removed after 0.16.0 is tagged.
+    pub const EfiBootServiceDriver: Subsystem = .efi_boot_service_driver;
+    /// Deprecated; use '.efi_rom' instead. To be removed after 0.16.0 is tagged.
+    pub const EfiRom: Subsystem = .efi_rom;
+    /// Deprecated; use '.efi_runtime_driver' instead. To be removed after 0.16.0 is tagged.
+    pub const EfiRuntimeDriver: Subsystem = .efi_runtime_driver;
+};
+
+pub const CompressDebugSections = enum { none, zlib, zstd };
+
+pub const RcIncludes = enum {
+    /// Use MSVC if available, fall back to MinGW.
+    any,
+    /// Use MSVC include paths (MSVC install + Windows SDK, must be present on the system).
+    msvc,
+    /// Use MinGW include paths (distributed with Zig).
+    gnu,
+    /// Do not use any autodetected include paths.
+    none,
+};
 
 /// Renders a `std.Target.Cpu` value into a textual representation that can be parsed
 /// via the `-mcpu` flag passed to the Zig compiler.
@@ -558,7 +601,7 @@ test isUnderscore {
 /// If the source can be UTF-16LE encoded, this function asserts that `gpa`
 /// will align a byte-sized allocation to at least 2. Allocators that don't do
 /// this are rare.
-pub fn readSourceFileToEndAlloc(gpa: Allocator, file_reader: *std.fs.File.Reader) ![:0]u8 {
+pub fn readSourceFileToEndAlloc(gpa: Allocator, file_reader: *Io.File.Reader) ![:0]u8 {
     var buffer: std.ArrayList(u8) = .empty;
     defer buffer.deinit(gpa);
 
@@ -605,7 +648,7 @@ pub fn printAstErrorsToStderr(gpa: Allocator, tree: Ast, path: []const u8, color
 
     var error_bundle = try wip_errors.toOwnedBundle("");
     defer error_bundle.deinit(gpa);
-    error_bundle.renderToStdErr(color.renderOptions());
+    error_bundle.renderToStdErr(.{}, color);
 }
 
 pub fn putAstErrorsIntoBundle(
@@ -620,8 +663,8 @@ pub fn putAstErrorsIntoBundle(
     try wip_errors.addZirErrorMessages(zir, tree, tree.source, path);
 }
 
-pub fn resolveTargetQueryOrFatal(target_query: std.Target.Query) std.Target {
-    return std.zig.system.resolveTargetQuery(target_query) catch |err|
+pub fn resolveTargetQueryOrFatal(io: Io, target_query: std.Target.Query) std.Target {
+    return std.zig.system.resolveTargetQuery(io, target_query) catch |err|
         std.process.fatal("unable to resolve target: {s}", .{@errorName(err)});
 }
 
@@ -697,6 +740,8 @@ pub const EnvVar = enum {
     ZIG_LIB_DIR,
     ZIG_LIBC,
     ZIG_BUILD_RUNNER,
+    ZIG_BUILD_ERROR_STYLE,
+    ZIG_BUILD_MULTILINE_ERRORS,
     ZIG_VERBOSE_LINK,
     ZIG_VERBOSE_CC,
     ZIG_BTRFS_WORKAROUND,

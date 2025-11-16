@@ -28,7 +28,8 @@ pub fn deinit(si: *SelfInfo, gpa: Allocator) void {
     if (si.unwind_cache) |cache| gpa.free(cache);
 }
 
-pub fn getSymbol(si: *SelfInfo, gpa: Allocator, address: usize) Error!std.debug.Symbol {
+pub fn getSymbol(si: *SelfInfo, gpa: Allocator, io: Io, address: usize) Error!std.debug.Symbol {
+    _ = io;
     const module = try si.findModule(gpa, address, .exclusive);
     defer si.rwlock.unlock();
 
@@ -94,42 +95,73 @@ pub const can_unwind: bool = s: {
     // Notably, we are yet to support unwinding on ARM. There, unwinding is not done through
     // `.eh_frame`, but instead with the `.ARM.exidx` section, which has a different format.
     const archs: []const std.Target.Cpu.Arch = switch (builtin.target.os.tag) {
+        // Not supported yet: arm
+        .haiku => &.{
+            .aarch64,
+            .m68k,
+            .riscv64,
+            .x86,
+            .x86_64,
+        },
+        // Not supported yet: arm/armeb/thumb/thumbeb, xtensa/xtensaeb
         .linux => &.{
             .aarch64,
             .aarch64_be,
-            .hexagon,
+            .arc,
+            .csky,
             .loongarch64,
+            .m68k,
+            .mips,
+            .mipsel,
+            .mips64,
+            .mips64el,
+            .or1k,
             .riscv32,
             .riscv64,
             .s390x,
             .x86,
             .x86_64,
         },
+        .serenity => &.{
+            .aarch64,
+            .x86_64,
+            .riscv64,
+        },
+
+        .dragonfly => &.{
+            .x86_64,
+        },
+        // Not supported yet: arm
+        .freebsd => &.{
+            .aarch64,
+            .riscv64,
+            .x86_64,
+        },
+        // Not supported yet: arm/armeb, mips64/mips64el
         .netbsd => &.{
             .aarch64,
             .aarch64_be,
+            .m68k,
+            .mips,
+            .mipsel,
             .x86,
             .x86_64,
         },
-        .freebsd => &.{
-            .x86_64,
-            .aarch64,
-        },
+        // Not supported yet: arm
         .openbsd => &.{
+            .aarch64,
+            .mips64,
+            .mips64el,
+            .riscv64,
+            .x86,
             .x86_64,
         },
-        .solaris => &.{
-            .x86_64,
-        },
+
         .illumos => &.{
             .x86,
             .x86_64,
         },
-        .serenity => &.{
-            .x86_64,
-            .aarch64,
-            .riscv64,
-        },
+
         else => unreachable,
     };
     for (archs) |a| {
@@ -305,6 +337,7 @@ const Module = struct {
         var elf_file = load_result catch |err| switch (err) {
             error.OutOfMemory,
             error.Unexpected,
+            error.Canceled,
             => |e| return e,
 
             error.Overflow,
@@ -322,6 +355,7 @@ const Module = struct {
             error.LockedMemoryLimitExceeded,
             error.ProcessFdQuotaExceeded,
             error.SystemFdQuotaExceeded,
+            error.Streaming,
             => return error.ReadFailed,
         };
         errdefer elf_file.deinit(gpa);
@@ -407,11 +441,11 @@ const DlIterContext = struct {
 
         // Populate `build_id` and `gnu_eh_frame`
         for (info.phdr[0..info.phnum]) |phdr| {
-            switch (phdr.p_type) {
-                std.elf.PT_NOTE => {
+            switch (phdr.type) {
+                .NOTE => {
                     // Look for .note.gnu.build-id
-                    const segment_ptr: [*]const u8 = @ptrFromInt(info.addr + phdr.p_vaddr);
-                    var r: std.Io.Reader = .fixed(segment_ptr[0..phdr.p_memsz]);
+                    const segment_ptr: [*]const u8 = @ptrFromInt(info.addr + phdr.vaddr);
+                    var r: std.Io.Reader = .fixed(segment_ptr[0..phdr.memsz]);
                     const name_size = r.takeInt(u32, native_endian) catch continue;
                     const desc_size = r.takeInt(u32, native_endian) catch continue;
                     const note_type = r.takeInt(u32, native_endian) catch continue;
@@ -421,9 +455,9 @@ const DlIterContext = struct {
                     const desc = r.take(desc_size) catch continue;
                     build_id = desc;
                 },
-                std.elf.PT_GNU_EH_FRAME => {
-                    const segment_ptr: [*]const u8 = @ptrFromInt(info.addr + phdr.p_vaddr);
-                    gnu_eh_frame = segment_ptr[0..phdr.p_memsz];
+                std.elf.PT.GNU_EH_FRAME => {
+                    const segment_ptr: [*]const u8 = @ptrFromInt(info.addr + phdr.vaddr);
+                    gnu_eh_frame = segment_ptr[0..phdr.memsz];
                 },
                 else => {},
             }
@@ -444,11 +478,11 @@ const DlIterContext = struct {
         });
 
         for (info.phdr[0..info.phnum]) |phdr| {
-            if (phdr.p_type != std.elf.PT_LOAD) continue;
+            if (phdr.type != .LOAD) continue;
             try context.si.ranges.append(gpa, .{
                 // Overflowing addition handles VSDOs having p_vaddr = 0xffffffffff700000
-                .start = info.addr +% phdr.p_vaddr,
-                .len = phdr.p_memsz,
+                .start = info.addr +% phdr.vaddr,
+                .len = phdr.memsz,
                 .module_index = module_index,
             });
         }
@@ -456,6 +490,7 @@ const DlIterContext = struct {
 };
 
 const std = @import("std");
+const Io = std.Io;
 const Allocator = std.mem.Allocator;
 const Dwarf = std.debug.Dwarf;
 const Error = std.debug.SelfInfoError;

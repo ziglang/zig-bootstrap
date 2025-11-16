@@ -1,19 +1,22 @@
-const std = @import("std");
-const build_options = @import("build_options");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
+
+const std = @import("std");
+const Io = std.Io;
 const assert = std.debug.assert;
 const fs = std.fs;
 const mem = std.mem;
 const log = std.log.scoped(.link);
-const trace = @import("tracy.zig").trace;
-const wasi_libc = @import("libs/wasi_libc.zig");
-
 const Allocator = std.mem.Allocator;
 const Cache = std.Build.Cache;
 const Path = std.Build.Cache.Path;
 const Directory = std.Build.Cache.Directory;
 const Compilation = @import("Compilation.zig");
 const LibCInstallation = std.zig.LibCInstallation;
+
+const trace = @import("tracy.zig").trace;
+const wasi_libc = @import("libs/wasi_libc.zig");
+
 const Zcu = @import("Zcu.zig");
 const InternPool = @import("InternPool.zig");
 const Type = @import("Type.zig");
@@ -425,7 +428,7 @@ pub const File = struct {
         tsaware: bool,
         nxcompat: bool,
         dynamicbase: bool,
-        compress_debug_sections: Lld.Elf.CompressDebugSections,
+        compress_debug_sections: std.zig.CompressDebugSections,
         bind_global_refs_locally: bool,
         import_symbols: bool,
         import_table: bool,
@@ -445,7 +448,7 @@ pub const File = struct {
         allow_shlib_undefined: ?bool,
         allow_undefined_version: bool,
         enable_new_dtags: ?bool,
-        subsystem: ?std.Target.SubSystem,
+        subsystem: ?std.zig.Subsystem,
         linker_script: ?[]const u8,
         version_script: ?[]const u8,
         soname: ?[]const u8,
@@ -568,15 +571,36 @@ pub const File = struct {
         return if (dev.env.supports(tag.devFeature()) and base.tag == tag) @fieldParentPtr("base", base) else null;
     }
 
+    pub fn startProgress(base: *File, prog_node: std.Progress.Node) void {
+        switch (base.tag) {
+            else => {},
+            inline .elf2, .coff2 => |tag| {
+                dev.check(tag.devFeature());
+                return @as(*tag.Type(), @fieldParentPtr("base", base)).startProgress(prog_node);
+            },
+        }
+    }
+
+    pub fn endProgress(base: *File) void {
+        switch (base.tag) {
+            else => {},
+            inline .elf2, .coff2 => |tag| {
+                dev.check(tag.devFeature());
+                return @as(*tag.Type(), @fieldParentPtr("base", base)).endProgress();
+            },
+        }
+    }
+
     pub fn makeWritable(base: *File) !void {
         dev.check(.make_writable);
         const comp = base.comp;
         const gpa = comp.gpa;
+        const io = comp.io;
         switch (base.tag) {
             .lld => assert(base.file == null),
-            .elf, .macho, .wasm, .goff, .xcoff => {
+            .elf, .macho, .wasm => {
                 if (base.file != null) return;
-                dev.checkAny(&.{ .coff_linker, .elf_linker, .macho_linker, .plan9_linker, .wasm_linker, .goff_linker, .xcoff_linker });
+                dev.checkAny(&.{ .coff_linker, .elf_linker, .macho_linker, .plan9_linker, .wasm_linker });
                 const emit = base.emit;
                 if (base.child_pid) |pid| {
                     if (builtin.os.tag == .windows) {
@@ -596,7 +620,7 @@ pub const File = struct {
                             .linux => std.posix.ptrace(std.os.linux.PTRACE.ATTACH, pid, 0, 0) catch |err| {
                                 log.warn("ptrace failure: {s}", .{@errorName(err)});
                             },
-                            .macos => {
+                            .maccatalyst, .macos => {
                                 const macho_file = base.cast(.macho).?;
                                 macho_file.ptraceAttach(pid) catch |err| {
                                     log.warn("attaching failed with error: {s}", .{@errorName(err)});
@@ -616,10 +640,10 @@ pub const File = struct {
                     &coff.mf
                 else
                     unreachable;
-                mf.file = try base.emit.root_dir.handle.openFile(base.emit.sub_path, .{
+                mf.file = try base.emit.root_dir.handle.adaptToNewApi().openFile(io, base.emit.sub_path, .{
                     .mode = .read_write,
                 });
-                base.file = mf.file;
+                base.file = .adaptFromNewApi(mf.file);
                 try mf.ensureTotalCapacity(@intCast(mf.nodes.items[0].location().resolve(mf)[1]));
             },
             .c, .spirv => dev.checkAny(&.{ .c_linker, .spirv_linker }),
@@ -644,6 +668,7 @@ pub const File = struct {
     pub fn makeExecutable(base: *File) !void {
         dev.check(.make_executable);
         const comp = base.comp;
+        const io = comp.io;
         switch (comp.config.output_mode) {
             .Obj => return,
             .Lib => switch (comp.config.link_mode) {
@@ -668,14 +693,14 @@ pub const File = struct {
                     }
                 }
             },
-            .macho, .wasm, .goff, .xcoff => if (base.file) |f| {
-                dev.checkAny(&.{ .coff_linker, .macho_linker, .plan9_linker, .wasm_linker, .goff_linker, .xcoff_linker });
+            .macho, .wasm => if (base.file) |f| {
+                dev.checkAny(&.{ .coff_linker, .macho_linker, .plan9_linker, .wasm_linker });
                 f.close();
                 base.file = null;
 
                 if (base.child_pid) |pid| {
                     switch (builtin.os.tag) {
-                        .macos => {
+                        .maccatalyst, .macos => {
                             const macho_file = base.cast(.macho).?;
                             macho_file.ptraceDetach(pid) catch |err| {
                                 log.warn("detaching failed with error: {s}", .{@errorName(err)});
@@ -694,8 +719,8 @@ pub const File = struct {
                     unreachable;
                 mf.unmap();
                 assert(mf.file.handle == f.handle);
+                mf.file.close(io);
                 mf.file = undefined;
-                f.close();
                 base.file = null;
             },
             .c, .spirv => dev.checkAny(&.{ .c_linker, .spirv_linker }),
@@ -812,7 +837,6 @@ pub const File = struct {
         switch (base.tag) {
             .lld => unreachable,
             .spirv => {},
-            .goff, .xcoff => {},
             .plan9 => unreachable,
             .elf2, .coff2 => {},
             inline else => |tag| {
@@ -960,7 +984,6 @@ pub const File = struct {
             .c => unreachable,
             .spirv => unreachable,
             .wasm => unreachable,
-            .goff, .xcoff => unreachable,
             .plan9 => unreachable,
             inline else => |tag| {
                 dev.check(tag.devFeature());
@@ -983,7 +1006,6 @@ pub const File = struct {
             .c => unreachable,
             .spirv => unreachable,
             .wasm => unreachable,
-            .goff, .xcoff => unreachable,
             .plan9 => unreachable,
             inline else => |tag| {
                 dev.check(tag.devFeature());
@@ -1000,7 +1022,6 @@ pub const File = struct {
             .c => unreachable,
             .spirv => unreachable,
             .wasm => unreachable,
-            .goff, .xcoff => unreachable,
             .plan9 => unreachable,
             inline else => |tag| {
                 dev.check(tag.devFeature());
@@ -1021,8 +1042,6 @@ pub const File = struct {
             .plan9 => unreachable,
 
             .spirv,
-            .goff,
-            .xcoff,
             => {},
 
             inline else => |tag| {
@@ -1122,7 +1141,7 @@ pub const File = struct {
     pub fn loadInput(base: *File, input: Input) anyerror!void {
         if (base.tag == .lld) return;
         switch (base.tag) {
-            inline .elf, .wasm => |tag| {
+            inline .elf, .elf2, .wasm => |tag| {
                 dev.check(tag.devFeature());
                 return @as(*tag.Type(), @fieldParentPtr("base", base)).loadInput(input);
             },
@@ -1158,8 +1177,6 @@ pub const File = struct {
         wasm,
         spirv,
         plan9,
-        goff,
-        xcoff,
         lld,
 
         pub fn Type(comptime tag: Tag) type {
@@ -1171,8 +1188,6 @@ pub const File = struct {
                 .c => C,
                 .wasm => Wasm,
                 .spirv => SpirV,
-                .goff => Goff,
-                .xcoff => Xcoff,
                 .lld => Lld,
                 .plan9 => comptime unreachable,
             };
@@ -1187,8 +1202,6 @@ pub const File = struct {
                 .plan9 => .plan9,
                 .c => .c,
                 .spirv => .spirv,
-                .goff => .goff,
-                .xcoff => .xcoff,
                 .hex => @panic("TODO implement hex object format"),
                 .raw => @panic("TODO implement raw object format"),
             };
@@ -1271,8 +1284,6 @@ pub const File = struct {
     pub const MachO = @import("link/MachO.zig");
     pub const SpirV = @import("link/SpirV.zig");
     pub const Wasm = @import("link/Wasm.zig");
-    pub const Goff = @import("link/Goff.zig");
-    pub const Xcoff = @import("link/Xcoff.zig");
     pub const Dwarf = @import("link/Dwarf.zig");
 };
 
@@ -1291,9 +1302,6 @@ pub const PrelinkTask = union(enum) {
     /// Tells the linker to load a shared library, possibly one that is a
     /// GNU ld script.
     load_dso: Path,
-    /// Tells the linker to load an input which could be an object file,
-    /// archive, or shared library.
-    load_input: Input,
 };
 pub const ZcuTask = union(enum) {
     /// Write the constant value for a Decl to the output file.
@@ -1469,20 +1477,6 @@ pub fn doPrelinkTask(comp: *Compilation, task: PrelinkTask) void {
             }) catch |err| switch (err) {
                 error.LinkFailure => return, // error reported via link_diags
                 else => |e| diags.addParseError(path, "failed to parse shared library: {s}", .{@errorName(e)}),
-            };
-        },
-        .load_input => |input| {
-            const prog_node = comp.link_prog_node.start("Parse Input", 0);
-            defer prog_node.end();
-            base.loadInput(input) catch |err| switch (err) {
-                error.LinkFailure => return, // error reported via link_diags
-                else => |e| {
-                    if (input.path()) |path| {
-                        diags.addParseError(path, "failed to parse linker input: {s}", .{@errorName(e)});
-                    } else {
-                        diags.addError("failed to {s}: {s}", .{ input.taskName(), @errorName(e) });
-                    }
-                },
             };
         },
     }
@@ -2225,7 +2219,7 @@ fn resolvePathInputLib(
             var error_bundle = try wip_errors.toOwnedBundle("");
             defer error_bundle.deinit(gpa);
 
-            error_bundle.renderToStdErr(color.renderOptions());
+            error_bundle.renderToStdErr(.{}, color);
 
             std.process.exit(1);
         }

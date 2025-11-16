@@ -5,7 +5,7 @@ const Writer = @This();
 const std = @import("../std.zig");
 const assert = std.debug.assert;
 const Limit = std.Io.Limit;
-const File = std.fs.File;
+const File = std.Io.File;
 const testing = std.testing;
 const Allocator = std.mem.Allocator;
 const ArrayList = std.ArrayList;
@@ -604,7 +604,7 @@ pub fn print(w: *Writer, comptime fmt: []const u8, args: anytype) Error!void {
         @compileError("32 arguments max are supported per format call");
     }
 
-    @setEvalBranchQuota(fmt.len * 1000);
+    @setEvalBranchQuota(@as(comptime_int, fmt.len) * 1000); // NOTE: We're upcasting as 16-bit usize overflows.
     comptime var arg_state: std.fmt.ArgState = .{ .args_len = fields_info.len };
     comptime var i = 0;
     comptime var literal: []const u8 = "";
@@ -923,10 +923,12 @@ pub fn sendFileHeader(
     return n;
 }
 
-/// Asserts nonzero buffer capacity.
+/// Asserts nonzero buffer capacity and nonzero `limit`.
 pub fn sendFileReading(w: *Writer, file_reader: *File.Reader, limit: Limit) FileReadingError!usize {
+    assert(limit != .nothing);
     const dest = limit.slice(try w.writableSliceGreedy(1));
-    const n = try file_reader.read(dest);
+    const n = try file_reader.interface.readSliceShort(dest);
+    if (n == 0) return error.EndOfStream;
     w.advance(n);
     return n;
 }
@@ -1159,7 +1161,7 @@ pub fn printValue(
             },
             't' => switch (@typeInfo(T)) {
                 .error_set => return w.alignBufferOptions(@errorName(value), options),
-                .@"enum", .@"union" => return w.alignBufferOptions(@tagName(value), options),
+                .@"enum", .enum_literal, .@"union" => return w.alignBufferOptions(@tagName(value), options),
                 else => invalidFmtError(fmt, value),
             },
             else => {},
@@ -2778,7 +2780,8 @@ pub const Allocating = struct {
         if (additional == 0) return error.EndOfStream;
         a.ensureUnusedCapacity(limit.minInt64(additional)) catch return error.WriteFailed;
         const dest = limit.slice(a.writer.buffer[a.writer.end..]);
-        const n = try file_reader.read(dest);
+        const n = try file_reader.interface.readSliceShort(dest);
+        if (n == 0) return error.EndOfStream;
         a.writer.end += n;
         return n;
     }
@@ -2824,6 +2827,8 @@ pub const Allocating = struct {
 };
 
 test "discarding sendFile" {
+    const io = testing.io;
+
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
@@ -2834,7 +2839,7 @@ test "discarding sendFile" {
     try file_writer.interface.writeByte('h');
     try file_writer.interface.flush();
 
-    var file_reader = file_writer.moveToReader();
+    var file_reader = file_writer.moveToReader(io);
     try file_reader.seekTo(0);
 
     var w_buffer: [256]u8 = undefined;
@@ -2844,23 +2849,49 @@ test "discarding sendFile" {
 }
 
 test "allocating sendFile" {
+    const io = testing.io;
+
     var tmp_dir = testing.tmpDir(.{});
     defer tmp_dir.cleanup();
 
     const file = try tmp_dir.dir.createFile("input.txt", .{ .read = true });
     defer file.close();
-    var r_buffer: [256]u8 = undefined;
+    var r_buffer: [2]u8 = undefined;
     var file_writer: std.fs.File.Writer = .init(file, &r_buffer);
-    try file_writer.interface.writeByte('h');
+    try file_writer.interface.writeAll("abcd");
     try file_writer.interface.flush();
 
-    var file_reader = file_writer.moveToReader();
+    var file_reader = file_writer.moveToReader(io);
     try file_reader.seekTo(0);
+    try file_reader.interface.fill(2);
 
     var allocating: Writer.Allocating = .init(testing.allocator);
     defer allocating.deinit();
+    try allocating.ensureUnusedCapacity(1);
+    try testing.expectEqual(4, allocating.writer.sendFileAll(&file_reader, .unlimited));
+    try testing.expectEqualStrings("abcd", allocating.writer.buffered());
+}
 
-    _ = try file_reader.interface.streamRemaining(&allocating.writer);
+test sendFileReading {
+    const io = testing.io;
+
+    var tmp_dir = testing.tmpDir(.{});
+    defer tmp_dir.cleanup();
+
+    const file = try tmp_dir.dir.createFile("input.txt", .{ .read = true });
+    defer file.close();
+    var r_buffer: [2]u8 = undefined;
+    var file_writer: std.fs.File.Writer = .init(file, &r_buffer);
+    try file_writer.interface.writeAll("abcd");
+    try file_writer.interface.flush();
+
+    var file_reader = file_writer.moveToReader(io);
+    try file_reader.seekTo(0);
+    try file_reader.interface.fill(2);
+
+    var w_buffer: [1]u8 = undefined;
+    var discarding: Writer.Discarding = .init(&w_buffer);
+    try testing.expectEqual(4, discarding.writer.sendFileReadingAll(&file_reader, .unlimited));
 }
 
 test writeStruct {

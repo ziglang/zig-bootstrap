@@ -52,6 +52,10 @@ else switch (native_os) {
         pub const fd_t = void;
         pub const uid_t = void;
         pub const gid_t = void;
+        pub const mode_t = u0;
+        pub const ino_t = void;
+        pub const IFNAMESIZE = {};
+        pub const SIG = void;
     },
 };
 
@@ -97,9 +101,7 @@ pub const POLL = system.POLL;
 pub const POSIX_FADV = system.POSIX_FADV;
 pub const PR = system.PR;
 pub const PROT = system.PROT;
-pub const REG = system.REG;
 pub const RLIM = system.RLIM;
-pub const RR = system.RR;
 pub const S = system.S;
 pub const SA = system.SA;
 pub const SC = system.SC;
@@ -358,6 +360,7 @@ pub const FChmodAtError = FChmodError || error{
     ProcessFdQuotaExceeded,
     /// The procfs fallback was used but the system exceeded it open file limit.
     SystemFdQuotaExceeded,
+    Canceled,
 };
 
 /// Changes the `mode` of `path` relative to the directory referred to by
@@ -487,7 +490,9 @@ fn fchmodat2(dirfd: fd_t, path: []const u8, mode: mode_t, flags: u32) FChmodAtEr
     const stat = fstatatZ(pathfd, "", AT.EMPTY_PATH) catch |err| switch (err) {
         error.NameTooLong => unreachable,
         error.FileNotFound => unreachable,
-        error.InvalidUtf8 => unreachable,
+        error.Streaming => unreachable,
+        error.BadPathName => return error.Unexpected,
+        error.Canceled => return error.Canceled,
         else => |e| return e,
     };
     if ((stat.mode & S.IFMT) == S.IFLNK)
@@ -665,18 +670,22 @@ pub fn getrandom(buffer: []u8) GetRandomError!void {
     return getRandomBytesDevURandom(buffer);
 }
 
-fn getRandomBytesDevURandom(buf: []u8) !void {
+fn getRandomBytesDevURandom(buf: []u8) GetRandomError!void {
     const fd = try openZ("/dev/urandom", .{ .ACCMODE = .RDONLY, .CLOEXEC = true }, 0);
     defer close(fd);
 
-    const st = try fstat(fd);
+    const st = fstat(fd) catch |err| switch (err) {
+        error.Streaming => return error.NoDevice,
+        else => |e| return e,
+    };
     if (!S.ISCHR(st.mode)) {
         return error.NoDevice;
     }
 
-    const file: fs.File = .{ .handle = fd };
-    var file_reader = file.readerStreaming(&.{});
-    file_reader.interface.readSliceAll(buf) catch return error.Unexpected;
+    var i: usize = 0;
+    while (i < buf.len) {
+        i += read(fd, buf[i..]) catch return error.Unexpected;
+    }
 }
 
 /// Causes abnormal process termination.
@@ -692,7 +701,7 @@ pub fn abort() noreturn {
         if (builtin.mode == .Debug and windows.peb().BeingDebugged != 0) {
             @breakpoint();
         }
-        windows.kernel32.ExitProcess(3);
+        windows.ntdll.RtlExitUserProcess(3);
     }
     if (!builtin.link_libc and native_os == .linux) {
         // The Linux man page says that the libc abort() function
@@ -700,7 +709,7 @@ pub fn abort() noreturn {
         // for user-defined signal handlers that want to restore some state in
         // some program sections and crash in others.
         // So, the user-installed SIGABRT handler is run, if present.
-        raise(SIG.ABRT) catch {};
+        raise(.ABRT) catch {};
 
         // Disable all signal handlers.
         const filledset = linux.sigfillset();
@@ -720,17 +729,17 @@ pub fn abort() noreturn {
             .mask = sigemptyset(),
             .flags = 0,
         };
-        sigaction(SIG.ABRT, &sigact, null);
+        sigaction(.ABRT, &sigact, null);
 
-        _ = linux.tkill(linux.gettid(), SIG.ABRT);
+        _ = linux.tkill(linux.gettid(), .ABRT);
 
         var sigabrtmask = sigemptyset();
-        sigaddset(&sigabrtmask, SIG.ABRT);
+        sigaddset(&sigabrtmask, .ABRT);
         sigprocmask(SIG.UNBLOCK, &sigabrtmask, null);
 
         // Beyond this point should be unreachable.
         @as(*allowzero volatile u8, @ptrFromInt(0)).* = 0;
-        raise(SIG.KILL) catch {};
+        raise(.KILL) catch {};
         exit(127); // Pid 1 might not be signalled in some containers.
     }
     switch (native_os) {
@@ -741,7 +750,7 @@ pub fn abort() noreturn {
 
 pub const RaiseError = UnexpectedError;
 
-pub fn raise(sig: u8) RaiseError!void {
+pub fn raise(sig: SIG) RaiseError!void {
     if (builtin.link_libc) {
         switch (errno(system.raise(sig))) {
             .SUCCESS => return,
@@ -769,7 +778,7 @@ pub fn raise(sig: u8) RaiseError!void {
 
 pub const KillError = error{ ProcessNotFound, PermissionDenied } || UnexpectedError;
 
-pub fn kill(pid: pid_t, sig: u8) KillError!void {
+pub fn kill(pid: pid_t, sig: SIG) KillError!void {
     switch (errno(system.kill(pid, sig))) {
         .SUCCESS => return,
         .INVAL => unreachable, // invalid signal
@@ -785,7 +794,7 @@ pub fn exit(status: u8) noreturn {
         std.c.exit(status);
     }
     if (native_os == .windows) {
-        windows.kernel32.ExitProcess(status);
+        windows.ntdll.RtlExitUserProcess(status);
     }
     if (native_os == .wasi) {
         wasi.proc_exit(status);
@@ -806,36 +815,7 @@ pub fn exit(status: u8) noreturn {
     system.exit(status);
 }
 
-pub const ReadError = error{
-    InputOutput,
-    SystemResources,
-    IsDir,
-    OperationAborted,
-    BrokenPipe,
-    ConnectionResetByPeer,
-    ConnectionTimedOut,
-    NotOpenForReading,
-    SocketNotConnected,
-
-    /// This error occurs when no global event loop is configured,
-    /// and reading from the file descriptor would block.
-    WouldBlock,
-
-    /// reading a timerfd with CANCEL_ON_SET will lead to this error
-    /// when the clock goes through a discontinuous change
-    Canceled,
-
-    /// In WASI, this error occurs when the file descriptor does
-    /// not hold the required rights to read from it.
-    AccessDenied,
-
-    /// This error occurs in Linux if the process to be read from
-    /// no longer exists.
-    ProcessNotFound,
-
-    /// Unable to read file due to lock.
-    LockViolation,
-} || UnexpectedError;
+pub const ReadError = std.Io.File.Reader.Error;
 
 /// Returns the number of bytes that were read, which can be less than
 /// buf.len. If 0 bytes were read, that means EOF.
@@ -870,9 +850,9 @@ pub fn read(fd: fd_t, buf: []u8) ReadError!usize {
             .ISDIR => return error.IsDir,
             .NOBUFS => return error.SystemResources,
             .NOMEM => return error.SystemResources,
-            .NOTCONN => return error.SocketNotConnected,
+            .NOTCONN => return error.SocketUnconnected,
             .CONNRESET => return error.ConnectionResetByPeer,
-            .TIMEDOUT => return error.ConnectionTimedOut,
+            .TIMEDOUT => return error.Timeout,
             .NOTCAPABLE => return error.AccessDenied,
             else => |err| return unexpectedErrno(err),
         }
@@ -881,7 +861,7 @@ pub fn read(fd: fd_t, buf: []u8) ReadError!usize {
     // Prevents EINVAL.
     const max_count = switch (native_os) {
         .linux => 0x7ffff000,
-        .macos, .ios, .watchos, .tvos, .visionos => maxInt(i32),
+        .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => maxInt(i32),
         else => maxInt(isize),
     };
     while (true) {
@@ -899,9 +879,9 @@ pub fn read(fd: fd_t, buf: []u8) ReadError!usize {
             .ISDIR => return error.IsDir,
             .NOBUFS => return error.SystemResources,
             .NOMEM => return error.SystemResources,
-            .NOTCONN => return error.SocketNotConnected,
+            .NOTCONN => return error.SocketUnconnected,
             .CONNRESET => return error.ConnectionResetByPeer,
-            .TIMEDOUT => return error.ConnectionTimedOut,
+            .TIMEDOUT => return error.Timeout,
             else => |err| return unexpectedErrno(err),
         }
     }
@@ -922,7 +902,6 @@ pub fn read(fd: fd_t, buf: []u8) ReadError!usize {
 /// a pointer within the address space of the application.
 pub fn readv(fd: fd_t, iov: []const iovec) ReadError!usize {
     if (native_os == .windows) {
-        // TODO improve this to use ReadFileScatter
         if (iov.len == 0) return 0;
         const first = iov[0];
         return read(fd, first.base[0..first.len]);
@@ -940,9 +919,9 @@ pub fn readv(fd: fd_t, iov: []const iovec) ReadError!usize {
             .ISDIR => return error.IsDir,
             .NOBUFS => return error.SystemResources,
             .NOMEM => return error.SystemResources,
-            .NOTCONN => return error.SocketNotConnected,
+            .NOTCONN => return error.SocketUnconnected,
             .CONNRESET => return error.ConnectionResetByPeer,
-            .TIMEDOUT => return error.ConnectionTimedOut,
+            .TIMEDOUT => return error.Timeout,
             .NOTCAPABLE => return error.AccessDenied,
             else => |err| return unexpectedErrno(err),
         }
@@ -962,15 +941,15 @@ pub fn readv(fd: fd_t, iov: []const iovec) ReadError!usize {
             .ISDIR => return error.IsDir,
             .NOBUFS => return error.SystemResources,
             .NOMEM => return error.SystemResources,
-            .NOTCONN => return error.SocketNotConnected,
+            .NOTCONN => return error.SocketUnconnected,
             .CONNRESET => return error.ConnectionResetByPeer,
-            .TIMEDOUT => return error.ConnectionTimedOut,
+            .TIMEDOUT => return error.Timeout,
             else => |err| return unexpectedErrno(err),
         }
     }
 }
 
-pub const PReadError = ReadError || error{Unseekable};
+pub const PReadError = std.Io.File.ReadPositionalError;
 
 /// Number of bytes read is returned. Upon reading end-of-file, zero is returned.
 ///
@@ -1009,9 +988,9 @@ pub fn pread(fd: fd_t, buf: []u8, offset: u64) PReadError!usize {
             .ISDIR => return error.IsDir,
             .NOBUFS => return error.SystemResources,
             .NOMEM => return error.SystemResources,
-            .NOTCONN => return error.SocketNotConnected,
+            .NOTCONN => return error.SocketUnconnected,
             .CONNRESET => return error.ConnectionResetByPeer,
-            .TIMEDOUT => return error.ConnectionTimedOut,
+            .TIMEDOUT => return error.Timeout,
             .NXIO => return error.Unseekable,
             .SPIPE => return error.Unseekable,
             .OVERFLOW => return error.Unseekable,
@@ -1023,7 +1002,7 @@ pub fn pread(fd: fd_t, buf: []u8, offset: u64) PReadError!usize {
     // Prevent EINVAL.
     const max_count = switch (native_os) {
         .linux => 0x7ffff000,
-        .macos, .ios, .watchos, .tvos, .visionos => maxInt(i32),
+        .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => maxInt(i32),
         else => maxInt(isize),
     };
 
@@ -1042,9 +1021,9 @@ pub fn pread(fd: fd_t, buf: []u8, offset: u64) PReadError!usize {
             .ISDIR => return error.IsDir,
             .NOBUFS => return error.SystemResources,
             .NOMEM => return error.SystemResources,
-            .NOTCONN => return error.SocketNotConnected,
+            .NOTCONN => return error.SocketUnconnected,
             .CONNRESET => return error.ConnectionResetByPeer,
-            .TIMEDOUT => return error.ConnectionTimedOut,
+            .TIMEDOUT => return error.Timeout,
             .NXIO => return error.Unseekable,
             .SPIPE => return error.Unseekable,
             .OVERFLOW => return error.Unseekable,
@@ -1135,9 +1114,8 @@ pub fn ftruncate(fd: fd_t, length: u64) TruncateError!void {
 /// * Windows
 /// On these systems, the read races with concurrent writes to the same file descriptor.
 pub fn preadv(fd: fd_t, iov: []const iovec, offset: u64) PReadError!usize {
-    // NOTE: serenity does not have preadv but it *does* have pwritev.
     const have_pread_but_not_preadv = switch (native_os) {
-        .windows, .macos, .ios, .watchos, .tvos, .visionos, .haiku, .serenity => true,
+        .windows, .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .haiku => true,
         else => false,
     };
     if (have_pread_but_not_preadv) {
@@ -1160,9 +1138,9 @@ pub fn preadv(fd: fd_t, iov: []const iovec, offset: u64) PReadError!usize {
             .ISDIR => return error.IsDir,
             .NOBUFS => return error.SystemResources,
             .NOMEM => return error.SystemResources,
-            .NOTCONN => return error.SocketNotConnected,
+            .NOTCONN => return error.SocketUnconnected,
             .CONNRESET => return error.ConnectionResetByPeer,
-            .TIMEDOUT => return error.ConnectionTimedOut,
+            .TIMEDOUT => return error.Timeout,
             .NXIO => return error.Unseekable,
             .SPIPE => return error.Unseekable,
             .OVERFLOW => return error.Unseekable,
@@ -1186,9 +1164,9 @@ pub fn preadv(fd: fd_t, iov: []const iovec, offset: u64) PReadError!usize {
             .ISDIR => return error.IsDir,
             .NOBUFS => return error.SystemResources,
             .NOMEM => return error.SystemResources,
-            .NOTCONN => return error.SocketNotConnected,
+            .NOTCONN => return error.SocketUnconnected,
             .CONNRESET => return error.ConnectionResetByPeer,
-            .TIMEDOUT => return error.ConnectionTimedOut,
+            .TIMEDOUT => return error.Timeout,
             .NXIO => return error.Unseekable,
             .SPIPE => return error.Unseekable,
             .OVERFLOW => return error.Unseekable,
@@ -1210,7 +1188,7 @@ pub const WriteError = error{
     PermissionDenied,
     BrokenPipe,
     SystemResources,
-    OperationAborted,
+    Canceled,
     NotOpenForWriting,
 
     /// The process cannot access the file because another process has locked
@@ -1233,7 +1211,7 @@ pub const WriteError = error{
 
     /// The socket type requires that message be sent atomically, and the size of the message
     /// to be sent made this impossible. The message is not transmitted.
-    MessageTooBig,
+    MessageOversize,
 } || UnexpectedError;
 
 /// Write to a file descriptor.
@@ -1291,7 +1269,7 @@ pub fn write(fd: fd_t, bytes: []const u8) WriteError!usize {
 
     const max_count = switch (native_os) {
         .linux => 0x7ffff000,
-        .macos, .ios, .watchos, .tvos, .visionos => maxInt(i32),
+        .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => maxInt(i32),
         else => maxInt(isize),
     };
     while (true) {
@@ -1315,7 +1293,7 @@ pub fn write(fd: fd_t, bytes: []const u8) WriteError!usize {
             .CONNRESET => return error.ConnectionResetByPeer,
             .BUSY => return error.DeviceBusy,
             .NXIO => return error.NoDevice,
-            .MSGSIZE => return error.MessageTooBig,
+            .MSGSIZE => return error.MessageOversize,
             else => |err| return unexpectedErrno(err),
         }
     }
@@ -1455,7 +1433,7 @@ pub fn pwrite(fd: fd_t, bytes: []const u8, offset: u64) PWriteError!usize {
     // Prevent EINVAL.
     const max_count = switch (native_os) {
         .linux => 0x7ffff000,
-        .macos, .ios, .watchos, .tvos, .visionos => maxInt(i32),
+        .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => maxInt(i32),
         else => maxInt(isize),
     };
 
@@ -1509,7 +1487,7 @@ pub fn pwrite(fd: fd_t, bytes: []const u8, offset: u64) PWriteError!usize {
 /// If `iov.len` is larger than `IOV_MAX`, a partial write will occur.
 pub fn pwritev(fd: fd_t, iov: []const iovec_const, offset: u64) PWriteError!usize {
     const have_pwrite_but_not_pwritev = switch (native_os) {
-        .windows, .macos, .ios, .watchos, .tvos, .visionos, .haiku => true,
+        .windows, .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos, .haiku => true,
         else => false,
     };
 
@@ -1571,84 +1549,10 @@ pub fn pwritev(fd: fd_t, iov: []const iovec_const, offset: u64) PWriteError!usiz
     }
 }
 
-pub const OpenError = error{
-    /// In WASI, this error may occur when the file descriptor does
-    /// not hold the required rights to open a new resource relative to it.
-    AccessDenied,
-    PermissionDenied,
-    SymLinkLoop,
-    ProcessFdQuotaExceeded,
-    SystemFdQuotaExceeded,
-    NoDevice,
-    /// Either:
-    /// * One of the path components does not exist.
-    /// * Cwd was used, but cwd has been deleted.
-    /// * The path associated with the open directory handle has been deleted.
-    /// * On macOS, multiple processes or threads raced to create the same file
-    ///   with `O.EXCL` set to `false`.
-    FileNotFound,
-
-    /// The path exceeded `max_path_bytes` bytes.
-    NameTooLong,
-
-    /// Insufficient kernel memory was available, or
-    /// the named file is a FIFO and per-user hard limit on
-    /// memory allocation for pipes has been reached.
-    SystemResources,
-
-    /// The file is too large to be opened. This error is unreachable
-    /// for 64-bit targets, as well as when opening directories.
-    FileTooBig,
-
-    /// The path refers to directory but the `DIRECTORY` flag was not provided.
-    IsDir,
-
-    /// A new path cannot be created because the device has no room for the new file.
-    /// This error is only reachable when the `CREAT` flag is provided.
-    NoSpaceLeft,
-
-    /// A component used as a directory in the path was not, in fact, a directory, or
-    /// `DIRECTORY` was specified and the path was not a directory.
-    NotDir,
-
-    /// The path already exists and the `CREAT` and `EXCL` flags were provided.
-    PathAlreadyExists,
-    DeviceBusy,
-
-    /// The underlying filesystem does not support file locks
-    FileLocksNotSupported,
-
-    /// Path contains characters that are disallowed by the underlying filesystem.
-    BadPathName,
-
-    /// WASI-only; file paths must be valid UTF-8.
-    InvalidUtf8,
-
-    /// Windows-only; file paths provided by the user must be valid WTF-8.
-    /// https://simonsapin.github.io/wtf-8/
-    InvalidWtf8,
-
-    /// On Windows, `\\server` or `\\server\share` was not found.
-    NetworkNotFound,
-
-    /// This error occurs in Linux if the process to be open was not found.
-    ProcessNotFound,
-
-    /// One of these three things:
-    /// * pathname  refers to an executable image which is currently being
-    ///   executed and write access was requested.
-    /// * pathname refers to a file that is currently in  use  as  a  swap
-    ///   file, and the O_TRUNC flag was specified.
-    /// * pathname  refers  to  a file that is currently being read by the
-    ///   kernel (e.g., for module/firmware loading), and write access was
-    ///   requested.
-    FileBusy,
-
-    WouldBlock,
-} || UnexpectedError;
+pub const OpenError = std.Io.File.OpenError || error{WouldBlock};
 
 /// Open and possibly create a file. Keeps trying if it gets interrupted.
-/// On Windows, `file_path` should be encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, `file_path` should be encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, `file_path` should be encoded as valid UTF-8.
 /// On other platforms, `file_path` is an opaque sequence of bytes with no particular encoding.
 /// See also `openZ`.
@@ -1663,7 +1567,7 @@ pub fn open(file_path: []const u8, flags: O, perm: mode_t) OpenError!fd_t {
 }
 
 /// Open and possibly create a file. Keeps trying if it gets interrupted.
-/// On Windows, `file_path` should be encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, `file_path` should be encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, `file_path` should be encoded as valid UTF-8.
 /// On other platforms, `file_path` is an opaque sequence of bytes with no particular encoding.
 /// See also `open`.
@@ -1700,10 +1604,7 @@ pub fn openZ(file_path: [*:0]const u8, flags: O, perm: mode_t) OpenError!fd_t {
             .PERM => return error.PermissionDenied,
             .EXIST => return error.PathAlreadyExists,
             .BUSY => return error.DeviceBusy,
-            .ILSEQ => |err| if (native_os == .wasi)
-                return error.InvalidUtf8
-            else
-                return unexpectedErrno(err),
+            .ILSEQ => return error.BadPathName,
             else => |err| return unexpectedErrno(err),
         }
     }
@@ -1711,7 +1612,7 @@ pub fn openZ(file_path: [*:0]const u8, flags: O, perm: mode_t) OpenError!fd_t {
 
 /// Open and possibly create a file. Keeps trying if it gets interrupted.
 /// `file_path` is relative to the open directory handle `dir_fd`.
-/// On Windows, `file_path` should be encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, `file_path` should be encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, `file_path` should be encoded as valid UTF-8.
 /// On other platforms, `file_path` is an opaque sequence of bytes with no particular encoding.
 /// See also `openatZ`.
@@ -1719,122 +1620,15 @@ pub fn openat(dir_fd: fd_t, file_path: []const u8, flags: O, mode: mode_t) OpenE
     if (native_os == .windows) {
         @compileError("Windows does not support POSIX; use Windows-specific API or cross-platform std.fs API");
     } else if (native_os == .wasi and !builtin.link_libc) {
-        // `mode` is ignored on WASI, which does not support unix-style file permissions
-        const opts = try openOptionsFromFlagsWasi(flags);
-        const fd = try openatWasi(
-            dir_fd,
-            file_path,
-            opts.lookup_flags,
-            opts.oflags,
-            opts.fs_flags,
-            opts.fs_rights_base,
-            opts.fs_rights_inheriting,
-        );
-        errdefer close(fd);
-
-        if (flags.write) {
-            const info = try std.os.fstat_wasi(fd);
-            if (info.filetype == .DIRECTORY)
-                return error.IsDir;
-        }
-
-        return fd;
+        @compileError("use std.Io instead");
     }
     const file_path_c = try toPosixPath(file_path);
     return openatZ(dir_fd, &file_path_c, flags, mode);
 }
 
-/// Open and possibly create a file in WASI.
-pub fn openatWasi(
-    dir_fd: fd_t,
-    file_path: []const u8,
-    lookup_flags: wasi.lookupflags_t,
-    oflags: wasi.oflags_t,
-    fdflags: wasi.fdflags_t,
-    base: wasi.rights_t,
-    inheriting: wasi.rights_t,
-) OpenError!fd_t {
-    while (true) {
-        var fd: fd_t = undefined;
-        switch (wasi.path_open(dir_fd, lookup_flags, file_path.ptr, file_path.len, oflags, base, inheriting, fdflags, &fd)) {
-            .SUCCESS => return fd,
-            .INTR => continue,
-
-            .FAULT => unreachable,
-            // Provides INVAL with a linux host on a bad path name, but NOENT on Windows
-            .INVAL => return error.BadPathName,
-            .BADF => unreachable,
-            .ACCES => return error.AccessDenied,
-            .FBIG => return error.FileTooBig,
-            .OVERFLOW => return error.FileTooBig,
-            .ISDIR => return error.IsDir,
-            .LOOP => return error.SymLinkLoop,
-            .MFILE => return error.ProcessFdQuotaExceeded,
-            .NAMETOOLONG => return error.NameTooLong,
-            .NFILE => return error.SystemFdQuotaExceeded,
-            .NODEV => return error.NoDevice,
-            .NOENT => return error.FileNotFound,
-            .NOMEM => return error.SystemResources,
-            .NOSPC => return error.NoSpaceLeft,
-            .NOTDIR => return error.NotDir,
-            .PERM => return error.PermissionDenied,
-            .EXIST => return error.PathAlreadyExists,
-            .BUSY => return error.DeviceBusy,
-            .NOTCAPABLE => return error.AccessDenied,
-            .ILSEQ => return error.InvalidUtf8,
-            else => |err| return unexpectedErrno(err),
-        }
-    }
-}
-
-/// A struct to contain all lookup/rights flags accepted by `wasi.path_open`
-const WasiOpenOptions = struct {
-    oflags: wasi.oflags_t,
-    lookup_flags: wasi.lookupflags_t,
-    fs_rights_base: wasi.rights_t,
-    fs_rights_inheriting: wasi.rights_t,
-    fs_flags: wasi.fdflags_t,
-};
-
-/// Compute rights + flags corresponding to the provided POSIX access mode.
-fn openOptionsFromFlagsWasi(oflag: O) OpenError!WasiOpenOptions {
-    const w = std.os.wasi;
-
-    // Next, calculate the read/write rights to request, depending on the
-    // provided POSIX access mode
-    var rights: w.rights_t = .{};
-    if (oflag.read) {
-        rights.FD_READ = true;
-        rights.FD_READDIR = true;
-    }
-    if (oflag.write) {
-        rights.FD_DATASYNC = true;
-        rights.FD_WRITE = true;
-        rights.FD_ALLOCATE = true;
-        rights.FD_FILESTAT_SET_SIZE = true;
-    }
-
-    // https://github.com/ziglang/zig/issues/18882
-    const flag_bits: u32 = @bitCast(oflag);
-    const oflags_int: u16 = @as(u12, @truncate(flag_bits >> 12));
-    const fs_flags_int: u16 = @as(u12, @truncate(flag_bits));
-
-    return .{
-        // https://github.com/ziglang/zig/issues/18882
-        .oflags = @bitCast(oflags_int),
-        .lookup_flags = .{
-            .SYMLINK_FOLLOW = !oflag.NOFOLLOW,
-        },
-        .fs_rights_base = rights,
-        .fs_rights_inheriting = rights,
-        // https://github.com/ziglang/zig/issues/18882
-        .fs_flags = @bitCast(fs_flags_int),
-    };
-}
-
 /// Open and possibly create a file. Keeps trying if it gets interrupted.
 /// `file_path` is relative to the open directory handle `dir_fd`.
-/// On Windows, `file_path` should be encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, `file_path` should be encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, `file_path` should be encoded as valid UTF-8.
 /// On other platforms, `file_path` is an opaque sequence of bytes with no particular encoding.
 /// See also `openat`.
@@ -1876,10 +1670,7 @@ pub fn openatZ(dir_fd: fd_t, file_path: [*:0]const u8, flags: O, mode: mode_t) O
             .AGAIN => return error.WouldBlock,
             .TXTBSY => return error.FileBusy,
             .NXIO => return error.NoDevice,
-            .ILSEQ => |err| if (native_os == .wasi)
-                return error.InvalidUtf8
-            else
-                return unexpectedErrno(err),
+            .ILSEQ => return error.BadPathName,
             else => |err| return unexpectedErrno(err),
         }
     }
@@ -1906,6 +1697,14 @@ pub fn dup2(old_fd: fd_t, new_fd: fd_t) !void {
             else => |err| return unexpectedErrno(err),
         }
     }
+}
+
+pub fn getpid() pid_t {
+    return system.getpid();
+}
+
+pub fn getppid() pid_t {
+    return system.getppid();
 }
 
 pub const ExecveError = error{
@@ -1948,7 +1747,7 @@ pub fn execveZ(
         .NOTDIR => return error.NotDir,
         .TXTBSY => return error.FileBusy,
         else => |err| switch (native_os) {
-            .macos, .ios, .tvos, .watchos, .visionos => switch (err) {
+            .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => switch (err) {
                 .BADEXEC => return error.InvalidExe,
                 .BADARCH => return error.InvalidExe,
                 else => return unexpectedErrno(err),
@@ -2133,21 +1932,16 @@ pub const SymLinkError = error{
     ReadOnlyFileSystem,
     NotDir,
     NameTooLong,
-
-    /// WASI-only; file paths must be valid UTF-8.
-    InvalidUtf8,
-
-    /// Windows-only; file paths provided by the user must be valid WTF-8.
-    /// https://simonsapin.github.io/wtf-8/
-    InvalidWtf8,
-
+    /// WASI: file paths must be valid UTF-8.
+    /// Windows: file paths provided by the user must be valid WTF-8.
+    /// https://wtf-8.codeberg.page/
     BadPathName,
 } || UnexpectedError;
 
 /// Creates a symbolic link named `sym_link_path` which contains the string `target_path`.
 /// A symbolic link (also known as a soft link) may point to an existing file or to a nonexistent
 /// one; the latter case is known as a dangling link.
-/// On Windows, both paths should be encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, both paths should be encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, both paths should be encoded as valid UTF-8.
 /// On other platforms, both paths are an opaque sequence of bytes with no particular encoding.
 /// If `sym_link_path` exists, it will not be overwritten.
@@ -2187,10 +1981,7 @@ pub fn symlinkZ(target_path: [*:0]const u8, sym_link_path: [*:0]const u8) SymLin
         .NOMEM => return error.SystemResources,
         .NOSPC => return error.NoSpaceLeft,
         .ROFS => return error.ReadOnlyFileSystem,
-        .ILSEQ => |err| if (native_os == .wasi)
-            return error.InvalidUtf8
-        else
-            return unexpectedErrno(err),
+        .ILSEQ => return error.BadPathName,
         else => |err| return unexpectedErrno(err),
     }
 }
@@ -2199,7 +1990,7 @@ pub fn symlinkZ(target_path: [*:0]const u8, sym_link_path: [*:0]const u8) SymLin
 /// `target_path` **relative** to `newdirfd` directory handle.
 /// A symbolic link (also known as a soft link) may point to an existing file or to a nonexistent
 /// one; the latter case is known as a dangling link.
-/// On Windows, both paths should be encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, both paths should be encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, both paths should be encoded as valid UTF-8.
 /// On other platforms, both paths are an opaque sequence of bytes with no particular encoding.
 /// If `sym_link_path` exists, it will not be overwritten.
@@ -2236,7 +2027,7 @@ pub fn symlinkatWasi(target_path: []const u8, newdirfd: fd_t, sym_link_path: []c
         .NOSPC => return error.NoSpaceLeft,
         .ROFS => return error.ReadOnlyFileSystem,
         .NOTCAPABLE => return error.AccessDenied,
-        .ILSEQ => return error.InvalidUtf8,
+        .ILSEQ => return error.BadPathName,
         else => |err| return unexpectedErrno(err),
     }
 }
@@ -2265,10 +2056,7 @@ pub fn symlinkatZ(target_path: [*:0]const u8, newdirfd: fd_t, sym_link_path: [*:
         .NOMEM => return error.SystemResources,
         .NOSPC => return error.NoSpaceLeft,
         .ROFS => return error.ReadOnlyFileSystem,
-        .ILSEQ => |err| if (native_os == .wasi)
-            return error.InvalidUtf8
-        else
-            return unexpectedErrno(err),
+        .ILSEQ => return error.BadPathName,
         else => |err| return unexpectedErrno(err),
     }
 }
@@ -2287,9 +2075,7 @@ pub const LinkError = UnexpectedError || error{
     NoSpaceLeft,
     ReadOnlyFileSystem,
     NotSameFileSystem,
-
-    /// WASI-only; file paths must be valid UTF-8.
-    InvalidUtf8,
+    BadPathName,
 };
 
 /// On WASI, both paths should be encoded as valid UTF-8.
@@ -2315,10 +2101,7 @@ pub fn linkZ(oldpath: [*:0]const u8, newpath: [*:0]const u8) LinkError!void {
         .ROFS => return error.ReadOnlyFileSystem,
         .XDEV => return error.NotSameFileSystem,
         .INVAL => unreachable,
-        .ILSEQ => |err| if (native_os == .wasi)
-            return error.InvalidUtf8
-        else
-            return unexpectedErrno(err),
+        .ILSEQ => return error.BadPathName,
         else => |err| return unexpectedErrno(err),
     }
 }
@@ -2369,10 +2152,7 @@ pub fn linkatZ(
         .ROFS => return error.ReadOnlyFileSystem,
         .XDEV => return error.NotSameFileSystem,
         .INVAL => unreachable,
-        .ILSEQ => |err| if (native_os == .wasi)
-            return error.InvalidUtf8
-        else
-            return unexpectedErrno(err),
+        .ILSEQ => return error.BadPathName,
         else => |err| return unexpectedErrno(err),
     }
 }
@@ -2418,7 +2198,7 @@ pub fn linkat(
             .ROFS => return error.ReadOnlyFileSystem,
             .XDEV => return error.NotSameFileSystem,
             .INVAL => unreachable,
-            .ILSEQ => return error.InvalidUtf8,
+            .ILSEQ => return error.BadPathName,
             else => |err| return unexpectedErrno(err),
         }
     }
@@ -2443,14 +2223,10 @@ pub const UnlinkError = error{
     SystemResources,
     ReadOnlyFileSystem,
 
-    /// WASI-only; file paths must be valid UTF-8.
-    InvalidUtf8,
-
-    /// Windows-only; file paths provided by the user must be valid WTF-8.
-    /// https://simonsapin.github.io/wtf-8/
-    InvalidWtf8,
-
-    /// On Windows, file paths cannot contain these characters:
+    /// WASI: file paths must be valid UTF-8.
+    /// Windows: file paths provided by the user must be valid WTF-8.
+    /// https://wtf-8.codeberg.page/
+    /// Windows: file paths cannot contain these characters:
     /// '/', '*', '?', '"', '<', '>', '|'
     BadPathName,
 
@@ -2459,7 +2235,7 @@ pub const UnlinkError = error{
 } || UnexpectedError;
 
 /// Delete a name and possibly the file it refers to.
-/// On Windows, `file_path` should be encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, `file_path` should be encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, `file_path` should be encoded as valid UTF-8.
 /// On other platforms, `file_path` is an opaque sequence of bytes with no particular encoding.
 /// See also `unlinkZ`.
@@ -2501,10 +2277,7 @@ pub fn unlinkZ(file_path: [*:0]const u8) UnlinkError!void {
         .NOTDIR => return error.NotDir,
         .NOMEM => return error.SystemResources,
         .ROFS => return error.ReadOnlyFileSystem,
-        .ILSEQ => |err| if (native_os == .wasi)
-            return error.InvalidUtf8
-        else
-            return unexpectedErrno(err),
+        .ILSEQ => return error.BadPathName,
         else => |err| return unexpectedErrno(err),
     }
 }
@@ -2523,7 +2296,7 @@ pub const UnlinkatError = UnlinkError || error{
 };
 
 /// Delete a file name and possibly the file it refers to, based on an open directory handle.
-/// On Windows, `file_path` should be encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, `file_path` should be encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, `file_path` should be encoded as valid UTF-8.
 /// On other platforms, `file_path` is an opaque sequence of bytes with no particular encoding.
 /// Asserts that the path parameter has no null bytes.
@@ -2563,7 +2336,7 @@ pub fn unlinkatWasi(dirfd: fd_t, file_path: []const u8, flags: u32) UnlinkatErro
         .ROFS => return error.ReadOnlyFileSystem,
         .NOTEMPTY => return error.DirNotEmpty,
         .NOTCAPABLE => return error.AccessDenied,
-        .ILSEQ => return error.InvalidUtf8,
+        .ILSEQ => return error.BadPathName,
 
         .INVAL => unreachable, // invalid flags, or pathname has . as last component
         .BADF => unreachable, // always a race condition
@@ -2596,10 +2369,7 @@ pub fn unlinkatZ(dirfd: fd_t, file_path_c: [*:0]const u8, flags: u32) UnlinkatEr
         .ROFS => return error.ReadOnlyFileSystem,
         .EXIST => return error.DirNotEmpty,
         .NOTEMPTY => return error.DirNotEmpty,
-        .ILSEQ => |err| if (native_os == .wasi)
-            return error.InvalidUtf8
-        else
-            return unexpectedErrno(err),
+        .ILSEQ => return error.BadPathName,
 
         .INVAL => unreachable, // invalid flags, or pathname has . as last component
         .BADF => unreachable, // always a race condition
@@ -2635,11 +2405,9 @@ pub const RenameError = error{
     PathAlreadyExists,
     ReadOnlyFileSystem,
     RenameAcrossMountPoints,
-    /// WASI-only; file paths must be valid UTF-8.
-    InvalidUtf8,
-    /// Windows-only; file paths provided by the user must be valid WTF-8.
-    /// https://simonsapin.github.io/wtf-8/
-    InvalidWtf8,
+    /// WASI: file paths must be valid UTF-8.
+    /// Windows: file paths provided by the user must be valid WTF-8.
+    /// https://wtf-8.codeberg.page/
     BadPathName,
     NoDevice,
     SharingViolation,
@@ -2655,7 +2423,7 @@ pub const RenameError = error{
 } || UnexpectedError;
 
 /// Change the name or location of a file.
-/// On Windows, both paths should be encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, both paths should be encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, both paths should be encoded as valid UTF-8.
 /// On other platforms, both paths are an opaque sequence of bytes with no particular encoding.
 pub fn rename(old_path: []const u8, new_path: []const u8) RenameError!void {
@@ -2701,10 +2469,7 @@ pub fn renameZ(old_path: [*:0]const u8, new_path: [*:0]const u8) RenameError!voi
         .NOTEMPTY => return error.PathAlreadyExists,
         .ROFS => return error.ReadOnlyFileSystem,
         .XDEV => return error.RenameAcrossMountPoints,
-        .ILSEQ => |err| if (native_os == .wasi)
-            return error.InvalidUtf8
-        else
-            return unexpectedErrno(err),
+        .ILSEQ => return error.BadPathName,
         else => |err| return unexpectedErrno(err),
     }
 }
@@ -2717,7 +2482,7 @@ pub fn renameW(old_path: [*:0]const u16, new_path: [*:0]const u16) RenameError!v
 }
 
 /// Change the name or location of a file based on an open directory handle.
-/// On Windows, both paths should be encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, both paths should be encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, both paths should be encoded as valid UTF-8.
 /// On other platforms, both paths are an opaque sequence of bytes with no particular encoding.
 pub fn renameat(
@@ -2765,7 +2530,7 @@ fn renameatWasi(old: RelativePathWasi, new: RelativePathWasi) RenameError!void {
         .ROFS => return error.ReadOnlyFileSystem,
         .XDEV => return error.RenameAcrossMountPoints,
         .NOTCAPABLE => return error.AccessDenied,
-        .ILSEQ => return error.InvalidUtf8,
+        .ILSEQ => return error.BadPathName,
         else => |err| return unexpectedErrno(err),
     }
 }
@@ -2816,16 +2581,13 @@ pub fn renameatZ(
         .NOTEMPTY => return error.PathAlreadyExists,
         .ROFS => return error.ReadOnlyFileSystem,
         .XDEV => return error.RenameAcrossMountPoints,
-        .ILSEQ => |err| if (native_os == .wasi)
-            return error.InvalidUtf8
-        else
-            return unexpectedErrno(err),
+        .ILSEQ => return error.BadPathName,
         else => |err| return unexpectedErrno(err),
     }
 }
 
 /// Same as `renameat` but Windows-only and the path parameters are
-/// [WTF-16](https://simonsapin.github.io/wtf-8/#potentially-ill-formed-utf-16) encoded.
+/// [WTF-16](https://wtf-8.codeberg.page/#potentially-ill-formed-utf-16) encoded.
 pub fn renameatW(
     old_dir_fd: fd_t,
     old_path_w: []const u16,
@@ -2845,15 +2607,19 @@ pub fn renameatW(
     };
     defer windows.CloseHandle(src_fd);
 
-    var need_fallback = true;
     var rc: windows.NTSTATUS = undefined;
-    // FILE_RENAME_INFORMATION_EX and FILE_RENAME_POSIX_SEMANTICS require >= win10_rs1,
-    // but FILE_RENAME_IGNORE_READONLY_ATTRIBUTE requires >= win10_rs5. We check >= rs5 here
-    // so that we only use POSIX_SEMANTICS when we know IGNORE_READONLY_ATTRIBUTE will also be
-    // supported in order to avoid either (1) using a redundant call that we can know in advance will return
-    // STATUS_NOT_SUPPORTED or (2) only setting IGNORE_READONLY_ATTRIBUTE when >= rs5
-    // and therefore having different behavior when the Windows version is >= rs1 but < rs5.
-    if (builtin.target.os.isAtLeast(.windows, .win10_rs5) orelse false) {
+    // FileRenameInformationEx has varying levels of support:
+    // - FILE_RENAME_INFORMATION_EX requires >= win10_rs1
+    //   (INVALID_INFO_CLASS is returned if not supported)
+    // - Requires the NTFS filesystem
+    //   (on filesystems like FAT32, INVALID_PARAMETER is returned)
+    // - FILE_RENAME_POSIX_SEMANTICS requires >= win10_rs1
+    // - FILE_RENAME_IGNORE_READONLY_ATTRIBUTE requires >= win10_rs5
+    //   (NOT_SUPPORTED is returned if a flag is unsupported)
+    //
+    // The strategy here is just to try using FileRenameInformationEx and fall back to
+    // FileRenameInformation if the return value lets us know that some aspect of it is not supported.
+    const need_fallback = need_fallback: {
         const struct_buf_len = @sizeOf(windows.FILE_RENAME_INFORMATION_EX) + (max_path_bytes - 1);
         var rename_info_buf: [struct_buf_len]u8 align(@alignOf(windows.FILE_RENAME_INFORMATION_EX)) = undefined;
         const struct_len = @sizeOf(windows.FILE_RENAME_INFORMATION_EX) - 1 + new_path_w.len * 2;
@@ -2866,7 +2632,7 @@ pub fn renameatW(
         if (ReplaceIfExists == windows.TRUE) flags |= windows.FILE_RENAME_REPLACE_IF_EXISTS;
         rename_info.* = .{
             .Flags = flags,
-            .RootDirectory = if (fs.path.isAbsoluteWindowsWTF16(new_path_w)) null else new_dir_fd,
+            .RootDirectory = if (fs.path.isAbsoluteWindowsWtf16(new_path_w)) null else new_dir_fd,
             .FileNameLength = @intCast(new_path_w.len * 2), // already checked error.NameTooLong
             .FileName = undefined,
         };
@@ -2880,12 +2646,17 @@ pub fn renameatW(
         );
         switch (rc) {
             .SUCCESS => return,
-            // INVALID_PARAMETER here means that the filesystem does not support FileRenameInformationEx
-            .INVALID_PARAMETER => {},
+            // The filesystem does not support FileDispositionInformationEx
+            .INVALID_PARAMETER,
+            // The operating system does not support FileDispositionInformationEx
+            .INVALID_INFO_CLASS,
+            // The operating system does not support one of the flags
+            .NOT_SUPPORTED,
+            => break :need_fallback true,
             // For all other statuses, fall down to the switch below to handle them.
-            else => need_fallback = false,
+            else => break :need_fallback false,
         }
-    }
+    };
 
     if (need_fallback) {
         const struct_buf_len = @sizeOf(windows.FILE_RENAME_INFORMATION) + (max_path_bytes - 1);
@@ -2898,20 +2669,19 @@ pub fn renameatW(
 
         rename_info.* = .{
             .Flags = ReplaceIfExists,
-            .RootDirectory = if (fs.path.isAbsoluteWindowsWTF16(new_path_w)) null else new_dir_fd,
+            .RootDirectory = if (fs.path.isAbsoluteWindowsWtf16(new_path_w)) null else new_dir_fd,
             .FileNameLength = @intCast(new_path_w.len * 2), // already checked error.NameTooLong
             .FileName = undefined,
         };
         @memcpy((&rename_info.FileName).ptr, new_path_w);
 
-        rc =
-            windows.ntdll.NtSetInformationFile(
-                src_fd,
-                &io_status_block,
-                rename_info,
-                @intCast(struct_len), // already checked for error.NameTooLong
-                .FileRenameInformation,
-            );
+        rc = windows.ntdll.NtSetInformationFile(
+            src_fd,
+            &io_status_block,
+            rename_info,
+            @intCast(struct_len), // already checked for error.NameTooLong
+            .FileRenameInformation,
+        );
     }
 
     switch (rc) {
@@ -2931,52 +2701,26 @@ pub fn renameatW(
     }
 }
 
-/// On Windows, `sub_dir_path` should be encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, `sub_dir_path` should be encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, `sub_dir_path` should be encoded as valid UTF-8.
 /// On other platforms, `sub_dir_path` is an opaque sequence of bytes with no particular encoding.
 pub fn mkdirat(dir_fd: fd_t, sub_dir_path: []const u8, mode: mode_t) MakeDirError!void {
     if (native_os == .windows) {
-        const sub_dir_path_w = try windows.sliceToPrefixedFileW(dir_fd, sub_dir_path);
-        return mkdiratW(dir_fd, sub_dir_path_w.span(), mode);
+        @compileError("use std.Io instead");
     } else if (native_os == .wasi and !builtin.link_libc) {
-        return mkdiratWasi(dir_fd, sub_dir_path, mode);
+        @compileError("use std.Io instead");
     } else {
         const sub_dir_path_c = try toPosixPath(sub_dir_path);
         return mkdiratZ(dir_fd, &sub_dir_path_c, mode);
     }
 }
 
-pub fn mkdiratWasi(dir_fd: fd_t, sub_dir_path: []const u8, mode: mode_t) MakeDirError!void {
-    _ = mode;
-    switch (wasi.path_create_directory(dir_fd, sub_dir_path.ptr, sub_dir_path.len)) {
-        .SUCCESS => return,
-        .ACCES => return error.AccessDenied,
-        .BADF => unreachable,
-        .PERM => return error.PermissionDenied,
-        .DQUOT => return error.DiskQuota,
-        .EXIST => return error.PathAlreadyExists,
-        .FAULT => unreachable,
-        .LOOP => return error.SymLinkLoop,
-        .MLINK => return error.LinkQuotaExceeded,
-        .NAMETOOLONG => return error.NameTooLong,
-        .NOENT => return error.FileNotFound,
-        .NOMEM => return error.SystemResources,
-        .NOSPC => return error.NoSpaceLeft,
-        .NOTDIR => return error.NotDir,
-        .ROFS => return error.ReadOnlyFileSystem,
-        .NOTCAPABLE => return error.AccessDenied,
-        .ILSEQ => return error.InvalidUtf8,
-        else => |err| return unexpectedErrno(err),
-    }
-}
-
 /// Same as `mkdirat` except the parameters are null-terminated.
 pub fn mkdiratZ(dir_fd: fd_t, sub_dir_path: [*:0]const u8, mode: mode_t) MakeDirError!void {
     if (native_os == .windows) {
-        const sub_dir_path_w = try windows.cStrToPrefixedFileW(dir_fd, sub_dir_path);
-        return mkdiratW(dir_fd, sub_dir_path_w.span(), mode);
+        @compileError("use std.Io instead");
     } else if (native_os == .wasi and !builtin.link_libc) {
-        return mkdirat(dir_fd, mem.sliceTo(sub_dir_path, 0), mode);
+        @compileError("use std.Io instead");
     }
     switch (errno(system.mkdirat(dir_fd, sub_dir_path, mode))) {
         .SUCCESS => return,
@@ -2996,62 +2740,16 @@ pub fn mkdiratZ(dir_fd: fd_t, sub_dir_path: [*:0]const u8, mode: mode_t) MakeDir
         .ROFS => return error.ReadOnlyFileSystem,
         // dragonfly: when dir_fd is unlinked from filesystem
         .NOTCONN => return error.FileNotFound,
-        .ILSEQ => |err| if (native_os == .wasi)
-            return error.InvalidUtf8
-        else
-            return unexpectedErrno(err),
+        .ILSEQ => return error.BadPathName,
         else => |err| return unexpectedErrno(err),
     }
 }
 
-/// Windows-only. Same as `mkdirat` except the parameter WTF16 LE encoded.
-pub fn mkdiratW(dir_fd: fd_t, sub_path_w: []const u16, mode: mode_t) MakeDirError!void {
-    _ = mode;
-    const sub_dir_handle = windows.OpenFile(sub_path_w, .{
-        .dir = dir_fd,
-        .access_mask = windows.GENERIC_READ | windows.SYNCHRONIZE,
-        .creation = windows.FILE_CREATE,
-        .filter = .dir_only,
-    }) catch |err| switch (err) {
-        error.IsDir => return error.Unexpected,
-        error.PipeBusy => return error.Unexpected,
-        error.NoDevice => return error.Unexpected,
-        error.WouldBlock => return error.Unexpected,
-        error.AntivirusInterference => return error.Unexpected,
-        else => |e| return e,
-    };
-    windows.CloseHandle(sub_dir_handle);
-}
-
-pub const MakeDirError = error{
-    /// In WASI, this error may occur when the file descriptor does
-    /// not hold the required rights to create a new directory relative to it.
-    AccessDenied,
-    PermissionDenied,
-    DiskQuota,
-    PathAlreadyExists,
-    SymLinkLoop,
-    LinkQuotaExceeded,
-    NameTooLong,
-    FileNotFound,
-    SystemResources,
-    NoSpaceLeft,
-    NotDir,
-    ReadOnlyFileSystem,
-    /// WASI-only; file paths must be valid UTF-8.
-    InvalidUtf8,
-    /// Windows-only; file paths provided by the user must be valid WTF-8.
-    /// https://simonsapin.github.io/wtf-8/
-    InvalidWtf8,
-    BadPathName,
-    NoDevice,
-    /// On Windows, `\\server` or `\\server\share` was not found.
-    NetworkNotFound,
-} || UnexpectedError;
+pub const MakeDirError = std.Io.Dir.MakeError;
 
 /// Create a directory.
 /// `mode` is ignored on Windows and WASI.
-/// On Windows, `dir_path` should be encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, `dir_path` should be encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, `dir_path` should be encoded as valid UTF-8.
 /// On other platforms, `dir_path` is an opaque sequence of bytes with no particular encoding.
 pub fn mkdir(dir_path: []const u8, mode: mode_t) MakeDirError!void {
@@ -3067,7 +2765,7 @@ pub fn mkdir(dir_path: []const u8, mode: mode_t) MakeDirError!void {
 }
 
 /// Same as `mkdir` but the parameter is null-terminated.
-/// On Windows, `dir_path` should be encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, `dir_path` should be encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, `dir_path` should be encoded as valid UTF-8.
 /// On other platforms, `dir_path` is an opaque sequence of bytes with no particular encoding.
 pub fn mkdirZ(dir_path: [*:0]const u8, mode: mode_t) MakeDirError!void {
@@ -3092,10 +2790,7 @@ pub fn mkdirZ(dir_path: [*:0]const u8, mode: mode_t) MakeDirError!void {
         .NOSPC => return error.NoSpaceLeft,
         .NOTDIR => return error.NotDir,
         .ROFS => return error.ReadOnlyFileSystem,
-        .ILSEQ => |err| if (native_os == .wasi)
-            return error.InvalidUtf8
-        else
-            return unexpectedErrno(err),
+        .ILSEQ => return error.BadPathName,
         else => |err| return unexpectedErrno(err),
     }
 }
@@ -3130,18 +2825,16 @@ pub const DeleteDirError = error{
     NotDir,
     DirNotEmpty,
     ReadOnlyFileSystem,
-    /// WASI-only; file paths must be valid UTF-8.
-    InvalidUtf8,
-    /// Windows-only; file paths provided by the user must be valid WTF-8.
-    /// https://simonsapin.github.io/wtf-8/
-    InvalidWtf8,
+    /// WASI: file paths must be valid UTF-8.
+    /// Windows: file paths provided by the user must be valid WTF-8.
+    /// https://wtf-8.codeberg.page/
     BadPathName,
     /// On Windows, `\\server` or `\\server\share` was not found.
     NetworkNotFound,
 } || UnexpectedError;
 
 /// Deletes an empty directory.
-/// On Windows, `dir_path` should be encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, `dir_path` should be encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, `dir_path` should be encoded as valid UTF-8.
 /// On other platforms, `dir_path` is an opaque sequence of bytes with no particular encoding.
 pub fn rmdir(dir_path: []const u8) DeleteDirError!void {
@@ -3161,7 +2854,7 @@ pub fn rmdir(dir_path: []const u8) DeleteDirError!void {
 }
 
 /// Same as `rmdir` except the parameter is null-terminated.
-/// On Windows, `dir_path` should be encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, `dir_path` should be encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, `dir_path` should be encoded as valid UTF-8.
 /// On other platforms, `dir_path` is an opaque sequence of bytes with no particular encoding.
 pub fn rmdirZ(dir_path: [*:0]const u8) DeleteDirError!void {
@@ -3186,10 +2879,7 @@ pub fn rmdirZ(dir_path: [*:0]const u8) DeleteDirError!void {
         .EXIST => return error.DirNotEmpty,
         .NOTEMPTY => return error.DirNotEmpty,
         .ROFS => return error.ReadOnlyFileSystem,
-        .ILSEQ => |err| if (native_os == .wasi)
-            return error.InvalidUtf8
-        else
-            return unexpectedErrno(err),
+        .ILSEQ => return error.BadPathName,
         else => |err| return unexpectedErrno(err),
     }
 }
@@ -3210,16 +2900,14 @@ pub const ChangeCurDirError = error{
     FileNotFound,
     SystemResources,
     NotDir,
+    /// WASI: file paths must be valid UTF-8.
+    /// Windows: file paths provided by the user must be valid WTF-8.
+    /// https://wtf-8.codeberg.page/
     BadPathName,
-    /// WASI-only; file paths must be valid UTF-8.
-    InvalidUtf8,
-    /// Windows-only; file paths provided by the user must be valid WTF-8.
-    /// https://simonsapin.github.io/wtf-8/
-    InvalidWtf8,
 } || UnexpectedError;
 
 /// Changes the current working directory of the calling process.
-/// On Windows, `dir_path` should be encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, `dir_path` should be encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, `dir_path` should be encoded as valid UTF-8.
 /// On other platforms, `dir_path` is an opaque sequence of bytes with no particular encoding.
 pub fn chdir(dir_path: []const u8) ChangeCurDirError!void {
@@ -3227,10 +2915,7 @@ pub fn chdir(dir_path: []const u8) ChangeCurDirError!void {
         @compileError("WASI does not support os.chdir");
     } else if (native_os == .windows) {
         var wtf16_dir_path: [windows.PATH_MAX_WIDE]u16 = undefined;
-        if (try std.unicode.checkWtf8ToWtf16LeOverflow(dir_path, &wtf16_dir_path)) {
-            return error.NameTooLong;
-        }
-        const len = try std.unicode.wtf8ToWtf16Le(&wtf16_dir_path, dir_path);
+        const len = try windows.wtf8ToWtf16Le(&wtf16_dir_path, dir_path);
         return chdirW(wtf16_dir_path[0..len]);
     } else {
         const dir_path_c = try toPosixPath(dir_path);
@@ -3239,17 +2924,14 @@ pub fn chdir(dir_path: []const u8) ChangeCurDirError!void {
 }
 
 /// Same as `chdir` except the parameter is null-terminated.
-/// On Windows, `dir_path` should be encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, `dir_path` should be encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, `dir_path` should be encoded as valid UTF-8.
 /// On other platforms, `dir_path` is an opaque sequence of bytes with no particular encoding.
 pub fn chdirZ(dir_path: [*:0]const u8) ChangeCurDirError!void {
     if (native_os == .windows) {
         const dir_path_span = mem.span(dir_path);
         var wtf16_dir_path: [windows.PATH_MAX_WIDE]u16 = undefined;
-        if (try std.unicode.checkWtf8ToWtf16LeOverflow(dir_path_span, &wtf16_dir_path)) {
-            return error.NameTooLong;
-        }
-        const len = try std.unicode.wtf8ToWtf16Le(&wtf16_dir_path, dir_path_span);
+        const len = try windows.wtf8ToWtf16Le(&wtf16_dir_path, dir_path_span);
         return chdirW(wtf16_dir_path[0..len]);
     } else if (native_os == .wasi and !builtin.link_libc) {
         return chdir(mem.span(dir_path));
@@ -3264,10 +2946,7 @@ pub fn chdirZ(dir_path: [*:0]const u8) ChangeCurDirError!void {
         .NOENT => return error.FileNotFound,
         .NOMEM => return error.SystemResources,
         .NOTDIR => return error.NotDir,
-        .ILSEQ => |err| if (native_os == .wasi)
-            return error.InvalidUtf8
-        else
-            return unexpectedErrno(err),
+        .ILSEQ => return error.BadPathName,
         else => |err| return unexpectedErrno(err),
     }
 }
@@ -3313,51 +2992,71 @@ pub const ReadLinkError = error{
     SystemResources,
     NotLink,
     NotDir,
-    /// WASI-only; file paths must be valid UTF-8.
-    InvalidUtf8,
-    /// Windows-only; file paths provided by the user must be valid WTF-8.
-    /// https://simonsapin.github.io/wtf-8/
-    InvalidWtf8,
+    /// WASI: file paths must be valid UTF-8.
+    /// Windows: file paths provided by the user must be valid WTF-8.
+    /// https://wtf-8.codeberg.page/
     BadPathName,
     /// Windows-only. This error may occur if the opened reparse point is
     /// of unsupported type.
     UnsupportedReparsePointType,
     /// On Windows, `\\server` or `\\server\share` was not found.
     NetworkNotFound,
+    /// On Windows, antivirus software is enabled by default. It can be
+    /// disabled, but Windows Update sometimes ignores the user's preference
+    /// and re-enables it. When enabled, antivirus software on Windows
+    /// intercepts file system operations and makes them significantly slower
+    /// in addition to possibly failing with this error code.
+    AntivirusInterference,
 } || UnexpectedError;
 
 /// Read value of a symbolic link.
-/// On Windows, `file_path` should be encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, `file_path` should be encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, `file_path` should be encoded as valid UTF-8.
 /// On other platforms, `file_path` is an opaque sequence of bytes with no particular encoding.
 /// The return value is a slice of `out_buffer` from index 0.
-/// On Windows, the result is encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, the result is encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, the result is encoded as UTF-8.
 /// On other platforms, the result is an opaque sequence of bytes with no particular encoding.
 pub fn readlink(file_path: []const u8, out_buffer: []u8) ReadLinkError![]u8 {
     if (native_os == .wasi and !builtin.link_libc) {
         return readlinkat(AT.FDCWD, file_path, out_buffer);
     } else if (native_os == .windows) {
-        const file_path_w = try windows.sliceToPrefixedFileW(null, file_path);
-        return readlinkW(file_path_w.span(), out_buffer);
+        var file_path_w = try windows.sliceToPrefixedFileW(null, file_path);
+        const result_w = try readlinkW(file_path_w.span(), &file_path_w.data);
+
+        const len = std.unicode.calcWtf8Len(result_w);
+        if (len > out_buffer.len) return error.NameTooLong;
+
+        const end_index = std.unicode.wtf16LeToWtf8(out_buffer, result_w);
+        return out_buffer[0..end_index];
     } else {
         const file_path_c = try toPosixPath(file_path);
         return readlinkZ(&file_path_c, out_buffer);
     }
 }
 
-/// Windows-only. Same as `readlink` except `file_path` is WTF16 LE encoded.
-/// The result is encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// Windows-only. Same as `readlink` except `file_path` is WTF-16 LE encoded, NT-prefixed.
+/// The result is encoded as WTF-16 LE.
+///
+/// `file_path` will never be accessed after `out_buffer` has been written to, so it
+/// is safe to reuse a single buffer for both.
+///
 /// See also `readlinkZ`.
-pub fn readlinkW(file_path: []const u16, out_buffer: []u8) ReadLinkError![]u8 {
+pub fn readlinkW(file_path: []const u16, out_buffer: []u16) ReadLinkError![]u16 {
     return windows.ReadLink(fs.cwd().fd, file_path, out_buffer);
 }
 
 /// Same as `readlink` except `file_path` is null-terminated.
 pub fn readlinkZ(file_path: [*:0]const u8, out_buffer: []u8) ReadLinkError![]u8 {
     if (native_os == .windows) {
-        const file_path_w = try windows.cStrToPrefixedFileW(null, file_path);
-        return readlinkW(file_path_w.span(), out_buffer);
+        var file_path_w = try windows.cStrToPrefixedFileW(null, file_path);
+        const result_w = try readlinkW(file_path_w.span(), &file_path_w.data);
+
+        const len = std.unicode.calcWtf8Len(result_w);
+        if (len > out_buffer.len) return error.NameTooLong;
+
+        const end_index = std.unicode.wtf16LeToWtf8(out_buffer, result_w);
+        return out_buffer[0..end_index];
     } else if (native_os == .wasi and !builtin.link_libc) {
         return readlink(mem.sliceTo(file_path, 0), out_buffer);
     }
@@ -3373,20 +3072,17 @@ pub fn readlinkZ(file_path: [*:0]const u8, out_buffer: []u8) ReadLinkError![]u8 
         .NOENT => return error.FileNotFound,
         .NOMEM => return error.SystemResources,
         .NOTDIR => return error.NotDir,
-        .ILSEQ => |err| if (native_os == .wasi)
-            return error.InvalidUtf8
-        else
-            return unexpectedErrno(err),
+        .ILSEQ => return error.BadPathName,
         else => |err| return unexpectedErrno(err),
     }
 }
 
 /// Similar to `readlink` except reads value of a symbolink link **relative** to `dirfd` directory handle.
-/// On Windows, `file_path` should be encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, `file_path` should be encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, `file_path` should be encoded as valid UTF-8.
 /// On other platforms, `file_path` is an opaque sequence of bytes with no particular encoding.
 /// The return value is a slice of `out_buffer` from index 0.
-/// On Windows, the result is encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, the result is encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// On WASI, the result is encoded as UTF-8.
 /// On other platforms, the result is an opaque sequence of bytes with no particular encoding.
 /// See also `readlinkatWasi`, `realinkatZ` and `realinkatW`.
@@ -3395,8 +3091,14 @@ pub fn readlinkat(dirfd: fd_t, file_path: []const u8, out_buffer: []u8) ReadLink
         return readlinkatWasi(dirfd, file_path, out_buffer);
     }
     if (native_os == .windows) {
-        const file_path_w = try windows.sliceToPrefixedFileW(dirfd, file_path);
-        return readlinkatW(dirfd, file_path_w.span(), out_buffer);
+        var file_path_w = try windows.sliceToPrefixedFileW(dirfd, file_path);
+        const result_w = try readlinkatW(dirfd, file_path_w.span(), &file_path_w.data);
+
+        const len = std.unicode.calcWtf8Len(result_w);
+        if (len > out_buffer.len) return error.NameTooLong;
+
+        const end_index = std.unicode.wtf16LeToWtf8(out_buffer, result_w);
+        return out_buffer[0..end_index];
     }
     const file_path_c = try toPosixPath(file_path);
     return readlinkatZ(dirfd, &file_path_c, out_buffer);
@@ -3418,15 +3120,19 @@ pub fn readlinkatWasi(dirfd: fd_t, file_path: []const u8, out_buffer: []u8) Read
         .NOMEM => return error.SystemResources,
         .NOTDIR => return error.NotDir,
         .NOTCAPABLE => return error.AccessDenied,
-        .ILSEQ => return error.InvalidUtf8,
+        .ILSEQ => return error.BadPathName,
         else => |err| return unexpectedErrno(err),
     }
 }
 
-/// Windows-only. Same as `readlinkat` except `file_path` is null-terminated, WTF16 LE encoded.
-/// The result is encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// Windows-only. Same as `readlinkat` except `file_path` WTF16 LE encoded, NT-prefixed.
+/// The result is encoded as WTF-16 LE.
+///
+/// `file_path` will never be accessed after `out_buffer` has been written to, so it
+/// is safe to reuse a single buffer for both.
+///
 /// See also `readlinkat`.
-pub fn readlinkatW(dirfd: fd_t, file_path: []const u16, out_buffer: []u8) ReadLinkError![]u8 {
+pub fn readlinkatW(dirfd: fd_t, file_path: []const u16, out_buffer: []u16) ReadLinkError![]u16 {
     return windows.ReadLink(dirfd, file_path, out_buffer);
 }
 
@@ -3434,8 +3140,14 @@ pub fn readlinkatW(dirfd: fd_t, file_path: []const u16, out_buffer: []u8) ReadLi
 /// See also `readlinkat`.
 pub fn readlinkatZ(dirfd: fd_t, file_path: [*:0]const u8, out_buffer: []u8) ReadLinkError![]u8 {
     if (native_os == .windows) {
-        const file_path_w = try windows.cStrToPrefixedFileW(dirfd, file_path);
-        return readlinkatW(dirfd, file_path_w.span(), out_buffer);
+        var file_path_w = try windows.cStrToPrefixedFileW(dirfd, file_path);
+        const result_w = try readlinkatW(dirfd, file_path_w.span(), &file_path_w.data);
+
+        const len = std.unicode.calcWtf8Len(result_w);
+        if (len > out_buffer.len) return error.NameTooLong;
+
+        const end_index = std.unicode.wtf16LeToWtf8(out_buffer, result_w);
+        return out_buffer[0..end_index];
     } else if (native_os == .wasi and !builtin.link_libc) {
         return readlinkat(dirfd, mem.sliceTo(file_path, 0), out_buffer);
     }
@@ -3451,10 +3163,7 @@ pub fn readlinkatZ(dirfd: fd_t, file_path: [*:0]const u8, out_buffer: []u8) Read
         .NOENT => return error.FileNotFound,
         .NOMEM => return error.SystemResources,
         .NOTDIR => return error.NotDir,
-        .ILSEQ => |err| if (native_os == .wasi)
-            return error.InvalidUtf8
-        else
-            return unexpectedErrno(err),
+        .ILSEQ => return error.BadPathName,
         else => |err| return unexpectedErrno(err),
     }
 }
@@ -3550,6 +3259,14 @@ pub fn geteuid() uid_t {
     return system.geteuid();
 }
 
+pub fn getgid() gid_t {
+    return system.getgid();
+}
+
+pub fn getegid() gid_t {
+    return system.getegid();
+}
+
 /// Test whether a file descriptor refers to a terminal.
 pub fn isatty(handle: fd_t) bool {
     if (native_os == .windows) {
@@ -3597,7 +3314,7 @@ pub const SocketError = error{
     AccessDenied,
 
     /// The implementation does not support the specified address family.
-    AddressFamilyNotSupported,
+    AddressFamilyUnsupported,
 
     /// Unknown protocol, or protocol family not available.
     ProtocolFamilyNotAvailable,
@@ -3620,33 +3337,6 @@ pub const SocketError = error{
 } || UnexpectedError;
 
 pub fn socket(domain: u32, socket_type: u32, protocol: u32) SocketError!socket_t {
-    if (native_os == .windows) {
-        // These flags are not actually part of the Windows API, instead they are converted here for compatibility
-        const filtered_sock_type = socket_type & ~@as(u32, SOCK.NONBLOCK | SOCK.CLOEXEC);
-        var flags: u32 = windows.ws2_32.WSA_FLAG_OVERLAPPED;
-        if ((socket_type & SOCK.CLOEXEC) != 0) flags |= windows.ws2_32.WSA_FLAG_NO_HANDLE_INHERIT;
-
-        const rc = try windows.WSASocketW(
-            @bitCast(domain),
-            @bitCast(filtered_sock_type),
-            @bitCast(protocol),
-            null,
-            0,
-            flags,
-        );
-        errdefer windows.closesocket(rc) catch unreachable;
-        if ((socket_type & SOCK.NONBLOCK) != 0) {
-            var mode: c_ulong = 1; // nonblocking
-            if (windows.ws2_32.SOCKET_ERROR == windows.ws2_32.ioctlsocket(rc, windows.ws2_32.FIONBIO, &mode)) {
-                switch (windows.ws2_32.WSAGetLastError()) {
-                    // have not identified any error codes that should be handled yet
-                    else => unreachable,
-                }
-            }
-        }
-        return rc;
-    }
-
     const have_sock_flags = !builtin.target.os.tag.isDarwin() and native_os != .haiku;
     const filtered_sock_type = if (!have_sock_flags)
         socket_type & ~@as(u32, SOCK.NONBLOCK | SOCK.CLOEXEC)
@@ -3663,7 +3353,7 @@ pub fn socket(domain: u32, socket_type: u32, protocol: u32) SocketError!socket_t
             return fd;
         },
         .ACCES => return error.AccessDenied,
-        .AFNOSUPPORT => return error.AddressFamilyNotSupported,
+        .AFNOSUPPORT => return error.AddressFamilyUnsupported,
         .INVAL => return error.ProtocolFamilyNotAvailable,
         .MFILE => return error.ProcessFdQuotaExceeded,
         .NFILE => return error.SystemFdQuotaExceeded,
@@ -3703,7 +3393,7 @@ pub fn socketpair(domain: u32, socket_type: u32, protocol: u32) SocketError![2]s
             return socks;
         },
         .ACCES => return error.AccessDenied,
-        .AFNOSUPPORT => return error.AddressFamilyNotSupported,
+        .AFNOSUPPORT => return error.AddressFamilyUnsupported,
         .INVAL => return error.ProtocolFamilyNotAvailable,
         .MFILE => return error.ProcessFdQuotaExceeded,
         .NFILE => return error.SystemFdQuotaExceeded,
@@ -3723,10 +3413,10 @@ pub const ShutdownError = error{
     BlockingOperationInProgress,
 
     /// The network subsystem has failed.
-    NetworkSubsystemFailed,
+    NetworkDown,
 
     /// The socket is not connected (connection-oriented sockets only).
-    SocketNotConnected,
+    SocketUnconnected,
     SystemResources,
 } || UnexpectedError;
 
@@ -3741,14 +3431,14 @@ pub fn shutdown(sock: socket_t, how: ShutdownHow) ShutdownError!void {
             .both => windows.ws2_32.SD_BOTH,
         });
         if (0 != result) switch (windows.ws2_32.WSAGetLastError()) {
-            .WSAECONNABORTED => return error.ConnectionAborted,
-            .WSAECONNRESET => return error.ConnectionResetByPeer,
-            .WSAEINPROGRESS => return error.BlockingOperationInProgress,
-            .WSAEINVAL => unreachable,
-            .WSAENETDOWN => return error.NetworkSubsystemFailed,
-            .WSAENOTCONN => return error.SocketNotConnected,
-            .WSAENOTSOCK => unreachable,
-            .WSANOTINITIALISED => unreachable,
+            .ECONNABORTED => return error.ConnectionAborted,
+            .ECONNRESET => return error.ConnectionResetByPeer,
+            .EINPROGRESS => return error.BlockingOperationInProgress,
+            .EINVAL => unreachable,
+            .ENETDOWN => return error.NetworkDown,
+            .ENOTCONN => return error.SocketUnconnected,
+            .ENOTSOCK => unreachable,
+            .NOTINITIALISED => unreachable,
             else => |err| return windows.unexpectedWSAError(err),
         };
     } else {
@@ -3761,7 +3451,7 @@ pub fn shutdown(sock: socket_t, how: ShutdownHow) ShutdownError!void {
             .SUCCESS => return,
             .BADF => unreachable,
             .INVAL => unreachable,
-            .NOTCONN => return error.SocketNotConnected,
+            .NOTCONN => return error.SocketUnconnected,
             .NOTSOCK => unreachable,
             .NOBUFS => return error.SystemResources,
             else => |err| return unexpectedErrno(err),
@@ -3770,70 +3460,17 @@ pub fn shutdown(sock: socket_t, how: ShutdownHow) ShutdownError!void {
 }
 
 pub const BindError = error{
-    /// The address is protected, and the user is not the superuser.
-    /// For UNIX domain sockets: Search permission is denied on  a  component
-    /// of  the  path  prefix.
-    AccessDenied,
-
-    /// The given address is already in use, or in the case of Internet domain sockets,
-    /// The  port number was specified as zero in the socket
-    /// address structure, but, upon attempting to bind to  an  ephemeral  port,  it  was
-    /// determined  that  all  port  numbers in the ephemeral port range are currently in
-    /// use.  See the discussion of /proc/sys/net/ipv4/ip_local_port_range ip(7).
-    AddressInUse,
-
-    /// A nonexistent interface was requested or the requested address was not local.
-    AddressNotAvailable,
-
-    /// The address is not valid for the address family of socket.
-    AddressFamilyNotSupported,
-
-    /// Too many symbolic links were encountered in resolving addr.
     SymLinkLoop,
-
-    /// addr is too long.
     NameTooLong,
-
-    /// A component in the directory prefix of the socket pathname does not exist.
     FileNotFound,
-
-    /// Insufficient kernel memory was available.
-    SystemResources,
-
-    /// A component of the path prefix is not a directory.
     NotDir,
-
-    /// The socket inode would reside on a read-only filesystem.
     ReadOnlyFileSystem,
+    AccessDenied,
+} || std.Io.net.IpAddress.BindError;
 
-    /// The network subsystem has failed.
-    NetworkSubsystemFailed,
-
-    FileDescriptorNotASocket,
-
-    AlreadyBound,
-} || UnexpectedError;
-
-/// addr is `*const T` where T is one of the sockaddr
 pub fn bind(sock: socket_t, addr: *const sockaddr, len: socklen_t) BindError!void {
     if (native_os == .windows) {
-        const rc = windows.bind(sock, addr, len);
-        if (rc == windows.ws2_32.SOCKET_ERROR) {
-            switch (windows.ws2_32.WSAGetLastError()) {
-                .WSANOTINITIALISED => unreachable, // not initialized WSA
-                .WSAEACCES => return error.AccessDenied,
-                .WSAEADDRINUSE => return error.AddressInUse,
-                .WSAEADDRNOTAVAIL => return error.AddressNotAvailable,
-                .WSAENOTSOCK => return error.FileDescriptorNotASocket,
-                .WSAEFAULT => unreachable, // invalid pointers
-                .WSAEINVAL => return error.AlreadyBound,
-                .WSAENOBUFS => return error.SystemResources,
-                .WSAENETDOWN => return error.NetworkSubsystemFailed,
-                else => |err| return windows.unexpectedWSAError(err),
-            }
-            unreachable;
-        }
-        return;
+        @compileError("use std.Io instead");
     } else {
         const rc = system.bind(sock, addr, len);
         switch (errno(rc)) {
@@ -3843,8 +3480,8 @@ pub fn bind(sock: socket_t, addr: *const sockaddr, len: socklen_t) BindError!voi
             .BADF => unreachable, // always a race condition if this error is returned
             .INVAL => unreachable, // invalid parameters
             .NOTSOCK => unreachable, // invalid `sockfd`
-            .AFNOSUPPORT => return error.AddressFamilyNotSupported,
-            .ADDRNOTAVAIL => return error.AddressNotAvailable,
+            .AFNOSUPPORT => return error.AddressFamilyUnsupported,
+            .ADDRNOTAVAIL => return error.AddressUnavailable,
             .FAULT => unreachable, // invalid `addr` pointer
             .LOOP => return error.SymLinkLoop,
             .NAMETOOLONG => return error.NameTooLong,
@@ -3859,51 +3496,13 @@ pub fn bind(sock: socket_t, addr: *const sockaddr, len: socklen_t) BindError!voi
 }
 
 pub const ListenError = error{
-    /// Another socket is already listening on the same port.
-    /// For Internet domain sockets, the  socket referred to by sockfd had not previously
-    /// been bound to an address and, upon attempting to bind it to an ephemeral port, it
-    /// was determined that all port numbers in the ephemeral port range are currently in
-    /// use.  See the discussion of /proc/sys/net/ipv4/ip_local_port_range in ip(7).
-    AddressInUse,
-
-    /// The file descriptor sockfd does not refer to a socket.
     FileDescriptorNotASocket,
-
-    /// The socket is not of a type that supports the listen() operation.
     OperationNotSupported,
-
-    /// The network subsystem has failed.
-    NetworkSubsystemFailed,
-
-    /// Ran out of system resources
-    /// On Windows it can either run out of socket descriptors or buffer space
-    SystemResources,
-
-    /// Already connected
-    AlreadyConnected,
-
-    /// Socket has not been bound yet
-    SocketNotBound,
-} || UnexpectedError;
+} || std.Io.net.IpAddress.ListenError || std.Io.net.UnixAddress.ListenError;
 
 pub fn listen(sock: socket_t, backlog: u31) ListenError!void {
     if (native_os == .windows) {
-        const rc = windows.listen(sock, backlog);
-        if (rc == windows.ws2_32.SOCKET_ERROR) {
-            switch (windows.ws2_32.WSAGetLastError()) {
-                .WSANOTINITIALISED => unreachable, // not initialized WSA
-                .WSAENETDOWN => return error.NetworkSubsystemFailed,
-                .WSAEADDRINUSE => return error.AddressInUse,
-                .WSAEISCONN => return error.AlreadyConnected,
-                .WSAEINVAL => return error.SocketNotBound,
-                .WSAEMFILE, .WSAENOBUFS => return error.SystemResources,
-                .WSAENOTSOCK => return error.FileDescriptorNotASocket,
-                .WSAEOPNOTSUPP => return error.OperationNotSupported,
-                .WSAEINPROGRESS => unreachable,
-                else => |err| return windows.unexpectedWSAError(err),
-            }
-        }
-        return;
+        @compileError("use std.Io instead");
     } else {
         const rc = system.listen(sock, backlog);
         switch (errno(rc)) {
@@ -3917,70 +3516,12 @@ pub fn listen(sock: socket_t, backlog: u31) ListenError!void {
     }
 }
 
-pub const AcceptError = error{
-    ConnectionAborted,
+pub const AcceptError = std.Io.net.Server.AcceptError;
 
-    /// The file descriptor sockfd does not refer to a socket.
-    FileDescriptorNotASocket,
-
-    /// The per-process limit on the number of open file descriptors has been reached.
-    ProcessFdQuotaExceeded,
-
-    /// The system-wide limit on the total number of open files has been reached.
-    SystemFdQuotaExceeded,
-
-    /// Not enough free memory.  This often means that the memory allocation  is  limited
-    /// by the socket buffer limits, not by the system memory.
-    SystemResources,
-
-    /// Socket is not listening for new connections.
-    SocketNotListening,
-
-    ProtocolFailure,
-
-    /// Firewall rules forbid connection.
-    BlockedByFirewall,
-
-    /// This error occurs when no global event loop is configured,
-    /// and accepting from the socket would block.
-    WouldBlock,
-
-    /// An incoming connection was indicated, but was subsequently terminated by the
-    /// remote peer prior to accepting the call.
-    ConnectionResetByPeer,
-
-    /// The network subsystem has failed.
-    NetworkSubsystemFailed,
-
-    /// The referenced socket is not a type that supports connection-oriented service.
-    OperationNotSupported,
-} || UnexpectedError;
-
-/// Accept a connection on a socket.
-/// If `sockfd` is opened in non blocking mode, the function will
-/// return error.WouldBlock when EAGAIN is received.
 pub fn accept(
-    /// This argument is a socket that has been created with `socket`, bound to a local address
-    /// with `bind`, and is listening for connections after a `listen`.
     sock: socket_t,
-    /// This argument is a pointer to a sockaddr structure.  This structure is filled in with  the
-    /// address  of  the  peer  socket, as known to the communications layer.  The exact format of the
-    /// address returned addr is determined by the socket's address  family  (see  `socket`  and  the
-    /// respective  protocol  man  pages).
     addr: ?*sockaddr,
-    /// This argument is a value-result argument: the caller must initialize it to contain  the
-    /// size (in bytes) of the structure pointed to by addr; on return it will contain the actual size
-    /// of the peer address.
-    ///
-    /// The returned address is truncated if the buffer provided is too small; in this  case,  `addr_size`
-    /// will return a value greater than was supplied to the call.
     addr_size: ?*socklen_t,
-    /// The following values can be bitwise ORed in flags to obtain different behavior:
-    /// * `SOCK.NONBLOCK` - Set the `NONBLOCK` file status flag on the open file description (see `open`)
-    ///   referred  to by the new file descriptor.  Using this flag saves extra calls to `fcntl` to achieve
-    ///   the same result.
-    /// * `SOCK.CLOEXEC`  - Set the close-on-exec (`FD_CLOEXEC`) flag on the new file descriptor.   See  the
-    ///   description  of the `CLOEXEC` flag in `open` for reasons why this may be useful.
     flags: u32,
 ) AcceptError!socket_t {
     const have_accept4 = !(builtin.target.os.tag.isDarwin() or native_os == .windows or native_os == .haiku);
@@ -3989,29 +3530,11 @@ pub fn accept(
     const accepted_sock: socket_t = while (true) {
         const rc = if (have_accept4)
             system.accept4(sock, addr, addr_size, flags)
-        else if (native_os == .windows)
-            windows.accept(sock, addr, addr_size)
         else
             system.accept(sock, addr, addr_size);
 
         if (native_os == .windows) {
-            if (rc == windows.ws2_32.INVALID_SOCKET) {
-                switch (windows.ws2_32.WSAGetLastError()) {
-                    .WSANOTINITIALISED => unreachable, // not initialized WSA
-                    .WSAECONNRESET => return error.ConnectionResetByPeer,
-                    .WSAEFAULT => unreachable,
-                    .WSAENOTSOCK => return error.FileDescriptorNotASocket,
-                    .WSAEINVAL => return error.SocketNotListening,
-                    .WSAEMFILE => return error.ProcessFdQuotaExceeded,
-                    .WSAENETDOWN => return error.NetworkSubsystemFailed,
-                    .WSAENOBUFS => return error.FileDescriptorNotASocket,
-                    .WSAEOPNOTSUPP => return error.OperationNotSupported,
-                    .WSAEWOULDBLOCK => return error.WouldBlock,
-                    else => |err| return windows.unexpectedWSAError(err),
-                }
-            } else {
-                break rc;
-            }
+            @compileError("use std.Io instead");
         } else {
             switch (errno(rc)) {
                 .SUCCESS => break @intCast(rc),
@@ -4073,9 +3596,9 @@ fn setSockFlags(sock: socket_t, flags: u32) !void {
             var mode: c_ulong = 1;
             if (windows.ws2_32.ioctlsocket(sock, windows.ws2_32.FIONBIO, &mode) == windows.ws2_32.SOCKET_ERROR) {
                 switch (windows.ws2_32.WSAGetLastError()) {
-                    .WSANOTINITIALISED => unreachable,
-                    .WSAENETDOWN => return error.NetworkSubsystemFailed,
-                    .WSAENOTSOCK => return error.FileDescriptorNotASocket,
+                    .NOTINITIALISED => unreachable,
+                    .ENETDOWN => return error.NetworkDown,
+                    .ENOTSOCK => return error.FileDescriptorNotASocket,
                     // TODO: handle more errors
                     else => |err| return windows.unexpectedWSAError(err),
                 }
@@ -4215,7 +3738,7 @@ pub const GetSockNameError = error{
     SystemResources,
 
     /// The network subsystem has failed.
-    NetworkSubsystemFailed,
+    NetworkDown,
 
     /// Socket hasn't been bound yet
     SocketNotBound,
@@ -4228,11 +3751,11 @@ pub fn getsockname(sock: socket_t, addr: *sockaddr, addrlen: *socklen_t) GetSock
         const rc = windows.getsockname(sock, addr, addrlen);
         if (rc == windows.ws2_32.SOCKET_ERROR) {
             switch (windows.ws2_32.WSAGetLastError()) {
-                .WSANOTINITIALISED => unreachable,
-                .WSAENETDOWN => return error.NetworkSubsystemFailed,
-                .WSAEFAULT => unreachable, // addr or addrlen have invalid pointers or addrlen points to an incorrect value
-                .WSAENOTSOCK => return error.FileDescriptorNotASocket,
-                .WSAEINVAL => return error.SocketNotBound,
+                .NOTINITIALISED => unreachable,
+                .ENETDOWN => return error.NetworkDown,
+                .EFAULT => unreachable, // addr or addrlen have invalid pointers or addrlen points to an incorrect value
+                .ENOTSOCK => return error.FileDescriptorNotASocket,
+                .EINVAL => return error.SocketNotBound,
                 else => |err| return windows.unexpectedWSAError(err),
             }
         }
@@ -4257,11 +3780,11 @@ pub fn getpeername(sock: socket_t, addr: *sockaddr, addrlen: *socklen_t) GetSock
         const rc = windows.getpeername(sock, addr, addrlen);
         if (rc == windows.ws2_32.SOCKET_ERROR) {
             switch (windows.ws2_32.WSAGetLastError()) {
-                .WSANOTINITIALISED => unreachable,
-                .WSAENETDOWN => return error.NetworkSubsystemFailed,
-                .WSAEFAULT => unreachable, // addr or addrlen have invalid pointers or addrlen points to an incorrect value
-                .WSAENOTSOCK => return error.FileDescriptorNotASocket,
-                .WSAEINVAL => return error.SocketNotBound,
+                .NOTINITIALISED => unreachable,
+                .ENETDOWN => return error.NetworkDown,
+                .EFAULT => unreachable, // addr or addrlen have invalid pointers or addrlen points to an incorrect value
+                .ENOTSOCK => return error.FileDescriptorNotASocket,
+                .EINVAL => return error.SocketNotBound,
                 else => |err| return windows.unexpectedWSAError(err),
             }
         }
@@ -4281,86 +3804,11 @@ pub fn getpeername(sock: socket_t, addr: *sockaddr, addrlen: *socklen_t) GetSock
     }
 }
 
-pub const ConnectError = error{
-    /// For UNIX domain sockets, which are identified by pathname: Write permission is denied on  the  socket
-    /// file,  or  search  permission  is  denied  for  one of the directories in the path prefix.
-    /// or
-    /// The user tried to connect to a broadcast address without having the socket broadcast flag enabled  or
-    /// the connection request failed because of a local firewall rule.
-    AccessDenied,
+pub const ConnectError = std.Io.net.IpAddress.ConnectError || std.Io.net.UnixAddress.ConnectError;
 
-    /// See AccessDenied
-    PermissionDenied,
-
-    /// Local address is already in use.
-    AddressInUse,
-
-    /// (Internet  domain  sockets)  The  socket  referred  to  by sockfd had not previously been bound to an
-    /// address and, upon attempting to bind it to an ephemeral port, it was determined that all port numbers
-    /// in    the    ephemeral    port    range    are   currently   in   use.    See   the   discussion   of
-    /// /proc/sys/net/ipv4/ip_local_port_range in ip(7).
-    AddressNotAvailable,
-
-    /// The passed address didn't have the correct address family in its sa_family field.
-    AddressFamilyNotSupported,
-
-    /// Insufficient entries in the routing cache.
-    SystemResources,
-
-    /// A connect() on a stream socket found no one listening on the remote address.
-    ConnectionRefused,
-
-    /// Network is unreachable.
-    NetworkUnreachable,
-
-    /// Timeout  while  attempting  connection.   The server may be too busy to accept new connections.  Note
-    /// that for IP sockets the timeout may be very long when syncookies are enabled on the server.
-    ConnectionTimedOut,
-
-    /// This error occurs when no global event loop is configured,
-    /// and connecting to the socket would block.
-    WouldBlock,
-
-    /// The given path for the unix socket does not exist.
-    FileNotFound,
-
-    /// Connection was reset by peer before connect could complete.
-    ConnectionResetByPeer,
-
-    /// Socket is non-blocking and already has a pending connection in progress.
-    ConnectionPending,
-
-    /// Socket was already connected
-    AlreadyConnected,
-} || UnexpectedError;
-
-/// Initiate a connection on a socket.
-/// If `sockfd` is opened in non blocking mode, the function will
-/// return error.WouldBlock when EAGAIN or EINPROGRESS is received.
 pub fn connect(sock: socket_t, sock_addr: *const sockaddr, len: socklen_t) ConnectError!void {
     if (native_os == .windows) {
-        const rc = windows.ws2_32.connect(sock, sock_addr, @intCast(len));
-        if (rc == 0) return;
-        switch (windows.ws2_32.WSAGetLastError()) {
-            .WSAEADDRINUSE => return error.AddressInUse,
-            .WSAEADDRNOTAVAIL => return error.AddressNotAvailable,
-            .WSAECONNREFUSED => return error.ConnectionRefused,
-            .WSAECONNRESET => return error.ConnectionResetByPeer,
-            .WSAETIMEDOUT => return error.ConnectionTimedOut,
-            .WSAEHOSTUNREACH, // TODO: should we return NetworkUnreachable in this case as well?
-            .WSAENETUNREACH,
-            => return error.NetworkUnreachable,
-            .WSAEFAULT => unreachable,
-            .WSAEINVAL => unreachable,
-            .WSAEISCONN => return error.AlreadyConnected,
-            .WSAENOTSOCK => unreachable,
-            .WSAEWOULDBLOCK => return error.WouldBlock,
-            .WSAEACCES => unreachable,
-            .WSAENOBUFS => return error.SystemResources,
-            .WSAEAFNOSUPPORT => return error.AddressFamilyNotSupported,
-            else => |err| return windows.unexpectedWSAError(err),
-        }
-        return;
+        @compileError("use std.Io instead");
     }
 
     while (true) {
@@ -4368,9 +3816,8 @@ pub fn connect(sock: socket_t, sock_addr: *const sockaddr, len: socklen_t) Conne
             .SUCCESS => return,
             .ACCES => return error.AccessDenied,
             .PERM => return error.PermissionDenied,
-            .ADDRINUSE => return error.AddressInUse,
-            .ADDRNOTAVAIL => return error.AddressNotAvailable,
-            .AFNOSUPPORT => return error.AddressFamilyNotSupported,
+            .ADDRNOTAVAIL => return error.AddressUnavailable,
+            .AFNOSUPPORT => return error.AddressFamilyUnsupported,
             .AGAIN, .INPROGRESS => return error.WouldBlock,
             .ALREADY => return error.ConnectionPending,
             .BADF => unreachable, // sockfd is not a valid open file descriptor.
@@ -4378,12 +3825,12 @@ pub fn connect(sock: socket_t, sock_addr: *const sockaddr, len: socklen_t) Conne
             .CONNRESET => return error.ConnectionResetByPeer,
             .FAULT => unreachable, // The socket structure address is outside the user's address space.
             .INTR => continue,
-            .ISCONN => return error.AlreadyConnected, // The socket is already connected.
+            .ISCONN => @panic("AlreadyConnected"), // The socket is already connected.
             .HOSTUNREACH => return error.NetworkUnreachable,
             .NETUNREACH => return error.NetworkUnreachable,
             .NOTSOCK => unreachable, // The file descriptor sockfd does not refer to a socket.
             .PROTOTYPE => unreachable, // The socket type does not support the requested communications protocol.
-            .TIMEDOUT => return error.ConnectionTimedOut,
+            .TIMEDOUT => return error.Timeout,
             .NOENT => return error.FileNotFound, // Returned when socket is AF.UNIX and the given path does not exist.
             .CONNABORTED => unreachable, // Tried to reuse socket that previously received error.ConnectionRefused.
             else => |err| return unexpectedErrno(err),
@@ -4431,8 +3878,8 @@ pub fn getsockoptError(sockfd: fd_t) ConnectError!void {
             .ACCES => return error.AccessDenied,
             .PERM => return error.PermissionDenied,
             .ADDRINUSE => return error.AddressInUse,
-            .ADDRNOTAVAIL => return error.AddressNotAvailable,
-            .AFNOSUPPORT => return error.AddressFamilyNotSupported,
+            .ADDRNOTAVAIL => return error.AddressUnavailable,
+            .AFNOSUPPORT => return error.AddressFamilyUnsupported,
             .AGAIN => return error.SystemResources,
             .ALREADY => return error.ConnectionPending,
             .BADF => unreachable, // sockfd is not a valid open file descriptor.
@@ -4443,7 +3890,7 @@ pub fn getsockoptError(sockfd: fd_t) ConnectError!void {
             .NETUNREACH => return error.NetworkUnreachable,
             .NOTSOCK => unreachable, // The file descriptor sockfd does not refer to a socket.
             .PROTOTYPE => unreachable, // The socket type does not support the requested communications protocol.
-            .TIMEDOUT => return error.ConnectionTimedOut,
+            .TIMEDOUT => return error.Timeout,
             .CONNRESET => return error.ConnectionResetByPeer,
             else => |err| return unexpectedErrno(err),
         },
@@ -4497,14 +3944,7 @@ pub fn wait4(pid: pid_t, flags: u32, ru: ?*rusage) WaitPidResult {
     }
 }
 
-pub const FStatError = error{
-    SystemResources,
-
-    /// In WASI, this error may occur when the file descriptor does
-    /// not hold the required rights to get its filestat information.
-    AccessDenied,
-    PermissionDenied,
-} || UnexpectedError;
+pub const FStatError = std.Io.File.StatError;
 
 /// Return information about a file descriptor.
 pub fn fstat(fd: fd_t) FStatError!Stat {
@@ -4531,21 +3971,17 @@ pub const FStatAtError = FStatError || error{
     NameTooLong,
     FileNotFound,
     SymLinkLoop,
-    /// WASI-only; file paths must be valid UTF-8.
-    InvalidUtf8,
+    BadPathName,
 };
 
 /// Similar to `fstat`, but returns stat of a resource pointed to by `pathname`
 /// which is relative to `dirfd` handle.
 /// On WASI, `pathname` should be encoded as valid UTF-8.
 /// On other platforms, `pathname` is an opaque sequence of bytes with no particular encoding.
-/// See also `fstatatZ` and `std.os.fstatat_wasi`.
+/// See also `fstatatZ`.
 pub fn fstatat(dirfd: fd_t, pathname: []const u8, flags: u32) FStatAtError!Stat {
     if (native_os == .wasi and !builtin.link_libc) {
-        const filestat = try std.os.fstatat_wasi(dirfd, pathname, .{
-            .SYMLINK_FOLLOW = (flags & AT.SYMLINK_NOFOLLOW) == 0,
-        });
-        return Stat.fromFilestat(filestat);
+        @compileError("use std.Io instead");
     } else if (native_os == .windows) {
         @compileError("fstatat is not yet implemented on Windows");
     } else {
@@ -4558,10 +3994,7 @@ pub fn fstatat(dirfd: fd_t, pathname: []const u8, flags: u32) FStatAtError!Stat 
 /// See also `fstatat`.
 pub fn fstatatZ(dirfd: fd_t, pathname: [*:0]const u8, flags: u32) FStatAtError!Stat {
     if (native_os == .wasi and !builtin.link_libc) {
-        const filestat = try std.os.fstatat_wasi(dirfd, mem.sliceTo(pathname, 0), .{
-            .SYMLINK_FOLLOW = (flags & AT.SYMLINK_NOFOLLOW) == 0,
-        });
-        return Stat.fromFilestat(filestat);
+        @compileError("use std.Io instead");
     }
 
     const fstatat_sym = if (lfs64_abi) system.fstatat64 else system.fstatat;
@@ -4578,10 +4011,7 @@ pub fn fstatatZ(dirfd: fd_t, pathname: [*:0]const u8, flags: u32) FStatAtError!S
         .LOOP => return error.SymLinkLoop,
         .NOENT => return error.FileNotFound,
         .NOTDIR => return error.FileNotFound,
-        .ILSEQ => |err| if (native_os == .wasi)
-            return error.InvalidUtf8
-        else
-            return unexpectedErrno(err),
+        .ILSEQ => return error.BadPathName,
         else => |err| return unexpectedErrno(err),
     }
 }
@@ -4992,7 +4422,9 @@ pub fn munmap(memory: []align(page_size_min) const u8) void {
         .SUCCESS => return,
         .INVAL => unreachable, // Invalid parameters.
         .NOMEM => unreachable, // Attempted to unmap a region in the middle of an existing mapping.
-        else => unreachable,
+        else => |e| if (unexpected_error_tracing) {
+            std.debug.panic("unexpected errno: {d} ({t})", .{ @intFromEnum(e), e });
+        } else unreachable,
     }
 }
 
@@ -5052,32 +4484,29 @@ pub const AccessError = error{
     NameTooLong,
     InputOutput,
     SystemResources,
-    BadPathName,
     FileBusy,
     SymLinkLoop,
     ReadOnlyFileSystem,
-    /// WASI-only; file paths must be valid UTF-8.
-    InvalidUtf8,
-    /// Windows-only; file paths provided by the user must be valid WTF-8.
-    /// https://simonsapin.github.io/wtf-8/
-    InvalidWtf8,
+    /// WASI: file paths must be valid UTF-8.
+    /// Windows: file paths provided by the user must be valid WTF-8.
+    /// https://wtf-8.codeberg.page/
+    BadPathName,
+    Canceled,
 } || UnexpectedError;
 
 /// check user's permissions for a file
 ///
-/// * On Windows, asserts `path` is valid [WTF-8](https://simonsapin.github.io/wtf-8/).
-/// * On WASI, invalid UTF-8 passed to `path` causes `error.InvalidUtf8`.
+/// * On Windows, asserts `path` is valid [WTF-8](https://wtf-8.codeberg.page/).
+/// * On WASI, invalid UTF-8 passed to `path` causes `error.BadPathName`.
 /// * On other platforms, `path` is an opaque sequence of bytes with no particular encoding.
 ///
 /// On Windows, `mode` is ignored. This is a POSIX API that is only partially supported by
 /// Windows. See `fs` for the cross-platform file system API.
 pub fn access(path: []const u8, mode: u32) AccessError!void {
     if (native_os == .windows) {
-        const path_w = try windows.sliceToPrefixedFileW(null, path);
-        _ = try windows.GetFileAttributesW(path_w.span().ptr);
-        return;
+        @compileError("use std.Io instead");
     } else if (native_os == .wasi and !builtin.link_libc) {
-        return faccessat(AT.FDCWD, path, mode, 0);
+        @compileError("wasi doesn't support absolute paths");
     }
     const path_c = try toPosixPath(path);
     return accessZ(&path_c, mode);
@@ -5086,9 +4515,7 @@ pub fn access(path: []const u8, mode: u32) AccessError!void {
 /// Same as `access` except `path` is null-terminated.
 pub fn accessZ(path: [*:0]const u8, mode: u32) AccessError!void {
     if (native_os == .windows) {
-        const path_w = try windows.cStrToPrefixedFileW(null, path);
-        _ = try windows.GetFileAttributesW(path_w.span().ptr);
-        return;
+        @compileError("use std.Io instead");
     } else if (native_os == .wasi and !builtin.link_libc) {
         return access(mem.sliceTo(path, 0), mode);
     }
@@ -5106,129 +4533,8 @@ pub fn accessZ(path: [*:0]const u8, mode: u32) AccessError!void {
         .FAULT => unreachable,
         .IO => return error.InputOutput,
         .NOMEM => return error.SystemResources,
-        .ILSEQ => |err| if (native_os == .wasi)
-            return error.InvalidUtf8
-        else
-            return unexpectedErrno(err),
+        .ILSEQ => return error.BadPathName,
         else => |err| return unexpectedErrno(err),
-    }
-}
-
-/// Check user's permissions for a file, based on an open directory handle.
-///
-/// * On Windows, asserts `path` is valid [WTF-8](https://simonsapin.github.io/wtf-8/).
-/// * On WASI, invalid UTF-8 passed to `path` causes `error.InvalidUtf8`.
-/// * On other platforms, `path` is an opaque sequence of bytes with no particular encoding.
-///
-/// On Windows, `mode` is ignored. This is a POSIX API that is only partially supported by
-/// Windows. See `fs` for the cross-platform file system API.
-pub fn faccessat(dirfd: fd_t, path: []const u8, mode: u32, flags: u32) AccessError!void {
-    if (native_os == .windows) {
-        const path_w = try windows.sliceToPrefixedFileW(dirfd, path);
-        return faccessatW(dirfd, path_w.span().ptr);
-    } else if (native_os == .wasi and !builtin.link_libc) {
-        const resolved: RelativePathWasi = .{ .dir_fd = dirfd, .relative_path = path };
-
-        const st = try std.os.fstatat_wasi(dirfd, path, .{
-            .SYMLINK_FOLLOW = (flags & AT.SYMLINK_NOFOLLOW) == 0,
-        });
-
-        if (mode != F_OK) {
-            var directory: wasi.fdstat_t = undefined;
-            if (wasi.fd_fdstat_get(resolved.dir_fd, &directory) != .SUCCESS) {
-                return error.AccessDenied;
-            }
-
-            var rights: wasi.rights_t = .{};
-            if (mode & R_OK != 0) {
-                if (st.filetype == .DIRECTORY) {
-                    rights.FD_READDIR = true;
-                } else {
-                    rights.FD_READ = true;
-                }
-            }
-            if (mode & W_OK != 0) {
-                rights.FD_WRITE = true;
-            }
-            // No validation for X_OK
-
-            // https://github.com/ziglang/zig/issues/18882
-            const rights_int: u64 = @bitCast(rights);
-            const inheriting_int: u64 = @bitCast(directory.fs_rights_inheriting);
-            if ((rights_int & inheriting_int) != rights_int) {
-                return error.AccessDenied;
-            }
-        }
-        return;
-    }
-    const path_c = try toPosixPath(path);
-    return faccessatZ(dirfd, &path_c, mode, flags);
-}
-
-/// Same as `faccessat` except the path parameter is null-terminated.
-pub fn faccessatZ(dirfd: fd_t, path: [*:0]const u8, mode: u32, flags: u32) AccessError!void {
-    if (native_os == .windows) {
-        const path_w = try windows.cStrToPrefixedFileW(dirfd, path);
-        return faccessatW(dirfd, path_w.span().ptr);
-    } else if (native_os == .wasi and !builtin.link_libc) {
-        return faccessat(dirfd, mem.sliceTo(path, 0), mode, flags);
-    }
-    switch (errno(system.faccessat(dirfd, path, mode, flags))) {
-        .SUCCESS => return,
-        .ACCES => return error.AccessDenied,
-        .PERM => return error.PermissionDenied,
-        .ROFS => return error.ReadOnlyFileSystem,
-        .LOOP => return error.SymLinkLoop,
-        .TXTBSY => return error.FileBusy,
-        .NOTDIR => return error.FileNotFound,
-        .NOENT => return error.FileNotFound,
-        .NAMETOOLONG => return error.NameTooLong,
-        .INVAL => unreachable,
-        .FAULT => unreachable,
-        .IO => return error.InputOutput,
-        .NOMEM => return error.SystemResources,
-        .ILSEQ => |err| if (native_os == .wasi)
-            return error.InvalidUtf8
-        else
-            return unexpectedErrno(err),
-        else => |err| return unexpectedErrno(err),
-    }
-}
-
-/// Same as `faccessat` except asserts the target is Windows and the path parameter
-/// is NtDll-prefixed, null-terminated, WTF-16 encoded.
-pub fn faccessatW(dirfd: fd_t, sub_path_w: [*:0]const u16) AccessError!void {
-    if (sub_path_w[0] == '.' and sub_path_w[1] == 0) {
-        return;
-    }
-    if (sub_path_w[0] == '.' and sub_path_w[1] == '.' and sub_path_w[2] == 0) {
-        return;
-    }
-
-    const path_len_bytes = cast(u16, mem.sliceTo(sub_path_w, 0).len * 2) orelse return error.NameTooLong;
-    var nt_name = windows.UNICODE_STRING{
-        .Length = path_len_bytes,
-        .MaximumLength = path_len_bytes,
-        .Buffer = @constCast(sub_path_w),
-    };
-    var attr = windows.OBJECT_ATTRIBUTES{
-        .Length = @sizeOf(windows.OBJECT_ATTRIBUTES),
-        .RootDirectory = if (fs.path.isAbsoluteWindowsW(sub_path_w)) null else dirfd,
-        .Attributes = 0, // Note we do not use OBJ_CASE_INSENSITIVE here.
-        .ObjectName = &nt_name,
-        .SecurityDescriptor = null,
-        .SecurityQualityOfService = null,
-    };
-    var basic_info: windows.FILE_BASIC_INFORMATION = undefined;
-    switch (windows.ntdll.NtQueryAttributesFile(&attr, &basic_info)) {
-        .SUCCESS => return,
-        .OBJECT_NAME_NOT_FOUND => return error.FileNotFound,
-        .OBJECT_PATH_NOT_FOUND => return error.FileNotFound,
-        .OBJECT_NAME_INVALID => unreachable,
-        .INVALID_PARAMETER => unreachable,
-        .ACCESS_DENIED => return error.AccessDenied,
-        .OBJECT_PATH_SYNTAX_BAD => unreachable,
-        else => |rc| return windows.unexpectedStatus(rc),
     }
 }
 
@@ -5376,15 +4682,8 @@ pub fn gettimeofday(tv: ?*timeval, tz: ?*timezone) void {
     }
 }
 
-pub const SeekError = error{
-    Unseekable,
+pub const SeekError = std.Io.File.SeekError;
 
-    /// In WASI, this error may occur when the file descriptor does
-    /// not hold the required rights to seek on it.
-    AccessDenied,
-} || UnexpectedError;
-
-/// Repositions read/write file offset relative to the beginning.
 pub fn lseek_SET(fd: fd_t, offset: u64) SeekError!void {
     if (native_os == .linux and !builtin.link_libc and @sizeOf(usize) == 4) {
         var result: u64 = undefined;
@@ -5628,16 +4927,15 @@ pub const RealPathError = error{
     SystemResources,
     NoSpaceLeft,
     FileSystem,
-    BadPathName,
     DeviceBusy,
     ProcessNotFound,
 
     SharingViolation,
     PipeBusy,
 
-    /// Windows-only; file paths provided by the user must be valid WTF-8.
-    /// https://simonsapin.github.io/wtf-8/
-    InvalidWtf8,
+    /// Windows: file paths provided by the user must be valid WTF-8.
+    /// https://wtf-8.codeberg.page/
+    BadPathName,
 
     /// On Windows, `\\server` or `\\server\share` was not found.
     NetworkNotFound,
@@ -5654,6 +4952,8 @@ pub const RealPathError = error{
     /// On Windows, the volume does not contain a recognized file system. File
     /// system drivers might not be loaded, or the volume may be corrupt.
     UnrecognizedVolume,
+
+    Canceled,
 } || UnexpectedError;
 
 /// Return the canonicalized absolute pathname.
@@ -5661,7 +4961,7 @@ pub const RealPathError = error{
 /// Expands all symbolic links and resolves references to `.`, `..`, and
 /// extra `/` characters in `pathname`.
 ///
-/// On Windows, `pathname` should be encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// On Windows, `pathname` should be encoded as [WTF-8](https://wtf-8.codeberg.page/).
 ///
 /// On other platforms, `pathname` is an opaque sequence of bytes with no particular encoding.
 ///
@@ -5669,14 +4969,18 @@ pub const RealPathError = error{
 ///
 /// See also `realpathZ` and `realpathW`.
 ///
-/// * On Windows, the result is encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// * On Windows, the result is encoded as [WTF-8](https://wtf-8.codeberg.page/).
 /// * On other platforms, the result is an opaque sequence of bytes with no particular encoding.
 ///
 /// Calling this function is usually a bug.
 pub fn realpath(pathname: []const u8, out_buffer: *[max_path_bytes]u8) RealPathError![]u8 {
     if (native_os == .windows) {
-        const pathname_w = try windows.sliceToPrefixedFileW(null, pathname);
-        return realpathW(pathname_w.span(), out_buffer);
+        var pathname_w = try windows.sliceToPrefixedFileW(null, pathname);
+
+        const wide_slice = try realpathW2(pathname_w.span(), &pathname_w.data);
+
+        const end_index = std.unicode.wtf16LeToWtf8(out_buffer, wide_slice);
+        return out_buffer[0..end_index];
     } else if (native_os == .wasi and !builtin.link_libc) {
         @compileError("WASI does not support os.realpath");
     }
@@ -5689,8 +4993,12 @@ pub fn realpath(pathname: []const u8, out_buffer: *[max_path_bytes]u8) RealPathE
 /// Calling this function is usually a bug.
 pub fn realpathZ(pathname: [*:0]const u8, out_buffer: *[max_path_bytes]u8) RealPathError![]u8 {
     if (native_os == .windows) {
-        const pathname_w = try windows.cStrToPrefixedFileW(null, pathname);
-        return realpathW(pathname_w.span(), out_buffer);
+        var pathname_w = try windows.cStrToPrefixedFileW(null, pathname);
+
+        const wide_slice = try realpathW2(pathname_w.span(), &pathname_w.data);
+
+        const end_index = std.unicode.wtf16LeToWtf8(out_buffer, wide_slice);
+        return out_buffer[0..end_index];
     } else if (native_os == .wasi and !builtin.link_libc) {
         return realpath(mem.sliceTo(pathname, 0), out_buffer);
     }
@@ -5710,7 +5018,6 @@ pub fn realpathZ(pathname: [*:0]const u8, out_buffer: *[max_path_bytes]u8) RealP
             error.FileLocksNotSupported => unreachable,
             error.WouldBlock => unreachable,
             error.FileBusy => unreachable, // not asking for write permissions
-            error.InvalidUtf8 => unreachable, // WASI-only
             else => |e| return e,
         };
         defer close(fd);
@@ -5734,34 +5041,24 @@ pub fn realpathZ(pathname: [*:0]const u8, out_buffer: *[max_path_bytes]u8) RealP
     return mem.sliceTo(result_path, 0);
 }
 
+/// Deprecated: use `realpathW2`.
+///
 /// Same as `realpath` except `pathname` is WTF16LE-encoded.
 ///
-/// The result is encoded as [WTF-8](https://simonsapin.github.io/wtf-8/).
+/// The result is encoded as [WTF-8](https://wtf-8.codeberg.page/).
 ///
 /// Calling this function is usually a bug.
 pub fn realpathW(pathname: []const u16, out_buffer: *[max_path_bytes]u8) RealPathError![]u8 {
-    const w = windows;
+    return fs.cwd().realpathW(pathname, out_buffer);
+}
 
-    const dir = fs.cwd().fd;
-    const access_mask = w.GENERIC_READ | w.SYNCHRONIZE;
-    const share_access = w.FILE_SHARE_READ | w.FILE_SHARE_WRITE | w.FILE_SHARE_DELETE;
-    const creation = w.FILE_OPEN;
-    const h_file = blk: {
-        const res = w.OpenFile(pathname, .{
-            .dir = dir,
-            .access_mask = access_mask,
-            .share_access = share_access,
-            .creation = creation,
-            .filter = .any,
-        }) catch |err| switch (err) {
-            error.WouldBlock => unreachable,
-            else => |e| return e,
-        };
-        break :blk res;
-    };
-    defer w.CloseHandle(h_file);
-
-    return std.os.getFdPath(h_file, out_buffer);
+/// Same as `realpath` except `pathname` is WTF16LE-encoded.
+///
+/// The result is encoded as WTF16LE.
+///
+/// Calling this function is usually a bug.
+pub fn realpathW2(pathname: []const u16, out_buffer: *[std.os.windows.PATH_MAX_WIDE]u16) RealPathError![]u16 {
+    return fs.cwd().realpathW2(pathname, out_buffer);
 }
 
 /// Spurious wakeups are possible and no precision of timing is guaranteed.
@@ -5787,6 +5084,13 @@ pub fn nanosleep(seconds: u64, nanoseconds: u64) void {
             else => return,
         }
     }
+}
+
+pub fn getSelfPhdrs() []std.elf.ElfN.Phdr {
+    const getauxval = if (builtin.link_libc) std.c.getauxval else std.os.linux.getauxval;
+    assert(getauxval(std.elf.AT_PHENT) == @sizeOf(std.elf.ElfN.Phdr));
+    const phdrs: [*]std.elf.ElfN.Phdr = @ptrFromInt(getauxval(std.elf.AT_PHDR));
+    return phdrs[0..getauxval(std.elf.AT_PHNUM)];
 }
 
 pub fn dl_iterate_phdr(
@@ -5816,34 +5120,24 @@ pub fn dl_iterate_phdr(
         }
     }
 
-    const elf_base = std.process.getBaseAddress();
-    const ehdr: *elf.Ehdr = @ptrFromInt(elf_base);
-    // Make sure the base address points to an ELF image.
-    assert(mem.eql(u8, ehdr.e_ident[0..4], elf.MAGIC));
-    const n_phdr = ehdr.e_phnum;
-    const phdrs = (@as([*]elf.Phdr, @ptrFromInt(elf_base + ehdr.e_phoff)))[0..n_phdr];
-
-    var it = dl.linkmap_iterator(phdrs) catch unreachable;
+    var it = dl.linkmap_iterator() catch unreachable;
 
     // The executable has no dynamic link segment, create a single entry for
     // the whole ELF image.
     if (it.end()) {
-        // Find the base address for the ELF image, if this is a PIE the value
-        // is non-zero.
-        const base_address = for (phdrs) |*phdr| {
-            if (phdr.p_type == elf.PT_PHDR) {
-                break @intFromPtr(phdrs.ptr) - phdr.p_vaddr;
-                // We could try computing the difference between _DYNAMIC and
-                // the p_vaddr of the PT_DYNAMIC section, but using the phdr is
-                // good enough (Is it?).
-            }
-        } else unreachable;
-
-        var info = dl_phdr_info{
-            .addr = base_address,
-            .name = "/proc/self/exe",
+        const getauxval = if (builtin.link_libc) std.c.getauxval else std.os.linux.getauxval;
+        const phdrs = getSelfPhdrs();
+        var info: dl_phdr_info = .{
+            .addr = for (phdrs) |phdr| switch (phdr.type) {
+                .PHDR => break @intFromPtr(phdrs.ptr) - phdr.vaddr,
+                else => {},
+            } else unreachable,
+            .name = switch (getauxval(std.elf.AT_EXECFN)) {
+                0 => "/proc/self/exe",
+                else => |name| @ptrFromInt(name),
+            },
             .phdr = phdrs.ptr,
-            .phnum = ehdr.e_phnum,
+            .phnum = @intCast(phdrs.len),
         };
 
         return callback(&info, @sizeOf(dl_phdr_info), context);
@@ -5851,24 +5145,18 @@ pub fn dl_iterate_phdr(
 
     // Last return value from the callback function.
     while (it.next()) |entry| {
-        var phdr: [*]elf.Phdr = undefined;
-        var phnum: u16 = undefined;
+        const phdrs: []elf.ElfN.Phdr = if (entry.l_addr != 0) phdrs: {
+            const ehdr: *elf.ElfN.Ehdr = @ptrFromInt(entry.l_addr);
+            assert(mem.eql(u8, ehdr.ident[0..4], elf.MAGIC));
+            const phdrs: [*]elf.ElfN.Phdr = @ptrFromInt(entry.l_addr + ehdr.phoff);
+            break :phdrs phdrs[0..ehdr.phnum];
+        } else getSelfPhdrs();
 
-        if (entry.l_addr != 0) {
-            const elf_header: *elf.Ehdr = @ptrFromInt(entry.l_addr);
-            phdr = @ptrFromInt(entry.l_addr + elf_header.e_phoff);
-            phnum = elf_header.e_phnum;
-        } else {
-            // This is the running ELF image
-            phdr = @ptrFromInt(elf_base + ehdr.e_phoff);
-            phnum = ehdr.e_phnum;
-        }
-
-        var info = dl_phdr_info{
+        var info: dl_phdr_info = .{
             .addr = entry.l_addr,
             .name = entry.l_name,
-            .phdr = phdr,
-            .phnum = phnum,
+            .phdr = phdrs.ptr,
+            .phnum = @intCast(phdrs.len),
         };
 
         try callback(&info, @sizeOf(dl_phdr_info), context);
@@ -5984,7 +5272,7 @@ pub fn sigemptyset() sigset_t {
     return system.sigemptyset();
 }
 
-pub fn sigaddset(set: *sigset_t, sig: u8) void {
+pub fn sigaddset(set: *sigset_t, sig: SIG) void {
     if (builtin.link_libc) {
         switch (errno(system.sigaddset(set, sig))) {
             .SUCCESS => return,
@@ -5994,7 +5282,7 @@ pub fn sigaddset(set: *sigset_t, sig: u8) void {
     system.sigaddset(set, sig);
 }
 
-pub fn sigdelset(set: *sigset_t, sig: u8) void {
+pub fn sigdelset(set: *sigset_t, sig: SIG) void {
     if (builtin.link_libc) {
         switch (errno(system.sigdelset(set, sig))) {
             .SUCCESS => return,
@@ -6004,7 +5292,7 @@ pub fn sigdelset(set: *sigset_t, sig: u8) void {
     system.sigdelset(set, sig);
 }
 
-pub fn sigismember(set: *const sigset_t, sig: u8) bool {
+pub fn sigismember(set: *const sigset_t, sig: SIG) bool {
     if (builtin.link_libc) {
         const rc = system.sigismember(set, sig);
         switch (errno(rc)) {
@@ -6016,11 +5304,11 @@ pub fn sigismember(set: *const sigset_t, sig: u8) bool {
 }
 
 /// Examine and change a signal action.
-pub fn sigaction(sig: u8, noalias act: ?*const Sigaction, noalias oact: ?*Sigaction) void {
+pub fn sigaction(sig: SIG, noalias act: ?*const Sigaction, noalias oact: ?*Sigaction) void {
     switch (errno(system.sigaction(sig, act, oact))) {
         .SUCCESS => return,
         // EINVAL means the signal is either invalid or some signal that cannot have its action
-        // changed. For POSIX, this means SIGKILL/SIGSTOP. For e.g. Solaris, this also includes the
+        // changed. For POSIX, this means SIGKILL/SIGSTOP. For e.g. illumos, this also includes the
         // non-standard SIGWAITING, SIGCANCEL, and SIGLWP. Either way, programmer error.
         .INVAL => unreachable,
         else => unreachable,
@@ -6137,55 +5425,6 @@ pub fn uname() utsname {
     }
 }
 
-pub fn res_mkquery(
-    op: u4,
-    dname: []const u8,
-    class: u8,
-    ty: u8,
-    data: []const u8,
-    newrr: ?[*]const u8,
-    buf: []u8,
-) usize {
-    _ = data;
-    _ = newrr;
-    // This implementation is ported from musl libc.
-    // A more idiomatic "ziggy" implementation would be welcome.
-    var name = dname;
-    if (mem.endsWith(u8, name, ".")) name.len -= 1;
-    assert(name.len <= 253);
-    const n = 17 + name.len + @intFromBool(name.len != 0);
-
-    // Construct query template - ID will be filled later
-    var q: [280]u8 = undefined;
-    @memset(q[0..n], 0);
-    q[2] = @as(u8, op) * 8 + 1;
-    q[5] = 1;
-    @memcpy(q[13..][0..name.len], name);
-    var i: usize = 13;
-    var j: usize = undefined;
-    while (q[i] != 0) : (i = j + 1) {
-        j = i;
-        while (q[j] != 0 and q[j] != '.') : (j += 1) {}
-        // TODO determine the circumstances for this and whether or
-        // not this should be an error.
-        if (j - i - 1 > 62) unreachable;
-        q[i - 1] = @intCast(j - i);
-    }
-    q[i + 1] = ty;
-    q[i + 3] = class;
-
-    // Make a reasonably unpredictable id
-    const ts = clock_gettime(.REALTIME) catch unreachable;
-    const UInt = std.meta.Int(.unsigned, @bitSizeOf(@TypeOf(ts.nsec)));
-    const unsec: UInt = @bitCast(ts.nsec);
-    const id: u32 = @truncate(unsec + unsec / 65536);
-    q[0] = @truncate(id / 256);
-    q[1] = @truncate(id);
-
-    @memcpy(buf[0..n], q[0..n]);
-    return n;
-}
-
 pub const SendError = error{
     /// (For UNIX domain sockets, which are identified by pathname) Write permission is  denied
     /// on  the destination socket file, or search permission is denied for one of the
@@ -6211,7 +5450,7 @@ pub const SendError = error{
 
     /// The  socket  type requires that message be sent atomically, and the size of the message
     /// to be sent made this impossible. The message is not transmitted.
-    MessageTooBig,
+    MessageOversize,
 
     /// The output queue for a network interface was full.  This generally indicates  that  the
     /// interface  has  stopped sending, but may be caused by transient congestion.  (Normally,
@@ -6230,7 +5469,7 @@ pub const SendError = error{
     NetworkUnreachable,
 
     /// The local network interface used to reach the destination is down.
-    NetworkSubsystemFailed,
+    NetworkDown,
 
     /// The destination address is not listening.
     ConnectionRefused,
@@ -6238,7 +5477,7 @@ pub const SendError = error{
 
 pub const SendMsgError = SendError || error{
     /// The passed address didn't have the correct address family in its sa_family field.
-    AddressFamilyNotSupported,
+    AddressFamilyUnsupported,
 
     /// Returned when socket is AF.UNIX and the given path has a symlink loop.
     SymLinkLoop,
@@ -6251,8 +5490,8 @@ pub const SendMsgError = SendError || error{
     NotDir,
 
     /// The socket is not connected (connection-oriented sockets only).
-    SocketNotConnected,
-    AddressNotAvailable,
+    SocketUnconnected,
+    AddressUnavailable,
 };
 
 pub fn sendmsg(
@@ -6267,25 +5506,25 @@ pub fn sendmsg(
         if (native_os == .windows) {
             if (rc == windows.ws2_32.SOCKET_ERROR) {
                 switch (windows.ws2_32.WSAGetLastError()) {
-                    .WSAEACCES => return error.AccessDenied,
-                    .WSAEADDRNOTAVAIL => return error.AddressNotAvailable,
-                    .WSAECONNRESET => return error.ConnectionResetByPeer,
-                    .WSAEMSGSIZE => return error.MessageTooBig,
-                    .WSAENOBUFS => return error.SystemResources,
-                    .WSAENOTSOCK => return error.FileDescriptorNotASocket,
-                    .WSAEAFNOSUPPORT => return error.AddressFamilyNotSupported,
-                    .WSAEDESTADDRREQ => unreachable, // A destination address is required.
-                    .WSAEFAULT => unreachable, // The lpBuffers, lpTo, lpOverlapped, lpNumberOfBytesSent, or lpCompletionRoutine parameters are not part of the user address space, or the lpTo parameter is too small.
-                    .WSAEHOSTUNREACH => return error.NetworkUnreachable,
-                    // TODO: WSAEINPROGRESS, WSAEINTR
-                    .WSAEINVAL => unreachable,
-                    .WSAENETDOWN => return error.NetworkSubsystemFailed,
-                    .WSAENETRESET => return error.ConnectionResetByPeer,
-                    .WSAENETUNREACH => return error.NetworkUnreachable,
-                    .WSAENOTCONN => return error.SocketNotConnected,
-                    .WSAESHUTDOWN => unreachable, // The socket has been shut down; it is not possible to WSASendTo on a socket after shutdown has been invoked with how set to SD_SEND or SD_BOTH.
-                    .WSAEWOULDBLOCK => return error.WouldBlock,
-                    .WSANOTINITIALISED => unreachable, // A successful WSAStartup call must occur before using this function.
+                    .EACCES => return error.AccessDenied,
+                    .EADDRNOTAVAIL => return error.AddressUnavailable,
+                    .ECONNRESET => return error.ConnectionResetByPeer,
+                    .EMSGSIZE => return error.MessageOversize,
+                    .ENOBUFS => return error.SystemResources,
+                    .ENOTSOCK => return error.FileDescriptorNotASocket,
+                    .EAFNOSUPPORT => return error.AddressFamilyUnsupported,
+                    .EDESTADDRREQ => unreachable, // A destination address is required.
+                    .EFAULT => unreachable, // The lpBuffers, lpTo, lpOverlapped, lpNumberOfBytesSent, or lpCompletionRoutine parameters are not part of the user address space, or the lpTo parameter is too small.
+                    .EHOSTUNREACH => return error.NetworkUnreachable,
+                    // TODO: EINPROGRESS, EINTR
+                    .EINVAL => unreachable,
+                    .ENETDOWN => return error.NetworkDown,
+                    .ENETRESET => return error.ConnectionResetByPeer,
+                    .ENETUNREACH => return error.NetworkUnreachable,
+                    .ENOTCONN => return error.SocketUnconnected,
+                    .ESHUTDOWN => unreachable, // The socket has been shut down; it is not possible to WSASendTo on a socket after shutdown has been invoked with how set to SD_SEND or SD_BOTH.
+                    .EWOULDBLOCK => return error.WouldBlock,
+                    .NOTINITIALISED => unreachable, // A successful WSAStartup call must occur before using this function.
                     else => |err| return windows.unexpectedWSAError(err),
                 }
             } else {
@@ -6305,21 +5544,21 @@ pub fn sendmsg(
                 .INTR => continue,
                 .INVAL => unreachable, // Invalid argument passed.
                 .ISCONN => unreachable, // connection-mode socket was connected already but a recipient was specified
-                .MSGSIZE => return error.MessageTooBig,
+                .MSGSIZE => return error.MessageOversize,
                 .NOBUFS => return error.SystemResources,
                 .NOMEM => return error.SystemResources,
                 .NOTSOCK => unreachable, // The file descriptor sockfd does not refer to a socket.
                 .OPNOTSUPP => unreachable, // Some bit in the flags argument is inappropriate for the socket type.
                 .PIPE => return error.BrokenPipe,
-                .AFNOSUPPORT => return error.AddressFamilyNotSupported,
+                .AFNOSUPPORT => return error.AddressFamilyUnsupported,
                 .LOOP => return error.SymLinkLoop,
                 .NAMETOOLONG => return error.NameTooLong,
                 .NOENT => return error.FileNotFound,
                 .NOTDIR => return error.NotDir,
                 .HOSTUNREACH => return error.NetworkUnreachable,
                 .NETUNREACH => return error.NetworkUnreachable,
-                .NOTCONN => return error.SocketNotConnected,
-                .NETDOWN => return error.NetworkSubsystemFailed,
+                .NOTCONN => return error.SocketUnconnected,
+                .NETDOWN => return error.NetworkDown,
                 else => |err| return unexpectedErrno(err),
             }
         }
@@ -6350,7 +5589,7 @@ pub const SendToError = SendMsgError || error{
 /// Otherwise, the address of the target is given by `dest_addr` with `addrlen` specifying  its  size.
 ///
 /// If the message is too long to pass atomically through the underlying protocol,
-/// `SendError.MessageTooBig` is returned, and the message is not transmitted.
+/// `SendError.MessageOversize` is returned, and the message is not transmitted.
 ///
 /// There is no  indication  of  failure  to  deliver.
 ///
@@ -6370,25 +5609,25 @@ pub fn sendto(
     if (native_os == .windows) {
         switch (windows.sendto(sockfd, buf.ptr, buf.len, flags, dest_addr, addrlen)) {
             windows.ws2_32.SOCKET_ERROR => switch (windows.ws2_32.WSAGetLastError()) {
-                .WSAEACCES => return error.AccessDenied,
-                .WSAEADDRNOTAVAIL => return error.AddressNotAvailable,
-                .WSAECONNRESET => return error.ConnectionResetByPeer,
-                .WSAEMSGSIZE => return error.MessageTooBig,
-                .WSAENOBUFS => return error.SystemResources,
-                .WSAENOTSOCK => return error.FileDescriptorNotASocket,
-                .WSAEAFNOSUPPORT => return error.AddressFamilyNotSupported,
-                .WSAEDESTADDRREQ => unreachable, // A destination address is required.
-                .WSAEFAULT => unreachable, // The lpBuffers, lpTo, lpOverlapped, lpNumberOfBytesSent, or lpCompletionRoutine parameters are not part of the user address space, or the lpTo parameter is too small.
-                .WSAEHOSTUNREACH => return error.NetworkUnreachable,
-                // TODO: WSAEINPROGRESS, WSAEINTR
-                .WSAEINVAL => unreachable,
-                .WSAENETDOWN => return error.NetworkSubsystemFailed,
-                .WSAENETRESET => return error.ConnectionResetByPeer,
-                .WSAENETUNREACH => return error.NetworkUnreachable,
-                .WSAENOTCONN => return error.SocketNotConnected,
-                .WSAESHUTDOWN => unreachable, // The socket has been shut down; it is not possible to WSASendTo on a socket after shutdown has been invoked with how set to SD_SEND or SD_BOTH.
-                .WSAEWOULDBLOCK => return error.WouldBlock,
-                .WSANOTINITIALISED => unreachable, // A successful WSAStartup call must occur before using this function.
+                .EACCES => return error.AccessDenied,
+                .EADDRNOTAVAIL => return error.AddressUnavailable,
+                .ECONNRESET => return error.ConnectionResetByPeer,
+                .EMSGSIZE => return error.MessageOversize,
+                .ENOBUFS => return error.SystemResources,
+                .ENOTSOCK => return error.FileDescriptorNotASocket,
+                .EAFNOSUPPORT => return error.AddressFamilyUnsupported,
+                .EDESTADDRREQ => unreachable, // A destination address is required.
+                .EFAULT => unreachable, // The lpBuffers, lpTo, lpOverlapped, lpNumberOfBytesSent, or lpCompletionRoutine parameters are not part of the user address space, or the lpTo parameter is too small.
+                .EHOSTUNREACH => return error.NetworkUnreachable,
+                // TODO: EINPROGRESS, EINTR
+                .EINVAL => unreachable,
+                .ENETDOWN => return error.NetworkDown,
+                .ENETRESET => return error.ConnectionResetByPeer,
+                .ENETUNREACH => return error.NetworkUnreachable,
+                .ENOTCONN => return error.SocketUnconnected,
+                .ESHUTDOWN => unreachable, // The socket has been shut down; it is not possible to WSASendTo on a socket after shutdown has been invoked with how set to SD_SEND or SD_BOTH.
+                .EWOULDBLOCK => return error.WouldBlock,
+                .NOTINITIALISED => unreachable, // A successful WSAStartup call must occur before using this function.
                 else => |err| return windows.unexpectedWSAError(err),
             },
             else => |rc| return @intCast(rc),
@@ -6410,21 +5649,21 @@ pub fn sendto(
             .INTR => continue,
             .INVAL => return error.UnreachableAddress,
             .ISCONN => unreachable, // connection-mode socket was connected already but a recipient was specified
-            .MSGSIZE => return error.MessageTooBig,
+            .MSGSIZE => return error.MessageOversize,
             .NOBUFS => return error.SystemResources,
             .NOMEM => return error.SystemResources,
             .NOTSOCK => unreachable, // The file descriptor sockfd does not refer to a socket.
             .OPNOTSUPP => unreachable, // Some bit in the flags argument is inappropriate for the socket type.
             .PIPE => return error.BrokenPipe,
-            .AFNOSUPPORT => return error.AddressFamilyNotSupported,
+            .AFNOSUPPORT => return error.AddressFamilyUnsupported,
             .LOOP => return error.SymLinkLoop,
             .NAMETOOLONG => return error.NameTooLong,
             .NOENT => return error.FileNotFound,
             .NOTDIR => return error.NotDir,
             .HOSTUNREACH => return error.NetworkUnreachable,
             .NETUNREACH => return error.NetworkUnreachable,
-            .NOTCONN => return error.SocketNotConnected,
-            .NETDOWN => return error.NetworkSubsystemFailed,
+            .NOTCONN => return error.SocketUnconnected,
+            .NETDOWN => return error.NetworkDown,
             else => |err| return unexpectedErrno(err),
         }
     }
@@ -6456,14 +5695,14 @@ pub fn send(
     flags: u32,
 ) SendError!usize {
     return sendto(sockfd, buf, flags, null, 0) catch |err| switch (err) {
-        error.AddressFamilyNotSupported => unreachable,
+        error.AddressFamilyUnsupported => unreachable,
         error.SymLinkLoop => unreachable,
         error.NameTooLong => unreachable,
         error.FileNotFound => unreachable,
         error.NotDir => unreachable,
         error.NetworkUnreachable => unreachable,
-        error.AddressNotAvailable => unreachable,
-        error.SocketNotConnected => unreachable,
+        error.AddressUnavailable => unreachable,
+        error.SocketUnconnected => unreachable,
         error.UnreachableAddress => unreachable,
         else => |e| return e,
     };
@@ -6563,7 +5802,7 @@ pub fn copy_file_range(fd_in: fd_t, off_in: u64, fd_out: fd_t, off_out: u64, len
 
 pub const PollError = error{
     /// The network subsystem has failed.
-    NetworkSubsystemFailed,
+    NetworkDown,
 
     /// The kernel had no space to allocate file descriptor tables.
     SystemResources,
@@ -6573,9 +5812,9 @@ pub fn poll(fds: []pollfd, timeout: i32) PollError!usize {
     if (native_os == .windows) {
         switch (windows.poll(fds.ptr, @intCast(fds.len), timeout)) {
             windows.ws2_32.SOCKET_ERROR => switch (windows.ws2_32.WSAGetLastError()) {
-                .WSANOTINITIALISED => unreachable,
-                .WSAENETDOWN => return error.NetworkSubsystemFailed,
-                .WSAENOBUFS => return error.SystemResources,
+                .NOTINITIALISED => unreachable,
+                .ENETDOWN => return error.NetworkDown,
+                .ENOBUFS => return error.SystemResources,
                 // TODO: handle more errors
                 else => |err| return windows.unexpectedWSAError(err),
             },
@@ -6637,19 +5876,19 @@ pub const RecvFromError = error{
     SystemResources,
 
     ConnectionResetByPeer,
-    ConnectionTimedOut,
+    Timeout,
 
     /// The socket has not been bound.
     SocketNotBound,
 
     /// The UDP message was too big for the buffer and part of it has been discarded
-    MessageTooBig,
+    MessageOversize,
 
     /// The network subsystem has failed.
-    NetworkSubsystemFailed,
+    NetworkDown,
 
     /// The socket is not connected (connection-oriented sockets only).
-    SocketNotConnected,
+    SocketUnconnected,
 
     /// The other end closed the socket unexpectedly or a read is executed on a shut down socket
     BrokenPipe,
@@ -6673,14 +5912,14 @@ pub fn recvfrom(
         if (native_os == .windows) {
             if (rc == windows.ws2_32.SOCKET_ERROR) {
                 switch (windows.ws2_32.WSAGetLastError()) {
-                    .WSANOTINITIALISED => unreachable,
-                    .WSAECONNRESET => return error.ConnectionResetByPeer,
-                    .WSAEINVAL => return error.SocketNotBound,
-                    .WSAEMSGSIZE => return error.MessageTooBig,
-                    .WSAENETDOWN => return error.NetworkSubsystemFailed,
-                    .WSAENOTCONN => return error.SocketNotConnected,
-                    .WSAEWOULDBLOCK => return error.WouldBlock,
-                    .WSAETIMEDOUT => return error.ConnectionTimedOut,
+                    .NOTINITIALISED => unreachable,
+                    .ECONNRESET => return error.ConnectionResetByPeer,
+                    .EINVAL => return error.SocketNotBound,
+                    .EMSGSIZE => return error.MessageOversize,
+                    .ENETDOWN => return error.NetworkDown,
+                    .ENOTCONN => return error.SocketUnconnected,
+                    .EWOULDBLOCK => return error.WouldBlock,
+                    .ETIMEDOUT => return error.Timeout,
                     // TODO: handle more errors
                     else => |err| return windows.unexpectedWSAError(err),
                 }
@@ -6693,14 +5932,14 @@ pub fn recvfrom(
                 .BADF => unreachable, // always a race condition
                 .FAULT => unreachable,
                 .INVAL => unreachable,
-                .NOTCONN => return error.SocketNotConnected,
+                .NOTCONN => return error.SocketUnconnected,
                 .NOTSOCK => unreachable,
                 .INTR => continue,
                 .AGAIN => return error.WouldBlock,
                 .NOMEM => return error.SystemResources,
                 .CONNREFUSED => return error.ConnectionRefused,
                 .CONNRESET => return error.ConnectionResetByPeer,
-                .TIMEDOUT => return error.ConnectionTimedOut,
+                .TIMEDOUT => return error.Timeout,
                 .PIPE => return error.BrokenPipe,
                 else => |err| return unexpectedErrno(err),
             }
@@ -6745,66 +5984,16 @@ pub fn recvmsg(
             .ISCONN => unreachable, // connection-mode socket was connected already but a recipient was specified
             .NOBUFS => return error.SystemResources,
             .NOMEM => return error.SystemResources,
-            .NOTCONN => return error.SocketNotConnected,
+            .NOTCONN => return error.SocketUnconnected,
             .NOTSOCK => unreachable, // The file descriptor sockfd does not refer to a socket.
-            .MSGSIZE => return error.MessageTooBig,
+            .MSGSIZE => return error.MessageOversize,
             .PIPE => return error.BrokenPipe,
             .OPNOTSUPP => unreachable, // Some bit in the flags argument is inappropriate for the socket type.
             .CONNRESET => return error.ConnectionResetByPeer,
-            .NETDOWN => return error.NetworkSubsystemFailed,
+            .NETDOWN => return error.NetworkDown,
             else => |err| return unexpectedErrno(err),
         }
     }
-}
-
-pub const DnExpandError = error{InvalidDnsPacket};
-
-pub fn dn_expand(
-    msg: []const u8,
-    comp_dn: []const u8,
-    exp_dn: []u8,
-) DnExpandError!usize {
-    // This implementation is ported from musl libc.
-    // A more idiomatic "ziggy" implementation would be welcome.
-    var p = comp_dn.ptr;
-    var len: usize = maxInt(usize);
-    const end = msg.ptr + msg.len;
-    if (p == end or exp_dn.len == 0) return error.InvalidDnsPacket;
-    var dest = exp_dn.ptr;
-    const dend = dest + @min(exp_dn.len, 254);
-    // detect reference loop using an iteration counter
-    var i: usize = 0;
-    while (i < msg.len) : (i += 2) {
-        // loop invariants: p<end, dest<dend
-        if ((p[0] & 0xc0) != 0) {
-            if (p + 1 == end) return error.InvalidDnsPacket;
-            const j = @as(usize, p[0] & 0x3f) << 8 | p[1];
-            if (len == maxInt(usize)) len = @intFromPtr(p) + 2 - @intFromPtr(comp_dn.ptr);
-            if (j >= msg.len) return error.InvalidDnsPacket;
-            p = msg.ptr + j;
-        } else if (p[0] != 0) {
-            if (dest != exp_dn.ptr) {
-                dest[0] = '.';
-                dest += 1;
-            }
-            var j = p[0];
-            p += 1;
-            if (j >= @intFromPtr(end) - @intFromPtr(p) or j >= @intFromPtr(dend) - @intFromPtr(dest)) {
-                return error.InvalidDnsPacket;
-            }
-            while (j != 0) {
-                j -= 1;
-                dest[0] = p[0];
-                dest += 1;
-                p += 1;
-            }
-        } else {
-            dest[0] = 0;
-            if (len == maxInt(usize)) len = @intFromPtr(p) + 1 - @intFromPtr(comp_dn.ptr);
-            return len;
-        }
-    }
-    return error.InvalidDnsPacket;
 }
 
 pub const SetSockOptError = error{
@@ -6824,7 +6013,7 @@ pub const SetSockOptError = error{
     PermissionDenied,
 
     OperationNotSupported,
-    NetworkSubsystemFailed,
+    NetworkDown,
     FileDescriptorNotASocket,
     SocketNotBound,
     NoDevice,
@@ -6836,11 +6025,11 @@ pub fn setsockopt(fd: socket_t, level: i32, optname: u32, opt: []const u8) SetSo
         const rc = windows.ws2_32.setsockopt(fd, level, @intCast(optname), opt.ptr, @intCast(opt.len));
         if (rc == windows.ws2_32.SOCKET_ERROR) {
             switch (windows.ws2_32.WSAGetLastError()) {
-                .WSANOTINITIALISED => unreachable,
-                .WSAENETDOWN => return error.NetworkSubsystemFailed,
-                .WSAEFAULT => unreachable,
-                .WSAENOTSOCK => return error.FileDescriptorNotASocket,
-                .WSAEINVAL => return error.SocketNotBound,
+                .NOTINITIALISED => unreachable,
+                .ENETDOWN => return error.NetworkDown,
+                .EFAULT => unreachable,
+                .ENOTSOCK => return error.FileDescriptorNotASocket,
+                .EINVAL => return error.SocketNotBound,
                 else => |err| return windows.unexpectedWSAError(err),
             }
         }
@@ -7399,7 +6588,6 @@ pub fn ptrace(request: u32, pid: pid_t, addr: usize, data: usize) PtraceError!vo
         .wasi,
         .emscripten,
         .haiku,
-        .solaris,
         .illumos,
         .plan9,
         => @compileError("ptrace unsupported by target OS"),
@@ -7420,7 +6608,7 @@ pub fn ptrace(request: u32, pid: pid_t, addr: usize, data: usize) PtraceError!vo
             else => |err| return unexpectedErrno(err),
         },
 
-        .macos, .ios, .tvos, .watchos, .visionos => switch (errno(std.c.ptrace(
+        .driverkit, .ios, .maccatalyst, .macos, .tvos, .visionos, .watchos => switch (errno(std.c.ptrace(
             @enumFromInt(request),
             pid,
             @ptrFromInt(addr),
@@ -7558,7 +6746,7 @@ pub fn ioctl_SIOCGIFINDEX(fd: fd_t, ifr: *ifreq) IoCtl_SIOCGIFINDEX_Error!void {
     }
 }
 
-const lfs64_abi = native_os == .linux and builtin.link_libc and (builtin.abi.isGnu() or builtin.abi.isAndroid());
+pub const lfs64_abi = native_os == .linux and builtin.link_libc and (builtin.abi.isGnu() or builtin.abi.isAndroid());
 
 /// Whether or not `error.Unexpected` will print its value and a stack trace.
 ///
@@ -7570,17 +6758,7 @@ pub const unexpected_error_tracing = builtin.mode == .Debug and switch (builtin.
     else => false,
 };
 
-pub const UnexpectedError = error{
-    /// The Operating System returned an undocumented error code.
-    ///
-    /// This error is in theory not possible, but it would be better
-    /// to handle this error than to invoke undefined behavior.
-    ///
-    /// When this error code is observed, it usually means the Zig Standard
-    /// Library needs a small patch to add the error code to the error set for
-    /// the respective function.
-    Unexpected,
-};
+pub const UnexpectedError = std.Io.UnexpectedError;
 
 /// Call this when you made a syscall or something that sets errno
 /// and you get an unexpected error.

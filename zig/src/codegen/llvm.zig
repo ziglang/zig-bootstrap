@@ -106,9 +106,20 @@ pub fn targetTriple(allocator: Allocator, target: *const std.Target) ![]const u8
         .wasm64 => "wasm64",
         .ve => "ve",
 
+        .alpha,
+        .arceb,
+        .hppa,
+        .hppa64,
         .kalimba,
+        .kvx,
+        .microblaze,
+        .microblazeel,
         .or1k,
         .propeller,
+        .sh,
+        .sheb,
+        .x86_16,
+        .xtensaeb,
         => unreachable, // Gated by hasLlvmSupport().
     };
 
@@ -156,6 +167,7 @@ pub fn targetTriple(allocator: Allocator, target: *const std.Target) ![]const u8
             .{ .spe, "spe" },
         }),
         .spirv32, .spirv64 => subArchName(target, .spirv, .{
+            .{ .v1_6, "1.6" },
             .{ .v1_5, "1.5" },
             .{ .v1_4, "1.4" },
             .{ .v1_3, "1.3" },
@@ -169,11 +181,9 @@ pub fn targetTriple(allocator: Allocator, target: *const std.Target) ![]const u8
     try llvm_triple.append('-');
 
     try llvm_triple.appendSlice(switch (target.os.tag) {
-        .aix,
-        .zos,
-        => "ibm",
         .driverkit,
         .ios,
+        .maccatalyst,
         .macos,
         .tvos,
         .visionos,
@@ -195,27 +205,22 @@ pub fn targetTriple(allocator: Allocator, target: *const std.Target) ![]const u8
     try llvm_triple.append('-');
 
     const llvm_os = switch (target.os.tag) {
-        .freestanding => "unknown",
         .dragonfly => "dragonfly",
         .freebsd => "freebsd",
         .fuchsia => "fuchsia",
         .linux => "linux",
         .netbsd => "netbsd",
         .openbsd => "openbsd",
-        .solaris, .illumos => "solaris",
+        .illumos => "solaris",
         .windows, .uefi => "windows",
-        .zos => "zos",
         .haiku => "haiku",
         .rtems => "rtems",
-        .aix => "aix",
         .cuda => "cuda",
         .nvcl => "nvcl",
         .amdhsa => "amdhsa",
-        .opencl => "unknown", // https://llvm.org/docs/SPIRVUsage.html#target-triples
         .ps3 => "lv2",
         .ps4 => "ps4",
         .ps5 => "ps5",
-        .vita => "unknown", // LLVM doesn't know about this target
         .mesa3d => "mesa3d",
         .amdpal => "amdpal",
         .hermit => "hermit",
@@ -223,7 +228,7 @@ pub fn targetTriple(allocator: Allocator, target: *const std.Target) ![]const u8
         .wasi => "wasi",
         .emscripten => "emscripten",
         .macos => "macosx",
-        .ios => "ios",
+        .ios, .maccatalyst => "ios",
         .tvos => "tvos",
         .watchos => "watchos",
         .driverkit => "driverkit",
@@ -233,10 +238,13 @@ pub fn targetTriple(allocator: Allocator, target: *const std.Target) ![]const u8
         .managarm => "managarm",
 
         .@"3ds",
-        .opengl,
-        .plan9,
         .contiki,
+        .freestanding,
+        .opencl, // https://llvm.org/docs/SPIRVUsage.html#target-triples
+        .opengl,
         .other,
+        .plan9,
+        .vita,
         => "unknown",
     };
     try llvm_triple.appendSlice(llvm_os);
@@ -259,7 +267,7 @@ pub fn targetTriple(allocator: Allocator, target: *const std.Target) ![]const u8
     try llvm_triple.append('-');
 
     const llvm_abi = switch (target.abi) {
-        .none, .ilp32 => "unknown",
+        .none => if (target.os.tag == .maccatalyst) "macabi" else "unknown",
         .gnu => "gnu",
         .gnuabin32 => "gnuabin32",
         .gnuabi64 => "gnuabi64",
@@ -268,6 +276,7 @@ pub fn targetTriple(allocator: Allocator, target: *const std.Target) ![]const u8
         .gnuf32 => "gnuf32",
         .gnusf => "gnusf",
         .gnux32 => "gnux32",
+        .ilp32 => "unknown",
         .code16 => "code16",
         .eabi => "eabi",
         .eabihf => "eabihf",
@@ -288,9 +297,7 @@ pub fn targetTriple(allocator: Allocator, target: *const std.Target) ![]const u8
         .muslx32 => "muslx32",
         .msvc => "msvc",
         .itanium => "itanium",
-        .cygnus => "cygnus",
         .simulator => "simulator",
-        .macabi => "macabi",
         .ohos, .ohoseabi => "ohos",
     };
     try llvm_triple.appendSlice(llvm_abi);
@@ -332,13 +339,13 @@ pub fn dataLayout(target: *const std.Target) []const u8 {
         .hexagon => "e-m:e-p:32:32:32-a:0-n16:32-i64:64:64-i32:32:32-i16:16:16-i1:8:8-f32:32:32-f64:64:64-v32:32:32-v64:64:64-v512:512:512-v1024:1024:1024-v2048:2048:2048",
         .lanai => "E-m:e-p:32:32-i64:64-a:0:32-n32-S64",
         .aarch64 => if (target.ofmt == .macho)
-            if (target.os.tag == .windows)
+            if (target.os.tag == .windows or target.os.tag == .uefi)
                 "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
             else if (target.abi == .ilp32)
                 "e-m:o-p:32:32-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
             else
                 "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-n32:64-S128-Fn32"
-        else if (target.os.tag == .windows)
+        else if (target.os.tag == .windows or target.os.tag == .uefi)
             "e-m:w-p270:32:32-p271:32:32-p272:64:64-p:64:64-i32:32-i64:64-i128:128-n32:64-S128-Fn32"
         else
             "e-m:e-p270:32:32-p271:32:32-p272:64:64-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128-Fn32",
@@ -353,7 +360,7 @@ pub fn dataLayout(target: *const std.Target) []const u8 {
             "E-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64",
         .thumb => if (target.ofmt == .macho)
             "e-m:o-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64"
-        else if (target.os.tag == .windows)
+        else if (target.os.tag == .windows or target.os.tag == .uefi)
             "e-m:w-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64"
         else
             "e-m:e-p:32:32-Fi8-i64:64-v128:64:128-a:0:32-n32-S64",
@@ -372,13 +379,9 @@ pub fn dataLayout(target: *const std.Target) []const u8 {
             else => "e-m:e-i8:8:32-i16:16:32-i64:64-i128:128-n32:64-S128",
         },
         .m68k => "E-m:e-p:32:16:32-i8:8:8-i16:16:16-i32:16:32-n8:16:32-a:0:16-S16",
-        .powerpc => if (target.os.tag == .aix)
-            "E-m:a-p:32:32-Fi32-i64:64-n32"
-        else
-            "E-m:e-p:32:32-Fn32-i64:64-n32",
+        .powerpc => "E-m:e-p:32:32-Fn32-i64:64-n32",
         .powerpcle => "e-m:e-p:32:32-Fn32-i64:64-n32",
         .powerpc64 => switch (target.os.tag) {
-            .aix => "E-m:a-Fi64-i64:64-i128:128-n32:64-S128-v256:256:256-v512:512:512",
             .linux => if (target.abi.isMusl())
                 "E-m:e-Fn32-i64:64-i128:128-n32:64-S128-v256:256:256-v512:512:512"
             else
@@ -415,12 +418,8 @@ pub fn dataLayout(target: *const std.Target) []const u8 {
             "E-m:e-p:64:64-i64:64-i128:128-n32:64-S128",
         .sparc => "E-m:e-p:32:32-i64:64-i128:128-f128:64-n32-S64",
         .sparc64 => "E-m:e-i64:64-i128:128-n32:64-S128",
-        .s390x => if (target.os.tag == .zos)
-            "E-m:l-p1:32:32-i1:8:16-i8:8:16-i64:64-f128:64-v128:64-a:8:16-n32:64"
-        else
-            "E-m:e-i1:8:16-i8:8:16-i64:64-f128:64-v128:64-a:8:16-n32:64",
-        .x86 => if (target.os.tag == .windows) switch (target.abi) {
-            .cygnus => "e-m:x-p:32:32-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:32-n8:16:32-a:0:32-S32",
+        .s390x => "E-m:e-i1:8:16-i8:8:16-i64:64-f128:64-v128:64-a:8:16-n32:64",
+        .x86 => if (target.os.tag == .windows or target.os.tag == .uefi) switch (target.abi) {
             .gnu => if (target.ofmt == .coff)
                 "e-m:x-p:32:32-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:32-n8:16:32-a:0:32-S32"
             else
@@ -449,7 +448,7 @@ pub fn dataLayout(target: *const std.Target) []const u8 {
             "e-m:o-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
         else switch (target.abi) {
             .gnux32, .muslx32 => "e-m:e-p:32:32-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
-            else => if (target.os.tag == .windows and target.ofmt == .coff)
+            else => if ((target.os.tag == .windows or target.os.tag == .uefi) and target.ofmt == .coff)
                 "e-m:w-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128"
             else
                 "e-m:e-p270:32:32-p271:32:32-p272:64:64-i64:64-i128:128-f80:128-n8:16:32:64-S128",
@@ -473,9 +472,20 @@ pub fn dataLayout(target: *const std.Target) []const u8 {
         .loongarch64 => "e-m:e-p:64:64-i64:64-i128:128-n32:64-S128",
         .xtensa => "e-m:e-p:32:32-i8:8:32-i16:16:32-i64:64-n32",
 
+        .alpha,
+        .arceb,
+        .hppa,
+        .hppa64,
         .kalimba,
+        .kvx,
+        .microblaze,
+        .microblazeel,
         .or1k,
         .propeller,
+        .sh,
+        .sheb,
+        .x86_16,
+        .xtensaeb,
         => unreachable, // Gated by hasLlvmSupport().
     };
 }
@@ -497,7 +507,7 @@ fn codeModel(model: std.builtin.CodeModel, target: *const std.Target) CodeModel 
         .extreme, .large => .large,
         .kernel => .kernel,
         .medany => if (target.cpu.arch.isRISCV()) .medium else .large,
-        .medium => if (target.os.tag == .aix) .large else .medium,
+        .medium => .medium,
         .medmid => .medium,
         .normal, .medlow, .small => .small,
         .tiny => .tiny,
@@ -774,10 +784,10 @@ pub const Object = struct {
     pub const EmitOptions = struct {
         pre_ir_path: ?[]const u8,
         pre_bc_path: ?[]const u8,
-        bin_path: ?[*:0]const u8,
-        asm_path: ?[*:0]const u8,
-        post_ir_path: ?[*:0]const u8,
-        post_bc_path: ?[*:0]const u8,
+        bin_path: ?[:0]const u8,
+        asm_path: ?[:0]const u8,
+        post_ir_path: ?[:0]const u8,
+        post_bc_path: ?[]const u8,
 
         is_debug: bool,
         is_small: bool,
@@ -981,7 +991,7 @@ pub const Object = struct {
                 options.post_ir_path == null and options.post_bc_path == null) return;
 
             if (options.post_bc_path) |path| {
-                var file = std.fs.cwd().createFileZ(path, .{}) catch |err|
+                var file = std.fs.cwd().createFile(path, .{}) catch |err|
                     return diags.fail("failed to create '{s}': {s}", .{ path, @errorName(err) });
                 defer file.close();
 
@@ -1090,8 +1100,8 @@ pub const Object = struct {
             // though it's clearly not ready and produces multiple miscompilations in our std tests.
             .allow_machine_outliner = !comp.root_mod.resolved_target.result.cpu.arch.isRISCV(),
             .asm_filename = null,
-            .bin_filename = options.bin_path,
-            .llvm_ir_filename = options.post_ir_path,
+            .bin_filename = if (options.bin_path) |x| x.ptr else null,
+            .llvm_ir_filename = if (options.post_ir_path) |x| x.ptr else null,
             .bitcode_filename = null,
 
             // `.coverage` value is only used when `.sancov` is enabled.
@@ -1138,7 +1148,7 @@ pub const Object = struct {
             lowered_options.time_report_out = &time_report_c_str;
         }
 
-        lowered_options.asm_filename = options.asm_path;
+        lowered_options.asm_filename = if (options.asm_path) |x| x.ptr else null;
         if (target_machine.emitToFile(module, &error_message, &lowered_options)) {
             defer llvm.disposeMessage(error_message);
             return diags.fail("LLVM failed to emit asm={s} bin={s} ir={s} bc={s}: {s}", .{
@@ -2400,8 +2410,7 @@ pub const Object = struct {
                     const field_size = field_ty.abiSize(zcu);
                     const field_align = ty.fieldAlignment(field_index, zcu);
                     const field_offset = ty.structFieldOffset(field_index, zcu);
-                    const field_name = struct_type.fieldName(ip, field_index).unwrap() orelse
-                        try ip.getOrPutStringFmt(gpa, pt.tid, "{d}", .{field_index}, .no_embedded_nulls);
+                    const field_name = struct_type.fieldName(ip, field_index);
                     fields.appendAssumeCapacity(try o.builder.debugMemberType(
                         try o.builder.metadataString(field_name.toSlice(ip)),
                         null, // File
@@ -2688,7 +2697,7 @@ pub const Object = struct {
     fn allocTypeName(o: *Object, pt: Zcu.PerThread, ty: Type) Allocator.Error![:0]const u8 {
         var aw: std.Io.Writer.Allocating = .init(o.gpa);
         defer aw.deinit();
-        ty.print(&aw.writer, pt) catch |err| switch (err) {
+        ty.print(&aw.writer, pt, null) catch |err| switch (err) {
             error.WriteFailed => return error.OutOfMemory,
         };
         return aw.toOwnedSliceSentinel(0);
@@ -4876,6 +4885,13 @@ pub const FuncGen = struct {
 
             const val: Builder.Value = switch (air_tags[@intFromEnum(inst)]) {
                 // zig fmt: off
+
+                // No "scalarize" legalizations are enabled, so these instructions never appear.
+                .legalize_vec_elem_val   => unreachable,
+                .legalize_vec_store_elem => unreachable,
+                // No soft float legalizations are enabled.
+                .legalize_compiler_rt_call => unreachable,
+
                 .add            => try self.airAdd(inst, .normal),
                 .add_optimized  => try self.airAdd(inst, .fast),
                 .add_wrap       => try self.airAddWrap(inst),
@@ -5081,8 +5097,6 @@ pub const FuncGen = struct {
 
                 .wasm_memory_size => try self.airWasmMemorySize(inst),
                 .wasm_memory_grow => try self.airWasmMemoryGrow(inst),
-
-                .vector_store_elem => try self.airVectorStoreElem(inst),
 
                 .runtime_nav_ptr => try self.airRuntimeNavPtr(inst),
 
@@ -6658,7 +6672,9 @@ pub const FuncGen = struct {
             "",
         );
 
-        const rt_int_bits = compilerRtIntBits(@intCast(operand_scalar_ty.bitSize(zcu)));
+        const rt_int_bits = compilerRtIntBits(@intCast(operand_scalar_ty.bitSize(zcu))) orelse {
+            return self.todo("float_from_int from '{f}' without intrinsics", .{operand_scalar_ty.fmt(pt)});
+        };
         const rt_int_ty = try o.builder.intType(rt_int_bits);
         var extended = try self.wip.conv(
             if (is_signed_int) .signed else .unsigned,
@@ -6727,7 +6743,9 @@ pub const FuncGen = struct {
             );
         }
 
-        const rt_int_bits = compilerRtIntBits(@intCast(dest_scalar_ty.bitSize(zcu)));
+        const rt_int_bits = compilerRtIntBits(@intCast(dest_scalar_ty.bitSize(zcu))) orelse {
+            return self.todo("int_from_float to '{f}' without intrinsics", .{dest_scalar_ty.fmt(pt)});
+        };
         const ret_ty = try o.builder.intType(rt_int_bits);
         const libc_ret_ty = if (rt_int_bits == 128 and (target.os.tag == .windows and target.cpu.arch == .x86_64)) b: {
             // On Windows x86-64, "ti" functions must use Vector(2, u64) instead of the standard
@@ -6862,16 +6880,14 @@ pub const FuncGen = struct {
         const array_llvm_ty = try o.lowerType(pt, array_ty);
         const elem_ty = array_ty.childType(zcu);
         if (isByRef(array_ty, zcu)) {
-            const indices: [2]Builder.Value = .{
-                try o.builder.intValue(try o.lowerType(pt, Type.usize), 0), rhs,
-            };
+            const elem_ptr = try self.wip.gep(.inbounds, array_llvm_ty, array_llvm_val, &.{
+                try o.builder.intValue(try o.lowerType(pt, Type.usize), 0),
+                rhs,
+            }, "");
             if (isByRef(elem_ty, zcu)) {
-                const elem_ptr = try self.wip.gep(.inbounds, array_llvm_ty, array_llvm_val, &indices, "");
                 const elem_alignment = elem_ty.abiAlignment(zcu).toLlvm();
                 return self.loadByRef(elem_ptr, elem_ty, elem_alignment, .normal);
             } else {
-                const elem_ptr =
-                    try self.wip.gep(.inbounds, array_llvm_ty, array_llvm_val, &indices, "");
                 return self.loadTruncate(.normal, elem_ty, elem_ptr, .default);
             }
         }
@@ -8129,33 +8145,6 @@ pub const FuncGen = struct {
         }, "");
     }
 
-    fn airVectorStoreElem(self: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
-        const o = self.ng.object;
-        const pt = self.ng.pt;
-        const zcu = pt.zcu;
-        const data = self.air.instructions.items(.data)[@intFromEnum(inst)].vector_store_elem;
-        const extra = self.air.extraData(Air.Bin, data.payload).data;
-
-        const vector_ptr = try self.resolveInst(data.vector_ptr);
-        const vector_ptr_ty = self.typeOf(data.vector_ptr);
-        const index = try self.resolveInst(extra.lhs);
-        const operand = try self.resolveInst(extra.rhs);
-
-        self.maybeMarkAllowZeroAccess(vector_ptr_ty.ptrInfo(zcu));
-
-        // TODO: Emitting a load here is a violation of volatile semantics. Not fixable in general.
-        // https://github.com/ziglang/zig/issues/18652#issuecomment-2452844908
-        const access_kind: Builder.MemoryAccessKind =
-            if (vector_ptr_ty.isVolatilePtr(zcu)) .@"volatile" else .normal;
-        const elem_llvm_ty = try o.lowerType(pt, vector_ptr_ty.childType(zcu));
-        const alignment = vector_ptr_ty.ptrAlignment(zcu).toLlvm();
-        const loaded = try self.wip.load(access_kind, elem_llvm_ty, vector_ptr, alignment, "");
-
-        const new_vector = try self.wip.insertElement(loaded, operand, index, "");
-        _ = try self.store(vector_ptr, vector_ptr_ty, new_vector, .none);
-        return .none;
-    }
-
     fn airRuntimeNavPtr(fg: *FuncGen, inst: Air.Inst.Index) !Builder.Value {
         const o = fg.ng.object;
         const pt = fg.ng.pt;
@@ -8292,8 +8281,7 @@ pub const FuncGen = struct {
         const rhs = try self.resolveInst(bin_op.rhs);
         const inst_ty = self.typeOfIndex(inst);
         const scalar_ty = inst_ty.scalarType(zcu);
-
-        if (scalar_ty.isAnyFloat()) return self.todo("saturating float add", .{});
+        assert(scalar_ty.zigTypeTag(zcu) == .int);
         return self.wip.callIntrinsic(
             .normal,
             .none,
@@ -8333,8 +8321,7 @@ pub const FuncGen = struct {
         const rhs = try self.resolveInst(bin_op.rhs);
         const inst_ty = self.typeOfIndex(inst);
         const scalar_ty = inst_ty.scalarType(zcu);
-
-        if (scalar_ty.isAnyFloat()) return self.todo("saturating float sub", .{});
+        assert(scalar_ty.zigTypeTag(zcu) == .int);
         return self.wip.callIntrinsic(
             .normal,
             .none,
@@ -8374,8 +8361,7 @@ pub const FuncGen = struct {
         const rhs = try self.resolveInst(bin_op.rhs);
         const inst_ty = self.typeOfIndex(inst);
         const scalar_ty = inst_ty.scalarType(zcu);
-
-        if (scalar_ty.isAnyFloat()) return self.todo("saturating float mul", .{});
+        assert(scalar_ty.zigTypeTag(zcu) == .int);
         return self.wip.callIntrinsic(
             .normal,
             .none,
@@ -11381,16 +11367,6 @@ pub const FuncGen = struct {
         const payload_llvm_ty = try o.lowerType(pt, payload_ty);
         const abi_size = payload_ty.abiSize(zcu);
 
-        // llvm bug workarounds:
-        const workaround_explicit_mask = o.target.cpu.arch == .powerpc and abi_size >= 4;
-        const workaround_disable_truncate = o.target.cpu.arch == .wasm32 and abi_size >= 4;
-
-        if (workaround_disable_truncate) {
-            // see https://github.com/llvm/llvm-project/issues/64222
-            // disable the truncation codepath for larger than 32bits value - with this heuristic, the backend passes the test suite.
-            return try fg.wip.load(access_kind, payload_llvm_ty, payload_ptr, payload_alignment, "");
-        }
-
         const load_llvm_ty = if (payload_ty.isAbiInt(zcu))
             try o.builder.intType(@intCast(abi_size * 8))
         else
@@ -11404,14 +11380,7 @@ pub const FuncGen = struct {
         else
             loaded;
 
-        const anded = if (workaround_explicit_mask and payload_llvm_ty != load_llvm_ty) blk: {
-            // this is rendundant with llvm.trunc. But without it, llvm17 emits invalid code for powerpc.
-            const mask_val = try o.builder.intValue(payload_llvm_ty, -1);
-            const zext_mask_val = try fg.wip.cast(.zext, mask_val, load_llvm_ty, "");
-            break :blk try fg.wip.bin(.@"and", shifted, zext_mask_val, "");
-        } else shifted;
-
-        return fg.wip.conv(.unneeded, anded, payload_llvm_ty, "");
+        return fg.wip.conv(.unneeded, shifted, payload_llvm_ty, "");
     }
 
     /// Load a by-ref type by constructing a new alloca and performing a memcpy.
@@ -11460,7 +11429,6 @@ pub const FuncGen = struct {
         const access_kind: Builder.MemoryAccessKind =
             if (info.flags.is_volatile) .@"volatile" else .normal;
 
-        assert(info.flags.vector_index != .runtime);
         if (info.flags.vector_index != .none) {
             const index_u32 = try o.builder.intValue(.i32, info.flags.vector_index);
             const vec_elem_ty = try o.lowerType(pt, elem_ty);
@@ -11530,7 +11498,6 @@ pub const FuncGen = struct {
         const access_kind: Builder.MemoryAccessKind =
             if (info.flags.is_volatile) .@"volatile" else .normal;
 
-        assert(info.flags.vector_index != .runtime);
         if (info.flags.vector_index != .none) {
             const index_u32 = try o.builder.intValue(.i32, info.flags.vector_index);
             const vec_elem_ty = try o.lowerType(pt, elem_ty);
@@ -11681,7 +11648,7 @@ pub const FuncGen = struct {
                 \\ srl $$0,  $$0,  19
                 \\ or  $$13, $$13, $$13
                 ,
-                .constraints = "={$11},{$12},{$11},~{memory}",
+                .constraints = "={$11},{$12},{$11},~{memory},~{$1}",
             },
             .mips64, .mips64el => .{
                 .template =
@@ -11689,7 +11656,7 @@ pub const FuncGen = struct {
                 \\ dsll $$0,  $$0,  29   ; dsll $$0, $$0, 19
                 \\ or   $$13, $$13, $$13
                 ,
-                .constraints = "={$11},{$12},{$11},~{memory}",
+                .constraints = "={$11},{$12},{$11},~{memory},~{$1}",
             },
             .powerpc, .powerpcle => .{
                 .template =
@@ -11736,7 +11703,7 @@ pub const FuncGen = struct {
                 \\ roll  $$61, %edi ; roll $$51, %edi
                 \\ xchgl %ebx, %ebx
                 ,
-                .constraints = "={edx},{eax},{edx},~{cc},~{memory}",
+                .constraints = "={edx},{eax},{edx},~{cc},~{memory},~{dirflag},~{fpsr},~{flags}",
             },
             .x86_64 => .{
                 .template =
@@ -11744,7 +11711,7 @@ pub const FuncGen = struct {
                 \\ rolq  $$61, %rdi ; rolq $$51, %rdi
                 \\ xchgq %rbx, %rbx
                 ,
-                .constraints = "={rdx},{rax},{edx},~{cc},~{memory}",
+                .constraints = "={rdx},{rax},{rdx},~{cc},~{memory},~{dirflag},~{fpsr},~{flags}",
             },
             else => unreachable,
         };
@@ -11816,8 +11783,11 @@ pub fn toLlvmCallConv(cc: std.builtin.CallingConvention, target: *const std.Targ
     const incoming_stack_alignment: ?u64, const register_params: u2 = switch (cc) {
         inline else => |pl| switch (@TypeOf(pl)) {
             void => .{ null, 0 },
+            std.builtin.CallingConvention.ArcInterruptOptions,
             std.builtin.CallingConvention.ArmInterruptOptions,
             std.builtin.CallingConvention.RiscvInterruptOptions,
+            std.builtin.CallingConvention.ShInterruptOptions,
+            std.builtin.CallingConvention.MicroblazeInterruptOptions,
             std.builtin.CallingConvention.MipsInterruptOptions,
             std.builtin.CallingConvention.CommonOptions,
             => .{ pl.incoming_stack_alignment, 0 },
@@ -11881,6 +11851,7 @@ fn toLlvmCallConvTag(cc_tag: std.builtin.CallingConvention.Tag, target: *const s
         .avr_interrupt => .avr_intrcc,
         .m68k_rtd => .m68k_rtdcc,
         .m68k_interrupt => .m68k_intrcc,
+        .msp430_interrupt => .msp430_intrcc,
         .amdgcn_kernel => .amdgpu_kernel,
         .amdgcn_cs => .amdgpu_cs,
         .nvptx_device => .ptx_device,
@@ -11897,12 +11868,20 @@ fn toLlvmCallConvTag(cc_tag: std.builtin.CallingConvention.Tag, target: *const s
 
         // All the calling conventions which LLVM does not have a general representation for.
         // Note that these are often still supported through the `cCallingConvention` path above via `ccc`.
+        .x86_16_cdecl,
+        .x86_16_stdcall,
+        .x86_16_regparmcall,
+        .x86_16_interrupt,
         .x86_sysv,
         .x86_win,
         .x86_thiscall_mingw,
+        .x86_64_x32,
         .aarch64_aapcs,
         .aarch64_aapcs_darwin,
         .aarch64_aapcs_win,
+        .alpha_osf,
+        .microblaze_std,
+        .microblaze_interrupt,
         .mips64_n64,
         .mips64_n32,
         .mips_o32,
@@ -11919,11 +11898,16 @@ fn toLlvmCallConvTag(cc_tag: std.builtin.CallingConvention.Tag, target: *const s
         .powerpc_aix_altivec,
         .wasm_mvp,
         .arc_sysv,
+        .arc_interrupt,
         .avr_gnu,
         .bpf_std,
         .csky_sysv,
         .hexagon_sysv,
         .hexagon_sysv_hvx,
+        .hppa_elf,
+        .hppa64_elf,
+        .kvx_lp64,
+        .kvx_ilp32,
         .lanai_sysv,
         .loongarch64_lp64,
         .loongarch32_ilp32,
@@ -11934,6 +11918,9 @@ fn toLlvmCallConvTag(cc_tag: std.builtin.CallingConvention.Tag, target: *const s
         .propeller_sysv,
         .s390x_sysv,
         .s390x_sysv_vx,
+        .sh_gnu,
+        .sh_renesas,
+        .sh_interrupt,
         .ve_sysv,
         .xcore_xs1,
         .xcore_xs2,
@@ -12615,7 +12602,7 @@ fn ccAbiPromoteInt(cc: std.builtin.CallingConvention, zcu: *Zcu, ty: Type) ?std.
         else => return null,
     };
     return switch (target.os.tag) {
-        .macos, .ios, .watchos, .tvos, .visionos => switch (int_info.bits) {
+        .driverkit, .ios, .maccatalyst, .macos, .watchos, .tvos, .visionos => switch (int_info.bits) {
             0...16 => int_info.signedness,
             else => null,
         },
@@ -12807,12 +12794,6 @@ fn backendSupportsF128(target: *const std.Target) bool {
         // https://github.com/llvm/llvm-project/issues/41838
         .sparc,
         => false,
-        // https://github.com/llvm/llvm-project/issues/101545
-        .powerpc,
-        .powerpcle,
-        .powerpc64,
-        .powerpc64le,
-        => target.os.tag != .aix,
         .arm,
         .armeb,
         .thumb,
@@ -12848,13 +12829,13 @@ const optional_layout_version = 3;
 
 const lt_errors_fn_name = "__zig_lt_errors_len";
 
-fn compilerRtIntBits(bits: u16) u16 {
+fn compilerRtIntBits(bits: u16) ?u16 {
     inline for (.{ 32, 64, 128 }) |b| {
         if (bits <= b) {
             return b;
         }
     }
-    return bits;
+    return null;
 }
 
 fn buildAllocaInner(
@@ -13105,9 +13086,20 @@ pub fn initializeLLVMTarget(arch: std.Target.Cpu.Arch) void {
         },
 
         // LLVM does does not have a backend for these.
+        .alpha,
+        .arceb,
+        .hppa,
+        .hppa64,
         .kalimba,
+        .kvx,
+        .microblaze,
+        .microblazeel,
         .or1k,
         .propeller,
+        .sh,
+        .sheb,
+        .x86_16,
+        .xtensaeb,
         => unreachable,
     }
 }

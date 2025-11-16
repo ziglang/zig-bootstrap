@@ -252,7 +252,7 @@ pub fn systemCompiler(target: std.Target) LangOpts.Compiler {
         target.abi.isAndroid() or
         target.os.tag.isBSD() or
         target.os.tag == .fuchsia or
-        target.os.tag == .solaris or
+        target.os.tag == .illumos or
         target.os.tag == .haiku or
         target.cpu.arch == .hexagon)
     {
@@ -281,7 +281,7 @@ pub fn hasFloat128(target: std.Target) bool {
         .haiku,
         .linux,
         .openbsd,
-        .solaris,
+        .illumos,
         => target.cpu.arch.isX86(),
         else => false,
     };
@@ -375,7 +375,7 @@ pub fn isWindowsMSVCEnvironment(target: std.Target) bool {
 }
 
 pub fn isCygwinMinGW(target: std.Target) bool {
-    return target.os.tag == .windows and (target.abi == .gnu or target.abi == .cygnus);
+    return target.os.tag == .windows and (target.abi == .gnu);
 }
 
 pub fn isPS(target: std.Target) bool {
@@ -403,7 +403,6 @@ pub fn builtinEnabled(target: std.Target, enabled_for: TargetSet) bool {
 }
 
 pub fn defaultFpEvalMethod(target: std.Target) LangOpts.FPEvalMethod {
-    if (target.os.tag == .aix) return .double;
     switch (target.cpu.arch) {
         .x86, .x86_64 => {
             if (target.ptrBitWidth() == 32 and target.os.tag == .netbsd) {
@@ -478,6 +477,7 @@ pub fn get32BitArchVariant(target: std.Target) ?std.Target {
         .ve,
         .bpfel,
         .bpfeb,
+        .kvx,
         .s390x,
         => return null,
 
@@ -552,6 +552,7 @@ pub fn get64BitArchVariant(target: std.Target) ?std.Target {
         .nvptx64,
         .wasm64,
         .spirv64,
+        .kvx,
         .loongarch64,
         .mips64,
         .mips64el,
@@ -637,8 +638,9 @@ pub fn toLLVMTriple(target: std.Target, buf: []u8) []const u8 {
         .wasm32 => "wasm32",
         .wasm64 => "wasm64",
         .ve => "ve",
-        // Note: propeller1, kalimba and or1k are not supported in LLVM; this is the Zig arch name
+        // Note: propeller1, kalimba, kvx, and or1k are not supported in LLVM; this is the Zig arch name
         .kalimba => "kalimba",
+        .kvx => "kvx",
         .propeller => "propeller",
         .or1k => "or1k",
     };
@@ -654,13 +656,10 @@ pub fn toLLVMTriple(target: std.Target, buf: []u8) []const u8 {
         .ps3 => "lv2",
         .netbsd => "netbsd",
         .openbsd => "openbsd",
-        .solaris => "solaris",
-        .illumos => "illumos",
+        .illumos => "solaris",
         .windows => "windows",
-        .zos => "zos",
         .haiku => "haiku",
         .rtems => "rtems",
-        .aix => "aix",
         .cuda => "cuda",
         .nvcl => "nvcl",
         .amdhsa => "amdhsa",
@@ -675,7 +674,7 @@ pub fn toLLVMTriple(target: std.Target, buf: []u8) []const u8 {
         .emscripten => "emscripten",
         .uefi => "windows",
         .macos => "macosx",
-        .ios => "ios",
+        .ios, .maccatalyst => "ios",
         .tvos => "tvos",
         .watchos => "watchos",
         .driverkit => "driverkit",
@@ -704,7 +703,8 @@ pub fn toLLVMTriple(target: std.Target, buf: []u8) []const u8 {
     writer.writeByte('-') catch unreachable;
 
     const llvm_abi = switch (target.abi) {
-        .none, .ilp32 => "unknown",
+        .none => if (target.os.tag == .maccatalyst) "macabi" else "unknown",
+        .ilp32 => "unknown",
         .gnu => "gnu",
         .gnuabin32 => "gnuabin32",
         .gnuabi64 => "gnuabi64",
@@ -728,9 +728,7 @@ pub fn toLLVMTriple(target: std.Target, buf: []u8) []const u8 {
         .muslx32 => "muslx32",
         .msvc => "msvc",
         .itanium => "itanium",
-        .cygnus => "cygnus",
         .simulator => "simulator",
-        .macabi => "macabi",
         .ohos => "ohos",
         .ohoseabi => "ohoseabi",
     };
@@ -742,9 +740,9 @@ pub const DefaultPIStatus = enum { yes, no, depends_on_linker };
 
 pub fn isPIEDefault(target: std.Target) DefaultPIStatus {
     return switch (target.os.tag) {
-        .aix,
         .haiku,
 
+        .maccatalyst,
         .macos,
         .ios,
         .tvos,
@@ -755,7 +753,7 @@ pub fn isPIEDefault(target: std.Target) DefaultPIStatus {
         .dragonfly,
         .netbsd,
         .freebsd,
-        .solaris,
+        .illumos,
 
         .cuda,
         .amdhsa,
@@ -766,7 +764,6 @@ pub fn isPIEDefault(target: std.Target) DefaultPIStatus {
         .ps5,
 
         .hurd,
-        .zos,
         => .no,
 
         .openbsd,
@@ -811,9 +808,9 @@ pub fn isPIEDefault(target: std.Target) DefaultPIStatus {
 
 pub fn isPICdefault(target: std.Target) DefaultPIStatus {
     return switch (target.os.tag) {
-        .aix,
         .haiku,
 
+        .maccatalyst,
         .macos,
         .ios,
         .tvos,
@@ -831,14 +828,13 @@ pub fn isPICdefault(target: std.Target) DefaultPIStatus {
 
         .fuchsia,
         .cuda,
-        .zos,
         => .no,
 
         .dragonfly,
         .openbsd,
         .netbsd,
         .freebsd,
-        .solaris,
+        .illumos,
         .hurd,
         => {
             return switch (target.cpu.arch) {
@@ -890,21 +886,20 @@ pub fn isPICdefault(target: std.Target) DefaultPIStatus {
 
 pub fn isPICDefaultForced(target: std.Target) DefaultPIStatus {
     return switch (target.os.tag) {
-        .aix, .amdhsa, .amdpal, .mesa3d => .yes,
+        .amdhsa, .amdpal, .mesa3d => .yes,
 
         .haiku,
         .dragonfly,
         .openbsd,
         .netbsd,
         .freebsd,
-        .solaris,
+        .illumos,
         .cuda,
         .ps4,
         .ps5,
         .hurd,
         .linux,
         .fuchsia,
-        .zos,
         => .no,
 
         .windows => {
@@ -924,6 +919,7 @@ pub fn isPICDefaultForced(target: std.Target) DefaultPIStatus {
             return if (target.cpu.arch == .x86_64) .yes else .no;
         },
 
+        .maccatalyst,
         .macos,
         .ios,
         .tvos,

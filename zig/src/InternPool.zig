@@ -2104,7 +2104,6 @@ pub const Key = union(enum) {
 
         pub const VectorIndex = enum(u16) {
             none = std.math.maxInt(u16),
-            runtime = std.math.maxInt(u16) - 1,
             _,
         };
 
@@ -3739,10 +3738,8 @@ pub const LoadedStructType = struct {
         return s.field_inits.get(ip)[i];
     }
 
-    /// Returns `none` in the case the struct is a tuple.
-    pub fn fieldName(s: LoadedStructType, ip: *const InternPool, i: usize) OptionalNullTerminatedString {
-        if (s.field_names.len == 0) return .none;
-        return s.field_names.get(ip)[i].toOptional();
+    pub fn fieldName(s: LoadedStructType, ip: *const InternPool, i: usize) NullTerminatedString {
+        return s.field_names.get(ip)[i];
     }
 
     pub fn fieldIsComptime(s: LoadedStructType, ip: *const InternPool, i: usize) bool {
@@ -5386,7 +5383,7 @@ pub const static_keys: [static_len]Key = .{
 /// This is specified with an integer literal and a corresponding comptime
 /// assert below to break an unfortunate and arguably incorrect dependency loop
 /// when compiling.
-pub const static_len = Zir.Inst.Index.static_len;
+pub const static_len = Zir.Inst.Ref.static_len;
 
 pub const Tag = enum(u8) {
     /// This special tag represents a value which was removed from this pool via
@@ -11330,7 +11327,7 @@ fn dumpStatsFallible(ip: *const InternPool, arena: Allocator) anyerror!void {
 
 fn dumpAllFallible(ip: *const InternPool) anyerror!void {
     var buffer: [4096]u8 = undefined;
-    const stderr_bw = std.debug.lockStderrWriter(&buffer);
+    const stderr_bw, _ = std.debug.lockStderrWriter(&buffer);
     defer std.debug.unlockStderrWriter();
     for (ip.locals, 0..) |*local, tid| {
         const items = local.shared.items.view();
@@ -11462,7 +11459,7 @@ pub fn dumpGenericInstancesFallible(ip: *const InternPool, allocator: Allocator)
     }
 
     var buffer: [4096]u8 = undefined;
-    const stderr_bw = std.debug.lockStderrWriter(&buffer);
+    const stderr_bw, _ = std.debug.lockStderrWriter(&buffer);
     defer std.debug.unlockStderrWriter();
 
     const SortContext = struct {
@@ -12950,7 +12947,17 @@ const PackedCallingConvention = packed struct(u18) {
                     .incoming_stack_alignment = .fromByteUnits(pl.incoming_stack_alignment orelse 0),
                     .extra = pl.register_params,
                 },
+                std.builtin.CallingConvention.ArcInterruptOptions => .{
+                    .tag = tag,
+                    .incoming_stack_alignment = .fromByteUnits(pl.incoming_stack_alignment orelse 0),
+                    .extra = @intFromEnum(pl.type),
+                },
                 std.builtin.CallingConvention.ArmInterruptOptions => .{
+                    .tag = tag,
+                    .incoming_stack_alignment = .fromByteUnits(pl.incoming_stack_alignment orelse 0),
+                    .extra = @intFromEnum(pl.type),
+                },
+                std.builtin.CallingConvention.MicroblazeInterruptOptions => .{
                     .tag = tag,
                     .incoming_stack_alignment = .fromByteUnits(pl.incoming_stack_alignment orelse 0),
                     .extra = @intFromEnum(pl.type),
@@ -12964,6 +12971,11 @@ const PackedCallingConvention = packed struct(u18) {
                     .tag = tag,
                     .incoming_stack_alignment = .fromByteUnits(pl.incoming_stack_alignment orelse 0),
                     .extra = @intFromEnum(pl.mode),
+                },
+                std.builtin.CallingConvention.ShInterruptOptions => .{
+                    .tag = tag,
+                    .incoming_stack_alignment = .fromByteUnits(pl.incoming_stack_alignment orelse 0),
+                    .extra = @intFromEnum(pl.save),
                 },
                 else => comptime unreachable,
             },
@@ -12984,7 +12996,15 @@ const PackedCallingConvention = packed struct(u18) {
                         .incoming_stack_alignment = cc.incoming_stack_alignment.toByteUnits(),
                         .register_params = @intCast(cc.extra),
                     },
+                    std.builtin.CallingConvention.ArcInterruptOptions => .{
+                        .incoming_stack_alignment = cc.incoming_stack_alignment.toByteUnits(),
+                        .type = @enumFromInt(cc.extra),
+                    },
                     std.builtin.CallingConvention.ArmInterruptOptions => .{
+                        .incoming_stack_alignment = cc.incoming_stack_alignment.toByteUnits(),
+                        .type = @enumFromInt(cc.extra),
+                    },
+                    std.builtin.CallingConvention.MicroblazeInterruptOptions => .{
                         .incoming_stack_alignment = cc.incoming_stack_alignment.toByteUnits(),
                         .type = @enumFromInt(cc.extra),
                     },
@@ -12995,6 +13015,10 @@ const PackedCallingConvention = packed struct(u18) {
                     std.builtin.CallingConvention.RiscvInterruptOptions => .{
                         .incoming_stack_alignment = cc.incoming_stack_alignment.toByteUnits(),
                         .mode = @enumFromInt(cc.extra),
+                    },
+                    std.builtin.CallingConvention.ShInterruptOptions => .{
+                        .incoming_stack_alignment = cc.incoming_stack_alignment.toByteUnits(),
+                        .save = @enumFromInt(cc.extra),
                     },
                     else => comptime unreachable,
                 },

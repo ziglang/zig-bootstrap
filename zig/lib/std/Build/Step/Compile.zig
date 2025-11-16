@@ -34,8 +34,7 @@ kind: Kind,
 major_only_filename: ?[]const u8,
 name_only_filename: ?[]const u8,
 formatted_panics: ?bool = null,
-// keep in sync with src/link.zig:CompressDebugSections
-compress_debug_sections: enum { none, zlib, zstd } = .none,
+compress_debug_sections: std.zig.CompressDebugSections = .none,
 verbose_link: bool,
 verbose_cc: bool,
 bundle_compiler_rt: ?bool = null,
@@ -67,13 +66,12 @@ installed_headers: std.array_list.Managed(HeaderInstallation),
 /// created otherwise.
 installed_headers_include_tree: ?*Step.WriteFile = null,
 
-// keep in sync with src/Compilation.zig:RcIncludes
 /// Behavior of automatic detection of include directories when compiling .rc files.
 ///  any: Use MSVC if available, fall back to MinGW.
 ///  msvc: Use MSVC include paths (must be present on the system).
 ///  gnu: Use MinGW include paths (distributed with Zig).
 ///  none: Do not use any autodetected include paths.
-rc_includes: enum { any, msvc, gnu, none } = .any,
+rc_includes: std.zig.RcIncludes = .any,
 
 /// (Windows) .manifest file to embed in the compilation
 /// Set via options; intended to be read-only after that.
@@ -171,7 +169,7 @@ lto: ?std.zig.LtoMode = null,
 
 dll_export_fns: ?bool = null,
 
-subsystem: ?std.Target.SubSystem = null,
+subsystem: ?std.zig.Subsystem = null,
 
 /// (Windows) When targeting the MinGW ABI, use the unicode entry point (wmain/wWinMain)
 mingw_unicode_entry_point: bool = false,
@@ -1056,15 +1054,15 @@ fn getGeneratedFilePath(compile: *Compile, comptime tag_name: []const u8, asking
     const maybe_path: ?*GeneratedFile = @field(compile, tag_name);
 
     const generated_file = maybe_path orelse {
-        const w = std.debug.lockStderrWriter(&.{});
-        std.Build.dumpBadGetPathHelp(&compile.step, w, .detect(.stderr()), compile.step.owner, asking_step) catch {};
+        const w, const ttyconf = std.debug.lockStderrWriter(&.{});
+        std.Build.dumpBadGetPathHelp(&compile.step, w, ttyconf, compile.step.owner, asking_step) catch {};
         std.debug.unlockStderrWriter();
         @panic("missing emit option for " ++ tag_name);
     };
 
     const path = generated_file.path orelse {
-        const w = std.debug.lockStderrWriter(&.{});
-        std.Build.dumpBadGetPathHelp(&compile.step, w, .detect(.stderr()), compile.step.owner, asking_step) catch {};
+        const w, const ttyconf = std.debug.lockStderrWriter(&.{});
+        std.Build.dumpBadGetPathHelp(&compile.step, w, ttyconf, compile.step.owner, asking_step) catch {};
         std.debug.unlockStderrWriter();
         @panic(tag_name ++ " is null. Is there a missing step dependency?");
     };
@@ -1701,7 +1699,7 @@ fn getZigArgs(compile: *Compile, fuzz: bool) ![][]const u8 {
         // This prevents a warning, that should probably be upgraded to an error in Zig's
         // CLI parsing code, when the linker sees an -L directory that does not exist.
 
-        if (prefix_dir.accessZ("lib", .{})) |_| {
+        if (prefix_dir.access("lib", .{})) |_| {
             try zig_args.appendSlice(&.{
                 "-L", b.pathJoin(&.{ search_prefix, "lib" }),
             });
@@ -1712,7 +1710,7 @@ fn getZigArgs(compile: *Compile, fuzz: bool) ![][]const u8 {
             }),
         }
 
-        if (prefix_dir.accessZ("include", .{})) |_| {
+        if (prefix_dir.access("include", .{})) |_| {
             try zig_args.appendSlice(&.{
                 "-I", b.pathJoin(&.{ search_prefix, "include" }),
             });
@@ -1764,16 +1762,7 @@ fn getZigArgs(compile: *Compile, fuzz: bool) ![][]const u8 {
 
     if (compile.subsystem) |subsystem| {
         try zig_args.append("--subsystem");
-        try zig_args.append(switch (subsystem) {
-            .Console => "console",
-            .Windows => "windows",
-            .Posix => "posix",
-            .Native => "native",
-            .EfiApplication => "efi_application",
-            .EfiBootServiceDriver => "efi_boot_service_driver",
-            .EfiRom => "efi_rom",
-            .EfiRuntimeDriver => "efi_runtime_driver",
-        });
+        try zig_args.append(@tagName(subsystem));
     }
 
     if (compile.mingw_unicode_entry_point) {
@@ -2027,10 +2016,9 @@ fn checkCompileErrors(compile: *Compile) !void {
         var aw: std.Io.Writer.Allocating = .init(arena);
         defer aw.deinit();
         try actual_eb.renderToWriter(.{
-            .ttyconf = .no_color,
             .include_reference_trace = false,
             .include_source_line = false,
-        }, &aw.writer);
+        }, &aw.writer, .no_color);
         break :ae try aw.toOwnedSlice();
     };
 

@@ -2,6 +2,7 @@
 const builtin = @import("builtin");
 
 const std = @import("std");
+const Io = std.Io;
 const fatal = std.process.fatal;
 const testing = std.testing;
 const assert = std.debug.assert;
@@ -12,12 +13,15 @@ pub const std_options: std.Options = .{
 };
 
 var log_err_count: usize = 0;
-var fba = std.heap.FixedBufferAllocator.init(&fba_buffer);
+var fba: std.heap.FixedBufferAllocator = .init(&fba_buffer);
 var fba_buffer: [8192]u8 = undefined;
 var stdin_buffer: [4096]u8 = undefined;
 var stdout_buffer: [4096]u8 = undefined;
+var runner_threaded_io: Io.Threaded = .init_single_threaded;
 
-const crippled = switch (builtin.zig_backend) {
+/// Keep in sync with logic in `std.Build.addRunArtifact` which decides whether
+/// the test runner will communicate with the build runner via `std.zig.Server`.
+const need_simple = switch (builtin.zig_backend) {
     .stage2_aarch64,
     .stage2_powerpc,
     .stage2_riscv64,
@@ -33,7 +37,7 @@ pub fn main() void {
         return;
     }
 
-    if (crippled) {
+    if (need_simple) {
         return mainSimple() catch @panic("test failure\n");
     }
 
@@ -61,8 +65,6 @@ pub fn main() void {
         fuzz_abi.fuzzer_init(.fromSlice(cache_dir));
     }
 
-    fba.reset();
-
     if (listen) {
         return mainServer() catch @panic("internal test runner failure");
     } else {
@@ -72,7 +74,7 @@ pub fn main() void {
 
 fn mainServer() !void {
     @disableInstrumentation();
-    var stdin_reader = std.fs.File.stdin().readerStreaming(&stdin_buffer);
+    var stdin_reader = std.fs.File.stdin().readerStreaming(runner_threaded_io.io(), &stdin_buffer);
     var stdout_writer = std.fs.File.stdout().writerStreaming(&stdout_buffer);
     var server = try std.zig.Server.init(.{
         .in = &stdin_reader.interface,
@@ -129,32 +131,43 @@ fn mainServer() !void {
 
             .run_test => {
                 testing.allocator_instance = .{};
+                testing.io_instance = .init(testing.allocator);
                 log_err_count = 0;
                 const index = try server.receiveBody_u32();
                 const test_fn = builtin.test_functions[index];
-                var fail = false;
-                var skip = false;
                 is_fuzz_test = false;
-                test_fn.func() catch |err| switch (err) {
-                    error.SkipZigTest => skip = true,
-                    else => {
-                        fail = true;
+
+                // let the build server know we're starting the test now
+                try server.serveStringMessage(.test_started, &.{});
+
+                const TestResults = std.zig.Server.Message.TestResults;
+                const status: TestResults.Status = if (test_fn.func()) |v| s: {
+                    v;
+                    break :s .pass;
+                } else |err| switch (err) {
+                    error.SkipZigTest => .skip,
+                    else => s: {
                         if (@errorReturnTrace()) |trace| {
                             std.debug.dumpStackTrace(trace);
                         }
+                        break :s .fail;
                     },
                 };
-                const leak = testing.allocator_instance.deinit() == .leak;
+                testing.io_instance.deinit();
+                const leak_count = testing.allocator_instance.detectLeaks();
+                testing.allocator_instance.deinitWithoutLeakChecks();
                 try server.serveTestResults(.{
                     .index = index,
                     .flags = .{
-                        .fail = fail,
-                        .skip = skip,
-                        .leak = leak,
+                        .status = status,
                         .fuzz = is_fuzz_test,
                         .log_err_count = std.math.lossyCast(
-                            @FieldType(std.zig.Server.Message.TestResults.Flags, "log_err_count"),
+                            @FieldType(TestResults.Flags, "log_err_count"),
                             log_err_count,
+                        ),
+                        .leak_count = std.math.lossyCast(
+                            @FieldType(TestResults.Flags, "leak_count"),
+                            leak_count,
                         ),
                     },
                 });
@@ -217,18 +230,13 @@ fn mainTerminal() void {
     });
     const have_tty = std.fs.File.stderr().isTty();
 
-    var async_frame_buffer: []align(builtin.target.stackAlignment()) u8 = undefined;
-    // TODO this is on the next line (using `undefined` above) because otherwise zig incorrectly
-    // ignores the alignment of the slice.
-    async_frame_buffer = &[_]u8{};
-
     var leaks: usize = 0;
     for (test_fn_list, 0..) |test_fn, i| {
         testing.allocator_instance = .{};
+        testing.io_instance = .init(testing.allocator);
         defer {
-            if (testing.allocator_instance.deinit() == .leak) {
-                leaks += 1;
-            }
+            testing.io_instance.deinit();
+            if (testing.allocator_instance.deinit() == .leak) leaks += 1;
         }
         testing.log_level = .warn;
 
@@ -315,7 +323,7 @@ pub fn mainSimple() anyerror!void {
         .stage2_aarch64, .stage2_riscv64 => true,
         else => false,
     };
-    // is the backend capable of calling `std.Io.Writer.print`?
+    // is the backend capable of calling `Io.Writer.print`?
     const enable_print = switch (builtin.zig_backend) {
         .stage2_aarch64, .stage2_riscv64 => true,
         else => false,
@@ -371,7 +379,7 @@ pub fn fuzz(
 
     // Some compiler backends are not capable of handling fuzz testing yet but
     // we still want CI test coverage enabled.
-    if (crippled) return;
+    if (need_simple) return;
 
     // Smoke test to ensure the test did not use conditional compilation to
     // contradict itself by making it not actually be a fuzz test when the test

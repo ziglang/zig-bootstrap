@@ -46,6 +46,8 @@ pub const aead = struct {
         pub const Aes256Ocb = @import("crypto/aes_ocb.zig").Aes256Ocb;
     };
 
+    pub const aes_ccm = @import("crypto/aes_ccm.zig");
+
     pub const ascon = struct {
         pub const AsconAead128 = @import("crypto/ascon.zig").AsconAead128;
     };
@@ -89,6 +91,7 @@ pub const auth = struct {
         pub const Aegis256Mac_128 = variants.Aegis256Mac_128;
     };
     pub const cmac = @import("crypto/cmac.zig");
+    pub const cbc_mac = @import("crypto/cbc_mac.zig");
 };
 
 /// Core functions, that should rarely be used directly by applications.
@@ -194,6 +197,7 @@ pub const pwhash = struct {
 pub const sign = struct {
     pub const Ed25519 = @import("crypto/25519/ed25519.zig").Ed25519;
     pub const ecdsa = @import("crypto/ecdsa.zig");
+    pub const mldsa = @import("crypto/ml_dsa.zig");
 };
 
 /// Stream ciphers. These do not provide any kind of authentication.
