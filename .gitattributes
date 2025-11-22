@@ -1,4 +1,5 @@
 clang/** linguist-vendored
+cmake/** linguist-vendored
 lld/** linguist-vendored
 llvm/** linguist-vendored
 third-party/** linguist-vendored
