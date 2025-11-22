@@ -1,5 +1,7 @@
-llvm/** linguist-vendored
-lld/** linguist-vendored
 clang/** linguist-vendored
+lld/** linguist-vendored
+llvm/** linguist-vendored
+third-party/** linguist-vendored
 zig/** linguist-vendored
 zlib/** linguist-vendored
+zstd/** linguist-vendored
