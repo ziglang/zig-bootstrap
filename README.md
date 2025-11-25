@@ -123,7 +123,7 @@ is more portable across Linux distributions.
 | `armeb-linux-gnueabihf`     | OK     |
 | `armeb-linux-musleabi`      | OK     |
 | `armeb-linux-musleabihf`    | OK     |
-| `hexagon-linux-musl`        | [#215](https://codeberg.org/ziglang/zig-bootstrap/issues/5) |
+| `hexagon-linux-musl`        | [#215](https://github.com/ziglang/zig-bootstrap/issues/215) |
 | `loongarch64-linux-gnu`     | OK     |
 | `loongarch64-linux-gnusf`   | OK     |
 | `loongarch64-linux-musl`    | OK     |
@@ -137,7 +137,7 @@ is more portable across Linux distributions.
 | `mips64-linux-muslabi64`    | OK     |
 | `mips64-linux-muslabin32`   | OK     |
 | `mips64el-linux-gnuabi64`   | OK     |
-| `mips64el-linux-gnuabin32`  | [#214](https://codeberg.org/ziglang/zig-bootstrap/issues/6) |
+| `mips64el-linux-gnuabin32`  | [#214](https://github.com/ziglang/zig-bootstrap/issues/214) |
 | `mips64el-linux-muslabi64`  | OK     |
 | `mips64el-linux-muslabin32` | OK     |
 | `mipsel-linux-gnueabi`      | OK     |
@@ -158,8 +158,8 @@ is more portable across Linux distributions.
 | `riscv64-linux-musl`        | OK     |
 | `s390x-linux-gnu`           | OK     |
 | `s390x-linux-musl`          | OK     |
-| `sparc-linux-gnu`           | [#117](https://codeberg.org/ziglang/zig-bootstrap/issues/8) |
-| `sparc64-linux-gnu`         | [#172](https://codeberg.org/ziglang/zig-bootstrap/issues/9) |
+| `sparc-linux-gnu`           | [#117](https://github.com/ziglang/zig-bootstrap/issues/117) |
+| `sparc64-linux-gnu`         | [#172](https://github.com/ziglang/zig-bootstrap/issues/172) |
 | `thumb-linux-musleabi`      | OK     |
 | `thumb-linux-musleabihf`    | OK     |
 | `thumbeb-linux-musleabi`    | OK     |
@@ -194,10 +194,10 @@ is more portable across Linux distributions.
 | `mipsel-netbsd-eabihf`   | OK     |
 | `powerpc-netbsd-eabi`    | OK     |
 | `powerpc-netbsd-eabihf`  | OK     |
-| `riscv32-netbsd-none`    | [#233](https://codeberg.org/ziglang/zig-bootstrap/issues/1) |
-| `riscv64-netbsd-none`    | [#234](https://codeberg.org/ziglang/zig-bootstrap/issues/2) |
-| `sparc-netbsd-none`      | [#230](https://codeberg.org/ziglang/zig-bootstrap/issues/3) |
-| `sparc64-netbsd-none`    | [#231](https://codeberg.org/ziglang/zig-bootstrap/issues/4) |
+| `riscv32-netbsd-none`    | [#233](https://github.com/ziglang/zig-bootstrap/issues/233) |
+| `riscv64-netbsd-none`    | [#234](https://github.com/ziglang/zig-bootstrap/issues/234) |
+| `sparc-netbsd-none`      | [#230](https://github.com/ziglang/zig-bootstrap/issues/230) |
+| `sparc64-netbsd-none`    | [#231](https://github.com/ziglang/zig-bootstrap/issues/231) |
 | `x86-netbsd-none`        | OK     |
 | `x86_64-netbsd-none`     | OK     |
 
