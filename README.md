@@ -42,7 +42,7 @@ For other versions, check the git tags of this repository.
 ## Build Instructions
 
 ```
-./build <arch>-<os>-<abi> <mcpu>
+./build <arch>-<os>-<abi> <mcpu> <zig_mode>
 ```
 
 All parameters are required:
@@ -53,6 +53,10 @@ All parameters are required:
  * `<mcpu>`: Replace with a `-mcpu` parameter of Zig. `baseline` is recommended
    and means it will target a generic CPU for the target. `native` means it
    will target the native CPU. See the Zig documentation for more details.
+ * `<zig_mode>`: Replace with any one value from the
+   [std.builtin.OptimizeMode](https://ziglang.org/documentation/master/std/#std.builtin.OptimizeMode)
+   enum. Note this only applies to the final output Zig binary. Intermediary build
+   stages will use ReleaseFast.
 
 Please be aware of the following two CMake environment variables that can
 significantly affect how long it takes to build:
@@ -76,7 +80,7 @@ installed via the Visual Studio installer.
 The script must be run within the `Developer Command Prompt for VS 2019` shell:
 
 ```
-build.bat <arch>-<os>-<abi> <mcpu>
+build.bat [arch>-<os>-<abi] [mcpu] [zig_mode]
 ```
 
 To build for x86 Windows, run the script within the `x86 Native Tools Command Prompt for VS 2019`.
